@@ -7938,6 +7938,93 @@ fn create_billing_explain_fixture() -> TempDir {
     tmp
 }
 
+fn create_request_tier_pricing_explain_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let litellm = serde_json::to_string(&serde_json::json!({
+        "timestamp": now,
+        "data": {
+            "claude-haiku-5-5": {
+                "input_cost_per_token": 0.0000001,
+                "output_cost_per_token": 0.0000005,
+                "cache_read_input_token_cost": 0.00000001,
+                "cache_creation_input_token_cost": 0.000000125,
+            }
+        }
+    }))
+    .unwrap();
+    let empty = format!(r#"{{"timestamp":{now},"data":{{}}}}"#);
+    write_canonical_pricing_cache_files(tmp.path(), &litellm, &empty, &empty);
+
+    let project = tmp.path().join(".claude/projects/request-tier-gaps");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session.jsonl"),
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-10-25T00:00:01Z","requestId":"req-long","message":{"id":"msg-long","model":"claude-haiku-5-5","usage":{"input_tokens":100001,"output_tokens":1}}}"#,
+            "
+",
+            r#"{"type":"assistant","timestamp":"2026-10-25T00:00:02Z","requestId":"req-hourly","message":{"id":"msg-hourly","model":"claude-haiku-5.5","usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_1h_input_tokens":10}}}}"#,
+            "
+",
+        ),
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
+    let tmp = create_request_tier_pricing_explain_fixture();
+    let output = cmd_with_home(tmp.path())
+        .timeout(Duration::from_secs(10))
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let long = rows
+        .iter()
+        .find(|row| row["rawModelId"] == "claude-haiku-5-5")
+        .expect("long-context explanation");
+    assert_eq!(long["coverage"], false);
+    assert_eq!(
+        long["uncoveredBuckets"],
+        serde_json::json!(["input_long_context_tier", "output_long_context_tier"])
+    );
+
+    let hourly = rows
+        .iter()
+        .find(|row| row["rawModelId"] == "claude-haiku-5.5")
+        .expect("1-hour cache-write explanation");
+    assert_eq!(hourly["coverage"], false);
+    assert_eq!(
+        hourly["uncoveredBuckets"],
+        serde_json::json!(["cache_write_1h_tier"])
+    );
+
+    cmd_with_home(tmp.path())
+        .timeout(Duration::from_secs(10))
+        .args(["pricing", "explain", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-haiku-5-5 billing=unknown"))
+        .stdout(predicate::str::contains(
+            "uncovered=input_long_context_tier,output_long_context_tier",
+        ))
+        .stdout(predicate::str::contains("claude-haiku-5.5 billing=unknown"))
+        .stdout(predicate::str::contains("uncovered=cache_write_1h_tier"));
+}
+
 #[test]
 fn billing_explain_rejects_unknown_and_blank_filters() {
     let tmp = create_billing_explain_fixture();

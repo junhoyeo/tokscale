@@ -362,7 +362,13 @@ impl LookupResult {
     }
 
     pub(crate) fn uncovered_buckets(&self, usage: &TokenBreakdown) -> Vec<&'static str> {
-        self.pricing.uncovered_buckets(usage)
+        let mut missing = self.pricing.uncovered_buckets(usage);
+        for tier in uncovered_required_request_tiers(self, usage) {
+            if !missing.contains(&tier) {
+                missing.push(tier);
+            }
+        }
+        missing
     }
 }
 
@@ -2315,57 +2321,120 @@ fn should_prefer_anthropic_haiku_55_tiered_litellm(
         })
 }
 
-fn covers_required_request_tiers(result: &LookupResult, usage: &TokenBreakdown) -> bool {
+fn has_any_valid_272k_tier(pricing: &ModelPricing) -> bool {
+    [
+        pricing.input_cost_per_token_above_272k_tokens,
+        pricing.output_cost_per_token_above_272k_tokens,
+        pricing.cache_read_input_token_cost_above_272k_tokens,
+    ]
+    .into_iter()
+    .any(|rate| rate.is_some_and(is_valid_price_value))
+}
+
+fn uncovered_required_request_tiers(
+    result: &LookupResult,
+    usage: &TokenBreakdown,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
     if !is_public_pricing_catalog_result(result) {
-        return true;
+        return missing;
     }
 
+    let valid = |rate: Option<f64>| rate.is_some_and(is_valid_price_value);
     let cache_write = usage.cache_write.max(0);
     let prompt_tokens = anthropic_haiku_55_prompt_tokens(usage);
+
+    // OpenAI's 272K card is request-wide. Once a catalog row publishes any
+    // part of that card, every populated request bucket needs its matching high
+    // rate. Cache writes follow the high/base input ratio, so that bucket also
+    // requires the high input rate.
+    if first_party_openai_model_id(&result.matched_key)
+        .is_some_and(is_openai_full_request_272k_model)
+        && has_any_valid_272k_tier(&result.pricing)
+        && prompt_tokens > TIERED_PRICING_THRESHOLD_272K_TOKENS as i64
+    {
+        let high_input = valid(result.pricing.input_cost_per_token_above_272k_tokens);
+        if usage.input > 0 && !high_input {
+            missing.push("input_long_context_tier");
+        }
+        if (usage.output > 0 || usage.reasoning > 0)
+            && !valid(result.pricing.output_cost_per_token_above_272k_tokens)
+        {
+            missing.push("output_long_context_tier");
+        }
+        if usage.cache_read > 0
+            && !valid(result.pricing.cache_read_input_token_cost_above_272k_tokens)
+        {
+            missing.push("cache_read_long_context_tier");
+        }
+        if cache_write > 0 && !high_input {
+            missing.push("cache_write_long_context_tier");
+        }
+        return missing;
+    }
 
     // `compute_cost` has no generic 100K walk because the operator and
     // request-vs-marginal semantics are provider-specific. If a catalog row
     // publishes such a tier under an identity this engine has not verified,
-    // keep the short request covered but refuse to submit a long request at
-    // the flat base rates. `claude-haiku-latest` is one live example: it is a
-    // moving provider alias, not a stable Haiku 5.5 identity.
+    // keep the short request covered but name why a long request is refused.
     if !is_anthropic_haiku_55_catalog_result(result) {
-        return prompt_tokens <= ANTHROPIC_HAIKU_55_PRICING_THRESHOLD_TOKENS
-            || !has_any_valid_100k_tier(&result.pricing);
+        if prompt_tokens > ANTHROPIC_HAIKU_55_PRICING_THRESHOLD_TOKENS
+            && has_any_valid_100k_tier(&result.pricing)
+        {
+            missing.push("request_long_context_tier");
+        }
+        return missing;
     }
 
-    let valid = |rate: Option<f64>| rate.is_some_and(is_valid_price_value);
     let cache_write_1h = usage.cache_write_1h.max(0).min(cache_write);
     let cache_write_5m = cache_write.saturating_sub(cache_write_1h);
 
-    // Unlike the generic fallback, Haiku 5.5 has a published, distinct 1-hour
-    // cache-write price. A flat 5-minute rate cannot cover that bucket even for
-    // a short prompt.
+    // Haiku 5.5 publishes a distinct 1-hour write price. A present 5-minute
+    // base rate cannot stand in for this bucket, even below 100K.
     if cache_write_1h > 0 && !valid(result.pricing.cache_creation_input_token_cost_above_1hr) {
-        return false;
+        missing.push("cache_write_1h_tier");
     }
 
     if prompt_tokens <= ANTHROPIC_HAIKU_55_PRICING_THRESHOLD_TOKENS {
-        return true;
+        return missing;
     }
 
-    (usage.input <= 0 || valid(result.pricing.input_cost_per_token_above_100k_tokens))
-        && (usage.output <= 0 && usage.reasoning <= 0
-            || valid(result.pricing.output_cost_per_token_above_100k_tokens))
-        && (usage.cache_read <= 0
-            || valid(result.pricing.cache_read_input_token_cost_above_100k_tokens))
-        && (cache_write_5m <= 0
-            || valid(
-                result
-                    .pricing
-                    .cache_creation_input_token_cost_above_100k_tokens,
-            ))
-        && (cache_write_1h <= 0
-            || valid(
-                result
-                    .pricing
-                    .cache_creation_input_token_cost_above_1hr_above_100k_tokens,
-            ))
+    if usage.input > 0 && !valid(result.pricing.input_cost_per_token_above_100k_tokens) {
+        missing.push("input_long_context_tier");
+    }
+    if (usage.output > 0 || usage.reasoning > 0)
+        && !valid(result.pricing.output_cost_per_token_above_100k_tokens)
+    {
+        missing.push("output_long_context_tier");
+    }
+    if usage.cache_read > 0 && !valid(result.pricing.cache_read_input_token_cost_above_100k_tokens)
+    {
+        missing.push("cache_read_long_context_tier");
+    }
+    if cache_write_5m > 0
+        && !valid(
+            result
+                .pricing
+                .cache_creation_input_token_cost_above_100k_tokens,
+        )
+    {
+        missing.push("cache_write_long_context_tier");
+    }
+    if cache_write_1h > 0
+        && !valid(
+            result
+                .pricing
+                .cache_creation_input_token_cost_above_1hr_above_100k_tokens,
+        )
+    {
+        missing.push("cache_write_1h_long_context_tier");
+    }
+
+    missing
+}
+
+fn covers_required_request_tiers(result: &LookupResult, usage: &TokenBreakdown) -> bool {
+    uncovered_required_request_tiers(result, usage).is_empty()
 }
 
 fn matches_model_or_snapshot(model_id: &str, base: &str) -> bool {
@@ -8304,6 +8373,10 @@ mod tests {
             ..Default::default()
         };
         assert!(!models_dev.covers_usage(&long_hourly_write));
+        assert_eq!(
+            models_dev.uncovered_buckets(&long_hourly_write),
+            vec!["cache_write_1h_tier", "cache_write_1h_long_context_tier"]
+        );
 
         let mut openrouter =
             anthropic_haiku_55_100k_result("anthropic/claude-haiku-5.5", "OpenRouter");
@@ -8320,6 +8393,10 @@ mod tests {
             .cache_creation_input_token_cost_above_1hr_above_100k_tokens = None;
         assert!(openrouter.covers_usage(&at_boundary));
         assert!(!openrouter.covers_usage(&long_input));
+        assert_eq!(
+            openrouter.uncovered_buckets(&long_input),
+            vec!["input_long_context_tier", "output_long_context_tier"]
+        );
 
         // models.dev publishes this moving OpenRouter alias with the same 100K
         // tier. It is not a stable Haiku 5.5 identity, so preserve the short
@@ -8333,6 +8410,10 @@ mod tests {
         ));
         assert!(moving_alias.covers_usage(&at_boundary));
         assert!(!moving_alias.covers_usage(&long_input));
+        assert_eq!(
+            moving_alias.uncovered_buckets(&long_input),
+            vec!["request_long_context_tier"]
+        );
     }
 
     #[test]
