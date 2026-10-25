@@ -17,7 +17,7 @@
 use super::opencode_schema::{
     parse_opencode_schema_rows_on, OpenCodeRowMetadata, OpenCodeSchemaConfig,
 };
-use super::utils::open_readonly_sqlite_opt;
+use super::utils::open_readonly_sqlite_snapshot;
 use super::UnifiedMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -477,12 +477,9 @@ fn merge_workspace(retained: &mut UnifiedMessage, incoming: &UnifiedMessage, con
 pub(crate) fn parse_micode_source(db_path: &Path) -> MiMoSource {
     #[cfg(test)]
     io_tests::record_open();
-    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
+    let Some(conn) = open_readonly_sqlite_snapshot(db_path) else {
         return MiMoSource::default();
     };
-    if conn.execute_batch("BEGIN DEFERRED").is_err() {
-        return MiMoSource::default();
-    }
     #[cfg(test)]
     io_tests::record_sessions();
     let (sessions, sessions_complete) = read_sessions(&conn);
