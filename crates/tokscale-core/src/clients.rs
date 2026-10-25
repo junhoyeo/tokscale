@@ -1124,6 +1124,17 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Proma = 58 => {
+        id: "proma",
+        display: "Proma",
+        logo: Some("https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png"),
+        root: PathRoot::Home,
+        relative: ".proma",
+        pattern: "proma-session",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1239,7 +1250,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 58);
+        assert_eq!(ClientId::COUNT, 59);
     }
 
     #[test]

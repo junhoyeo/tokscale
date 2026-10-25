@@ -1,3 +1,4 @@
+import { describeRankingWindow } from "../reportingPeriods";
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { formatCurrency, formatNumber } from "../format";
 import {
@@ -77,7 +78,7 @@ export function renderTerminalEmbedSvg(
       label:
         periodLabel === "lifetime"
           ? `rank.${sortBy}`
-          : `rank.${periodLabel}.${sortBy}`,
+          : `rank.${periodLabel}.utc.${sortBy}`,
       value: rank,
       color: getRankColor(data.stats.rank, palette),
     },
@@ -98,6 +99,7 @@ export function renderTerminalEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="terminal" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale stats for @${escapeXml(data.user.username)}">
+  <title>${escapeXml(describeRankingWindow(data.rankDateRange))}</title>
   ${cardTextStyle()}
   ${cardSurface(W, height, palette)}
   ${cardHeader({

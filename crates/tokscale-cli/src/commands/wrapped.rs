@@ -172,7 +172,9 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let until = format!("{}-12-31", year);
 
     let has_cursor_cache = cursor::has_cursor_usage_cache();
-    let cursor_logged_in = include_cursor && cursor::ensure_cursor_session_for_sync();
+    let cursor_logged_in = !tokscale_core::network::is_offline()
+        && include_cursor
+        && cursor::ensure_cursor_session_for_sync();
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor_logged_in {
@@ -1111,6 +1113,9 @@ async fn ensure_fonts_loaded(client: &reqwest::Client) -> Result<FontSet> {
         (Some(regular), None) => (regular.clone(), regular),
         (None, Some(bold)) => (bold.clone(), bold),
         (None, None) => {
+            if tokscale_core::network::is_offline() {
+                anyhow::bail!("Wrapped fonts are not cached or could not be parsed; generate Wrapped once online to prepare the assets");
+            }
             anyhow::bail!(
                 "Failed to load Figtree fonts. Could not download or parse cached font files."
             )
@@ -1159,6 +1164,8 @@ async fn fetch_svg_and_convert_to_png(
         return Ok(legacy_path);
     }
 
+    tokscale_core::network::require_online("Downloading a missing Wrapped image")
+        .map_err(anyhow::Error::msg)?;
     let response = client
         .get(svg_url)
         .send()
@@ -1193,6 +1200,8 @@ async fn fetch_svg_and_convert_to_png(
 }
 
 async fn fetch_to_file(client: &reqwest::Client, url: &str, path: &Path) -> Result<()> {
+    tokscale_core::network::require_online("Downloading a missing Wrapped asset")
+        .map_err(anyhow::Error::msg)?;
     let response = client
         .get(url)
         .send()

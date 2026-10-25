@@ -1,3 +1,4 @@
+import { finitePeriodCacheControl } from "@/lib/reportingPeriods";
 import { NextRequest, NextResponse } from "next/server";
 import {
   getUserEmbedStats,
@@ -206,7 +207,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         compact,
       });
 
-      return createSvgResponse(svg);
+      return createSvgResponse(svg, { cacheControl: period === "all" ? undefined : finitePeriodCacheControl(startedAt) });
     }
 
     const contributionDataRequired = requiresContributions(
@@ -291,7 +292,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       graph: showGraph,
     });
 
-    return createSvgResponse(svg);
+    return createSvgResponse(svg, { cacheControl: period === "all" ? undefined : finitePeriodCacheControl(startedAt) });
   } catch (error) {
     console.error("[embed-svg] failed", {
       username,

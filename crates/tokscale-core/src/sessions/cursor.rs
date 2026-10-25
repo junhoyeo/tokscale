@@ -18,10 +18,9 @@
 use super::{timestamp_to_date_with_timezone, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
-#[cfg(test)]
-use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
@@ -140,6 +139,10 @@ fn infer_provider(model: &str) -> &'static str {
 
 /// One row of `usageEventsDisplay`. Only the fields tokscale consumes are
 /// modeled; unknown fields are ignored so upstream additions don't break parsing.
+///
+/// The field order is a contract: serde also accepts a row in positional form
+/// (a JSON array whose entries fill the fields in this order), so a field
+/// added here has to keep its position stable.
 #[derive(Debug, Deserialize)]
 struct CursorUsageEvent {
     #[serde(rename = "conversationId", default)]
@@ -258,6 +261,11 @@ pub struct CursorUsageEventIdentity {
     pub model: String,
     pub timestamp: i64,
     pub tokens: TokenBreakdown,
+    /// The event's own id, when the row carries one.
+    ///
+    /// A stable identity for the event itself, so the successive snapshots
+    /// Cursor reports for one event are recognized as that one event.
+    pub usage_event_id: Option<String>,
 }
 
 /// Project a row using the report parser's full deserializer and normalization.
@@ -273,6 +281,7 @@ pub fn parse_cursor_usage_event_identity(
         model: event.normalized_model()?.to_string(),
         conversation_id: event.normalized_conversation_id().map(str::to_string),
         tokens: event.token_usage.unwrap_or_default().token_breakdown(),
+        usage_event_id: cursor_usage_event_id(value),
     })
 }
 
@@ -396,6 +405,21 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
     }
 }
 
+/// The event's own identity, when the row carries one.
+///
+/// Read from the raw row rather than from [`CursorUsageEvent`], whose field
+/// order is a contract: a row in positional form (a JSON array) fills that
+/// struct's fields in order, so adding the id there would shift every field
+/// after it. The id is read from the named field of the raw object instead,
+/// which leaves the struct's layout untouched.
+fn cursor_usage_event_id(row: &serde_json::Value) -> Option<String> {
+    row.get("usageEventId")?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 /// Parse a Cursor usage events JSON file (dashboard `get-filtered-usage-events`).
 ///
 /// Sessions are keyed by `conversationId` (the Cursor session UUID). Cost comes
@@ -405,6 +429,11 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
 /// parsed individually so one malformed entry is skipped rather than discarding
 /// the whole cache. Events with no usable `conversationId` fall back to a
 /// UTC-stable synthetic per-day id so their cost is never dropped from totals.
+///
+/// Rows sharing a `usageEventId` are snapshots of one event, not independent
+/// events, so only the snapshot with the largest `(token total, cost)` is kept.
+/// An id-less legacy row with the same parsed session, model, and timestamp as
+/// an identified row competes with that event's snapshots under the same rule.
 pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -424,8 +453,14 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
 
     let account_id = account_id_from_cursor_cache_path(path);
     let mut messages = Vec::with_capacity(rows.len());
+    // The snapshot identity of each parsed row, kept alongside its message so
+    // the duplicated snapshots of one event can be collapsed afterwards.
+    let mut snapshot_ids: Vec<Option<String>> = Vec::with_capacity(rows.len());
 
     for row in rows {
+        // The event id is read before the row is consumed by the deserializer.
+        let usage_event_id = cursor_usage_event_id(&row);
+
         // Deserialize each row on its own so one malformed entry (an unexpected
         // type in a single field) skips just that row instead of discarding the
         // entire cache.
@@ -482,10 +517,98 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
         if cost.is_some() {
             message.mark_provider_reported_cost();
         }
+        snapshot_ids.push(usage_event_id);
         messages.push(message);
     }
 
+    dedupe_cursor_event_snapshots(messages, snapshot_ids)
+}
+
+/// Collapse the repeated snapshots of one Cursor event into a single message.
+///
+/// Cursor's usage-events payload is a log of *snapshots*, not of independent
+/// events: the same event is reported again with its running token totals —
+/// inside a single API response as well as across incremental syncs, since a
+/// cached row survives only while its token projection still matches the
+/// freshly fetched one. The event keeps its `usageEventId` and its timestamp
+/// while the token counts grow, so summing every row counts one event many
+/// times over.
+///
+/// The surviving row is chosen by lexicographic maximum `(token total, cost)`.
+/// An id-less legacy row with the same parsed session id, model, and timestamp
+/// as an identified row competes with that event's snapshots. This retains the
+/// largest observed usage instead of dropping a possibly larger legacy snapshot.
+/// All id-less rows without an identified match are kept.
+fn dedupe_cursor_event_snapshots(
+    messages: Vec<UnifiedMessage>,
+    snapshot_ids: Vec<Option<String>>,
+) -> Vec<UnifiedMessage> {
+    if messages.len() < 2 {
+        return messages;
+    }
+
+    // Associate legacy id-less snapshots with an identified row using only the
+    // normalized message fields parsed from the same raw identity fields. If
+    // more than one event id has the same fallback identity, choose one
+    // deterministically without merging the distinct identified events.
+    let mut identified_by_fallback: HashMap<(String, String, i64), String> = HashMap::new();
+    for (message, snapshot_id) in messages.iter().zip(&snapshot_ids) {
+        let Some(snapshot_id) = snapshot_id.as_ref() else {
+            continue;
+        };
+        identified_by_fallback
+            .entry((
+                message.session_id.clone(),
+                message.model_id.clone(),
+                message.timestamp,
+            ))
+            .and_modify(|current| {
+                if snapshot_id < current {
+                    current.clone_from(snapshot_id);
+                }
+            })
+            .or_insert_with(|| snapshot_id.clone());
+    }
+
+    // The index of the surviving row per event id, and the set of rows that a
+    // larger snapshot of the same event supersedes.
+    let mut surviving: HashMap<String, usize> = HashMap::new();
+    let mut superseded = vec![false; messages.len()];
+
+    for (index, snapshot_id) in snapshot_ids.iter().enumerate() {
+        let fallback_key = (
+            messages[index].session_id.clone(),
+            messages[index].model_id.clone(),
+            messages[index].timestamp,
+        );
+        let Some(snapshot_id) = snapshot_id
+            .as_ref()
+            .or_else(|| identified_by_fallback.get(&fallback_key))
+        else {
+            continue;
+        };
+        match surviving.get(snapshot_id).copied() {
+            Some(current) => {
+                let is_larger = (messages[index].tokens.total(), messages[index].cost)
+                    > (messages[current].tokens.total(), messages[current].cost);
+                if is_larger {
+                    superseded[current] = true;
+                    surviving.insert(snapshot_id.clone(), index);
+                } else {
+                    superseded[index] = true;
+                }
+            }
+            None => {
+                surviving.insert(snapshot_id.clone(), index);
+            }
+        }
+    }
+
     messages
+        .into_iter()
+        .zip(superseded)
+        .filter_map(|(message, is_superseded)| if is_superseded { None } else { Some(message) })
+        .collect()
 }
 
 /// Parse a Cursor usage CSV file
@@ -699,6 +822,261 @@ mod tests {
         let _sibling_counter = register_parse_cursor_file_counter(sibling.path());
         record_parse_cursor_file_call(&sibling.path().join("usage.csv"));
         assert_eq!(parse_cursor_file_call_count(sibling.path()), 1);
+    }
+
+    fn cursor_snapshot_row(
+        timestamp: i64,
+        usage_event_id: Option<&str>,
+        input_tokens: i64,
+        charged_cents: f64,
+    ) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "timestamp": timestamp.to_string(),
+            "model": "gpt-5",
+            "chargedCents": charged_cents,
+            "tokenUsage": {
+                "inputTokens": input_tokens,
+                "outputTokens": 0,
+                "totalCents": charged_cents,
+            },
+            "conversationId": "same-conversation",
+        });
+        if let Some(usage_event_id) = usage_event_id {
+            row["usageEventId"] = serde_json::json!(usage_event_id);
+        }
+        row
+    }
+
+    fn parse_cursor_snapshot_rows(rows: Vec<serde_json::Value>) -> Vec<UnifiedMessage> {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        let json = serde_json::json!({"usageEventsDisplay": rows});
+        std::fs::write(&file_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        parse_cursor_file(&file_path)
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_only_the_largest_snapshot_per_event() {
+        // Cursor's usage-events payload reports one event repeatedly, with its
+        // running token totals. The rows share a `usageEventId` and a
+        // timestamp, so summing them would count the event many times over.
+        let json = r#"{
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gemini-3.8-flash-high",
+                    "usageEventId": "452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                    "chargedCents": 226.30601501464844,
+                    "tokenUsage": {
+                        "cacheReadTokens": 10512194,
+                        "inputTokens": 1906404,
+                        "outputTokens": 11958,
+                        "totalCents": 226.30601501464844
+                    },
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                },
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gemini-3.8-flash-high",
+                    "usageEventId": "452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                    "chargedCents": 214.28521728515625,
+                    "tokenUsage": {
+                        "cacheReadTokens": 9000000,
+                        "inputTokens": 1900000,
+                        "outputTokens": 96958,
+                        "totalCents": 214.28521728515625
+                    },
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                },
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gemini-3.8-flash-high",
+                    "usageEventId": "452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                    "chargedCents": 33.39442443847656,
+                    "tokenUsage": {
+                        "cacheReadTokens": 400000,
+                        "inputTokens": 40000,
+                        "outputTokens": 4103,
+                        "totalCents": 33.39442443847656
+                    },
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                }
+            ]
+        }"#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 1, "one event must yield one message");
+        assert_eq!(messages[0].tokens.cache_read, 10512194);
+        assert_eq!(messages[0].tokens.input, 1906404);
+        assert_eq!(messages[0].tokens.output, 11958);
+        assert!((messages[0].cost - 2.2630601501464844).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_matches_idless_snapshot_to_identified_event() {
+        let idless = cursor_snapshot_row(1_792_841_120_156, None, 10, 1.0);
+        let identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+
+        let messages = parse_cursor_snapshot_rows(vec![idless, identified]);
+
+        assert_eq!(messages.len(), 1, "one event must yield one message");
+        assert_eq!(messages[0].tokens.input, 20);
+        assert!((messages[0].cost - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_matches_idless_snapshot_after_identified_event() {
+        let identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+        let idless = cursor_snapshot_row(1_792_841_120_156, None, 10, 1.0);
+
+        let messages = parse_cursor_snapshot_rows(vec![identified, idless]);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "row order must not change the event count"
+        );
+        assert_eq!(messages[0].tokens.input, 20);
+        assert!((messages[0].cost - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_larger_idless_snapshot_for_synthetic_session() {
+        let mut idless = cursor_snapshot_row(1_792_841_120_156, None, 30, 3.0);
+        let mut identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+        idless.as_object_mut().unwrap().remove("conversationId");
+        identified.as_object_mut().unwrap().remove("conversationId");
+
+        let messages = parse_cursor_snapshot_rows(vec![idless, identified]);
+
+        assert_eq!(messages.len(), 1, "one event must yield one message");
+        assert_eq!(messages[0].tokens.input, 30);
+        assert!(messages[0].session_id.starts_with("cursor-active-"));
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_idless_snapshot_at_a_distinct_timestamp() {
+        let identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+        let matching_idless = cursor_snapshot_row(1_792_841_120_156, None, 10, 1.0);
+        let distinct_idless = cursor_snapshot_row(1_792_841_120_157, None, 7, 0.7);
+
+        let messages =
+            parse_cursor_snapshot_rows(vec![identified, matching_idless, distinct_idless]);
+
+        assert_eq!(messages.len(), 2, "the unmatched id-less event must remain");
+        assert!(messages.iter().any(|message| {
+            message.timestamp == 1_792_841_120_157 && message.tokens.input == 7
+        }));
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_later_lower_snapshot_does_not_replace_larger() {
+        let larger = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            100,
+            10.0,
+        );
+        let later_but_lower = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+
+        let messages = parse_cursor_snapshot_rows(vec![larger, later_but_lower]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert!((messages[0].cost - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_rows_without_an_event_id() {
+        // Id-less rows without any identified session/model/timestamp match
+        // carry no event identity, so they are all kept as independent events.
+        let json = r#"{
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792405129245",
+                    "model": "grok-bot-automation",
+                    "chargedCents": 0,
+                    "conversationId": "sand-subagent-9405fe37"
+                },
+                {
+                    "timestamp": "1792405129246",
+                    "model": "grok-bot-automation",
+                    "chargedCents": 0,
+                    "conversationId": "sand-subagent-9405fe38"
+                }
+            ]
+        }"#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_distinct_events_with_the_same_model() {
+        // Two different events of the same model must not be merged just
+        // because they share a conversation.
+        let json = r#"{
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792838733769",
+                    "model": "gemini-4-argon-medium",
+                    "usageEventId": "d85f7dbb-31fc-4c6c-b904-652930ba1d40",
+                    "chargedCents": 319.1834411621094,
+                    "tokenUsage": {"inputTokens": 100, "outputTokens": 10, "totalCents": 319.1834411621094},
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                },
+                {
+                    "timestamp": "1792838254696",
+                    "model": "gemini-4-argon-medium",
+                    "usageEventId": "b039781d-caa8-43ec-b993-ef2002481e3c",
+                    "chargedCents": 70.84400939941406,
+                    "tokenUsage": {"inputTokens": 50, "outputTokens": 5, "totalCents": 70.84400939941406},
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                }
+            ]
+        }"#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 2);
+        let total: i64 = messages.iter().map(|m| m.tokens.total()).sum();
+        assert_eq!(total, 165);
     }
 
     #[test]

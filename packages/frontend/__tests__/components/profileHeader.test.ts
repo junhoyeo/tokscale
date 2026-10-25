@@ -108,7 +108,7 @@ describe("formatJoined", () => {
 describe("getProfileRankLabel", () => {
   it("makes the rank window explicit", () => {
     expect(getProfileRankLabel("all")).toBe("All-time rank");
-    expect(getProfileRankLabel("month")).toBe("30d rank");
-    expect(getProfileRankLabel("week")).toBe("7d rank");
+    expect(getProfileRankLabel("month")).toBe("30d rank (UTC)");
+    expect(getProfileRankLabel("week")).toBe("7d rank (UTC)");
   });
 });

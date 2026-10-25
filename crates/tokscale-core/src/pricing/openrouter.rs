@@ -483,6 +483,10 @@ fn optional_rates_agree(reference: &ModelPricing, candidate: &ModelPricing) -> b
 }
 
 /// Fetch all models and get author pricing for each
+pub(super) async fn fetch_uncached() -> Result<HashMap<String, ModelPricing>, String> {
+    fetch_all_models_from_api_base(API_BASE, false).await
+}
+
 pub async fn fetch_all_models() -> Result<HashMap<String, ModelPricing>, String> {
     fetch_all_models_from_api_base(API_BASE, true).await
 }

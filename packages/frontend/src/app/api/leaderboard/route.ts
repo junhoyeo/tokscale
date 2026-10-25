@@ -1,3 +1,4 @@
+import { finitePeriodCacheControl } from "@/lib/reportingPeriods";
 import { NextResponse } from "next/server";
 import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import type { Period, SortBy } from "@/lib/leaderboard/types";
@@ -15,6 +16,7 @@ function parseIntSafe(value: string | null, defaultValue: number): number {
 }
 
 export async function GET(request: Request) {
+  const startedAt = Date.now();
   const { searchParams } = new URL(request.url);
 
   try {
@@ -49,7 +51,9 @@ export async function GET(request: Request) {
 
     return NextResponse.json(data, {
       headers: {
-        "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+        "Cache-Control": period === "all" || period === "custom"
+          ? "public, s-maxage=60, stale-while-revalidate=300"
+          : finitePeriodCacheControl(startedAt),
       },
     });
   } catch (error) {

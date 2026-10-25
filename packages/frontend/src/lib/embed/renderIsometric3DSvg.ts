@@ -1,3 +1,4 @@
+import { describeRankingWindow } from "../reportingPeriods";
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { escapeXml, formatNumber, formatCurrency } from "../format";
 import { colorPalettes, getDarkGradeColors } from "../themes";
@@ -233,7 +234,7 @@ export function renderIsometric3DEmbedSvg(
       value: cost,
     },
     {
-      label: periodLabel === "lifetime" ? "Rank" : `Rank · ${periodLabel}`,
+      label: periodLabel === "lifetime" ? "Rank" : `Rank · ${periodLabel} UTC`,
       value: rank,
     },
     {
@@ -268,6 +269,7 @@ export function renderIsometric3DEmbedSvg(
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="3d" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale 3D contribution graph for ${safeUsername}">
+  <title>${escapeXml(describeRankingWindow(data.rankDateRange))}</title>
   <title>${safeUsername} Tokscale 3D contribution graph</title>
   <style>${faceCss}</style>
   <rect width="${width}" height="${height}" rx="${rx}" fill="${palette.surface}"/>

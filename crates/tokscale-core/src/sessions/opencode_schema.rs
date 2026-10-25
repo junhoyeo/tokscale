@@ -17,7 +17,7 @@
 //! opposite of the point.
 
 use super::utils::{
-    open_readonly_sqlite_opt, sqlite_for_each_row_on, sqlite_for_each_row_on_with_params,
+    open_readonly_sqlite_snapshot, sqlite_for_each_row_on, sqlite_for_each_row_on_with_params,
     SqliteScan,
 };
 use super::{
@@ -1425,6 +1425,34 @@ const MAX_MERGED_DEDUP_KEYS: usize = 250_000;
 pub(crate) static INCREMENTAL_RESCANS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Runs once between OpenCode query groups for a matching database path.
+#[cfg(test)]
+type PathScopedQueryGroupHook = Option<(std::path::PathBuf, fn(&Path))>;
+
+#[cfg(test)]
+static BETWEEN_OPENCODE_QUERY_GROUPS_HOOK: std::sync::Mutex<PathScopedQueryGroupHook> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_between_opencode_query_groups_hook(path: &Path) {
+    let hook = {
+        let mut slot = BETWEEN_OPENCODE_QUERY_GROUPS_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|(expected_path, _)| expected_path == path)
+        {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
 /// A scan's messages plus the state a later scan needs to resume from it.
 pub(crate) struct OpenCodeSchemaScan {
     pub complete: bool,
@@ -1494,7 +1522,7 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
     cfg: OpenCodeSchemaConfig,
     session_clients: Option<&std::collections::HashMap<String, String>>,
 ) -> OpenCodeSchemaScan {
-    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
+    let Some(conn) = open_readonly_sqlite_snapshot(db_path) else {
         return OpenCodeSchemaScan::empty();
     };
 
@@ -1583,6 +1611,11 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
             }
             _ => None,
         });
+
+        #[cfg(test)]
+        if group_index + 1 < cfg.query_groups.len() {
+            run_between_opencode_query_groups_hook(db_path);
+        }
     }
 
     // Resolve each physical row to the final message slot after all
@@ -1682,7 +1715,7 @@ pub(crate) fn rescan_opencode_schema_sqlite_with_session_clients(
         return None;
     }
 
-    let conn = open_readonly_sqlite_opt(db_path)?;
+    let conn = open_readonly_sqlite_snapshot(db_path)?;
     let db_namespace = if cfg.namespace_rowid_dedup_key {
         db_path.to_string_lossy().into_owned()
     } else {
@@ -2030,4 +2063,118 @@ fn merge_incremental_messages(
     }
 
     Some(merged)
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    struct BetweenQueryGroupsHook;
+
+    impl BetweenQueryGroupsHook {
+        fn set(path: &Path, hook: fn(&Path)) -> Self {
+            *BETWEEN_OPENCODE_QUERY_GROUPS_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((path.to_path_buf(), hook));
+            Self
+        }
+    }
+
+    impl Drop for BetweenQueryGroupsHook {
+        fn drop(&mut self) {
+            *BETWEEN_OPENCODE_QUERY_GROUPS_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    fn payload(output: i64) -> String {
+        format!(
+            r#"{{
+                "id": "logical-turn",
+                "role": "assistant",
+                "modelID": "claude-sonnet-4",
+                "providerID": "anthropic",
+                "tokens": {{ "input": 10, "output": {output}, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                "time": {{ "created": 1700000000000.0 }}
+            }}"#
+        )
+    }
+
+    fn migrate_turn_to_v1(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        let transaction = conn.unchecked_transaction().unwrap();
+        transaction
+            .execute("DELETE FROM session_message WHERE id = 'logical-turn'", [])
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES ('logical-turn', 'session-1', 2000, 2000, ?1)",
+                [payload(150)],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn full_scan_reads_dual_schema_groups_from_one_snapshot() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 type TEXT NOT NULL,
+                 time_created INTEGER NOT NULL,
+                 time_updated INTEGER NOT NULL,
+                 data TEXT NOT NULL
+             );
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 time_created INTEGER NOT NULL,
+                 time_updated INTEGER NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message
+                 (id, session_id, type, time_created, time_updated, data)
+             VALUES ('logical-turn', 'session-1', 'assistant', 1000, 1000, ?1)",
+            params![payload(100)],
+        )
+        .unwrap();
+
+        let hook = BetweenQueryGroupsHook::set(&db_path, migrate_turn_to_v1);
+        let scan = scan_opencode_schema_sqlite(&db_path, OpenCodeSchemaConfig::opencode());
+        drop(hook);
+
+        assert!(scan.complete);
+        assert_eq!(
+            scan.messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            100,
+            "the v2 and v1 query groups must share the pre-write snapshot"
+        );
+        let post_write = scan_opencode_schema_sqlite(&db_path, OpenCodeSchemaConfig::opencode());
+        assert_eq!(
+            post_write
+                .messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            150,
+            "the test writer must commit the replacement turn"
+        );
+    }
 }

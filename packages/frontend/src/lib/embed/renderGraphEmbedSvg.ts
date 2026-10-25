@@ -1,3 +1,4 @@
+import { describeRankingWindow } from "../reportingPeriods";
 import type { UserEmbedStats, EmbedContributionDay } from "./getUserEmbedStats";
 import { formatCurrency, formatNumber } from "../format";
 import {
@@ -88,13 +89,14 @@ export function renderGraphEmbedSvg(
       label:
         periodLabel === "lifetime"
           ? `Rank · ${sortBy}`
-          : `Rank · ${periodLabel}`,
+          : `Rank · ${periodLabel} UTC`,
       color: getRankColor(data.stats.rank, palette),
     },
   ];
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg data-template="graph" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tokscale contribution graph for @${escapeXml(data.user.username)}">
+  <title>${escapeXml(describeRankingWindow(data.rankDateRange))}</title>
   ${cardTextStyle()}
   ${cardSurface(W, H, palette)}
   ${cardHeader({

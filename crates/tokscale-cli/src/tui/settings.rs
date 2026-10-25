@@ -374,9 +374,10 @@ pub struct Settings {
     #[serde(default)]
     pub model_aliases: tokscale_core::ModelAliasMap,
     /// When true, the interactive TUI uses a light background instead of the
-    /// hardcoded dark one. Toggled live with the `L` key and persisted.
-    #[serde(default)]
-    pub tui_light_mode: bool,
+    /// dark one. Toggled live with the `L` key and persisted. When unset, the
+    /// TUI follows the terminal background reported by `COLORFGBG`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tui_light_mode: Option<bool>,
     /// Preferred UI language for the TUI interface.
     #[serde(default, deserialize_with = "deserialize_tui_language_lossy")]
     pub tui_language: TuiLanguage,
@@ -497,7 +498,7 @@ impl Default for Settings {
             minutely_tab_enabled: false,
             autosubmit: AutosubmitSettings::default(),
             model_aliases: tokscale_core::ModelAliasMap::default(),
-            tui_light_mode: false,
+            tui_light_mode: None,
             tui_language: TuiLanguage::En,
             cursor: CursorSettings::default(),
         }

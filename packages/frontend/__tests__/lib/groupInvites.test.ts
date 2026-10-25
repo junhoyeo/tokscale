@@ -21,6 +21,7 @@ const mockState = vi.hoisted(() => {
       expiresAt: "groupInvites.expiresAt",
       acceptedAt: "groupInvites.acceptedAt",
     },
+    groupInviteRedemptions: { inviteId: "redemptions.inviteId", userId: "redemptions.userId" },
     groupMembers: {
       groupId: "groupMembers.groupId",
       userId: "groupMembers.userId",
@@ -51,7 +52,7 @@ const mockState = vi.hoisted(() => {
   const updateWhere = vi.fn(() => ({ returning: claimReturning }));
   const updateSet = vi.fn(() => ({ where: updateWhere }));
 
-  const onConflictDoNothing = vi.fn(async () => undefined);
+  const onConflictDoNothing = vi.fn(() => ({ returning: vi.fn(async () => [{ userId: "user", inviteId: "invite" }]) }));
   const insertValues = vi.fn(() => ({ onConflictDoNothing }));
 
   const tx = {
@@ -124,12 +125,16 @@ vi.mock("drizzle-orm", () => ({
   and: mockState.and,
   eq: mockState.eq,
   gt: mockState.gt,
+  lt: vi.fn(),
+  desc: vi.fn(),
+  sql: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ strings, values })),
 }));
 
 vi.mock("@/lib/db", () => ({
   db: mockState.db,
   groupInvites: mockState.tables.groupInvites,
   groupMembers: mockState.tables.groupMembers,
+  groupInviteRedemptions: mockState.tables.groupInviteRedemptions,
   groups: mockState.tables.groups,
 }));
 
