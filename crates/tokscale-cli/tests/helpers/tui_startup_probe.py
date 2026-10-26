@@ -185,7 +185,26 @@ class Probe:
         # the application reaches its next keyboard event or terminal restore.
         self.read_until(lambda: self.process.poll() is not None, "q exits with Keychain held")
         status = self.process.wait(timeout=DEADLINE_SECONDS)
+        # A heading can arrive in a different PTY read from the card below it.
+        # Inspect the complete final frame, including bytes buffered at exit.
+        end = time.monotonic() + 1
+        while time.monotonic() < end:
+            ready, _, _ = select.select([self.master], [], [], 0.05)
+            if not ready:
+                break
+            try:
+                chunk = os.read(self.master, 65536)
+            except BlockingIOError:
+                continue
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                break
+            if not chunk:
+                break
+            self.output.extend(chunk)
         assert status == 0, f"TUI exited with status {status}: {self.text!r}"
+        assert SENTINEL not in self.text, "unverified Claude card was rendered"
         assert not self.release.exists(), "fixture released Keychain before verifying exit"
         if self.case != "online-usage-blocked":
             assert not self.marker.exists(), "startup/offline navigation queried Keychain"
