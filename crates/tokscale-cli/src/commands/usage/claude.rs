@@ -500,6 +500,14 @@ impl From<reqwest::Error> for FetchError {
         Self::Other(error.into())
     }
 }
+fn usage_client(timeout: std::time::Duration) -> anyhow::Result<reqwest::Client> {
+    // Bound the complete request, including response-body reads, while retaining
+    // the shared proxy and TLS configuration.
+    Ok(tokscale_core::http::client_builder()
+        .timeout(timeout)
+        .build()?)
+}
+
 async fn fetch_usage(
     client: &reqwest::Client,
     usage_url: &str,
@@ -805,7 +813,7 @@ fn fetch_policy(
         .enable_all()
         .build()?;
     let response = rt.block_on(fetch_usage(
-        &tokscale_core::http::client(),
+        &usage_client(std::time::Duration::from_secs(30))?,
         usage_url,
         token,
     ));
@@ -881,6 +889,75 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::commands::usage::test_server::{spawn_server, Seen};
+
+    fn assert_request_timeout(partial_body: bool) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "client never connected");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            if partial_body {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{").unwrap();
+            }
+            let _ = released.recv_timeout(Duration::from_secs(3));
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                fetch_usage(
+                    &usage_client(Duration::from_millis(100)).unwrap(),
+                    &url,
+                    "test-token",
+                ),
+            )
+            .await
+        });
+        let _ = release.send(());
+        server.join().unwrap();
+        let response = result.expect("HTTP client must time out before the watchdog");
+        let Err(FetchError::Other(error)) = response else {
+            panic!("expected an HTTP timeout, got {response:?}");
+        };
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+    }
+
+    #[test]
+    fn request_times_out_waiting_for_headers() {
+        assert_request_timeout(false);
+    }
+
+    #[test]
+    fn request_times_out_reading_response_body() {
+        assert_request_timeout(true);
+    }
 
     #[test]
     fn policy_reuses_success_then_recovers_from_rate_limit() {
