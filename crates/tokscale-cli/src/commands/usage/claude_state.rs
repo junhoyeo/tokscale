@@ -52,7 +52,14 @@ pub(super) fn disk_lock(path: &Path) -> std::io::Result<fs::File> {
     for _ in 0..10 {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.raw_os_error().is_some_and(|code| {
+                        Some(code) == fs2::lock_contended_error().raw_os_error()
+                    }) =>
+            {
+                // Windows reports ERROR_LOCK_VIOLATION as PermissionDenied.
+                // Match fs2's exact contention code without masking access errors.
                 std::thread::sleep(std::time::Duration::from_millis(5))
             }
             Err(e) => return Err(e),
@@ -154,4 +161,20 @@ pub(super) fn forget_memory(path: &Path) {
         .lock()
         .unwrap()
         .remove(path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_lock_reports_contention_as_would_block_on_every_platform() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = path(temp.path(), "test-account");
+        let _held = disk_lock(&path).unwrap();
+        let started = std::time::Instant::now();
+        let error = disk_lock(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 }

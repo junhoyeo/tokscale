@@ -1337,11 +1337,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
         fs::create_dir_all(&cache).unwrap();
-        let server_cache = cache.clone();
-        let backup = temp.path().join("previous-cache");
+        let sample_path = state::path(&cache, &cooldown_key("stale-access-token"));
+        let server_sample_path = sample_path.clone();
         let (url, log) = spawn_server(move |_, _| {
-            fs::rename(&server_cache, &backup).unwrap();
-            fs::write(&server_cache, "blocked").unwrap();
+            // A directory at the JSON destination prevents atomic replacement
+            // without moving the directory containing the open request lock.
+            fs::create_dir(&server_sample_path).unwrap();
             (200, USAGE_BODY.into())
         });
         assert_eq!(
@@ -1350,6 +1351,16 @@ mod tests {
                 .len(),
             1
         );
+        assert!(sample_path.is_dir(), "the sample write must have failed");
+        let fresh = fetch_report_at(&url, keychain_credentials, &cache, 1030);
+        assert_eq!(fresh.outputs.len(), 1);
+        assert!(!fresh.outputs[0].freshness.as_ref().unwrap().stale);
+        assert!(fresh.diagnostics.is_empty());
+        // The request has completed, so its lock file can now be replaced on
+        // Windows too. This separately simulates unavailable coordination.
+        let lock_path = sample_path.with_extension("request.lock");
+        fs::remove_file(&lock_path).unwrap();
+        fs::create_dir(&lock_path).unwrap();
         let cached = fetch_report_at(&url, keychain_credentials, &cache, 1030);
         assert_eq!(
             cached.outputs[0].freshness.as_ref().unwrap().fetched_at,
@@ -1364,7 +1375,8 @@ mod tests {
             .outputs
             .is_empty());
         // Fixing access restores coordinated requests instead of permanent lockout.
-        fs::remove_file(&cache).unwrap();
+        fs::remove_dir(&lock_path).unwrap();
+        fs::remove_dir(&sample_path).unwrap();
         let (recovered_url, recovered_log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
         assert_eq!(
             fetch_report_at(&recovered_url, keychain_credentials, &cache, 4601)
@@ -2451,19 +2463,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let blocked_cache = temp.path().join("cache");
         fs::create_dir_all(&blocked_cache).unwrap();
-        let server_cache = blocked_cache.clone();
-        let backup = temp.path().join("previous-cache");
+        let sample_path = state::path(&blocked_cache, &cooldown_key("stale-access-token"));
+        let cooldown_file = cooldown_path_in(&blocked_cache, &cooldown_key("stale-access-token"));
+        let server_sample_path = sample_path.clone();
+        let server_cooldown_file = cooldown_file.clone();
         let (usage_url, log) = spawn_server(move |_, _| {
-            fs::rename(&server_cache, &backup).unwrap();
-            fs::write(
-                &server_cache,
-                "file blocks cache writes after request lock acquisition",
-            )
-            .unwrap();
+            // Block both JSON destinations after acquiring the request lock.
+            // Renaming its open parent directory would fail on Windows.
+            fs::create_dir(&server_sample_path).unwrap();
+            fs::create_dir_all(&server_cooldown_file).unwrap();
             (429, "{}".into())
         });
         let first = fetch_blocking_in(&usage_url, keychain_credentials, &blocked_cache);
         assert!(first.unwrap_err().to_string().contains("HTTP 429"));
+        assert!(sample_path.is_dir());
+        assert!(cooldown_file.is_dir());
         let second = fetch_blocking_in(&usage_url, keychain_credentials, &blocked_cache);
         assert!(second.unwrap_err().to_string().contains("retry in"));
         assert_eq!(log.lock().unwrap().len(), 1);
