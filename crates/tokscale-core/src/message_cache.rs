@@ -1022,6 +1022,8 @@ impl From<LegacyCodexStateV14> for CodexParseState {
             has_own_activity: state.has_own_activity,
             has_supported_usage: state.has_supported_usage,
             has_own_synthetic_activity: state.has_own_synthetic_activity,
+            has_entered_review_mode: false,
+            has_own_turn_context: true,
             current_model: state.current_model,
             thread_service_tier: state.thread_service_tier,
             request_service_tier: state.request_service_tier,
@@ -1163,6 +1165,8 @@ impl From<LegacyCodexStateV15> for CodexParseState {
             has_own_activity: state.has_own_activity,
             has_supported_usage: state.has_supported_usage,
             has_own_synthetic_activity: state.has_own_synthetic_activity,
+            has_entered_review_mode: false,
+            has_own_turn_context: true,
             current_model: state.current_model,
             thread_service_tier: state.thread_service_tier,
             request_service_tier: state.request_service_tier,
@@ -1253,6 +1257,157 @@ impl From<LegacyCodexIncrementalV15> for CodexIncrementalCache {
 }
 #[cfg(test)]
 impl From<CodexIncrementalCache> for LegacyCodexIncrementalV15 {
+    fn from(cache: CodexIncrementalCache) -> Self {
+        Self {
+            state: cache.state.into(),
+            consumed_offset: cache.consumed_offset,
+            ends_with_newline: cache.ends_with_newline,
+            prefix_hash: cache.prefix_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyCodexStateV19 {
+    has_own_activity: bool,
+    has_supported_usage: bool,
+    has_own_synthetic_activity: bool,
+    current_model: Option<String>,
+    thread_service_tier: Option<String>,
+    request_service_tier: Option<String>,
+    current_turn_start_ms: Option<i64>,
+    last_accepted_token_timestamp_ms: Option<i64>,
+    previous_totals: Option<crate::sessions::codex::CodexTotals>,
+    session_is_headless: bool,
+    session_is_subagent: bool,
+    session_is_guardian: bool,
+    session_id_from_meta: Option<String>,
+    session_forked_from_id: Option<String>,
+    forked_child_session_id: Option<String>,
+    forked_child_replay_session_id: Option<String>,
+    session_provider: Option<String>,
+    session_agent: Option<String>,
+    session_workspace_key: Option<String>,
+    session_workspace_label: Option<String>,
+    forked_child_waiting_for_turn_context: bool,
+    forked_child_inherited_baseline: Option<crate::sessions::codex::CodexTotals>,
+    forked_child_inherited_reported_total: Option<i64>,
+    pending_turn_start: bool,
+    forked_child_task_started_turn_ids: std::collections::HashSet<String>,
+    forked_child_is_user_fork: bool,
+    session_owned_by_openclaw: bool,
+    current_turn_id: Option<String>,
+    turn_id_announced_by_task_started: bool,
+    usage_event_ordinal: u64,
+    turn_coverage: crate::sessions::codex::CodexTurnCoverage,
+    pending_usage_record: Option<crate::sessions::codex::CodexPendingUsageRecord>,
+    settled_usage_records: std::collections::VecDeque<crate::sessions::codex::CodexTotals>,
+}
+
+impl From<LegacyCodexStateV19> for CodexParseState {
+    fn from(state: LegacyCodexStateV19) -> Self {
+        Self {
+            has_own_activity: state.has_own_activity,
+            has_supported_usage: state.has_supported_usage,
+            has_own_synthetic_activity: state.has_own_synthetic_activity,
+            current_model: state.current_model,
+            thread_service_tier: state.thread_service_tier,
+            request_service_tier: state.request_service_tier,
+            current_turn_start_ms: state.current_turn_start_ms,
+            last_accepted_token_timestamp_ms: state.last_accepted_token_timestamp_ms,
+            previous_totals: state.previous_totals,
+            session_is_headless: state.session_is_headless,
+            session_is_subagent: state.session_is_subagent,
+            session_is_guardian: state.session_is_guardian,
+            session_id_from_meta: state.session_id_from_meta,
+            session_forked_from_id: state.session_forked_from_id,
+            forked_child_session_id: state.forked_child_session_id,
+            forked_child_replay_session_id: state.forked_child_replay_session_id,
+            session_provider: state.session_provider,
+            session_agent: state.session_agent,
+            session_workspace_key: state.session_workspace_key,
+            session_workspace_label: state.session_workspace_label,
+            forked_child_waiting_for_turn_context: state.forked_child_waiting_for_turn_context,
+            forked_child_inherited_baseline: state.forked_child_inherited_baseline,
+            forked_child_inherited_reported_total: state.forked_child_inherited_reported_total,
+            pending_turn_start: state.pending_turn_start,
+            forked_child_task_started_turn_ids: state.forked_child_task_started_turn_ids,
+            forked_child_is_user_fork: state.forked_child_is_user_fork,
+            session_owned_by_openclaw: state.session_owned_by_openclaw,
+            current_turn_id: state.current_turn_id,
+            turn_id_announced_by_task_started: state.turn_id_announced_by_task_started,
+            usage_event_ordinal: state.usage_event_ordinal,
+            turn_coverage: state.turn_coverage,
+            pending_usage_record: state.pending_usage_record,
+            settled_usage_records: state.settled_usage_records,
+            has_entered_review_mode: false,
+            has_own_turn_context: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyCodexIncrementalV19 {
+    state: LegacyCodexStateV19,
+    consumed_offset: u64,
+    ends_with_newline: bool,
+    prefix_hash: [u8; 32],
+}
+
+impl From<LegacyCodexIncrementalV19> for CodexIncrementalCache {
+    fn from(cache: LegacyCodexIncrementalV19) -> Self {
+        Self {
+            state: cache.state.into(),
+            consumed_offset: cache.consumed_offset,
+            ends_with_newline: cache.ends_with_newline,
+            prefix_hash: cache.prefix_hash,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<CodexParseState> for LegacyCodexStateV19 {
+    fn from(state: CodexParseState) -> Self {
+        Self {
+            has_own_activity: state.has_own_activity,
+            has_supported_usage: state.has_supported_usage,
+            has_own_synthetic_activity: state.has_own_synthetic_activity,
+            current_model: state.current_model,
+            thread_service_tier: state.thread_service_tier,
+            request_service_tier: state.request_service_tier,
+            current_turn_start_ms: state.current_turn_start_ms,
+            last_accepted_token_timestamp_ms: state.last_accepted_token_timestamp_ms,
+            previous_totals: state.previous_totals,
+            session_is_headless: state.session_is_headless,
+            session_is_subagent: state.session_is_subagent,
+            session_is_guardian: state.session_is_guardian,
+            session_id_from_meta: state.session_id_from_meta,
+            session_forked_from_id: state.session_forked_from_id,
+            forked_child_session_id: state.forked_child_session_id,
+            forked_child_replay_session_id: state.forked_child_replay_session_id,
+            session_provider: state.session_provider,
+            session_agent: state.session_agent,
+            session_workspace_key: state.session_workspace_key,
+            session_workspace_label: state.session_workspace_label,
+            forked_child_waiting_for_turn_context: state.forked_child_waiting_for_turn_context,
+            forked_child_inherited_baseline: state.forked_child_inherited_baseline,
+            forked_child_inherited_reported_total: state.forked_child_inherited_reported_total,
+            pending_turn_start: state.pending_turn_start,
+            forked_child_task_started_turn_ids: state.forked_child_task_started_turn_ids,
+            forked_child_is_user_fork: state.forked_child_is_user_fork,
+            session_owned_by_openclaw: state.session_owned_by_openclaw,
+            current_turn_id: state.current_turn_id,
+            turn_id_announced_by_task_started: state.turn_id_announced_by_task_started,
+            usage_event_ordinal: state.usage_event_ordinal,
+            turn_coverage: state.turn_coverage,
+            pending_usage_record: state.pending_usage_record,
+            settled_usage_records: state.settled_usage_records,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<CodexIncrementalCache> for LegacyCodexIncrementalV19 {
     fn from(cache: CodexIncrementalCache) -> Self {
         Self {
             state: cache.state.into(),
@@ -1783,7 +1938,12 @@ fn parser_version(client: ClientId) -> u32 {
         // v18->v19: OpenCodex Responses combo attribution changes Codex's
         // reported model/provider identity without changing token totals.
         // The decoded archive limit remains an exact cache fingerprint marker.
-        ClientId::Codex => 19,
+        // v19->v20: a `codex review` parent rollout (an own `EnteredReviewMode`
+        // item and no own `turn_context`) no longer counts as missing usage.
+        // The parse state gained `has_entered_review_mode` and
+        // `has_own_turn_context`. A finished review never rewrites its parent,
+        // so a warm v19 entry would keep reporting it without the parser running.
+        ClientId::Codex => 20,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -1932,7 +2092,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v7->v8: turn aggregates retain modelCalls and trustworthy
         // costUsdTicks. Unchanged closed sessions otherwise replay v7 rows with
         // message_count = 1 and no provider-reported cost (#1387).
-        ClientId::Grok => 8,
+        // v8->v9: unified inference durations are now measured and anchored
+        // at request start, while overlap selection retains the source clock.
+        ClientId::Grok => 9,
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -2028,7 +2190,10 @@ fn parser_version(client: ClientId) -> u32 {
         // reasoning out of `candidatesTokenCount` when the recorded total
         // shows it inside. Unchanged transcripts must not replay the old
         // double-counted buckets.
-        ClientId::Qwen => 2,
+        // v2->v3: an explicit `totalTokenCount: 0` (OpenAI-compatible
+        // provider without `total_tokens`) keeps the reasoning inside the
+        // candidates instead of counting it twice.
+        ClientId::Qwen => 3,
         ClientId::Mux => 1,
         ClientId::Crush => 1,
         ClientId::Goose => 1,
@@ -4324,9 +4489,10 @@ fn read_shard_with_limit_unchecked(
             // other parser version as stale.
             if identity.namespace == ClientId::Codex.as_str() {
                 match identity.parser_version {
-                    19 => {
-                        read_legacy_v10::<CodexIncrementalCache>(&envelope.payload, max_shard_bytes)
-                    }
+                    19 => read_legacy_v10::<LegacyCodexIncrementalV19>(
+                        &envelope.payload,
+                        max_shard_bytes,
+                    ),
                     15 => read_legacy_v10::<LegacyCodexIncrementalV15>(
                         &envelope.payload,
                         max_shard_bytes,
@@ -4768,7 +4934,10 @@ mod tests {
     #[test]
     fn released_codex_v10_parser19_preserves_state_and_resumes_without_double_counting() {
         use crate::sessions::codex::parse_codex_file_incremental;
-        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let identity = CacheIdentity {
+            namespace: ClientId::Codex.as_str(),
+            parser_version: 19,
+        };
         assert_eq!(identity.parser_version, 19);
         let dir = TempDir::new().unwrap();
         let shard = dir.path().join("legacy.bin");
@@ -4805,7 +4974,12 @@ mod tests {
             .iter()
             .all(|message| message.date == "2026-10-01"));
         let cached = entries[0].codex_incremental.as_ref().unwrap();
-        assert_eq!(serde_json::to_value(cached).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_value(LegacyCodexIncrementalV19::from(cached.clone())).unwrap(),
+            expected
+        );
+        assert!(!cached.state.has_entered_review_mode);
+        assert!(cached.state.has_own_turn_context);
         assert_eq!(cached.consumed_offset, prefix.len() as u64);
         assert_eq!(cached.state.usage_event_ordinal, 1);
         assert!(cached.state.pending_usage_record.is_some());
@@ -4820,7 +4994,12 @@ mod tests {
         let entry = warm.remove(0);
         assert_eq!(entry.billing_identity_generation, 0);
         let cached = entry.codex_incremental.unwrap();
-        assert_eq!(serde_json::to_value(&cached).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_value(LegacyCodexIncrementalV19::from(cached.clone())).unwrap(),
+            expected
+        );
+        assert!(!cached.state.has_entered_review_mode);
+        assert!(cached.state.has_own_turn_context);
         std::fs::OpenOptions::new()
             .append(true)
             .open(&source)
@@ -5107,7 +5286,7 @@ mod tests {
     #[test]
     fn historical_codex_cache_is_stale_before_decoding_old_state() {
         let identity = CacheIdentity::for_client(ClientId::Codex);
-        assert_eq!(identity.parser_version, 19);
+        assert_eq!(identity.parser_version, 20);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("old.bin");
         for bytes in [
@@ -5116,6 +5295,9 @@ mod tests {
             // Parser 18 predates the OpenCodex combo-attribution bump, so its
             // released shard is rejected by version before any payload decode.
             include_bytes!("../tests/fixtures/billing-cache/codex-v10-parser18.bin").as_slice(),
+            // Parser 19 predates the codex review parent rollout exemption, so its
+            // released shard is rejected by version before any payload decode.
+            include_bytes!("../tests/fixtures/billing-cache/codex-v10-parser19.bin").as_slice(),
         ] {
             std::fs::write(&path, bytes).unwrap();
             assert!(matches!(
@@ -6070,10 +6252,11 @@ mod tests {
         // skips oversized records while preserving later usage, v17->v18
         // settles pending usage when terminal events end a turn, and
         // v18->v19 re-attributes OpenCodex combo traffic to the observed
-        // physical model so cached rows cannot keep the virtual selector.
+        // physical model so cached rows cannot keep the virtual selector, and
+        // v19->v20 exempts `codex review` parent rollouts from missing usage.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 19);
+        assert_eq!(parser_version(ClientId::Codex), 20);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 
@@ -6364,8 +6547,8 @@ mod tests {
     }
 
     #[test]
-    fn test_qwen_parser_version_invalidates_v1_entries() {
-        assert_eq!(parser_version(ClientId::Qwen), 2);
+    fn test_qwen_parser_version_invalidates_v2_entries() {
+        assert_eq!(parser_version(ClientId::Qwen), 3);
     }
 
     #[test]
@@ -6745,10 +6928,11 @@ mod tests {
     }
 
     #[test]
-    fn test_grok_cost_and_call_count_parser_version_invalidates_v7_entries() {
-        // A closed Grok session file keeps its fingerprint forever, so only the
-        // version bump discards cached rows without modelCalls/costUsdTicks.
-        assert_eq!(parser_version(ClientId::Grok), 8);
+    fn test_grok_inference_duration_parser_version_invalidates_v8_entries() {
+        // A closed Grok log keeps its fingerprint forever, so only the version
+        // bump discards v8 rows (shipped in 4.20.0) that carry no inference
+        // duration and still sit on the completion clock.
+        assert_eq!(parser_version(ClientId::Grok), 9);
     }
 
     #[test]
@@ -6828,12 +7012,49 @@ mod tests {
         let cache = SourceMessageCache::load();
         let rebuilt = cache
             .get(current_identity, &source)
-            .expect("the v8 parse must replace the stale v7 row");
-        assert_eq!(rebuilt.parser_version, 8);
+            .expect("the v9 parse must replace the stale v7 row");
+        assert_eq!(rebuilt.parser_version, 9);
         assert_eq!(rebuilt.messages[0].message_count, 8);
         assert_eq!(
             rebuilt.messages[0].cost_source,
             crate::sessions::CostSource::ProviderReported
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn grok_v8_shards_are_reparsed_with_inference_duration() {
+        let home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(home.path());
+        let path = home.path().join(".grok/logs/unified.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"prompt_tokens":100,"completion_tokens":25,"model_elapsed_ms":500}}"#).unwrap();
+        let fingerprint = SourceFingerprint::from_grok_path(&path).unwrap();
+        let current = CacheIdentity::for_client(ClientId::Grok);
+        let previous = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 8,
+        };
+        let mut stale = test_entry(previous, &path, "session-1");
+        stale.fingerprint = fingerprint.clone();
+        stale.messages[0].timestamp = 1_700_000_000_000;
+        let shard = cache_shard_path(current, &path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, previous, &[stale], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let cold = crate::parse_all_messages_with_pricing_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["grok".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].timestamp, 1_699_999_999_500);
+        assert_eq!(cold[0].duration_ms, Some(500));
+        assert_eq!(
+            SourceFingerprint::from_grok_path(&path).unwrap(),
+            fingerprint
         );
     }
 
@@ -7117,7 +7338,7 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         let cached = warm.get(identity, &source).unwrap();
-        assert_eq!(cached.parser_version, 19);
+        assert_eq!(cached.parser_version, 20);
         assert_eq!(cached.messages, parsed);
     }
 
@@ -7225,8 +7446,8 @@ mod tests {
         let fresh_cache = SourceMessageCache::load();
         let fresh_entry = fresh_cache
             .get(identity, &source)
-            .expect("the production scan must persist a v19 replacement");
-        assert_eq!(fresh_entry.parser_version, 19);
+            .expect("the production scan must persist a v20 replacement");
+        assert_eq!(fresh_entry.parser_version, 20);
         assert!(
             codex_cache_entry_matches_fingerprint(&fresh_entry, &fingerprint),
             "the v19 replacement must carry valid incremental metadata"
@@ -7345,8 +7566,8 @@ mod tests {
         let fresh_cache = SourceMessageCache::load();
         let fresh_entry = fresh_cache
             .get(identity, &source)
-            .expect("the production scan must persist a v19 replacement");
-        assert_eq!(fresh_entry.parser_version, 19);
+            .expect("the production scan must persist a v20 replacement");
+        assert_eq!(fresh_entry.parser_version, 20);
         assert!(
             codex_cache_entry_matches_fingerprint(&fresh_entry, &fingerprint),
             "the v19 replacement must carry valid incremental metadata"
@@ -7364,6 +7585,84 @@ mod tests {
             &warm_entry,
             &fingerprint
         ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_v19_shards_are_reparsed_for_review_parent_diagnostic() {
+        // A finished `codex review` parent is never written again, so its v19
+        // entry keeps a valid fingerprint. Only the version bump lets the parser
+        // see the `EnteredReviewMode` item and stop reporting it.
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = temp_home.path().join(".codex/sessions/2026/09/01");
+        fs::create_dir_all(&sessions).unwrap();
+        let source =
+            sessions.join("rollout-2026-09-01T10-00-00-00000000-0000-7000-8000-000000000001.jsonl");
+        // The review parent rollout from #1516.
+        fs::write(&source, crate::sessions::codex::CODEX_REVIEW_PARENT_FIXTURE).unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Codex);
+        let stale_identity = CacheIdentity {
+            parser_version: 19,
+            ..identity
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        // What 4.20.0 cached for the parent: active, no ledger, no review flags.
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            Some(CodexIncrementalCache {
+                state: CodexParseState {
+                    has_own_activity: true,
+                    ..CodexParseState::default()
+                },
+                consumed_offset: fingerprint.size,
+                ends_with_newline: true,
+                prefix_hash: fingerprint.content_hash,
+            }),
+        );
+        let shard = cache_shard_path(identity, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let scan = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                temp_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let missing_usage_warnings = || {
+            crate::tui_signal::take_deferred_stderr_for_test()
+                .into_iter()
+                .filter(|m| m.contains("contain Codex activity but no supported usage records"))
+                .count()
+        };
+
+        // Cold (stale v19 entry rejected) and warm (fresh v20 entry).
+        for _ in 0..2 {
+            assert!(scan().is_empty());
+            assert_eq!(missing_usage_warnings(), 0);
+        }
+        let entry = SourceMessageCache::load().get(identity, &source).unwrap();
+        assert_eq!(entry.parser_version, 20);
+        let state = &entry.codex_incremental.as_ref().unwrap().state;
+        assert!(state.has_entered_review_mode);
+        assert!(!state.has_own_turn_context);
     }
 
     #[test]

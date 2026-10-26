@@ -159,7 +159,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let mut outputs = Vec::new();
 
         for site in targets {

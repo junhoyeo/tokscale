@@ -3,7 +3,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, TableState};
 
 use crate::commands::usage::{
-    helpers, UsageFetchDiagnostic, UsageFetchDiagnosticSeverity, UsageMetric, UsageOutput,
+    helpers, UsageAccount, UsageFetchDiagnostic, UsageFetchDiagnosticSeverity, UsageMetric,
+    UsageOutput,
 };
 use crate::tui::app::{App, ClickAction};
 use crate::tui::codex_login::CodexLoginOutcome;
@@ -153,6 +154,16 @@ fn status_label(app: &App) -> String {
     }
 }
 
+/// The saved Codex identity behind a card. Antigravity model groups and
+/// MiniMax Token Plan sites also fill the account slot, always marked active,
+/// but they are not entries in the Codex store.
+fn saved_codex_account(output: &UsageOutput) -> Option<&UsageAccount> {
+    output
+        .account
+        .as_ref()
+        .filter(|_| output.provider == "Codex")
+}
+
 fn usage_inventory(outputs: &[UsageOutput]) -> UsageInventory {
     let providers = outputs
         .iter()
@@ -161,7 +172,7 @@ fn usage_inventory(outputs: &[UsageOutput]) -> UsageInventory {
         .len();
     let saved = outputs
         .iter()
-        .filter(|output| output.account.is_some())
+        .filter(|output| saved_codex_account(output).is_some())
         .count();
     UsageInventory {
         providers,
@@ -1481,7 +1492,7 @@ fn attention_severity_rank(output: &UsageOutput) -> u8 {
 }
 
 fn attention_action_rank(output: &UsageOutput) -> u8 {
-    match &output.account {
+    match saved_codex_account(output) {
         Some(account) if account.is_active => 0,
         Some(_) => 1,
         None => 2,
@@ -1579,7 +1590,7 @@ fn provider_summary_line(
     let saved = group
         .outputs
         .iter()
-        .filter(|(_, output)| output.account.is_some())
+        .filter(|(_, output)| saved_codex_account(output).is_some())
         .count();
     let managed = group.outputs.len().saturating_sub(saved);
     let count_label = identity_count_label(app.settings.tui_language, saved, managed, app.glyphs);
@@ -2110,7 +2121,7 @@ fn external_credential_manager(output: &UsageOutput) -> Option<&'static str> {
 }
 
 fn credential_detail(lang: TuiLanguage, output: &UsageOutput) -> String {
-    match &output.account {
+    match saved_codex_account(output) {
         Some(account) if account.is_active => {
             tr(lang, MessageKey::CredentialSavedActive).to_string()
         }
@@ -2134,7 +2145,7 @@ fn selected_account_actions_line(
     y: u16,
 ) -> Line<'static> {
     let lang = app.settings.tui_language;
-    if let Some(account) = &selected.account {
+    if let Some(account) = saved_codex_account(selected) {
         let mut spans = Vec::new();
         let mut buttons = Vec::new();
         if has_available_reset_credit(selected) {
@@ -2508,7 +2519,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
         format!("{} {separator} {}", row.limit, row.reset)
     };
 
-    let managed_label = if output.account.is_none() {
+    let managed_label = if saved_codex_account(output).is_none() {
         Some(tr(lang, MessageKey::AuthManaged))
     } else {
         None
@@ -2848,22 +2859,16 @@ fn readiness_color(app: &App, status: UsageReadiness) -> Color {
 }
 
 fn active_output(outputs: &[UsageOutput]) -> Option<&UsageOutput> {
-    outputs.iter().find(|output| {
-        output
-            .account
-            .as_ref()
-            .is_some_and(|account| account.is_active)
-    })
+    outputs
+        .iter()
+        .find(|output| saved_codex_account(output).is_some_and(|account| account.is_active))
 }
 
 fn best_fallback_output(outputs: &[UsageOutput]) -> Option<&UsageOutput> {
     outputs
         .iter()
         .filter(|output| {
-            !output
-                .account
-                .as_ref()
-                .is_some_and(|account| account.is_active)
+            saved_codex_account(output).is_some_and(|account| !account.is_active)
                 && readiness_status(output) == UsageReadiness::Ready
         })
         .max_by(|a, b| output_score(a).total_cmp(&output_score(b)))
@@ -3008,7 +3013,7 @@ fn privacy_text(app: &App, value: &str) -> String {
 fn account_state_label(lang: TuiLanguage, output: &UsageOutput) -> String {
     tr(
         lang,
-        match &output.account {
+        match saved_codex_account(output) {
             Some(account) if account.is_active => MessageKey::AuthActive,
             Some(_) => MessageKey::AuthSaved,
             None if output.metrics.iter().any(|m| m.remaining_percent < 25.0) => {
@@ -3025,7 +3030,7 @@ fn account_state_label(lang: TuiLanguage, output: &UsageOutput) -> String {
 fn account_auth_label(lang: TuiLanguage, output: &UsageOutput) -> &'static str {
     tr(
         lang,
-        match &output.account {
+        match saved_codex_account(output) {
             Some(account) if account.is_active => MessageKey::AuthActive,
             Some(_) => MessageKey::AuthSaved,
             None => MessageKey::AuthManaged,
@@ -3034,7 +3039,7 @@ fn account_auth_label(lang: TuiLanguage, output: &UsageOutput) -> &'static str {
 }
 
 fn account_auth_color(output: &UsageOutput) -> Color {
-    match &output.account {
+    match saved_codex_account(output) {
         Some(account) if account.is_active => Color::Green,
         Some(_) => Color::Blue,
         None => Color::Yellow,
@@ -3889,6 +3894,14 @@ mod tests {
 
         assert!(saved.contains("Use Account"), "{saved}");
         assert!(saved.contains("Remove"), "{saved}");
+        assert!(app.click_areas.iter().any(|area| matches!(
+            &area.action,
+            ClickAction::CodexUseAccount { account_id } if account_id == "acct_personal"
+        )));
+        assert!(app.click_areas.iter().any(|area| matches!(
+            &area.action,
+            ClickAction::CodexRemoveAccount { account_id } if account_id == "acct_personal"
+        )));
 
         let mut managed = output("Codex", None);
         managed.credential_source = Some("opencode".to_string());
@@ -3898,6 +3911,160 @@ mod tests {
 
         assert!(!external.contains("Use Account"), "{external}");
         assert!(!external.contains("Remove"), "{external}");
+    }
+
+    #[test]
+    fn non_codex_accounts_never_offer_codex_actions() {
+        // Antigravity model groups and MiniMax Token Plan sites ride in the
+        // account slot too; they are not saved Codex identities.
+        for provider in ["Antigravity", "MiniMax Token Plan"] {
+            for is_active in [false, true] {
+                let mut app = make_app();
+                app.subscription_usage = vec![output_with_reset_credits(
+                    provider,
+                    Some(UsageAccount {
+                        id: "external_account".to_string(),
+                        label: Some("external account".to_string()),
+                        is_active,
+                    }),
+                    1,
+                    &far_future_reset_timestamp(),
+                )];
+
+                let body = render_body(&mut app, 180, 32);
+
+                assert!(body.contains("Managed externally"), "{provider}: {body}");
+                assert!(!body.contains("saved store"), "{provider}: {body}");
+                assert!(!body.contains("Use Account"), "{provider}: {body}");
+                assert!(!app.click_areas.iter().any(|area| matches!(
+                    area.action,
+                    ClickAction::CodexUseAccount { .. }
+                        | ClickAction::CodexRemoveAccount { .. }
+                        | ClickAction::CodexResetAccount { .. }
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_recommendations_only_use_saved_codex_accounts() {
+        let active = output_with_remaining(
+            "Codex",
+            Some(UsageAccount {
+                id: "active_codex".to_string(),
+                label: None,
+                is_active: true,
+            }),
+            5.0,
+        );
+        let antigravity = output(
+            "Antigravity",
+            Some(UsageAccount {
+                id: "gemini-pro".to_string(),
+                label: None,
+                is_active: false,
+            }),
+        );
+        let external_codex = output("Codex", None);
+        let mut outputs = vec![active, antigravity, external_codex];
+        assert!(best_fallback_output(&outputs).is_none());
+        assert_ne!(
+            overall_state_label(TuiLanguage::En, &outputs),
+            tr(TuiLanguage::En, MessageKey::StateSwitchRecommended)
+        );
+
+        outputs.push(output_with_remaining(
+            "Codex",
+            Some(UsageAccount {
+                id: "fallback_codex".to_string(),
+                label: None,
+                is_active: false,
+            }),
+            50.0,
+        ));
+        assert_eq!(
+            best_fallback_output(&outputs)
+                .unwrap()
+                .account
+                .as_ref()
+                .unwrap()
+                .id,
+            "fallback_codex"
+        );
+        assert_eq!(
+            overall_state_label(TuiLanguage::En, &outputs),
+            tr(TuiLanguage::En, MessageKey::StateSwitchRecommended)
+        );
+    }
+
+    #[test]
+    fn active_antigravity_group_does_not_drive_codex_switching() {
+        let antigravity = output_with_remaining(
+            "Antigravity",
+            Some(UsageAccount {
+                id: "gemini-pro".to_string(),
+                label: None,
+                is_active: true,
+            }),
+            5.0,
+        );
+        let codex = output(
+            "Codex",
+            Some(UsageAccount {
+                id: "active_codex".to_string(),
+                label: None,
+                is_active: true,
+            }),
+        );
+        let outputs = vec![antigravity, codex];
+        assert_eq!(active_output(&outputs).unwrap().provider, "Codex");
+        assert_eq!(
+            overall_state_label(TuiLanguage::En, &outputs),
+            tr(TuiLanguage::En, MessageKey::StateReadyWithWarnings)
+        );
+    }
+
+    /// Antigravity model groups and MiniMax Token Plan sites fill the account
+    /// slot, always active. They must count as managed in both the header and
+    /// the per-provider summary; counting them as saved inflates "saved" by
+    /// one per group or site.
+    #[test]
+    fn usage_counts_exclude_non_codex_accounts_from_saved() {
+        let external = |provider: &str, id: &str| {
+            output(
+                provider,
+                Some(UsageAccount {
+                    id: id.to_string(),
+                    label: None,
+                    is_active: true,
+                }),
+            )
+        };
+        let mut app = make_app();
+        app.subscription_usage = vec![
+            output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "acct_work".to_string(),
+                    label: Some("work".to_string()),
+                    is_active: true,
+                }),
+            ),
+            external("Antigravity", "gemini-pro"),
+            external("Antigravity", "gemini-flash"),
+            external("Antigravity", "claude"),
+            external("MiniMax Token Plan", "site"),
+        ];
+
+        let inventory = usage_inventory(&app.subscription_usage);
+        assert_eq!((inventory.saved, inventory.managed), (1, 4));
+
+        let body = render_body(&mut app, 160, 40);
+
+        assert!(body.contains("3 providers ∙ 1 saved ∙ 4 managed"), "{body}");
+        assert!(body.contains("3 managed"), "Antigravity group: {body}");
+        assert!(!body.contains("3 saved"), "Antigravity group: {body}");
+        assert!(!body.contains("5 saved"), "header: {body}");
     }
 
     #[test]

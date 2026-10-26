@@ -55,7 +55,6 @@ pub mod auth {
     use base64::Engine;
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Serialize};
-    use std::io::Write;
     use std::path::PathBuf;
 
     // ── API endpoints (constants, not secrets) ─────────────────────────────
@@ -196,19 +195,7 @@ pub mod auth {
         ensure_cache_dir()?;
         let path = creds_path(creds.variant);
         let json = serde_json::to_string_pretty(creds)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)?
-                .write_all(json.as_bytes())?;
-        }
-        #[cfg(not(unix))]
-        std::fs::write(&path, json)?;
+        crate::commands::usage::helpers::atomic_write_secret(&path, json.as_bytes())?;
         Ok(())
     }
 

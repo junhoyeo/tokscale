@@ -54,7 +54,6 @@ fn qwen_token_breakdown(usage: &UsageMetadata) -> TokenBreakdown {
     let candidates = usage.candidates_token_count.unwrap_or(0).max(0);
     let thoughts = usage.thoughts_token_count.unwrap_or(0).max(0);
     let cache_read = usage.cached_content_token_count.unwrap_or(0).max(0);
-    let total = usage.total_token_count.unwrap_or(0);
 
     // A cached count above the prompt cannot be a subset of it, so there is
     // nothing to split out; keep both as reported.
@@ -68,8 +67,21 @@ fn qwen_token_breakdown(usage: &UsageMetadata) -> TokenBreakdown {
     // and the recorded total tells them apart: OpenAI-compatible providers
     // report `total_tokens = prompt_tokens + completion_tokens`, while the
     // Gemini API adds `thoughtsTokenCount` on top of the candidates.
-    let thoughts_in_candidates =
-        thoughts > 0 && total > 0 && total == prompt.saturating_add(candidates);
+    //
+    // An explicit total of 0 next to non-zero thoughts and candidates comes
+    // from the OpenAI-compatible converters: they write
+    // `totalTokenCount: usage.total_tokens || 0` when the provider omits the
+    // total, and Qwen Code coerces a missing total to 0 before recording.
+    // The reasoning is still inside `completion_tokens` there. Gemini API
+    // responses carry their own non-zero total, and the Anthropic converter
+    // writes no thoughts. A missing key carries no provider evidence, so it
+    // keeps the separate split.
+    let thoughts_in_candidates = thoughts > 0
+        && match usage.total_token_count {
+            Some(0) => candidates > 0,
+            Some(total) => total > 0 && total == prompt.saturating_add(candidates),
+            None => false,
+        };
     let (output, reasoning) = if thoughts_in_candidates {
         let reasoning = thoughts.min(candidates);
         (candidates - reasoning, reasoning)
@@ -421,6 +433,89 @@ not valid json at all
         assert_eq!(messages[0].tokens.output, 300);
         assert_eq!(messages[0].tokens.reasoning, 120);
         assert_eq!(messages[0].tokens.total(), 10420);
+    }
+
+    #[test]
+    fn test_parse_qwen_clamps_thoughts_above_candidates() {
+        // The total says the thoughts sit inside the candidates, but the
+        // reported thoughts exceed them. Only the candidates can be reasoning,
+        // so the breakdown still sums to the recorded total.
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 100, "totalTokenCount": 1100, "cachedContentTokenCount": 0, "thoughtsTokenCount": 150}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.reasoning, 100);
+        assert_eq!(messages[0].tokens.total(), 1100);
+    }
+
+    #[test]
+    fn test_parse_qwen_keeps_split_when_total_matches_neither_shape() {
+        // prompt + candidates + 7 is neither the OpenAI-compatible shape
+        // (prompt + candidates) nor the Gemini shape (+ thoughts), so the
+        // thoughts stay a separate bucket.
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 300, "totalTokenCount": 1307, "cachedContentTokenCount": 0, "thoughtsTokenCount": 120}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 300);
+        assert_eq!(messages[0].tokens.reasoning, 120);
+    }
+
+    #[test]
+    fn test_parse_qwen_keeps_fully_cached_prompt() {
+        // A fully cached prompt leaves no uncached input. With no output either,
+        // the cache reads are the only usage, so the record must not be
+        // skipped as a zero-token entry.
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 5000, "candidatesTokenCount": 0, "totalTokenCount": 5000, "cachedContentTokenCount": 5000, "thoughtsTokenCount": 0}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 0);
+        assert_eq!(messages[0].tokens.cache_read, 5000);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].tokens.total(), 5000);
+    }
+
+    #[test]
+    fn test_parse_qwen_zero_total_keeps_thoughts_inside_candidates() {
+        // Qwen Code's OpenAI converter writes `totalTokenCount:
+        // usage.total_tokens || 0`, so a provider that omits `total_tokens`
+        // records an explicit 0. `completion_tokens` still contains the
+        // reasoning, so it must not be counted beside the candidates again.
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 300, "totalTokenCount": 0, "cachedContentTokenCount": 0, "thoughtsTokenCount": 120}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 180);
+        assert_eq!(messages[0].tokens.reasoning, 120);
+        assert_eq!(messages[0].tokens.total(), 1300);
+    }
+
+    #[test]
+    fn test_parse_qwen_missing_total_keeps_split() {
+        // With no `totalTokenCount` key there is no evidence of the provider
+        // shape, so the thoughts stay a separate bucket.
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "session1", "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 300, "cachedContentTokenCount": 0, "thoughtsTokenCount": 120}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_qwen_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 300);
+        assert_eq!(messages[0].tokens.reasoning, 120);
     }
 
     #[test]

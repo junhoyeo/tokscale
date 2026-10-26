@@ -116,6 +116,8 @@ pub struct CodexPayload {
     /// system-injected context (`<environment_context>`, `<system-reminder>`,
     /// `<user_instructions>`, …) begins with `<`.
     pub message: Option<String>,
+    /// Turn-item payload (e.g. `EnteredReviewMode` on an `item_completed` event).
+    pub item: Option<Value>,
 }
 
 /// Lenient `Option<i64>` deserializer for `CodexPayload::started_at`. Coerces
@@ -452,6 +454,14 @@ pub(crate) struct CodexParseState {
     /// appended chunk is recognized as well.
     #[serde(default)]
     pub settled_usage_records: std::collections::VecDeque<CodexTotals>,
+    /// `codex review` parent threads record `EnteredReviewMode` and mirror
+    /// subagent findings without running model calls of their own.
+    #[serde(default)]
+    pub has_entered_review_mode: bool,
+    /// Set when this file's own turn reaches a `turn_context` entry. Replayed
+    /// parent history in forked children does not set this.
+    #[serde(default)]
+    pub has_own_turn_context: bool,
 }
 
 /// A `token_usage_record` waiting for a token_count to confirm it; see
@@ -665,6 +675,12 @@ impl ParsedCodexFile {
     pub(crate) fn is_missing_usage(&self) -> bool {
         self.parse_succeeded && self.state.is_missing_usage()
     }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn is_review_parent_rollout(&self) -> bool {
+        self.parse_succeeded && self.state.is_review_parent_rollout()
+    }
 }
 
 #[cfg(test)]
@@ -865,8 +881,15 @@ impl CodexParseState {
         self.settled_usage_records.push_back(usage);
     }
 
+    pub(crate) fn is_review_parent_rollout(&self) -> bool {
+        !self.session_is_subagent && self.has_entered_review_mode && !self.has_own_turn_context
+    }
+
     pub(crate) fn is_missing_usage(&self) -> bool {
-        !self.session_owned_by_openclaw && self.has_own_activity && !self.has_supported_usage
+        !self.session_owned_by_openclaw
+            && !self.is_review_parent_rollout()
+            && self.has_own_activity
+            && !self.has_supported_usage
     }
 
     fn remember_own_activity(&mut self, event_model: Option<&str>) {
@@ -1324,7 +1347,11 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                 // request-scoped tier. The thread tier lives in its own slot,
                 // so a request-scoped record can never end it early.
                 if entry.entry_type == "turn_context" {
+                    state.has_own_turn_context = true;
                     state.request_service_tier = None;
+                }
+                if codex_entry_has_entered_review_mode(&entry.entry_type, &payload) {
+                    state.has_entered_review_mode = true;
                 }
                 let has_own_activity = match entry.entry_type.as_str() {
                     "response_item" => matches!(
@@ -1408,6 +1435,8 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                             state.forked_child_task_started_turn_ids.clear();
                             state.forked_child_is_user_fork =
                                 payload.thread_source.as_deref() == Some("user");
+                            state.has_own_turn_context = false;
+                            state.has_entered_review_mode = false;
                         }
                     }
                     if let Some(ref provider) = payload.model_provider {
@@ -2005,6 +2034,17 @@ fn codex_thread_is_guardian(thread_source: Option<&str>, source: Option<&Value>)
 /// model still stays out of the interactive bucket.
 fn codex_thread_is_subagent(thread_source: Option<&str>, source: Option<&Value>) -> bool {
     thread_source == Some("subagent") || source.and_then(|source| source.get("subagent")).is_some()
+}
+
+fn codex_entry_has_entered_review_mode(entry_type: &str, payload: &CodexPayload) -> bool {
+    entry_type == "event_msg"
+        && payload.payload_type.as_deref() == Some("item_completed")
+        && payload
+            .item
+            .as_ref()
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            == Some("EnteredReviewMode")
 }
 
 fn forked_from_id_from_source(source: Option<&Value>) -> Option<&str> {
@@ -2676,6 +2716,9 @@ fn codex_message_is_human_turn(message: Option<&str>) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) use tests::CODEX_REVIEW_PARENT_FIXTURE;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{aggregate_model_usage_entries, GroupBy};
@@ -2907,6 +2950,194 @@ mod tests {
         assert!(parsed.state.has_supported_usage);
         assert!(!parsed.is_missing_usage());
         assert!(parsed.messages.is_empty());
+    }
+
+    pub(crate) const CODEX_REVIEW_PARENT_FIXTURE: &str = concat!(
+        r#"{"timestamp":"2026-09-01T10:00:00.100Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000001","timestamp":"2026-09-01T10:00:00.000Z","cwd":"/repo","originator":"codex_exec","cli_version":"0.154.0","source":"exec","thread_source":"user","model_provider":"openai"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:00.100Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000001","turn_id":"rollout-1","item":{"type":"EnteredReviewMode","id":"item-1","target":{"type":"baseBranch","branch":"main"},"user_facing_hint":"changes against 'main'"}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:00.200Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-7000-8000-0000000000aa","started_at":1788256800,"model_context_window":258400}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000001","turn_id":"00000000-0000-7000-8000-0000000000aa","item":{"type":"UserMessage","id":"item-2","content":[{"type":"text","text":"Review the current diff against main."}]}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_action>\n  <context>code review</context>\n  <action>review</action>\n  <results>Review findings summary.</results>\n</user_action>"}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:02:00.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000001","turn_id":"00000000-0000-7000-8000-0000000000aa","item":{"type":"ExitedReviewMode","id":"item-3","review_output":{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"No issues found.","overall_confidence_score":0.9}}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:02:00.010Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"No issues found."}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:02:00.010Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000001","turn_id":"00000000-0000-7000-8000-0000000000aa","item":{"type":"AgentMessage","id":"item-4","content":[{"type":"text","text":"No issues found."}]}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:02:00.020Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"00000000-0000-7000-8000-0000000000aa","last_agent_message":null,"completed_at":1788256920,"duration_ms":119820}}"#,
+        "\n"
+    );
+
+    const CODEX_REVIEW_SUBAGENT_FIXTURE: &str = concat!(
+        r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000002","session_id":"00000000-0000-7000-8000-000000000001","parent_thread_id":"00000000-0000-7000-8000-000000000001","timestamp":"2026-09-01T10:00:00.050Z","cwd":"/repo","originator":"codex_exec","cli_version":"0.154.0","source":{"subagent":"review"},"thread_source":"subagent","model_provider":"openai","subagent_history_start_ordinal":8}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-7000-8000-0000000000bb","started_at":1788256800,"model_context_window":258400}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"turn_context","payload":{"turn_id":"00000000-0000-7000-8000-0000000000bb","cwd":"/repo","approval_policy":"never","sandbox_policy":{"type":"read-only"},"model":"gpt-5.5","effort":"xhigh","summary":"auto"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review the current diff against main."}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000002","turn_id":"00000000-0000-7000-8000-0000000000bb","item":{"type":"UserMessage","id":"item-1","content":[{"type":"text","text":"Review the current diff against main."}]}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:20.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"git\",\"diff\",\"main\"]}","call_id":"call_1"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:20.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":8000,"cached_input_tokens":3000,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":8080},"last_token_usage":{"input_tokens":8000,"cached_input_tokens":3000,"output_tokens":80,"reasoning_output_tokens":0,"total_tokens":8080},"model_context_window":258400}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:00:20.200Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"diff --git a/x b/x"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:01:59.900Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"No issues found."}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:01:59.950Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":56000,"cached_input_tokens":50000,"output_tokens":480,"reasoning_output_tokens":200,"total_tokens":56480},"last_token_usage":{"input_tokens":48000,"cached_input_tokens":47000,"output_tokens":400,"reasoning_output_tokens":200,"total_tokens":48400},"model_context_window":258400}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-09-01T10:02:00.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"00000000-0000-7000-8000-0000000000bb","last_agent_message":"No issues found.","completed_at":1788256920,"duration_ms":119850}}"#,
+        "\n"
+    );
+
+    #[test]
+    fn codex_review_parent_rollout_is_not_flagged_as_missing_usage() {
+        let file = create_test_file(CODEX_REVIEW_PARENT_FIXTURE);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.has_own_activity);
+        assert!(!parsed.state.has_supported_usage);
+        assert!(parsed.state.has_entered_review_mode);
+        assert!(!parsed.state.has_own_turn_context);
+        assert!(parsed.is_review_parent_rollout());
+        assert!(!parsed.is_missing_usage());
+        assert!(parsed.messages.is_empty());
+    }
+
+    #[test]
+    fn codex_review_subagent_rollout_is_metered_with_subagent_agent() {
+        let file = create_test_file(CODEX_REVIEW_SUBAGENT_FIXTURE);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.session_is_subagent);
+        assert!(!parsed.is_review_parent_rollout());
+        assert!(!parsed.is_missing_usage());
+        assert_eq!(parsed.messages.len(), 2);
+        for message in &parsed.messages {
+            assert_eq!(message.agent.as_deref(), Some(CODEX_SUBAGENT_AGENT));
+            assert_eq!(message.model_id, "gpt-5.5");
+        }
+        let total_input: i64 = parsed.messages.iter().map(|m| m.tokens.input).sum();
+        let total_cached: i64 = parsed.messages.iter().map(|m| m.tokens.cache_read).sum();
+        let total_output: i64 = parsed.messages.iter().map(|m| m.tokens.output).sum();
+        let total_reasoning: i64 = parsed.messages.iter().map(|m| m.tokens.reasoning).sum();
+        assert_eq!(total_input, 6000);
+        assert_eq!(total_cached, 50000);
+        assert_eq!(total_output, 280);
+        assert_eq!(total_reasoning, 200);
+    }
+
+    #[test]
+    fn codex_review_subagent_without_tokens_is_flagged_as_missing_usage() {
+        let failed_subagent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000002","session_id":"00000000-0000-7000-8000-000000000001","source":{"subagent":"review"},"thread_source":"subagent"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review the diff."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"item-1"}}}"#,
+            "\n"
+        );
+        let file = create_test_file(failed_subagent);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.session_is_subagent);
+        assert!(parsed.state.has_own_activity);
+        assert!(!parsed.state.has_supported_usage);
+        assert!(!parsed.is_review_parent_rollout());
+        assert!(parsed.is_missing_usage());
+    }
+
+    #[test]
+    fn codex_review_parent_incremental_parsing_persists_review_mode_state() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+
+        let mut lines = CODEX_REVIEW_PARENT_FIXTURE.split_inclusive('\n');
+        let prefix = lines.by_ref().take(3).collect::<String>();
+        let suffix = lines.collect::<String>();
+
+        std::fs::write(&path, &prefix).unwrap();
+        let chunk1 = parse_codex_file_incremental(&path, 0, CodexParseState::default());
+        assert!(chunk1.parse_succeeded);
+        assert!(chunk1.state.has_entered_review_mode);
+        assert!(!chunk1.state.has_own_turn_context);
+        assert!(chunk1.is_review_parent_rollout());
+        assert!(!chunk1.is_missing_usage());
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(suffix.as_bytes())
+            .unwrap();
+
+        let chunk2 = parse_codex_file_incremental(&path, chunk1.consumed_offset, chunk1.state);
+        assert!(chunk2.parse_succeeded);
+        assert!(chunk2.state.has_entered_review_mode);
+        assert!(!chunk2.state.has_own_turn_context);
+        assert!(chunk2.is_review_parent_rollout());
+        assert!(!chunk2.is_missing_usage());
+        assert!(chunk2.messages.is_empty());
+    }
+
+    #[test]
+    fn codex_review_parent_replayed_into_forked_child_does_not_leak_to_child() {
+        let forked = format!(
+            "{}\n{}\n{}\n{}\n{}\n{UNMETERED_ACTIVITY}",
+            r#"{"type":"session_meta","payload":{"id":"019a0000-0002-7000-8000-000000000002","forked_from_id":"019a0000-0001-7000-8000-000000000001","thread_source":"user"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"019a0000-0001-7000-8000-000000000001"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"EnteredReviewMode"}}}"#,
+            r#"{"type":"turn_context","payload":{"turn_id":"019a0000-0001-7000-8000-000000000003","model":"gpt-5.4"}}"#,
+            r#"{"type":"turn_context","payload":{"turn_id":"019a0000-0002-7000-8000-000000000004","model":"gpt-5.4"}}"#
+        );
+        let file = create_test_file(&forked);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.has_own_activity);
+        assert!(!parsed.state.has_supported_usage);
+        assert!(parsed.state.has_own_turn_context);
+        assert!(!parsed.state.has_entered_review_mode);
+        assert!(!parsed.is_review_parent_rollout());
+        assert!(parsed.is_missing_usage());
+    }
+
+    #[test]
+    fn codex_prompt_mentioning_entered_review_mode_is_not_exempt() {
+        let content = format!(
+            "{}\n{}\n{UNMETERED_ACTIVITY}",
+            r#"{"type":"session_meta","payload":{"id":"session-1","thread_source":"user"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"How does EnteredReviewMode work in Codex?"}]}}"#
+        );
+        let file = create_test_file(&content);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(!parsed.state.has_entered_review_mode);
+        assert!(!parsed.is_review_parent_rollout());
+        assert!(parsed.is_missing_usage());
+    }
+
+    #[test]
+    fn codex_review_parent_with_own_turn_context_is_not_exempt() {
+        let with_turn_context = format!(
+            "{}\n{}\n{UNMETERED_ACTIVITY}",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"EnteredReviewMode"}}}"#,
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.5"}}"#
+        );
+        let file = create_test_file(&with_turn_context);
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.state.has_entered_review_mode);
+        assert!(parsed.state.has_own_turn_context);
+        assert!(!parsed.is_review_parent_rollout());
+        assert!(parsed.is_missing_usage());
     }
 
     struct FailAfterFirstLine {

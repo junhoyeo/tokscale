@@ -10560,6 +10560,78 @@ mod tests {
 
     #[test]
     #[serial]
+    fn missing_codex_usage_warning_ignores_codex_review_parent_but_tracks_failed_subagent() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        // 1. Review parent rollout: has EnteredReviewMode, no turn_context, activity mirrored from subagent.
+        let review_parent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.100Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000001","timestamp":"2026-09-01T10:00:00.000Z","cwd":"/repo","originator":"codex_exec","cli_version":"0.154.0","source":"exec","thread_source":"user","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:00.100Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000001","turn_id":"rollout-1","item":{"type":"EnteredReviewMode","id":"item-1"}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review findings."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:02:00.010Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"No issues found."}]}}"#,
+            "\n"
+        );
+        std::fs::write(sessions.join("review_parent.jsonl"), review_parent).unwrap();
+
+        // 2. Review subagent rollout: metered with CODEX_SUBAGENT_AGENT.
+        let review_subagent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000002","session_id":"00000000-0000-7000-8000-000000000001","source":{"subagent":"review"},"thread_source":"subagent","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"turn_context","payload":{"turn_id":"turn-sub-1","model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:01:59.950Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":100,"reasoning_output_tokens":0,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":100,"reasoning_output_tokens":0,"total_tokens":1100}}}}"#,
+            "\n"
+        );
+        std::fs::write(sessions.join("review_subagent.jsonl"), review_subagent).unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        // Verify cold and warm cache scans
+        for _ in 0..2 {
+            let messages = parse_all_messages_with_pricing(home, &["codex".to_string()], None);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].agent.as_deref(),
+                Some(crate::sessions::codex::CODEX_SUBAGENT_AGENT)
+            );
+            assert!(
+                take_missing_codex_usage_warnings().is_empty(),
+                "review parent must not trigger missing usage diagnostic warning"
+            );
+        }
+
+        // 3. Failed review subagent rollout without tokens: must trigger diagnostic warning.
+        let failed_subagent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000003","session_id":"00000000-0000-7000-8000-000000000001","source":{"subagent":"review"},"thread_source":"subagent"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Failed before model call."}]}}"#,
+            "\n"
+        );
+        std::fs::write(sessions.join("failed_subagent.jsonl"), failed_subagent).unwrap();
+
+        for _ in 0..2 {
+            let messages = parse_all_messages_with_pricing(home, &["codex".to_string()], None);
+            assert_eq!(messages.len(), 1);
+            let warnings = take_missing_codex_usage_warnings();
+            assert_eq!(
+                warnings.len(),
+                1,
+                "failed review subagent must trigger missing usage warning"
+            );
+            assert!(warnings[0].contains("1 of 3 inspected rollout files"));
+        }
+    }
+
+    #[test]
+    #[serial]
     fn missing_codex_usage_warning_tracks_synthetic_activity() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
@@ -18420,8 +18492,7 @@ mod tests {
             &rollout,
             transcript
                 .replace("gpt-5.2", "combo/aggregate-fixture")
-                // Keep the equal-token sibling outside the 30s late-usage window.
-                .replace("2026-04-30T11:00:03Z", "2026-04-30T11:01:10Z"),
+                .replace("2026-04-30T11:00:03Z", "2026-04-30T11:00:10Z"),
         )
         .unwrap();
 

@@ -58,7 +58,7 @@ export async function getPublicProfileDevicesResponse(
         totalCost: sql<string>`COALESCE(SUM(${dailyBreakdown.cost}), 0)`,
         inputTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.inputTokens}), 0)`,
         outputTokens: sql<string>`COALESCE(SUM(${dailyBreakdown.outputTokens}), 0)`,
-        activeDays: sql<string>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)`,
+        activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 OR ${dailyBreakdown.cost} > 0 THEN ${dailyBreakdown.date} END)::int`,
         firstDay: sql<string | null>`MIN(${dailyBreakdown.date})`,
         lastDay: sql<string | null>`MAX(${dailyBreakdown.date})`,
       })

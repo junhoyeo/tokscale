@@ -467,7 +467,12 @@ export function validateSubmission(data: unknown): ValidationResult {
   }
 
   // 3b. Active days should match
-  const activeDays = submission.contributions.filter((d) => d.totals.tokens > 0).length;
+  const activeDays = submission.contributions.filter(
+    (d) =>
+      d.totals.tokens > 0 ||
+      d.totals.cost > 0 ||
+      (d.totals.messages ?? 0) > 0
+  ).length;
   if (activeDays !== submission.summary.activeDays) {
     warnings.push(
       `Active days mismatch: summary=${submission.summary.activeDays}, calculated=${activeDays}`

@@ -331,6 +331,7 @@ tokscale models --json > report.json   # 保存到文件
 | **工作区 + 模型** | `--group-by workspace,model` | | 先按工作区键、再按模型对本地使用量分组；添加 [`--merge-worktrees`](#按工作区统计费用) 可将 git worktree 折叠进其父仓库 |
 | **会话 + 模型** | `--group-by session,model` | | 每个 `session_id` 和模型一行 — 将成本归因到特定的 agent-CLI 会话 |
 | **客户端 + 会话 + 模型** | `--group-by client,session,model` | | 每个客户端、会话和模型一行 — 适用于按 `session_id` 关联的多代理运行器 |
+| **机器 + 模型** | `--group-by machine,model` | | 每个机器标签和模型一行 — 参见[按机器统计用量](#按机器统计用量) |
 
 **`--group-by model`**（最精简）
 
@@ -397,6 +398,37 @@ tokscale models --json --group-by workspace,model --merge-worktrees
 ```
 
 在 TUI 中按 `g` → **工作区 + 模型**，再按 `w` 切换 worktree 折叠（页脚会显示 `[w:worktrees]` 或 `[w:repos]`）。
+
+#### 按机器统计用量
+
+如果你把其他机器的会话文件夹复制到本地目录，并通过 `scanner.extraScanPaths` 添加，请用 `scanner.machineLabels` 为每个文件夹指定机器标签。带标签文件夹下的所有会话文件都计入该机器；其余全部计入 `scanner.localMachineLabel`（默认 `"local"`）:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/Users/me/mirrors/steven/.codex/sessions"],
+      "claude": ["/Users/me/mirrors/steven/.claude/projects"]
+    },
+    "machineLabels": {
+      "/Users/me/mirrors/steven": "steven"
+    },
+    "localMachineLabel": "laptop"
+  }
+}
+```
+
+文件夹匹配其下的所有文件，按完整的路径组成部分比较（在 Windows 上不区分大小写）；文件夹嵌套时，最长的文件夹优先。然后按机器分组:
+
+```bash
+# 每个 (机器, 模型) 一行，带 Machine 列
+tokscale models --light --group-by machine,model
+
+# 仅在此模式下 JSON 条目才包含 `machine` 字段
+tokscale models --json --group-by machine,model
+```
+
+在 TUI 中按 `g` → **机器 + 模型**。
 
 工作区行的标签为 `repo` 或 `repo ⑃ worktree`。各客户端记录工作区的方式并不一致 — Claude Code 存储的是把非字母数字替换成短横线的目录 slug（`-Users-me-devpro-app`），而 Codex 与 OpenCode 存储真实路径 — 因此 tokscale 会对照文件系统把 slug 还原成真实路径。有四点值得注意:
 
@@ -818,7 +850,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | 需要已安装并已认证的 Codex CLI。 |
 | `gemini` | `gemini -p` | 需要已安装并已认证的 Gemini CLI。 |
 | `kiro` | `kiro --non-interactive` | 需要已安装并已认证的 Kiro CLI。 |
-| `minimax` | （HTTP API） | 使用 OpenAI 兼容的 chat-completions API，无需 CLI。设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN`。默认在全局端点（`https://api.minimax.io/v1`）使用 `MiniMax-M3`；设置 `MINIMAX_API_REGION=cn` 可改用 `https://api.minimaxi.com/v1`，并可通过 `MINIMAX_MODEL` 选择其他模型（例如 `MiniMax-M2.7`）。 |
+| `minimax` | （HTTP API） | 使用 OpenAI 兼容的 chat-completions API，无需 CLI。设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN`。默认在全局端点（`https://api.minimax.io/v1`）使用 `MiniMax-M3.1-Flash`；设置 `MINIMAX_API_REGION=cn` 可改用 `https://api.minimaxi.com/v1`，并可通过 `MINIMAX_MODEL` 选择其他模型（例如 `MiniMax-M3`）。 |
 
 **工作原理：**
 
@@ -972,6 +1004,8 @@ Tokscale 将设置存储在配置目录下的 `settings.json` 中。默认位置
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
 | `cursor.syncTimeoutSeconds` | number | 未设置 | `tokscale cursor sync` 下载每个账户使用量时的总时间预算（秒，1-86400）。未设置时从 120 秒开始，并根据 Cursor 报告的使用量事件数延长，最多 1800 秒。`tokscale cursor sync --timeout <SECONDS>` 会按次运行覆盖该设置。参见 [Cursor IDE 命令](#cursor-ide-命令)。 |
 | `scanner.extraScanPaths` | object | `{}` | 针对 Tokscale 默认 home 根位置之外的会话，为各客户端额外指定的扫描根目录 |
+| `scanner.machineLabels` | object | `{}` | 每个文件夹的机器标签，格式为 `{ "<folder>": "<label>" }`。在 `--group-by machine,model` 中，文件夹下的会话文件计入其标签；匹配的文件夹中最长者优先。参见[按机器统计用量](#按机器统计用量)。 |
+| `scanner.localMachineLabel` | string | `"local"` | 不属于任何 `scanner.machineLabels` 文件夹的会话文件所用的机器标签 |
 | `scanner.bucketTimezone` | string | 自动检测 | 此设备将使用量按天分桶时所用时区的 IANA 名称（例如 `"Asia/Seoul"`）。首次运行时会自动记录。请优先使用 `tokscale config set timezone <zone>`，而非手动编辑。 |
 
 #### 每日边界与 `scanner.bucketTimezone`

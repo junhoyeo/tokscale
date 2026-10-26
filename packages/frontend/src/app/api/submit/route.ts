@@ -201,6 +201,13 @@ function expandDaysForRecountProofs(
   return proofOnlyDates;
 }
 
+/** A client's provenance without the floor tag, for a cost known to be complete. */
+function completeCostProvenance(breakdown: ClientBreakdownData) {
+  const provenance = deriveClientBreakdownProvenance(breakdown);
+  delete provenance.costIsComplete;
+  return provenance;
+}
+
 function mergeModelBreakdowns(
   target: Record<string, ClientBreakdownData["models"][string]>,
   incoming: Record<string, ClientBreakdownData["models"][string]>
@@ -841,6 +848,11 @@ export async function POST(request: Request) {
       // because their presentation surfaces can overlap; the remaining
       // clients use independent device/client ledgers.
       const parserPlans = new Map<string, ParserHighWaterPlan>();
+      const costIncompleteDates = new Set(
+        data.contributions
+          .filter((day) => day.totals?.costIsComplete === false)
+          .map((day) => day.date)
+      );
       for (const [client, supportedVersion] of Object.entries(
         SUPPORTED_VERSIONED_PARSERS
       )) {
@@ -897,6 +909,7 @@ export async function POST(request: Request) {
                 >,
                 client
               ),
+          costIncompleteDates,
         });
         if (plan.mode === "status-quo") continue;
         parserPlans.set(client, plan);
@@ -1159,12 +1172,20 @@ export async function POST(request: Request) {
           >;
           const { breakdown: existingClientBreakdown, foldedClientFloors } =
             normalizeClientBreakdownAliases(rawExistingBreakdown);
-          // A recount proof corrects the stored cell FIRST; today's bounded
-          // increment is then added on top of the corrected cell, exactly as
-          // the planner credited it. The corrected cell is written directly
-          // after the merge: it is lower than the stored one by design, which
-          // the regression guard would otherwise refuse.
+          // A recount proof corrects the stored cell FIRST (counts only at the
+          // device's transition; afterwards only a floored cost); today's
+          // bounded increment is then added on top of the corrected cell,
+          // exactly as the planner credited it. The corrected cell is written
+          // directly after the merge: it can be lower than the stored one by
+          // design, which the regression guard would otherwise refuse. A cell
+          // the proof leaves unchanged takes the ordinary increment path.
           const recountedCells = new Map<string, ClientBreakdownData>();
+          // Clients whose whole cost a complete proof accounts for, so an
+          // earlier floor tag may clear.
+          const provenCostClients = new Set<string>();
+          // Clients whose recounted cost was kept for want of complete
+          // pricing: their cell is a floor whatever this day's pricing.
+          const deferredCostClients = new Set<string>();
           const incomingCostIsComplete =
             incomingDay.totals?.costIsComplete ?? true;
           for (const [client, plan] of plannedIncrementClients) {
@@ -1182,7 +1203,27 @@ export async function POST(request: Request) {
             if (!stored || !proofDay || !plan.recountDays?.includes(incomingDay.date)) {
               continue;
             }
-            const { cell, removed } = applyRecountProofToCell(stored, proofDay);
+            // What this snapshot submitted for the client, before the
+            // planner's increment replaced it above: a proof cost counts only
+            // where it is the submitted cost.
+            const submitted = ownValue(
+              foldParserClientSnapshot([incomingDay], client),
+              incomingDay.date
+            );
+            const { cell, removed, changed, costProven, costDeferred } = applyRecountProofToCell(
+              stored,
+              proofDay,
+              submitted,
+              {
+                transition: plan.recountTransition === true,
+                costIsComplete: incomingCostIsComplete,
+                storedCostIsFloor: stored.provenance?.costIsComplete === false,
+                costUnsafeModels: new Set(plan.recountCostUnsafeModels ?? []),
+              }
+            );
+            if (incomingCostIsComplete && costProven) provenCostClients.add(client);
+            if (costDeferred) deferredCostClients.add(client);
+            if (!changed) continue;
             const increment = incomingClientBreakdown[client];
             recountedCells.set(
               client,
@@ -1190,10 +1231,8 @@ export async function POST(request: Request) {
             );
             clientsToMerge.delete(client);
             delete incomingClientBreakdown[client];
-            // An incomplete snapshot may not lower cost (the write below
-            // floors it at the stored model costs), so only a complete one
-            // actually removes the proven cost; report what is written.
-            const removedCost = incomingCostIsComplete ? removed.cost : 0;
+            // A restated floor can also raise a cost; only removals are reported.
+            const removedCost = Math.max(0, removed.cost);
             if (removed.tokens > 0 || removedCost > 0 || removed.messages > 0) {
               const total = recountRemoved.get(client) ?? {
                 days: 0,
@@ -1206,6 +1245,7 @@ export async function POST(request: Request) {
               recountRemoved.set(client, total);
             }
           }
+
           for (const [client] of plannedIncrementClients) {
             const increment = incomingClientBreakdown[client];
             if (increment) {
@@ -1242,17 +1282,25 @@ export async function POST(request: Request) {
           }
           const mergedClientBreakdown = mergeResult.merged;
           for (const [client, cell] of recountedCells) {
-            // The proof restates the whole cell's cost, so a complete snapshot
-            // clears an earlier floor exactly, the documented rule for a
-            // complete write. An incomplete one may still only raise cost:
-            // the stored (pre-correction) model costs stay as floors and the
-            // cell stays tagged, and the cost correction lands on the first
-            // complete snapshot of the same layout.
-            const written = applyCostCompleteness(
-              cell,
-              ownValue(existingClientBreakdown, client),
-              incomingCostIsComplete
-            );
+            // The corrected amounts are written as they are: where pricing
+            // could not vouch for the proof's cost, the stored cost was left in
+            // place as a floor. The cell is tagged as a floor when this
+            // snapshot is incomplete, when such a cost was kept, or when it was
+            // tagged before and the proof does not account for its whole
+            // cost.
+            const keepsFloor =
+              !incomingCostIsComplete ||
+              deferredCostClients.has(client) ||
+              (ownValue(existingClientBreakdown, client)?.provenance
+                ?.costIsComplete === false &&
+                !provenCostClients.has(client));
+            const provenance = completeCostProvenance(cell);
+            const written: ClientBreakdownData = {
+              ...cell,
+              provenance: keepsFloor
+                ? { ...provenance, costIsComplete: false }
+                : provenance,
+            };
             // A cell the proof empties entirely (every stored row was a
             // duplicate) leaves nothing to keep; dropping it lets an
             // otherwise empty day row go with it below.
@@ -1264,9 +1312,12 @@ export async function POST(request: Request) {
           }
           for (const [client] of plannedIncrementClients) {
             const merged = mergedClientBreakdown[client];
-            if (
-              merged &&
-              !recountedCells.has(client) &&
+            if (!merged || recountedCells.has(client)) continue;
+            if (provenCostClients.has(client)) {
+              // A complete proof accounts for the cell's whole stored cost, so
+              // an earlier floor clears; no amount changes.
+              merged.provenance = completeCostProvenance(merged);
+            } else if (
               ownValue(existingClientBreakdown, client)?.provenance
                 ?.costIsComplete === false
             ) {
@@ -1276,6 +1327,7 @@ export async function POST(request: Request) {
               };
             }
           }
+
           // A preserved fold must keep its ORIGINAL raw alias keys in storage
           // (e.g. both "kilocode" and "kilo"), not the collapsed sum: the
           // collapsed form is indistinguishable from real usage, so writing it
@@ -1545,7 +1597,7 @@ export async function POST(request: Request) {
           // columns used (migrations 0015/0016).
           dateStart: sql<string>`COALESCE(MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MIN(${dailyBreakdown.date}))`,
           dateEnd: sql<string>`COALESCE(MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MAX(${dailyBreakdown.date}))`,
-          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 OR ${dailyBreakdown.cost} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
           // One floored day on ONE device makes the summed total a lower bound,
           // so completeness composes with AND, not OR (#1044). COALESCE covers

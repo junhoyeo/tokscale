@@ -896,7 +896,7 @@ describe('POST /api/submit - Client-Level Merge', () => {
           totalTokens: 0,
           totalCost: 2.05,
           totalDays: 1,
-          activeDays: 0,
+          activeDays: 1,
           averagePerDay: 2.05,
           maxCostInSingleDay: 2.05,
           clients: ["cursor" as const],
@@ -962,7 +962,7 @@ describe('POST /api/submit - Client-Level Merge', () => {
           totalTokens: 0,
           totalCost: 0.04,
           totalDays: 1,
-          activeDays: 0,
+          activeDays: 1,
           averagePerDay: 0.04,
           maxCostInSingleDay: 0.04,
           clients: ["cursor" as const],
@@ -1043,7 +1043,7 @@ describe('POST /api/submit - Client-Level Merge', () => {
           totalTokens: 0,
           totalCost: totalCostWithFpResidue,
           totalDays: 1,
-          activeDays: 0,
+          activeDays: 1,
           averagePerDay: totalCostWithFpResidue,
           maxCostInSingleDay: totalCostWithFpResidue,
           clients: ["cursor" as const],
@@ -1097,6 +1097,217 @@ describe('POST /api/submit - Client-Level Merge', () => {
 
       expect(result.errors).toEqual([]);
       expect(result.valid).toBe(true);
+    });
+
+    it("accepts 0-token cost-bearing days without active days mismatch warnings", () => {
+      // Issue #1501: when a submission includes 0-token days with non-zero cost
+      // (such as Cursor legacy tool calls), the aggregator counts them as active
+      // days (tokens > 0 || cost > 0 || messages > 0). Validation must count
+      // them the same way so summary.activeDays matches calculated active days
+      // without triggering an active days mismatch warning.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-30" },
+        },
+        summary: {
+          totalTokens: 1000,
+          totalCost: 3.05,
+          totalDays: 2,
+          activeDays: 2,
+          averagePerDay: 1.525,
+          maxCostInSingleDay: 2.05,
+          clients: ["cursor" as const],
+          models: ["premium-tool-call", "claude-3.5-sonnet"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 1000,
+            totalCost: 3.05,
+            range: { start: "2025-04-29", end: "2025-04-30" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 0, cost: 2.05, messages: 10 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "premium-tool-call",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 2.05,
+                messages: 10,
+              },
+            ],
+          },
+          {
+            date: "2025-04-30",
+            totals: { tokens: 1000, cost: 1.0, messages: 5 },
+            intensity: 1 as const,
+            tokenBreakdown: {
+              input: 1000,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "claude-3.5-sonnet",
+                providerId: "cursor",
+                tokens: {
+                  input: 1000,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 1.0,
+                messages: 5,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+      expect(result.warnings.some((w) => w.includes("Active days mismatch"))).toBe(false);
+      expect(result.warnings).toEqual([]);
+    });
+
+    it("accepts 0-token 0-cost message-bearing days without active days mismatch warnings", () => {
+      // CLI aggregator counts a day as active when tokens > 0 || cost > 0 || messages > 0.
+      // Validation must count message-only days as active so summary.activeDays matches.
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 0,
+          totalDays: 1,
+          activeDays: 1,
+          averagePerDay: 0,
+          maxCostInSingleDay: 0,
+          clients: ["cursor" as const],
+          models: ["cursor-fast"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: 0,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 0, cost: 0, messages: 15 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [
+              {
+                client: "cursor" as const,
+                modelId: "cursor-fast",
+                providerId: "cursor",
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  reasoning: 0,
+                },
+                cost: 0,
+                messages: 15,
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+      expect(result.warnings.some((w) => w.includes("Active days mismatch"))).toBe(false);
+    });
+
+    it("flags an active days mismatch when an inactive day (0 tokens, 0 cost, 0 messages) is claimed as active", () => {
+      const payload = {
+        meta: {
+          generatedAt: "2026-05-27T00:00:00.000Z",
+          version: "2.1.3",
+          dateRange: { start: "2025-04-29", end: "2025-04-29" },
+        },
+        summary: {
+          totalTokens: 0,
+          totalCost: 0,
+          totalDays: 1,
+          activeDays: 1, // Claimed 1, but day has 0 tokens, 0 cost, 0 messages
+          averagePerDay: 0,
+          maxCostInSingleDay: 0,
+          clients: ["cursor" as const],
+          models: ["cursor-fast"],
+        },
+        years: [
+          {
+            year: "2025",
+            totalTokens: 0,
+            totalCost: 0,
+            range: { start: "2025-04-29", end: "2025-04-29" },
+          },
+        ],
+        contributions: [
+          {
+            date: "2025-04-29",
+            totals: { tokens: 0, cost: 0, messages: 0 },
+            intensity: 0 as const,
+            tokenBreakdown: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            clients: [],
+          },
+        ],
+      };
+
+      const result = validateSubmission(payload);
+
+      expect(result.warnings).toContain("Active days mismatch: summary=1, calculated=0");
     });
 
     it("excludes cursor legacy cost from the cost-per-million sanity cap", () => {

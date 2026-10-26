@@ -223,6 +223,15 @@ describe("profile contribution calendar", () => {
     expect(calendar.highestDay?.date).toBe("2026-07-06");
   });
 
+  it("counts cost-bearing zero-token days as active days", () => {
+    const calendar = createContributionCalendar([
+      contribution("2026-07-05", 0, 2.5),
+      contribution("2026-07-06", 100, 1.0),
+    ]);
+
+    expect(calendar.activeDays).toBe(2);
+  });
+
   it("treats floating-point cost residue as free usage", () => {
     const calendar = createContributionCalendar([
       contribution("2026-07-05", 100, 1e-7),

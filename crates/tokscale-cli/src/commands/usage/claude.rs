@@ -113,13 +113,29 @@ fn remove_own_staging_files(path: &Path) {
     }
 }
 
-fn write_cooldown_with_now<F>(
+/// Keep lock retries bounded without tying tests to scheduler or fsync latency.
+fn try_lock_cooldown<F>(lock: &fs::File, mut wait: F) -> bool
+where
+    F: FnMut(std::time::Duration),
+{
+    for _ in 0..10 {
+        if lock.try_lock_exclusive().is_ok() {
+            return true;
+        }
+        wait(std::time::Duration::from_millis(5));
+    }
+    false
+}
+
+fn write_cooldown_with_now<F, W>(
     path: &Path,
     record: &PersistedCooldown,
     now: F,
+    wait: W,
 ) -> std::io::Result<()>
 where
     F: FnOnce() -> u64,
+    W: FnMut(std::time::Duration),
 {
     let parent = path
         .parent()
@@ -134,15 +150,7 @@ where
         .open(lock_path)?;
     // Contention is bounded: preserve the longer cross-process cooldown when
     // possible, but never let a stuck cache lock hang an interactive refresh.
-    let mut locked = false;
-    for _ in 0..10 {
-        if lock.try_lock_exclusive().is_ok() {
-            locked = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    if !locked {
+    if !try_lock_cooldown(&lock, wait) {
         return Ok(());
     }
     let lock_now = now();
@@ -191,7 +199,7 @@ fn write_cooldown_at(
     record: &PersistedCooldown,
     lock_now: u64,
 ) -> std::io::Result<()> {
-    write_cooldown_with_now(path, record, || lock_now)
+    write_cooldown_with_now(path, record, || lock_now, std::thread::sleep)
 }
 
 #[cfg(test)]
@@ -226,7 +234,7 @@ where
             })
             .or_insert_with(|| record.clone());
     }
-    let _ = write_cooldown_with_now(path, &record, current_now);
+    let _ = write_cooldown_with_now(path, &record, current_now, std::thread::sleep);
 }
 
 #[cfg(test)]
@@ -500,6 +508,7 @@ impl From<reqwest::Error> for FetchError {
         Self::Other(error.into())
     }
 }
+#[cfg(test)]
 fn usage_client(timeout: std::time::Duration) -> anyhow::Result<reqwest::Client> {
     // Bound the complete request, including response-body reads, while retaining
     // the shared proxy and TLS configuration.
@@ -813,7 +822,7 @@ fn fetch_policy(
         .enable_all()
         .build()?;
     let response = rt.block_on(fetch_usage(
-        &usage_client(std::time::Duration::from_secs(30))?,
+        &super::helpers::http_client()?,
         usage_url,
         token,
     ));
@@ -2598,11 +2607,19 @@ mod tests {
     fn shorter_update_does_not_shorten_active_cooldown() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cooldown.json");
-        set_cooldown_at(&path, 30, 1_000, 1_000);
-        set_cooldown_at(&path, 90, 1_000, 1_000);
-        set_cooldown_at(&path, 10, 1_000, 1_000);
-        clear_cooldown();
-        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        // Each uncontended write must persist the maximum, in either order.
+        // Clear memory after every write so it cannot hide a shortened disk record.
+        for waits in [[30, 90, 10], [90, 30, 10]] {
+            clear_cooldown();
+            let _ = fs::remove_file(&path);
+            let mut longest = 0;
+            for wait in waits {
+                set_cooldown_at(&path, wait, 1_000, 1_000);
+                longest = longest.max(wait);
+                clear_cooldown();
+                assert_eq!(cooldown_remaining(&path, 1_000), Some(longest));
+            }
+        }
     }
 
     #[test]
@@ -2623,18 +2640,23 @@ mod tests {
         };
 
         write_cooldown_at(&path, &newer, 1_010).unwrap();
-        write_cooldown_with_now(&path, &older, || {
-            let lock = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path.with_extension("lock"))
-                .unwrap();
-            assert!(
-                lock.try_lock_exclusive().is_err(),
-                "clock sampled after lock acquisition"
-            );
-            1_020
-        })
+        write_cooldown_with_now(
+            &path,
+            &older,
+            || {
+                let lock = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path.with_extension("lock"))
+                    .unwrap();
+                assert!(
+                    lock.try_lock_exclusive().is_err(),
+                    "clock sampled after lock acquisition"
+                );
+                1_020
+            },
+            std::thread::sleep,
+        )
         .unwrap();
         assert_eq!(read_cooldown(&path, 1_020), Some(80));
 
@@ -2732,8 +2754,63 @@ mod tests {
     }
 
     #[test]
+    fn cooldown_lock_stops_after_its_retry_budget() {
+        // Use separate opens: cloned handles can share flock locks on Unix.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+        let mut waits = Vec::new();
+        assert!(!try_lock_cooldown(&contender, |duration| {
+            waits.push(duration);
+            assert!(waits.len() <= 10, "lock acquisition exceeded retry budget");
+        }));
+        assert_eq!(waits, vec![std::time::Duration::from_millis(5); 10]);
+        holder.unlock().unwrap();
+    }
+
+    #[test]
+    fn cooldown_lock_can_succeed_on_its_last_attempt() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+        let mut waits = 0;
+        assert!(try_lock_cooldown(&contender, |_| {
+            waits += 1;
+            if waits == 9 {
+                holder.unlock().unwrap();
+            }
+        }));
+        assert_eq!(waits, 9);
+        assert!(holder.try_lock_exclusive().is_err());
+        contender.unlock().unwrap();
+        assert!(try_lock_cooldown(&holder, |_| panic!(
+            "free lock must not wait"
+        )));
+        holder.unlock().unwrap();
+    }
+
+    #[test]
     #[serial_test::serial]
     fn contended_writer_leaves_committed_and_staging_files_untouched() {
+        clear_cooldown();
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cooldown.json");
         let committed = PersistedCooldown {
@@ -2755,28 +2832,40 @@ mod tests {
             .unwrap();
         lock.lock_exclusive().unwrap();
 
-        write_cooldown_at(
-            &path,
-            &PersistedCooldown {
-                version: COOLDOWN_VERSION,
-                issued_at: 1_000,
-                expires_at: 1_090,
-            },
-            1_000,
-        )
-        .unwrap();
+        // The held lock forces persistence to exhaust its bounded retry budget.
+        // The process must still enforce the longer cooldown in memory.
+        set_cooldown_at(&path, 90, 1_000, 1_000);
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        set_cooldown_at(&path, 30, 1_000, 1_000);
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
 
         assert_eq!(fs::read_to_string(&staging).unwrap(), "active writer");
         assert_eq!(fs::read_to_string(&legacy).unwrap(), "active legacy writer");
-        assert_eq!(read_cooldown(&path, 1_000), Some(60));
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            serde_json::to_vec(&committed).unwrap()
+        );
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(60));
         lock.unlock().unwrap();
     }
 
     #[test]
     #[serial_test::serial]
-    fn concurrent_writers_preserve_the_later_cooldown() {
+    fn concurrent_writers_preserve_the_later_cooldown_in_memory_when_disk_is_locked() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cooldown.json");
+        clear_cooldown();
+        // Hold the lock until both workers finish. Neither can persist, regardless
+        // of thread scheduling or coverage overhead, so this tests the memory max.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut workers = Vec::new();
         for wait in [30, 90] {
@@ -2791,8 +2880,88 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        clear_cooldown();
         assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        assert!(
+            !path.exists(),
+            "contended writers must not commit without a lock"
+        );
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_000), None);
+        lock.unlock().unwrap();
+    }
+
+    /// Two writers contend for the disk lock and both commit. The first holds
+    /// the lock, paused in its `now` hook (sampled after acquisition); the
+    /// second loses its first attempt and is parked in its injected wait until
+    /// the first has committed. Channels drive every step, so neither thread
+    /// scheduling nor fsync latency decides what reaches the disk -- unlike a
+    /// real 5 ms sleep, the parked wait cannot run out the retry budget.
+    #[test]
+    fn contending_writers_both_persist_and_keep_the_longer_cooldown() {
+        use std::sync::mpsc;
+        for (first, second) in [(30, 90), (90, 30)] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("cooldown.json");
+            let record = |wait: u64| PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_000,
+                expires_at: 1_000 + wait,
+            };
+
+            let (first_locked_tx, first_locked) = mpsc::channel();
+            let (release_first_tx, release_first) = mpsc::channel::<()>();
+            let first_writer = {
+                let path = path.clone();
+                let record = record(first);
+                std::thread::spawn(move || {
+                    write_cooldown_with_now(
+                        &path,
+                        &record,
+                        move || {
+                            first_locked_tx.send(()).unwrap();
+                            release_first.recv().unwrap();
+                            1_000
+                        },
+                        |_| panic!("the first writer must find the lock free"),
+                    )
+                })
+            };
+            first_locked.recv().unwrap();
+
+            let (second_waiting_tx, second_waiting) = mpsc::channel();
+            let (resume_second_tx, resume_second) = mpsc::channel::<()>();
+            let second_writer = {
+                let path = path.clone();
+                let record = record(second);
+                std::thread::spawn(move || {
+                    let mut waits = 0;
+                    write_cooldown_with_now(
+                        &path,
+                        &record,
+                        || 1_000,
+                        move |_| {
+                            waits += 1;
+                            assert_eq!(waits, 1, "the second writer must retry exactly once");
+                            second_waiting_tx.send(()).unwrap();
+                            resume_second.recv().unwrap();
+                        },
+                    )
+                })
+            };
+            // The second writer has tried the lock and lost.
+            second_waiting.recv().unwrap();
+            release_first_tx.send(()).unwrap();
+            first_writer.join().unwrap().unwrap();
+            assert_eq!(read_cooldown(&path, 1_000), Some(first));
+
+            resume_second_tx.send(()).unwrap();
+            second_writer.join().unwrap().unwrap();
+            assert_eq!(
+                read_cooldown(&path, 1_000),
+                Some(first.max(second)),
+                "{first}s then {second}s"
+            );
+        }
     }
 
     /// RFC 9110 also allows `Retry-After` as an HTTP-date. That form must

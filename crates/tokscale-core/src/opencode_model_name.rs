@@ -102,6 +102,10 @@ fn provider_key(provider_id: &str) -> String {
 }
 
 pub(crate) fn parse_jsonc(contents: &str) -> Option<serde_json::Value> {
+    // Editors on Windows can save JSON with a UTF-8 BOM. OpenCode reads such a
+    // config fine (its file read decodes the BOM away), but serde_json rejects
+    // it, which silently dropped every name in the file.
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     serde_json::from_str(contents)
         .ok()
         .or_else(|| serde_json::from_str(&strip_jsonc_syntax(contents)).ok())
@@ -601,6 +605,17 @@ mod tests {
             resolver.display_name("fireworks", "accounts/fireworks/models/glm-5p2"),
             Some("Inline")
         );
+    }
+
+    #[test]
+    fn reads_config_saved_with_a_utf8_bom() {
+        for config in [
+            "\u{feff}{\"provider\":{\"openai\":{\"models\":{\"gpt-5\":{\"name\":\"GPT Five\"}}}}}",
+            "\u{feff}{\n  // comment\n  \"provider\": {\"openai\": {\"models\": {\"gpt-5\": {\"name\": \"GPT Five\"},},},},\n}",
+        ] {
+            let resolver = OpenCodeModelNameResolver::from_json(config);
+            assert_eq!(resolver.display_name("openai", "gpt-5"), Some("GPT Five"), "{config:?}");
+        }
     }
 
     #[test]
