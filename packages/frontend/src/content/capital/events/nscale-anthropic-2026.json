@@ -1,0 +1,114 @@
+{
+  "sources": [
+    {
+      "id": "src_nscale_s1_2026_09_18",
+      "url": "https://www.sec.gov/Archives/edgar/data/2110365/000119312526395475/ck0002110365-20260918.htm",
+      "publisher": "SEC EDGAR (Nscale Limited)",
+      "type": "sec_filing",
+      "title": "Nscale Limited registration statement on Form S-1, September 18, 2026",
+      "publishedAt": "2026-09-18",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001193125-26-395475",
+        "cik": "0002110365",
+        "filedAt": "2026-09-18"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_nscale_anthropic_2026",
+    "slug": "nscale-anthropic-2026",
+    "kind": "deal",
+    "types": [
+      "compute_contract"
+    ],
+    "title": "Anthropic and Nscale GPU services agreements",
+    "summary": "Anthropic signed four GPU services agreements with Nscale subsidiaries for dedicated GPU infrastructure at Nscale's Monarch Compute Campus in West Virginia. Aggregate payments are up to about $44.6 billion, subject to delivery and availability requirements.",
+    "date": "2026-08-25",
+    "dates": {
+      "signed": "2026-08-25",
+      "filed": "2026-09-18"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_nscale",
+        "roles": [
+          "provider"
+        ],
+        "note": "Through four wholly owned subsidiaries of Nscale Limited"
+      },
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "buyer"
+        ],
+        "note": "Anthropic PBC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "contract",
+        "label": "Aggregate payments under the Anthropic Services Agreements",
+        "measure": "contract_value",
+        "value": 44600000000,
+        "currency": "USD",
+        "basis": "up_to_approximately",
+        "status": "signed",
+        "asOf": "2026-08-25",
+        "from": "org_anthropic",
+        "to": "org_nscale",
+        "condition": "Subject to Nscale meeting specified delivery and service availability requirements",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "On August 25, 2026, we entered into the Anthropic Services Agreements, which provide for aggregate payments to us of up to approximately $44.6 billion, subject to our satisfaction of specified delivery and service availability requirements."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Scope",
+        "text": "Dedicated GPU infrastructure services at the Monarch Compute Campus for NVIDIA Vera Rubin NVL72 GPUs.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "On August 25, 2026, we entered into a series of GPU Services Agreements (collectively, the \"Anthropic Services Agreements\") with Anthropic PBC (\"Anthropic\"), pursuant to which we agreed to provide Anthropic with dedicated GPU infrastructure services at our Monarch Compute Campus to support the deployment of NVIDIA Vera Rubin NVL72 GPUs."
+      },
+      {
+        "label": "Site",
+        "text": "The Monarch Compute Campus is in Mason County, West Virginia.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "which includes the Monarch Compute Campus in Mason County, West Virginia"
+      },
+      {
+        "label": "Structure",
+        "text": "Four separate agreements, each between Anthropic and a wholly owned Nscale subsidiary.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "The Anthropic Services Agreements are structured as four separate agreements, each between Anthropic and a wholly owned subsidiary of Nscale Limited."
+      },
+      {
+        "label": "Term",
+        "text": "Four tranches, each with a multi-year service term from acceptance, with extension options at Anthropic's election.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "Pursuant to the Anthropic Services Agreements, we will provide Anthropic with dedicated GPU infrastructure services at our Monarch Compute Campus, deploying NVIDIA Vera Rubin NVL72 GPUs across four tranches, each with a multi-year service term commencing on acceptance of the applicable tranche and subject to extension options exercisable at Anthropic's election."
+      },
+      {
+        "label": "Financing",
+        "text": "As of the filing, Nscale had no binding commitments for the financing needed to perform the agreements.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "As of the date of this prospectus, we have not obtained binding commitments for any of the financings required to fund performance under the Anthropic Services Agreements."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_nscale_s_1_2026",
+        "note": "Disclosed in the Nscale registration statement."
+      }
+    ],
+    "sourceIds": [
+      "src_nscale_s1_2026_09_18"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

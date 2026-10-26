@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Navigation } from "@/components/layout/Navigation";
-import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 import { getSession } from "@/lib/auth/session";
 import { getGroupLeaderboardData } from "@/lib/groups/getGroupLeaderboard";
 import { getGroupMembership } from "@/lib/groups/permissions";
@@ -65,7 +65,7 @@ function PageShell({ children }: { children: React.ReactNode }) {
     <div className="service-page-shell">
       <Navigation />
       <main className="service-main" id="main-content">{children}</main>
-      <ServiceFooter />
+      <PublicFooter />
     </div>
   );
 }

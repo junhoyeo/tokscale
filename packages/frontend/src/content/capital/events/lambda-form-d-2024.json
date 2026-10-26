@@ -1,0 +1,116 @@
+{
+  "sources": [
+    {
+      "id": "src_lambda_form_d_2024_02_16",
+      "url": "https://www.sec.gov/Archives/edgar/data/1954966/000195496624000001/primary_doc.xml",
+      "publisher": "SEC EDGAR (Lambda, Inc.)",
+      "type": "sec_filing",
+      "title": "Lambda, Inc. Form D, filed February 16, 2024",
+      "publishedAt": "2024-02-16",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "D",
+        "accession": "0001954966-24-000001",
+        "cik": "0001954966",
+        "filedAt": "2024-02-16"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_lambda_form_d_2024",
+    "slug": "lambda-form-d-2024",
+    "kind": "filing",
+    "types": [
+      "form_d"
+    ],
+    "title": "Lambda Form D for an equity offering (filed February 2024)",
+    "summary": "Lambda filed a Form D notice for an equity offering that began on October 5, 2023. The filing reports the full offering amount as sold and does not name a round or a valuation.",
+    "date": "2024-02-16",
+    "dates": {
+      "filed": "2024-02-16"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_lambda",
+        "roles": [
+          "issuer",
+          "filer"
+        ],
+        "note": "Lambda, Inc."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "offering",
+        "label": "Total offering amount",
+        "measure": "form_d_offering_amount",
+        "value": 319999978,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2024-02-16",
+        "to": "org_lambda",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<totalOfferingAmount>319999978</totalOfferingAmount>"
+      },
+      {
+        "id": "sold",
+        "label": "Total amount sold",
+        "measure": "form_d_amount_sold",
+        "value": 319999978,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2024-02-16",
+        "to": "org_lambda",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<totalAmountSold>319999978</totalAmountSold>"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "investors",
+        "label": "Investors who have already invested",
+        "measure": "investors",
+        "value": 38,
+        "basis": "exact",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<totalNumberAlreadyInvested>38</totalNumberAlreadyInvested>"
+      }
+    ],
+    "facts": [
+      {
+        "label": "First sale",
+        "text": "October 5, 2023.",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<dateOfFirstSale> <value>2023-10-05</value> </dateOfFirstSale>"
+      },
+      {
+        "label": "Exemption",
+        "text": "Rule 506(b) of Regulation D.",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<federalExemptionsExclusions> <item>06b</item> </federalExemptionsExclusions>"
+      },
+      {
+        "label": "Security type",
+        "text": "Equity.",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<isEquityType>true</isEquityType>"
+      },
+      {
+        "label": "Amount remaining",
+        "text": "Nothing was left to sell when the notice was filed.",
+        "sourceId": "src_lambda_form_d_2024_02_16",
+        "quote": "<totalRemaining>0</totalRemaining>"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_lambda_form_d_2024_02_16"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

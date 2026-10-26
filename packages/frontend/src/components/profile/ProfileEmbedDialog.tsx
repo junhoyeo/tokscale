@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { toast } from "react-toastify";
+import { Select } from "@/components/ui/Select";
 import {
   EMBED_TEMPLATES,
   resolvePalette,
@@ -243,23 +244,16 @@ export function ProfileEmbedDialog({
             {capabilities.showTemplate && (
               <OptionGroup>
                 <OptionLabel id="embed-template-label">Template</OptionLabel>
-                <SelectWrap>
-                  <SelectControl
-                    name="profile-embed-template"
-                    aria-labelledby="embed-template-label"
-                    value={template}
-                    onChange={(event) =>
-                      setTemplate(event.currentTarget.value as EmbedTemplate)
-                    }
-                  >
-                    {EMBED_TEMPLATES.map((tpl) => (
-                      <option key={tpl} value={tpl}>
-                        {EMBED_TEMPLATE_LABELS[tpl]}
-                      </option>
-                    ))}
-                  </SelectControl>
-                  <SelectIcon aria-hidden="true" />
-                </SelectWrap>
+                <TemplateSelect
+                  name="profile-embed-template"
+                  aria-labelledby="embed-template-label"
+                  value={template}
+                  options={EMBED_TEMPLATES.map((tpl) => ({
+                    value: tpl,
+                    label: EMBED_TEMPLATE_LABELS[tpl],
+                  }))}
+                  onChange={(next) => setTemplate(next as EmbedTemplate)}
+                />
               </OptionGroup>
             )}
 
@@ -892,45 +886,17 @@ const OptionLabel = styled.span`
   line-height: 1.3;
 `;
 
-const SelectWrap = styled.div`
-  position: relative;
-  min-width: 0;
-`;
-
-const SelectControl = styled.select`
-  width: 100%;
-  min-height: 34px;
-  appearance: none;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  padding: 6px 30px 6px 10px;
-  background: var(--service-surface-muted);
-  color: var(--service-text);
-  font: inherit;
-  font-size: 0.8125rem;
-  line-height: 1.3;
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
+const TemplateSelect = styled(Select)`
+  --select-width: 100%;
+  --select-height: 34px;
+  --select-font-size: 0.8125rem;
+  --select-padding-x: 10px;
+  --select-background: var(--service-surface-muted);
+  --select-border-color: var(--service-border-strong);
 
   @media (pointer: coarse) {
-    min-height: 44px;
-    font-size: 1rem;
+    --select-font-size: 1rem;
   }
-`;
-
-const SelectIcon = styled.span`
-  position: absolute;
-  top: 50%;
-  right: 12px;
-  width: 7px;
-  height: 7px;
-  border-right: 1.5px solid var(--service-text-muted);
-  border-bottom: 1.5px solid var(--service-text-muted);
-  pointer-events: none;
-  transform: translateY(-70%) rotate(45deg);
 `;
 
 const SegmentedControl = styled.div`

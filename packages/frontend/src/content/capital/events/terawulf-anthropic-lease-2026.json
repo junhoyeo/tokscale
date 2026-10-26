@@ -1,0 +1,131 @@
+{
+  "sources": [
+    {
+      "id": "src_terawulf_8k_2026_07_06",
+      "url": "https://www.sec.gov/Archives/edgar/data/1083301/000110465926080583/tm2619468d1_8k.htm",
+      "publisher": "SEC EDGAR (TeraWulf Inc.)",
+      "type": "sec_filing",
+      "title": "TeraWulf Form 8-K, July 6, 2026 (Justified Data Campus lease and Abernathy transaction)",
+      "publishedAt": "2026-07-06",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001104659-26-080583",
+        "cik": "0001083301",
+        "filedAt": "2026-07-06",
+        "periodOfReport": "2026-07-06"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_terawulf_ex99_2026_07_06",
+      "url": "https://www.sec.gov/Archives/edgar/data/1083301/000110465926080583/tm2619468d1_ex99-1.htm",
+      "publisher": "SEC EDGAR (TeraWulf Inc.)",
+      "type": "sec_filing",
+      "title": "TeraWulf press release, July 6, 2026 (Exhibit 99.1): Anthropic lease at Justified Data Campus and sale of Abernathy interest to Fluidstack",
+      "publishedAt": "2026-07-06",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001104659-26-080583",
+        "cik": "0001083301",
+        "filedAt": "2026-07-06",
+        "periodOfReport": "2026-07-06"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_terawulf_anthropic_lease_2026",
+    "slug": "terawulf-anthropic-lease-2026",
+    "kind": "deal",
+    "types": [
+      "datacenter_lease"
+    ],
+    "title": "Anthropic and TeraWulf 20-year data-center lease",
+    "summary": "A TeraWulf subsidiary signed a 20-year lease with Anthropic for critical IT load at its Justified Data campus in Hawesville, Kentucky. Delivery is expected in phases from late 2027 to early 2028.",
+    "date": "2026-07-06",
+    "dates": {
+      "signed": "2026-07-06",
+      "filed": "2026-07-06"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_terawulf",
+        "roles": [
+          "lessor"
+        ],
+        "note": "Through its subsidiary Raylan Data LLC"
+      },
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "lessee"
+        ],
+        "note": "Anthropic PBC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "lease_revenue",
+        "label": "Expected contracted lease revenue over the initial term",
+        "measure": "contract_value",
+        "value": 19000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "announced",
+        "asOf": "2026-07-06",
+        "from": "org_anthropic",
+        "to": "org_terawulf",
+        "term": {
+          "years": 20
+        },
+        "condition": "TeraWulf's expectation over the initial lease term",
+        "sourceId": "src_terawulf_ex99_2026_07_06",
+        "quote": "The lease is expected to generate approximately $19 billion of contracted revenue over the initial lease term."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "it_load",
+        "label": "Critical IT load",
+        "measure": "it_load_mw",
+        "value": 401,
+        "basis": "approximately",
+        "term": {
+          "years": 20
+        },
+        "sourceId": "src_terawulf_8k_2026_07_06",
+        "quote": "the Landlord will provide Anthropic with approximately 401 MW of critical IT load for high-performance computing (\"HPC\") operations at the Company's data center campus located in Hawesville, Kentucky"
+      }
+    ],
+    "facts": [
+      {
+        "label": "Term",
+        "text": "20 years from delivery, with two optional five-year renewals.",
+        "sourceId": "src_terawulf_8k_2026_07_06",
+        "quote": "Anthropic's obligation to pay rent under the Justified Data Campus Lease will commence upon the delivery of the applicable leased premises and continue for a term of 20 years thereafter, subject to Anthropic's option to extend the term for up to an additional ten years through two successive five-year renewal options."
+      },
+      {
+        "label": "Delivery",
+        "text": "In phases from late 2027 to early 2028.",
+        "sourceId": "src_terawulf_8k_2026_07_06",
+        "quote": "Delivery of the leased capacity is expected to occur in phases beginning in late 2027 and concluding in early 2028."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_terawulf_fluidstack_sale_2026",
+        "note": "Reported in the same 8-K."
+      }
+    ],
+    "sourceIds": [
+      "src_terawulf_8k_2026_07_06",
+      "src_terawulf_ex99_2026_07_06"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

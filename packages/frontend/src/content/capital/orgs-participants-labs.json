@@ -1,0 +1,293 @@
+{
+  "sources": [
+    {
+      "id": "src_wikidata_q20718",
+      "url": "https://www.wikidata.org/wiki/Q20718",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q20718 (Samsung Electronics)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q2164606",
+      "url": "https://www.wikidata.org/wiki/Q2164606",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q2164606 (TPG)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q297879",
+      "url": "https://www.wikidata.org/wiki/Q297879",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q297879 (ASML Holding)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q3511946",
+      "url": "https://www.wikidata.org/wiki/Q3511946",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q3511946 (T. Rowe Price)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    }
+  ],
+  "orgs": [
+    {
+      "id": "org_asml",
+      "slug": "asml",
+      "name": "ASML",
+      "legalNames": [
+        "ASML Holding NV"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Veldhoven",
+        "country": "NL"
+      },
+      "founded": {
+        "date": "1984-04-01",
+        "sourceId": "src_wikidata_q297879"
+      },
+      "website": "https://www.asml.com",
+      "description": "Semiconductor equipment manufacturer that also invests in AI companies.",
+      "ids": {
+        "wikidata": "Q297879",
+        "secCik": [
+          "0000937966"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "ASML"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/asml.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_d_e_shaw_ventures",
+      "slug": "d-e-shaw-ventures",
+      "name": "D. E. Shaw Ventures",
+      "legalNames": [],
+      "aliases": [
+        "D.E. Shaw Ventures"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "vc"
+      ],
+      "status": "private",
+      "description": "Venture investment firm.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/d-e-shaw-ventures.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_psg_equity",
+      "slug": "psg-equity",
+      "name": "PSG Equity",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "description": "Investment firm.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/psg-equity.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_samsung_electronics",
+      "slug": "samsung-electronics",
+      "name": "Samsung Electronics",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "statusNote": "Listed on the Korea Exchange (KRX)",
+      "hq": {
+        "country": "KR"
+      },
+      "founded": {
+        "date": "1969-01-13",
+        "sourceId": "src_wikidata_q20718"
+      },
+      "website": "https://samsung.com",
+      "description": "Electronics and chip company.",
+      "ids": {
+        "wikidata": "Q20718",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/samsung-electronics.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_scaleup_europe_fund",
+      "slug": "scaleup-europe-fund",
+      "name": "Scaleup Europe Fund",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "description": "Investment fund managed by EQT.",
+      "ids": {
+        "wikidata": "Q140290753",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_t_rowe_price",
+      "slug": "t-rowe-price",
+      "name": "T. Rowe Price",
+      "legalNames": [
+        "T. Rowe Price Associates, Inc.",
+        "T. Rowe Price Investment Management, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "asset-manager"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Baltimore",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1937",
+        "sourceId": "src_wikidata_q3511946"
+      },
+      "website": "https://www.troweprice.com",
+      "description": "Investment management firm.",
+      "ids": {
+        "wikidata": "Q3511946",
+        "secCik": [
+          "0001113169"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "TROW"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/t-rowe-price.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_tpg",
+      "slug": "tpg",
+      "name": "TPG",
+      "legalNames": [
+        "TPG Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "asset-manager"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Fort Worth",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1992",
+        "sourceId": "src_wikidata_q2164606"
+      },
+      "website": "https://www.tpg.com",
+      "description": "Investment firm.",
+      "ids": {
+        "wikidata": "Q2164606",
+        "secCik": [
+          "0001880661"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "TPG"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/tpg.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    }
+  ]
+}

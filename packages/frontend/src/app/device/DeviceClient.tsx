@@ -17,6 +17,8 @@ const Container = styled.div`
   justify-content: center;
   padding-left: 16px;
   padding-right: 16px;
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  color: var(--service-text);
 `;
 
 const LoadingContainer = styled.div`
@@ -24,10 +26,12 @@ const LoadingContainer = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  color: var(--service-text);
 `;
 
 const LoadingText = styled.div`
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const CardWrapper = styled.div`
@@ -38,9 +42,9 @@ const CardWrapper = styled.div`
 const Card = styled.div`
   border-radius: 16px;
   border: 1px solid;
-  border-color: var(--color-border-default);
+  border-color: var(--service-border);
   padding: 32px;
-  background-color: var(--color-bg-default);
+  background-color: var(--service-surface);
 `;
 
 const Header = styled.div`
@@ -58,8 +62,8 @@ const IconBox = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(to bottom right, #53d1f3, #3bc4e8);
-  box-shadow: 0 10px 15px -3px rgba(83, 209, 243, 0.25);
+  background: var(--v2-accent-strong);
+  box-shadow: 0 10px 24px -6px rgba(0, 115, 255, 0.35);
 `;
 
 const Icon = styled.svg`
@@ -71,12 +75,12 @@ const Icon = styled.svg`
 const Title = styled.h1`
   font-size: 24px;
   font-weight: bold;
-  color: var(--color-fg-default);
+  color: var(--service-text);
 `;
 
 const Subtitle = styled.p`
   margin-top: 8px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const SignInContainer = styled.div`
@@ -85,7 +89,7 @@ const SignInContainer = styled.div`
 
 const SignInText = styled.p`
   margin-bottom: 24px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const SignInButton = styled.a`
@@ -96,8 +100,8 @@ const SignInButton = styled.a`
   padding: 12px 24px;
   font-weight: 500;
   border-radius: 12px;
-  background-color: var(--color-fg-default);
-  color: var(--color-bg-default);
+  background-color: var(--service-text);
+  color: var(--v2-canvas);
   transition: opacity 0.2s;
   text-decoration: none;
 
@@ -125,24 +129,24 @@ const SuccessIconBox = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: rgba(83, 209, 243, 0.1);
+  background-color: var(--v2-accent-soft);
 `;
 
 const SuccessIcon = styled.svg`
   width: 32px;
   height: 32px;
-  color: #53d1f3;
+  color: var(--v2-focus);
 `;
 
 const SuccessTitle = styled.h2`
   font-size: 20px;
   font-weight: 600;
   margin-bottom: 8px;
-  color: var(--color-fg-default);
+  color: var(--service-text);
 `;
 
 const SuccessText = styled.p`
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const Form = styled.form``;
@@ -154,7 +158,7 @@ const FormGroup = styled.div`
 const FormText = styled.p`
   text-align: center;
   margin-bottom: 16px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const Input = styled.input`
@@ -162,17 +166,16 @@ const Input = styled.input`
   padding: 16px;
   text-align: center;
   font-size: 24px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   letter-spacing: 0.3em;
   border: 1px solid;
-  border-color: var(--color-border-default);
+  border-color: var(--service-border-strong);
   border-radius: 12px;
-  background-color: var(--color-bg-elevated);
-  color: var(--color-fg-default);
+  background-color: var(--service-canvas);
+  color: var(--service-text);
 
   &:focus {
     outline: none;
-    box-shadow: 0 0 0 2px var(--color-primary);
+    box-shadow: 0 0 0 2px var(--v2-focus);
     border-color: transparent;
   }
 
@@ -194,7 +197,7 @@ const SubmitButton = styled.button`
   color: white;
   font-weight: 500;
   border-radius: 12px;
-  background-color: var(--color-primary);
+  background-color: var(--v2-accent-strong);
   border: none;
   cursor: pointer;
   transition: opacity 0.2s;
@@ -213,12 +216,12 @@ const UserInfoText = styled.p`
   text-align: center;
   font-size: 14px;
   margin-top: 16px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const Username = styled.span`
   font-weight: 500;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 export default function DeviceClient() {
@@ -276,14 +279,14 @@ export default function DeviceClient() {
 
   if (isLoading) {
     return (
-      <LoadingContainer style={{ backgroundColor: "var(--color-bg-default)" }}>
+      <LoadingContainer>
         <LoadingText>Loading...</LoadingText>
       </LoadingContainer>
     );
   }
 
   return (
-    <Container style={{ backgroundColor: "var(--color-bg-default)" }}>
+    <Container>
       <CardWrapper>
         <Card>
           <Header>

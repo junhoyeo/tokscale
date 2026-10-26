@@ -1,0 +1,93 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_series_e",
+      "url": "https://www.anthropic.com/news/anthropic-raises-series-e-at-usd61-5b-post-money-valuation",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic raises Series E at $61.5B post-money valuation",
+      "publishedAt": "2025-03-03",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_series_e_2025",
+    "slug": "anthropic-series-e-2025",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "Anthropic Series E",
+    "summary": "Anthropic raised a $3.5 billion Series E round led by Lightspeed Venture Partners, at a $61.5 billion post-money valuation.",
+    "roundLabel": "Series E",
+    "date": "2025-03-03",
+    "dates": {
+      "announced": "2025-03-03"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series E equity",
+        "measure": "equity_raised",
+        "value": 3500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2025-03-03",
+        "to": "org_anthropic",
+        "sourceId": "src_anthropic_series_e",
+        "quote": "Anthropic has raised $3.5 billion at a $61.5 billion post-money valuation."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 61500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-03-03",
+        "sourceId": "src_anthropic_series_e",
+        "quote": "Anthropic has raised $3.5 billion at a $61.5 billion post-money valuation."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Other named investors",
+        "text": "Bessemer Venture Partners, Cisco Investments, D1 Capital Partners, Fidelity Management & Research Company, General Catalyst, Jane Street, Menlo Ventures and Salesforce Ventures, among other new and existing investors.",
+        "sourceId": "src_anthropic_series_e",
+        "quote": "The round was led by Lightspeed Venture Partners, with participation from Bessemer Venture Partners, Cisco Investments, D1 Capital Partners, Fidelity Management & Research Company, General Catalyst, Jane Street, Menlo Ventures and Salesforce Ventures, among other new and existing investors."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_anthropic_series_e"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

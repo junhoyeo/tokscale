@@ -1,0 +1,16 @@
+Logo sources for the home "Trusted by professionals at" row.
+
+- microsoft.svg, amazon.svg, google.svg, hashed.svg, toss.png: from the previous tokscale.ai landing
+  (packages/frontend/public/assets/landing/trusted-by-*), recolored to #A3ADBD.
+- bytedance.svg: the full logo (symbol and wordmark) from the header of https://www.bytedance.com/en/
+  (inline SVG, retrieved 2026-10-21), cropped to the artwork and recolored to #A3ADBD.
+- alibaba.png: the full logo (symbol and wordmark) from https://www.alibabagroup.com/en-US/
+  (902x116 PNG, retrieved 2026-10-21), recolored to #A3ADBD with its transparency kept.
+- tencent.png: the "Tencent 腾讯" logo from the header of the Chinese site https://www.tencent.com/zh-cn/
+  (wp-content/uploads/2022/12/logo@2x.png, 401x54 PNG, retrieved 2026-10-21), recolored to #A3ADBD with
+  its transparency kept.
+- intel.svg: from Simple Icons 16.35.0 (https://github.com/simple-icons/simple-icons, CC0 1.0),
+  cropped to the glyphs and recolored to #A3ADBD.
+
+All marks are trademarks of their respective owners. The row lists companies where Tokscale users
+report working; it does not claim a customer relationship or an endorsement.

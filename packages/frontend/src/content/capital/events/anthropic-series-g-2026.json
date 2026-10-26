@@ -1,0 +1,173 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_series_g",
+      "url": "https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic raises $30 billion in Series G funding at $380 billion post-money valuation",
+      "publishedAt": "2026-02-12",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_series_g_2026",
+    "slug": "anthropic-series-g-2026",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "Anthropic Series G",
+    "summary": "Anthropic raised a $30 billion Series G round led by GIC and Coatue, at a $380 billion post-money valuation. The round includes part of the investments that Microsoft and NVIDIA announced earlier.",
+    "roundLabel": "Series G",
+    "date": "2026-02-12",
+    "dates": {
+      "announced": "2026-02-12"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_gic",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_coatue",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_d_e_shaw_ventures",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_dragoneer",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_founders_fund",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_iconiq",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_mgx",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_sequoia_capital",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_microsoft",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "Part of its earlier announced investment is in this round"
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "Part of its earlier announced investment is in this round"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series G equity",
+        "measure": "equity_raised",
+        "value": 30000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-02-12",
+        "to": "org_anthropic",
+        "sourceId": "src_anthropic_series_g",
+        "quote": "We have raised $30 billion in Series G funding led by GIC and Coatue, valuing Anthropic at $380 billion post-money."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 380000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-12",
+        "sourceId": "src_anthropic_series_g",
+        "quote": "We have raised $30 billion in Series G funding led by GIC and Coatue, valuing Anthropic at $380 billion post-money."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Co-leads",
+        "text": "D. E. Shaw Ventures, Dragoneer, Founders Fund, ICONIQ and MGX co-led the round.",
+        "sourceId": "src_anthropic_series_g",
+        "quote": "The round was co-led by D. E. Shaw Ventures, Dragoneer, Founders Fund, ICONIQ, and MGX."
+      },
+      {
+        "label": "Other named investors",
+        "text": "Accel, Addition, Alpha Wave Global, Altimeter, AMP PBC, Appaloosa LP, Baillie Gifford, Bessemer Venture Partners, affiliated funds of BlackRock, Blackstone, D1 Capital Partners, Fidelity Management & Research Company, General Catalyst, Greenoaks, Growth Equity at Goldman Sachs Alternatives, Insight Partners, Jane Street, JPMorganChase through its Security and Resiliency Initiative and Growth Equity Partners, Lightspeed Venture Partners, Menlo Ventures, Morgan Stanley Investment Management, NX1 Capital, Qatar Investment Authority (QIA), Sands Capital, Sequoia Capital, Temasek, TowerBrook, TPG, Whale Rock Capital, and XN.",
+        "sourceId": "src_anthropic_series_g",
+        "quote": "Significant investors in this round include: Accel, Addition, Alpha Wave Global, Altimeter, AMP PBC, Appaloosa LP, Baillie Gifford, Bessemer Venture Partners, affiliated funds of BlackRock, Blackstone, D1 Capital Partners, Fidelity Management & Research Company, General Catalyst, Greenoaks, Growth Equity at Goldman Sachs Alternatives, Insight Partners, Jane Street, JPMorganChase through its Security and Resiliency Initiative and Growth Equity Partners, Lightspeed Venture Partners, Menlo Ventures, Morgan Stanley Investment Management, NX1 Capital, Qatar Investment Authority (QIA), Sands Capital, Sequoia Capital, Temasek, TowerBrook, TPG, Whale Rock Capital, and XN."
+      },
+      {
+        "label": "Microsoft and NVIDIA investments",
+        "text": "The round includes part of the investments that Microsoft and NVIDIA announced earlier. Anthropic does not say how much.",
+        "sourceId": "src_anthropic_series_g",
+        "quote": "This round also includes a portion of the previously announced investments from Microsoft and NVIDIA."
+      }
+    ],
+    "relations": [
+      {
+        "type": "includes",
+        "event": "evt_anthropic_microsoft_nvidia_2025",
+        "note": "Part of the Microsoft and NVIDIA investment commitments of November 18, 2025 is in this round. The size of that part is not stated."
+      }
+    ],
+    "sourceIds": [
+      "src_anthropic_series_g"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

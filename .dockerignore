@@ -32,6 +32,9 @@ docker-compose.yml
 
 # Docs and assets (not needed for the app build)
 *.md
+# Linked policy documents are inputs to the frontend notice bundle.
+!CLA.md
+!TRADEMARKS.md
 .github/
 docs/
 

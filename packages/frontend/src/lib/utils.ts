@@ -355,14 +355,135 @@ export function hexToNumber(hex: string): number {
   return parseInt(hex.replace("#", ""), 16);
 }
 
-export function isValidContributionData(data: unknown): data is TokenContributionData {
-  if (!data || typeof data !== "object") return false;
-  const d = data as Record<string, unknown>;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function withLegacyAliases(
+  value: unknown,
+  aliases: Readonly<Record<string, string>>
+): Record<string, unknown> | unknown {
+  if (!isRecord(value)) return value;
+  const normalized = { ...value };
+  for (const [current, legacy] of Object.entries(aliases)) {
+    if (normalized[current] === undefined && normalized[legacy] !== undefined) {
+      normalized[current] = normalized[legacy];
+    }
+  }
+  return normalized;
+}
+
+/** Map graph exports from before the source-to-client rename to the current viewer shape. */
+export function normalizeContributionData(data: unknown): unknown {
+  if (!isRecord(data)) return data;
+
+  const summary = withLegacyAliases(data.summary, { clients: "sources" });
+  const contributions = Array.isArray(data.contributions)
+    ? data.contributions.map((value) => {
+        const day = withLegacyAliases(value, { clients: "sources" });
+        if (isRecord(day) && Array.isArray(day.clients)) {
+          day.clients = day.clients.map((line) => withLegacyAliases(line, { client: "source" }));
+        }
+        return day;
+      })
+    : data.contributions;
+
+  return { ...data, summary, contributions };
+}
+
+function isClientType(value: unknown): value is ClientType {
   return (
-    typeof d.meta === "object" &&
-    typeof d.summary === "object" &&
-    Array.isArray(d.years) &&
-    Array.isArray(d.contributions)
+    typeof value === "string" &&
+    /^[a-z0-9][a-z0-9._/-]{0,95}$/.test(value) &&
+    !Object.prototype.hasOwnProperty.call(Object.prototype, value)
+  );
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function hasNumberFields(value: unknown, fields: readonly string[]): boolean {
+  return isRecord(value) && fields.every((field) => isFiniteNumber(value[field]));
+}
+
+function hasStringFields(value: unknown, fields: readonly string[]): boolean {
+  return isRecord(value) && fields.every((field) => typeof value[field] === "string");
+}
+
+function isTokenBreakdown(value: unknown): boolean {
+  return hasNumberFields(value, ["input", "output", "cacheRead", "cacheWrite", "reasoning"]);
+}
+
+function isClientContribution(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (
+    !isClientType(value.client) ||
+    typeof value.modelId !== "string" ||
+    !isFiniteNumber(value.cost) ||
+    !isFiniteNumber(value.messages) ||
+    !isTokenBreakdown(value.tokens)
+  ) {
+    return false;
+  }
+
+  if (value.models === undefined) return true;
+  if (!isRecord(value.models)) return false;
+  return Object.values(value.models).every((model) =>
+    hasNumberFields(model, ["tokens", "cost", "input", "output", "cacheRead", "cacheWrite", "reasoning", "messages"])
+  );
+}
+
+function isDailyContribution(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.date === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value.date) &&
+    (value.timestampMs === undefined ||
+      value.timestampMs === null ||
+      (isFiniteNumber(value.timestampMs) && Number.isFinite(new Date(value.timestampMs).getTime()))) &&
+    isFiniteNumber(value.intensity) &&
+    Number.isInteger(value.intensity) &&
+    value.intensity >= 0 &&
+    value.intensity <= 4 &&
+    hasNumberFields(value.totals, ["tokens", "cost", "messages"]) &&
+    isTokenBreakdown(value.tokenBreakdown) &&
+    Array.isArray(value.clients) &&
+    value.clients.every(isClientContribution)
+  );
+}
+
+export function isValidContributionData(data: unknown): data is TokenContributionData {
+  if (!isRecord(data) || !isRecord(data.meta) || !isRecord(data.summary)) return false;
+
+  return (
+    typeof data.meta.generatedAt === "string" &&
+    typeof data.meta.version === "string" &&
+    hasStringFields(data.meta.dateRange, ["start", "end"]) &&
+    hasNumberFields(data.summary, [
+      "totalTokens",
+      "totalCost",
+      "totalDays",
+      "activeDays",
+      "averagePerDay",
+      "maxCostInSingleDay",
+    ]) &&
+    Array.isArray(data.summary.clients) &&
+    data.summary.clients.every(isClientType) &&
+    Array.isArray(data.summary.models) &&
+    data.summary.models.every((model) => typeof model === "string") &&
+    Array.isArray(data.years) &&
+    data.years.every(
+      (year) =>
+        isRecord(year) &&
+        typeof year.year === "string" &&
+        /^\d{4}$/.test(year.year) &&
+        isFiniteNumber(year.totalTokens) &&
+        isFiniteNumber(year.totalCost) &&
+        hasStringFields(year.range, ["start", "end"])
+    ) &&
+    Array.isArray(data.contributions) &&
+    data.contributions.every(isDailyContribution)
   );
 }
 

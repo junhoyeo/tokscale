@@ -1,0 +1,133 @@
+{
+  "sources": [
+    {
+      "id": "src_fluidstack_form_d_a_2026_05_12",
+      "url": "https://www.sec.gov/Archives/edgar/data/2104151/000090679126000077/primary_doc.xml",
+      "publisher": "SEC EDGAR (Fluidstack Ltd)",
+      "type": "sec_filing",
+      "title": "Fluidstack Ltd Form D/A (amendment), filed May 12, 2026",
+      "publishedAt": "2026-05-12",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "D/A",
+        "accession": "0000906791-26-000077",
+        "cik": "0002104151",
+        "filedAt": "2026-05-12"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_fluidstack_form_d_amendment_2026_05",
+    "slug": "fluidstack-form-d-amendment-2026-05",
+    "kind": "filing",
+    "types": [
+      "form_d"
+    ],
+    "title": "Fluidstack Form D/A amendment (filed May 2026)",
+    "summary": "Fluidstack amended its January 2026 Form D notice for the equity offering that began on January 10, 2026. The amendment reports higher offering and sold amounts and more investors.",
+    "date": "2026-05-12",
+    "dates": {
+      "filed": "2026-05-12"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_fluidstack",
+        "roles": [
+          "issuer",
+          "filer"
+        ],
+        "note": "Fluidstack Ltd"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "offering",
+        "label": "Total offering amount",
+        "measure": "form_d_offering_amount",
+        "value": 849999997,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-05-12",
+        "to": "org_fluidstack",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<totalOfferingAmount>849999997</totalOfferingAmount>"
+      },
+      {
+        "id": "sold",
+        "label": "Total amount sold",
+        "measure": "form_d_amount_sold",
+        "value": 842478689,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-05-12",
+        "to": "org_fluidstack",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<totalAmountSold>842478689</totalAmountSold>"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "investors",
+        "label": "Investors who have already invested",
+        "measure": "investors",
+        "value": 30,
+        "basis": "exact",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<totalNumberAlreadyInvested>30</totalNumberAlreadyInvested>"
+      }
+    ],
+    "facts": [
+      {
+        "label": "First sale",
+        "text": "January 10, 2026.",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<dateOfFirstSale> <value>2026-01-10</value> </dateOfFirstSale>"
+      },
+      {
+        "label": "Exemption",
+        "text": "Rule 506(b) of Regulation D.",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<federalExemptionsExclusions> <item>06b</item> </federalExemptionsExclusions>"
+      },
+      {
+        "label": "Security type",
+        "text": "Equity.",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<isEquityType>true</isEquityType>"
+      },
+      {
+        "label": "Amendment",
+        "text": "Amends the Form D with accession number 0000906791-26-000010.",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<isAmendment>true</isAmendment> <previousAccessionNumber>0000906791-26-000010</previousAccessionNumber>"
+      },
+      {
+        "label": "Sales commissions",
+        "text": "$5,050,000 in sales commissions.",
+        "sourceId": "src_fluidstack_form_d_a_2026_05_12",
+        "quote": "<salesCommissions> <dollarAmount>5050000</dollarAmount> </salesCommissions>"
+      }
+    ],
+    "relations": [
+      {
+        "type": "amends",
+        "event": "evt_fluidstack_form_d_2026_01",
+        "note": "Amends the Form D filed on January 23, 2026."
+      },
+      {
+        "type": "includes",
+        "event": "evt_fluidstack_form_d_2026_01",
+        "note": "The amended amounts replace the amounts in the original notice for the same offering."
+      }
+    ],
+    "sourceIds": [
+      "src_fluidstack_form_d_a_2026_05_12"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

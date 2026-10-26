@@ -10,6 +10,8 @@ import {
 } from "@/lib/db/usernameLookup";
 import type { ModerationAction } from "@/lib/db/schema";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
+import { expireExploreCache } from "@/lib/explore/cache";
+import { advanceExploreCacheRevision } from "@/lib/explore/revision";
 
 export interface ModerationTarget {
   id: string;
@@ -92,6 +94,7 @@ export async function applyModerationAction(params: {
       reason,
     });
 
+    await advanceExploreCacheRevision(tx);
     return updatedTarget.username;
   });
 
@@ -108,9 +111,16 @@ export async function applyModerationAction(params: {
  * Best-effort by design: the write has already committed, so a revalidation
  * failure must not surface as a failed moderation action. Worst case the
  * change appears after the existing TTLs expire (60s for the leaderboard and
- * profiles, an hour for the sitemap).
+ * profiles, ten minutes for explore, an hour for the sitemap). Explore uses
+ * immediate expiration so successful invalidation never serves hidden users
+ * through stale-while-revalidate.
  */
 async function invalidateAfterModeration(userId: string, username: string): Promise<void> {
+  try {
+    expireExploreCache();
+  } catch (error) {
+    console.error("[moderation] explore cache revalidation failed:", error);
+  }
   try {
     // Every leaderboard cache entry carries this tag, including the per-period
     // ones, so one call covers all of them.

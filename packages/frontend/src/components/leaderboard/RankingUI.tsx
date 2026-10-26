@@ -160,10 +160,20 @@ const MobileRankingLink = styled(Link)<{ $current: boolean }>`
   background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "transparent"};
   color: inherit;
   text-decoration: none;
+  transition: background-color 120ms ease;
+
+  /* The row is one link: the same hover as other row links (globals.css). */
+  &:hover {
+    background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "var(--v2-row-hover)"};
+  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
     outline-offset: -2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
   }
 `;
 

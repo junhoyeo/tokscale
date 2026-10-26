@@ -3,8 +3,7 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import styled, { keyframes } from "styled-components";
 import type { DailyContribution, GraphColorPalette, TooltipPosition } from "@/lib/types";
-import { getGradeColor } from "@/lib/themes";
-import { useSystemDarkMode } from "@/lib/useMediaQuery";
+import { DARK_GRAPH_EMPTY_CUBE, getDarkGraphColor } from "@/lib/darkGraphColors";
 import { groupByWeek, hexToNumber, formatCurrency, formatTokenCount } from "@/lib/utils";
 import { formatContributionDate } from "@/lib/date-utils";
 import { CUBE_SIZE, MAX_CUBE_HEIGHT, MIN_CUBE_HEIGHT, ISO_CANVAS_WIDTH, ISO_CANVAS_HEIGHT } from "@/lib/constants";
@@ -19,101 +18,150 @@ const LoadingContainer = styled.div`
   align-items: center;
   justify-content: center;
   width: 100%;
+  color: var(--service-text-muted);
+  font-size: 14px;
 `;
 
 const LoadingText = styled.div`
   animation: ${pulse} 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
 `;
 
+/* The stats float over the empty corners of the isometric view. When the card is too narrow for
+   that, they move below the canvas instead of covering the cubes. */
 const Container = styled.div.attrs({ className: "ic-contributions-wrapper" })`
-  position: relative;
   width: 100%;
+  container-type: inline-size;
+`;
+
+const Stage = styled.div`
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 `;
 
 const StyledCanvas = styled.canvas`
-  cursor: pointer;
+  flex: 1 1 100%;
   width: 100%;
+  max-width: 100%;
   height: auto;
+  cursor: pointer;
 `;
 
-const TopRightStats = styled.div`
+const StatsGroup = styled.div`
   position: absolute;
-  top: 12px;
-  right: 20px;
+  min-width: 0;
+
+  @container (max-width: 760px) {
+    position: static;
+    flex: 1 1 260px;
+  }
 `;
 
-const BottomLeftStats = styled.div`
-  position: absolute;
-  bottom: 24px;
-  left: 20px;
+const TopRightStats = styled(StatsGroup)`
+  top: 0;
+  right: 0;
 `;
 
-const StatsTitle = styled.h5`
-  margin-bottom: 4px;
-  font-size: 14px;
+const BottomLeftStats = styled(StatsGroup)`
+  bottom: 0;
+  left: 0;
+`;
+
+const StatsTitle = styled.h3`
+  margin: 0 0 6px;
+  color: var(--service-text);
+  font-size: 13px;
   font-weight: 600;
 `;
 
 const StatsBox = styled.div`
   display: flex;
-  justify-content: space-between;
-  border-radius: 6px;
-  border-width: 1px;
-  border-style: solid;
-  padding-left: 4px;
-  padding-right: 4px;
-  
-  @media (min-width: 768px) {
-    padding-left: 8px;
-    padding-right: 8px;
-  }
+  flex-wrap: wrap;
+  overflow: hidden;
+  border: 1px solid var(--service-border);
+  border-radius: 10px;
+  background: rgba(13, 16, 22, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 `;
 
 const StatItem = styled.div`
-  padding: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 12px;
+
+  & + & {
+    border-left: 1px solid var(--service-border);
+  }
 `;
 
-const HiddenStatItem = styled(StatItem)`
+const TokensStatItem = styled(StatItem)`
   display: none;
-  @media (min-width: 1280px) {
+
+  @container (min-width: 1000px) {
+    display: block;
+  }
+
+  @container (max-width: 760px) {
     display: block;
   }
 `;
 
-const StatValue = styled.span`
+const StatValue = styled.span<{ $emphasis?: boolean }>`
   display: block;
-  font-size: 24px;
-  font-weight: 700;
+  color: ${({ $emphasis }) => ($emphasis ? "var(--v2-numeric)" : "var(--service-text)")};
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
   line-height: 1.25;
+  white-space: nowrap;
+
+  @container (max-width: 760px) {
+    font-size: 18px;
+  }
 `;
 
 const StatLabel = styled.span`
   display: block;
+  margin-top: 2px;
+  color: var(--service-text);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 500;
 `;
 
 const StatSubtext = styled.span`
-  display: none;
+  display: block;
+  color: var(--service-text-muted);
   font-size: 12px;
-  
-  @media (min-width: 640px) {
-    display: block;
-  }
+  white-space: nowrap;
 `;
 
 const StatsFooter = styled.p`
-  margin-top: 4px;
-  text-align: right;
+  margin: 6px 0 0;
+  color: var(--service-text-muted);
   font-size: 12px;
+  text-align: right;
+
+  @container (max-width: 760px) {
+    text-align: left;
+  }
 `;
 
 const SpanBase = styled.span`
-  font-size: 16px;
+  font-size: 14px;
+  font-weight: 500;
 `;
 
 const SpanBold = styled.span`
-  font-weight: 700;
+  color: var(--service-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 `;
 
 interface TokenGraph3DProps {
@@ -153,7 +201,6 @@ export function TokenGraph3D({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const obeliskRef = useRef<any>(null);
   const weeksData = useMemo(() => groupByWeek(contributions, year), [contributions, year]);
-  const isDark = useSystemDarkMode();
 
   useEffect(() => {
     async function loadObelisk() {
@@ -182,8 +229,8 @@ export function TokenGraph3D({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.fillStyle = isDark ? "#10121C" : "#FFFFFF";
-    ctx.fillRect(0, 0, ISO_CANVAS_WIDTH, ISO_CANVAS_HEIGHT);
+    // Transparent: the card's surface shows through, as in the 2D view.
+    ctx.clearRect(0, 0, ISO_CANVAS_WIDTH, ISO_CANVAS_HEIGHT);
 
     const point = new obelisk.Point(130, 90);
     const pixelView = new obelisk.PixelView(canvas, point);
@@ -208,10 +255,7 @@ export function TokenGraph3D({
         }
 
         const intensity = day?.intensity ?? 0;
-        const colorHex = getGradeColor(palette, intensity);
-        const resolvedColor = colorHex.startsWith("var(") 
-          ? (isDark ? "#1A212A" : "#EBEDF0") 
-          : colorHex;
+        const resolvedColor = intensity > 0 ? getDarkGraphColor(palette, intensity) : DARK_GRAPH_EMPTY_CUBE;
         const colorNum = hexToNumber(resolvedColor);
 
         const dimension = new obelisk.CubeDimension(CUBE_SIZE, CUBE_SIZE, Math.max(cubeHeight, MIN_CUBE_HEIGHT));
@@ -222,7 +266,7 @@ export function TokenGraph3D({
         pixelView.renderObject(cube, p3d);
       }
     }
-  }, [obeliskLoaded, palette, maxTokens, weeksData, isDark]);
+  }, [obeliskLoaded, palette, maxTokens, weeksData]);
 
   const getDayAtPosition = useCallback(
     (clientX: number, clientY: number): { day: DailyContribution | null; position: TooltipPosition } | null => {
@@ -271,68 +315,63 @@ export function TokenGraph3D({
 
   if (!obeliskLoaded) {
     return (
-      <LoadingContainer
-        ref={containerRef}
-        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}`, backgroundColor: isDark ? "#10121C" : "#FFFFFF" }}
-      >
-        <LoadingText style={{ color: isDark ? "#4B6486" : "#656D76" }}>Loading 3D view...</LoadingText>
+      <LoadingContainer ref={containerRef} style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}` }}>
+        <LoadingText>Loading 3D view...</LoadingText>
       </LoadingContainer>
     );
   }
 
   return (
     <Container ref={containerRef}>
-      <StyledCanvas
-        ref={canvasRef}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => onDayHover(null, null)}
-        onClick={handleClick}
-        style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}` }}
-      />
+      <Stage>
+        <StyledCanvas
+          ref={canvasRef}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => onDayHover(null, null)}
+          onClick={handleClick}
+          style={{ aspectRatio: `${ISO_CANVAS_WIDTH} / ${ISO_CANVAS_HEIGHT}` }}
+        />
 
-      <TopRightStats>
-        <StatsTitle style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Token Usage</StatsTitle>
-        <StatsBox
-          style={{ borderColor: isDark ? "#1E2733" : "#D0D7DE", backgroundColor: isDark ? "#1A212A" : "#FFFFFF" }}
-        >
-          <StatItem>
-            <StatValue style={{ color: palette.grade1 }}>{formatCurrency(totalCost)}</StatValue>
-            <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Total</StatLabel>
-            <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{dateRange.start} → {dateRange.end}</StatSubtext>
-          </StatItem>
-          <HiddenStatItem>
-            <StatValue style={{ color: palette.grade1 }}>{formatTokenCount(totalTokens)}</StatValue>
-            <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Tokens</StatLabel>
-            <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{activeDays} active days</StatSubtext>
-          </HiddenStatItem>
-          {bestDay && (
+        <TopRightStats>
+          <StatsTitle>Token usage</StatsTitle>
+          <StatsBox>
             <StatItem>
-              <StatValue style={{ color: palette.grade1 }}>{formatCurrency(bestDay.totals.cost)}</StatValue>
-              <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Best day</StatLabel>
-              <StatSubtext style={{ color: isDark ? "#4B6486" : "#656D76" }}>{formatContributionDate(bestDay).split(",")[0]}</StatSubtext>
+              <StatValue $emphasis>{formatCurrency(totalCost)}</StatValue>
+              <StatLabel>Total</StatLabel>
+              <StatSubtext>{dateRange.start} → {dateRange.end}</StatSubtext>
             </StatItem>
-          )}
-        </StatsBox>
-        <StatsFooter style={{ color: isDark ? "#4B6486" : "#656D76" }}>
-          Average: <SpanBold style={{ color: palette.grade1 }}>{formatCurrency(activeDays > 0 ? totalCost / activeDays : 0)}</SpanBold> / day
-        </StatsFooter>
-      </TopRightStats>
+            <TokensStatItem>
+              <StatValue>{formatTokenCount(totalTokens)}</StatValue>
+              <StatLabel>Tokens</StatLabel>
+              <StatSubtext>{activeDays} active days</StatSubtext>
+            </TokensStatItem>
+            {bestDay && (
+              <StatItem>
+                <StatValue>{formatCurrency(bestDay.totals.cost)}</StatValue>
+                <StatLabel>Best day</StatLabel>
+                <StatSubtext>{formatContributionDate(bestDay).split(",")[0]}</StatSubtext>
+              </StatItem>
+            )}
+          </StatsBox>
+          <StatsFooter>
+            Average: <SpanBold>{formatCurrency(activeDays > 0 ? totalCost / activeDays : 0)}</SpanBold> / day
+          </StatsFooter>
+        </TopRightStats>
 
-      <BottomLeftStats>
-        <StatsTitle style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Streaks</StatsTitle>
-        <StatsBox
-          style={{ borderColor: isDark ? "#1E2733" : "#D0D7DE", backgroundColor: isDark ? "#1A212A" : "#FFFFFF" }}
-        >
-          <StatItem>
-            <StatValue style={{ color: palette.grade1 }}>{longestStreak} <SpanBase>days</SpanBase></StatValue>
-            <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Longest</StatLabel>
-          </StatItem>
-          <StatItem>
-            <StatValue style={{ color: palette.grade1 }}>{currentStreak} <SpanBase>days</SpanBase></StatValue>
-            <StatLabel style={{ color: isDark ? "#FFFFFF" : "#1F2328" }}>Current</StatLabel>
-          </StatItem>
-        </StatsBox>
-      </BottomLeftStats>
+        <BottomLeftStats>
+          <StatsTitle>Streaks</StatsTitle>
+          <StatsBox>
+            <StatItem>
+              <StatValue>{longestStreak} <SpanBase>days</SpanBase></StatValue>
+              <StatLabel>Longest</StatLabel>
+            </StatItem>
+            <StatItem>
+              <StatValue>{currentStreak} <SpanBase>days</SpanBase></StatValue>
+              <StatLabel>Current</StatLabel>
+            </StatItem>
+          </StatsBox>
+        </BottomLeftStats>
+      </Stage>
     </Container>
   );
 }

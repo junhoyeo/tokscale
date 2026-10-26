@@ -1,0 +1,404 @@
+{
+  "retrieved": "2026-10-21",
+  "note": "Icons from the logo column of README.md's Overview table, resized to 64x64 tiles (transparent ones on white, wide ones fitted into the square). 9router.svg is the favicon of https://9router.com because the README has no 9Router row.",
+  "files": {
+    "client-aside.webp": {
+      "clients": [
+        "aside"
+      ],
+      "source": ".github/assets/client-aside.png",
+      "readme_row": "Aside"
+    },
+    "client-opencode.webp": {
+      "clients": [
+        "opencode"
+      ],
+      "source": ".github/assets/client-opencode.png",
+      "readme_row": "OpenCode"
+    },
+    "client-claude.webp": {
+      "clients": [
+        "claude"
+      ],
+      "source": ".github/assets/client-claude.jpg",
+      "readme_row": "Claude Code"
+    },
+    "client-openai.webp": {
+      "clients": [
+        "codex"
+      ],
+      "source": ".github/assets/client-openai.jpg",
+      "readme_row": "Codex CLI"
+    },
+    "gh-minimax-ai.webp": {
+      "clients": [
+        "mcode"
+      ],
+      "source": "https://github.com/MiniMax-AI.png",
+      "readme_row": "MiniMax Code"
+    },
+    "client-copilot.webp": {
+      "clients": [
+        "copilot"
+      ],
+      "source": ".github/assets/client-copilot.jpg",
+      "readme_row": "GitHub Copilot CLI"
+    },
+    "client-gemini.webp": {
+      "clients": [
+        "gemini"
+      ],
+      "source": ".github/assets/client-gemini.png",
+      "readme_row": "Gemini CLI"
+    },
+    "client-cursor.webp": {
+      "clients": [
+        "cursor"
+      ],
+      "source": ".github/assets/client-cursor.jpg",
+      "readme_row": "Cursor IDE"
+    },
+    "client-amp.webp": {
+      "clients": [
+        "amp"
+      ],
+      "source": ".github/assets/client-amp.png",
+      "readme_row": "Amp (AmpCode)"
+    },
+    "client-codebuff.webp": {
+      "clients": [
+        "codebuff"
+      ],
+      "source": ".github/assets/client-codebuff.png",
+      "readme_row": "Codebuff"
+    },
+    "client-freebuff.webp": {
+      "clients": [
+        "freebuff"
+      ],
+      "source": ".github/assets/client-freebuff.png",
+      "readme_row": "Freebuff"
+    },
+    "client-droid.webp": {
+      "clients": [
+        "droid"
+      ],
+      "source": ".github/assets/client-droid.png",
+      "readme_row": "Droid (Factory Droid)"
+    },
+    "client-openclaw.webp": {
+      "clients": [
+        "openclaw"
+      ],
+      "source": ".github/assets/client-openclaw.jpg",
+      "readme_row": "OpenClaw"
+    },
+    "client-hermes.webp": {
+      "clients": [
+        "hermes"
+      ],
+      "source": ".github/assets/client-hermes.png",
+      "readme_row": "Hermes Agent"
+    },
+    "client-pi.webp": {
+      "clients": [
+        "pi"
+      ],
+      "source": ".github/assets/client-pi.png",
+      "readme_row": "Pi"
+    },
+    "client-kimi.webp": {
+      "clients": [
+        "kimi"
+      ],
+      "source": ".github/assets/client-kimi.png",
+      "readme_row": "Kimi CLI"
+    },
+    "client-qwen.webp": {
+      "clients": [
+        "qwen"
+      ],
+      "source": ".github/assets/client-qwen.png",
+      "readme_row": "Qwen CLI"
+    },
+    "client-roocode.webp": {
+      "clients": [
+        "roocode"
+      ],
+      "source": ".github/assets/client-roocode.png",
+      "readme_row": "Roo Code"
+    },
+    "client-kilocode.webp": {
+      "clients": [
+        "kilocode",
+        "kilo"
+      ],
+      "source": ".github/assets/client-kilocode.png",
+      "readme_row": "Kilo"
+    },
+    "client-mux.webp": {
+      "clients": [
+        "mux"
+      ],
+      "source": ".github/assets/client-mux.png",
+      "readme_row": "Mux"
+    },
+    "gh-kirodotdev.webp": {
+      "clients": [
+        "kiro"
+      ],
+      "source": "https://github.com/kirodotdev.png",
+      "readme_row": "Kiro"
+    },
+    "client-crush.webp": {
+      "clients": [
+        "crush"
+      ],
+      "source": ".github/assets/client-crush.png",
+      "readme_row": "Crush"
+    },
+    "client-goose.webp": {
+      "clients": [
+        "goose"
+      ],
+      "source": ".github/assets/client-goose.png",
+      "readme_row": "Goose"
+    },
+    "client-antigravity.webp": {
+      "clients": [
+        "antigravity",
+        "antigravity-cli",
+        "antigravity-extension"
+      ],
+      "source": ".github/assets/client-antigravity.png",
+      "readme_row": "Antigravity IDE Extension"
+    },
+    "client-zed.webp": {
+      "clients": [
+        "zed"
+      ],
+      "source": ".github/assets/client-zed.webp",
+      "readme_row": "Zed Agent"
+    },
+    "client-trae.webp": {
+      "clients": [
+        "trae"
+      ],
+      "source": ".github/assets/client-trae.png",
+      "readme_row": "Trae IDE"
+    },
+    "gh-warpdotdev.webp": {
+      "clients": [
+        "warp"
+      ],
+      "source": "https://github.com/warpdotdev.png",
+      "readme_row": "Warp"
+    },
+    "gh-cline.webp": {
+      "clients": [
+        "cline"
+      ],
+      "source": "https://github.com/cline.png",
+      "readme_row": "Cline"
+    },
+    "client-synthetic.webp": {
+      "clients": [
+        "synthetic",
+        "reasonix"
+      ],
+      "source": ".github/assets/client-synthetic.png",
+      "readme_row": "Reasonix"
+    },
+    "github-com-7246e920-f3f8-4b6e-847e-030ae04e86c2.webp": {
+      "clients": [
+        "gjc"
+      ],
+      "source": "https://github.com/user-attachments/assets/7246e920-f3f8-4b6e-847e-030ae04e86c2",
+      "readme_row": "gajae-code (gjc)"
+    },
+    "9router.svg": {
+      "clients": [
+        "9router"
+      ],
+      "source": "https://9router.com/ (favicon, inline SVG)",
+      "readme_row": null
+    },
+    "gh-xai-org.webp": {
+      "clients": [
+        "grok"
+      ],
+      "source": "https://github.com/xai-org.png",
+      "readme_row": "Grok Build"
+    },
+    "client-jcode.webp": {
+      "clients": [
+        "jcode"
+      ],
+      "source": ".github/assets/client-jcode.png",
+      "readme_row": "Jcode"
+    },
+    "raw-githubusercontent-com-command-code-logo-black-bg.webp": {
+      "clients": [
+        "commandcode"
+      ],
+      "source": "https://raw.githubusercontent.com/CommandCodeAI/command-code/main/.github/commandcode/logo/command-code-logo-black-bg.png",
+      "readme_row": "Command Code"
+    },
+    "gh-xiaomimimo.webp": {
+      "clients": [
+        "micode"
+      ],
+      "source": "https://github.com/XiaomiMiMo.png",
+      "readme_row": "MiMo Code"
+    },
+    "gh-jetbrains.webp": {
+      "clients": [
+        "junie"
+      ],
+      "source": "https://github.com/JetBrains.png",
+      "readme_row": "Junie"
+    },
+    "gh-zai-org.webp": {
+      "clients": [
+        "zcode"
+      ],
+      "source": "https://github.com/zai-org.png",
+      "readme_row": "ZCode"
+    },
+    "gh-alibaba.webp": {
+      "clients": [
+        "opencodereview"
+      ],
+      "source": "https://github.com/alibaba.png",
+      "readme_row": "OpenCodeReview"
+    },
+    "pc3-gtimg-com-43068-48-1764842447.webp": {
+      "clients": [
+        "codebuddy"
+      ],
+      "source": "https://pc3.gtimg.com/softmgr/logo/48/43068_48_1764842447.png",
+      "readme_row": "CodeBuddy"
+    },
+    "static-workbuddy-cn-share-logo.webp": {
+      "clients": [
+        "workbuddy"
+      ],
+      "source": "https://static.workbuddy.cn/web/agents/008054d6beaaf4a83e2d049e982e1244560726dc/assets/share-logo.png",
+      "readme_row": "WorkBuddy"
+    },
+    "client-devin.webp": {
+      "clients": [
+        "devin-cli",
+        "devin-desktop"
+      ],
+      "source": ".github/assets/client-devin.jpg",
+      "readme_row": "Devin Desktop"
+    },
+    "client-senpi.webp": {
+      "clients": [
+        "senpi"
+      ],
+      "source": ".github/assets/client-senpi.png",
+      "readme_row": "Senpi (OmO Native)"
+    },
+    "gh-augmentcode.webp": {
+      "clients": [
+        "augment"
+      ],
+      "source": "https://github.com/augmentcode.png",
+      "readme_row": "Augment Code"
+    },
+    "gh-getkimchi.webp": {
+      "clients": [
+        "kimchi"
+      ],
+      "source": "https://github.com/getkimchi.png",
+      "readme_row": "Kimchi Coding"
+    },
+    "gh-primeintellect-ai.webp": {
+      "clients": [
+        "prime-agent"
+      ],
+      "source": "https://github.com/PrimeIntellect-ai.png",
+      "readme_row": "Prime Agent"
+    },
+    "client-cherrystudio.webp": {
+      "clients": [
+        "cherrystudio"
+      ],
+      "source": ".github/assets/client-cherrystudio.png",
+      "readme_row": "Cherry Studio"
+    },
+    "gh-deepseek-ai.webp": {
+      "clients": [
+        "dsh"
+      ],
+      "source": "https://github.com/deepseek-ai.png",
+      "readme_row": "DeepSeek Harness"
+    },
+    "client-fx.webp": {
+      "clients": [
+        "fx"
+      ],
+      "source": ".github/assets/client-fx.png",
+      "readme_row": "fx"
+    },
+    "omp-sh-favicon-180x180.webp": {
+      "clients": [
+        "omp"
+      ],
+      "source": "https://omp.sh/favicon-180x180.png",
+      "readme_row": "omp (Oh My Pi)"
+    },
+    "gh-lmstudio-ai.webp": {
+      "clients": [
+        "lmstudio"
+      ],
+      "source": "https://github.com/lmstudio-ai.png",
+      "readme_row": "LM Studio"
+    },
+    "gh-unslothai.webp": {
+      "clients": [
+        "unsloth"
+      ],
+      "source": "https://github.com/unslothai.png",
+      "readme_row": "Unsloth Studio"
+    },
+    "client-hindsight.webp": {
+      "clients": [
+        "hindsight"
+      ],
+      "source": ".github/assets/client-hindsight.png",
+      "readme_row": "Hindsight"
+    },
+    "client-micode-desktop.webp": {
+      "clients": [
+        "micode-desktop"
+      ],
+      "source": ".github/assets/client-micode-desktop.png",
+      "readme_row": "Xiaomi MiMo AI (desktop)"
+    },
+    "gh-meta-models.webp": {
+      "clients": [
+        "muse"
+      ],
+      "source": "https://github.com/meta-models.png",
+      "readme_row": "Muse Code"
+    },
+    "gh-mistralai.webp": {
+      "clients": [
+        "vibe"
+      ],
+      "source": "https://github.com/mistralai.png",
+      "readme_row": "Mistral Vibe"
+    },
+    "raw-githubusercontent-com-proma-icon.webp": {
+      "clients": [
+        "proma"
+      ],
+      "source": "https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png",
+      "readme_row": "Proma",
+      "retrieved": "2026-10-25"
+    }
+  }
+}

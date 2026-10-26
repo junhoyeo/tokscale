@@ -2,6 +2,12 @@
 
 Thanks for your interest in improving Tokscale. This guide covers the development workflow and the most common contribution — adding support for a new AI coding client. For commit-message and pull-request conventions, see [`AGENTS.md`](./AGENTS.md).
 
+## Licensing and the CLA
+
+- The CLI and core library (`crates/`) are under the [MIT License](./LICENSE). The web app (`packages/frontend`) is under the GNU AGPL v3.0; see [`packages/frontend/LICENSING.md`](./packages/frontend/LICENSING.md).
+- Pull requests that change `packages/frontend` need a one-time signature of the [Contributor License Agreement](./CLA.md). The CLA check comments on your pull request with instructions. A new client integration changes the frontend, so it needs the signature too. Post the exact signing sentence as the whole comment, without quotes or extra text. The check also runs on signing comments and `recheck`, but never requests a CLA for changes outside the frontend. Maintainers must complete the [branch and JSON storage setup](./docs/cla-setup.md) before enabling it.
+- Do not include code or data that you cannot license under these terms.
+
 ## Development setup
 
 Tokscale is a Cargo workspace (the `tokscale` CLI and its core library) plus a Next.js web frontend.

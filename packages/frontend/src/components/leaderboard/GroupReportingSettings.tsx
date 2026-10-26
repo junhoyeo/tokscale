@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import styled from "styled-components";
 import { SecondaryButton } from "./RankingUI";
+import { Select } from "@/components/ui/Select";
 import { COMMON_TIMEZONE_GROUPS, isValidTimeZone } from "@/lib/timezone";
 
 interface GroupReportingSettingsProps {
@@ -13,6 +14,7 @@ interface GroupReportingSettingsProps {
 }
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const WEEKDAY_OPTIONS = WEEKDAYS.map((day, index) => ({ value: String(index), label: day }));
 
 const Panel = styled.section`
   display: grid;
@@ -28,13 +30,19 @@ const Panel = styled.section`
 `;
 
 const Controls = styled.div`
+  --select-height: 44px;
+  --select-padding-x: 8px;
+  --select-font-size: 0.875rem;
+  --select-background: var(--service-surface);
+  --select-border-color: var(--service-border-strong);
+
   display: flex;
   max-width: 100%;
   flex-wrap: wrap;
   align-items: end;
   gap: 12px;
   label { display: grid; max-width: 100%; gap: 6px; color: var(--service-text-muted); font-size: 0.8125rem; }
-  select, input {
+  input {
     min-height: 44px;
     max-width: 100%;
     padding: 8px;
@@ -45,7 +53,7 @@ const Controls = styled.div`
     font-size: 0.875rem;
     color-scheme: dark;
   }
-  select:focus-visible, input:focus-visible { outline: 2px solid var(--service-focus); }
+  input:focus-visible { outline: 2px solid var(--service-focus); }
 `;
 
 export function GroupReportingSettings({ slug, timeZone, weekStartsOn, onChanged }: GroupReportingSettingsProps) {
@@ -106,9 +114,13 @@ export function GroupReportingSettings({ slug, timeZone, weekStartsOn, onChanged
             </datalist>
           </label>
           <label>Week starts on
-            <select aria-label="Week starts on" value={selectedWeekStart} onChange={(event) => setSelectedWeekStart(Number(event.target.value))} disabled={pending}>
-              {WEEKDAYS.map((day, index) => <option key={day} value={index}>{day}</option>)}
-            </select>
+            <Select
+              aria-label="Week starts on"
+              value={String(selectedWeekStart)}
+              options={WEEKDAY_OPTIONS}
+              onChange={(next) => setSelectedWeekStart(Number(next))}
+              disabled={pending}
+            />
           </label>
           <SecondaryButton type="submit" disabled={pending || !isValidTimeZone(selectedTimeZone) || (selectedTimeZone === timeZone && selectedWeekStart === weekStartsOn)}>Save calendar</SecondaryButton>
         </Controls>

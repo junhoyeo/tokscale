@@ -1,5 +1,5 @@
 import { Navigation } from "@/components/layout/Navigation";
-import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 
 /**
  * Shell for legal/informational pages.
@@ -26,7 +26,7 @@ export function LegalPageShell({
           {children}
         </article>
       </main>
-      <ServiceFooter />
+      <PublicFooter />
     </div>
   );
 }

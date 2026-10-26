@@ -27,7 +27,7 @@
 [![GitHub Forks](https://img.shields.io/github/forks/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/network/members)
 [![GitHub Stars](https://img.shields.io/github/stars/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/issues)
-[![License](https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/blob/master/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20%2B%20AGPL--3.0-white?labelColor=black&style=flat-square)](#ライセンス)
 [![Coverage](https://raw.githubusercontent.com/junhoyeo/tokscale/refs/heads/main/.github/badges/coverage.svg)](https://github.com/junhoyeo/tokscale/issues/403)
 
 [🇺🇸 English](README.md) | [🇰🇷 한국어](README.ko.md) | [🇯🇵 日本語](README.ja.md) | [🇨🇳 简体中文](README.zh-cn.md)
@@ -2113,7 +2113,9 @@ Tokscaleは[LiteLLMの価格データベース](https://github.com/BerriAI/litel
 </p>
 
 <p align="center">
-  <strong>MIT © <a href="https://github.com/junhoyeo">Junho Yeo</a></strong>
+  <strong>CLI・コア: MIT © <a href="https://github.com/junhoyeo">Junho Yeo</a> · Web アプリ: AGPL-3.0</strong>
 </p>
+
+CLI とコアライブラリ（`crates/`）は [MIT ライセンス](LICENSE) です。`packages/frontend` の Web アプリは [GNU AGPL v3.0](packages/frontend/LICENSE) で、対象範囲は [`LICENSING.md`](packages/frontend/LICENSING.md) にまとめています。`packages/frontend/src/content` にある Tokscale がまとめたデータは [CC BY 4.0](packages/frontend/src/content/LICENSE.md) です。Tokscale の名前とロゴは[商標ポリシー](TRADEMARKS.md)に従います。
 
 このプロジェクトが興味深いと感じたら、**スターを付けてください ⭐** または[GitHubでフォロー](https://github.com/junhoyeo)して旅に参加してください（すでに1.1k以上が乗船中）。私は24時間コーディングし、定期的に驚くべきものを出荷しています—あなたのサポートは無駄になりません。
