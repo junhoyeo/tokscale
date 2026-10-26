@@ -1325,7 +1325,7 @@ fn parse_all_messages_deferred(
 fn codex_missing_usage_warning(missing_files: usize, inspected_files: usize) -> Option<String> {
     (missing_files > 0).then(|| {
         format!(
-            "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients (e.g. legacy pre-Sept 2026 rollouts or interrupted sessions without model output). Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
+            "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients (for example, sessions interrupted before a usage event was recorded). Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
         )
     })
 }
