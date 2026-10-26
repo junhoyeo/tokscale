@@ -406,7 +406,7 @@ pub fn has_credentials() -> bool {
     credentials_path().exists() || read_keychain().is_ok()
 }
 
-/// How [`fetch_blocking`] obtains Claude Code's credential document. Injected
+/// How [`fetch_policy`] obtains Claude Code's credential document. Injected
 /// so tests can also drive the Keychain-sourced shape -- credentials present,
 /// no file on disk -- which no test can produce through [`read_credentials`]
 /// because the Keychain is a real macOS service.
