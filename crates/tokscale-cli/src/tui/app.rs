@@ -5191,6 +5191,34 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_initial_tab_schedules_background_load() {
+        let app = App::new_with_cached_data(
+            TuiConfig {
+                initial_tab: Some(Tab::Usage),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(app.current_tab, Tab::Usage);
+        assert!(app.usage_fetch_attempted);
+        assert!(app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_pending_usage_load_keeps_quit_responsive_without_another_fetch() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.usage_rx = Some(receiver);
+        app.usage_fetcher = || panic!("a pending Usage load must not create another fetch");
+        app.refresh_usage();
+        assert!(app.is_fetching_usage());
+        assert!(app.handle_key_event(key(KeyCode::Char('q'))));
+        assert!(app.should_quit);
+    }
+
+    #[test]
     fn test_handle_key_refresh_usage_tab_reports_fetch_failure_diagnostic() {
         let mut app = make_app();
         app.usage_fetcher = failing_usage_fetcher;

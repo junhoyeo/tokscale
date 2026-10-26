@@ -374,24 +374,10 @@ fn load_cache_at(path: &std::path::Path) -> Option<Vec<UsageOutput>> {
 
 #[cfg_attr(test, allow(dead_code))]
 pub fn load_cache() -> Option<Vec<UsageOutput>> {
-    let path = cache_path()?;
-    Some(load_startup_cache_at(
-        &path,
-        &disabled_provider_ids(),
-        claude::startup_sample,
-    ))
-}
-
-fn load_startup_cache_at(
-    path: &std::path::Path,
-    disabled: &std::collections::HashSet<String>,
-    claude_sample: impl FnOnce() -> Option<UsageOutput>,
-) -> Vec<UsageOutput> {
-    let mut outputs = filter_disabled_outputs(load_cache_at(path).unwrap_or_default(), disabled);
-    if !disabled.contains("claude") {
-        outputs.extend(claude_sample());
-    }
-    outputs
+    // Constructors may call this on the UI thread. Credential-scoped Claude
+    // data is loaded only by the existing background Usage fetcher.
+    load_cache_at(&cache_path()?)
+        .map(|outputs| filter_disabled_outputs(outputs, &disabled_provider_ids()))
 }
 
 // ── Public API ──
@@ -891,33 +877,21 @@ mod tests {
     }
 
     #[test]
-    fn startup_uses_only_the_current_claude_sample_without_refreshing_its_time() {
+    fn shared_cache_does_not_restore_claude_from_freshness_metadata() {
         let temp = TempDir::new().unwrap();
         let path = cache_path_in(temp.path()).unwrap();
-        save_cache_at(&path, &[sample_output("Claude"), sample_output("Codex")]);
         let mut current = sample_output("Claude");
         current.freshness = Some(UsageFreshness {
-            fetched_at: 1000,
-            stale: true,
+            fetched_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            stale: false,
         });
-        let outputs = load_startup_cache_at(&path, &Default::default(), || Some(current));
-        assert_eq!(outputs.len(), 2);
+        save_cache_at(&path, &[current, sample_output("Codex")]);
+        let outputs = load_cache_at(&path).unwrap();
+        assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].provider, "Codex");
-        assert_eq!(outputs[1].freshness.as_ref().unwrap().fetched_at, 1000);
-        assert!(outputs[1].freshness.as_ref().unwrap().stale);
-        let without_login = load_startup_cache_at(&path, &Default::default(), || None);
-        assert_eq!(without_login.len(), 1);
-        assert_eq!(without_login[0].provider, "Codex");
-    }
-
-    #[test]
-    fn disabled_claude_does_not_probe_current_credentials_on_startup() {
-        let temp = TempDir::new().unwrap();
-        let disabled = std::collections::HashSet::from(["claude".to_string()]);
-        let outputs = load_startup_cache_at(&temp.path().join("missing.json"), &disabled, || {
-            panic!("disabled Claude must not probe credentials")
-        });
-        assert!(outputs.is_empty());
     }
 
     #[test]

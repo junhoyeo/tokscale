@@ -3421,6 +3421,18 @@ mod tests {
     }
 
     #[test]
+    fn startup_cache_sentinel_is_visible_when_a_claude_card_is_present() {
+        let mut app = make_app();
+        let mut sample = output("Claude", None);
+        sample.plan = Some("UNTRUSTED_CLAUDE_SENTINEL".to_string());
+        sample.email = None;
+        sample.metrics.clear();
+        app.subscription_usage = vec![sample];
+        let body = render_body(&mut app, 120, 40);
+        assert!(body.contains("UNTRUSTED_CLAUDE_SENTINEL"), "{body}");
+    }
+
+    #[test]
     fn claude_cached_observation_is_dated_in_wide_and_compact_layouts() {
         for width in [140, 80, 40] {
             let mut app = make_app();

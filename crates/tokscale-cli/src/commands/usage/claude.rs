@@ -875,22 +875,6 @@ pub fn fetch_report() -> UsageFetchReport {
         now_epoch_secs,
     )
 }
-pub fn startup_sample() -> Option<UsageOutput> {
-    let creds = read_credentials().ok()?;
-    let token = access_token(&creds)?;
-    let now = now_epoch_secs();
-    let path = state::path(&crate::paths::get_cache_dir(), &cooldown_key(token));
-    let state = state::load(&path, now);
-    let stale = state.fresh(now).is_none()
-        || state.until > now
-        || cooldown_remaining(
-            &cooldown_path_in(&crate::paths::get_cache_dir(), &cooldown_key(token)),
-            now,
-        )
-        .is_some();
-    state.sample(now, stale)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
