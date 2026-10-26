@@ -288,6 +288,7 @@ fn fetch_blocking_with_cap(
         let metrics = usage_metrics(&body);
 
         Ok(vec![UsageOutput {
+            freshness: None,
             provider: "OpenCode Go".into(),
             account: None,
             credential_source: None,

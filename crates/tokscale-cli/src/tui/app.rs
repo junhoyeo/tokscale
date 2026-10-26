@@ -3456,6 +3456,7 @@ mod tests {
 
     fn usage_output(provider: &str, account: Option<UsageAccount>) -> UsageOutput {
         UsageOutput {
+            freshness: None,
             provider: provider.to_string(),
             account,
             credential_source: None,

@@ -468,6 +468,7 @@ fn build_output(parsed: ParsedBilling) -> UsageOutput {
     };
 
     UsageOutput {
+        freshness: None,
         provider: "Sakana".into(),
         account: None,
         credential_source: None,

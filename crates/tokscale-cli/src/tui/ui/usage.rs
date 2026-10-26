@@ -970,6 +970,8 @@ fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &
 
 fn medium_selected_account_preferred_height(selected: &UsageOutput, glyphs: Glyphs) -> u16 {
     let status_rows = 3
+        + usize::from(selected.freshness.is_some())
+        + usize::from(selected.freshness.as_ref().is_some_and(|value| value.stale))
         + usize::from(credits_status_line(selected, glyphs).is_some())
         + reset_credit_detail_rows(selected);
     let limit_rows = 2 + selected.metrics.len().min(4);
@@ -1656,6 +1658,42 @@ fn render_selected_account(
     let mut lines = Vec::new();
 
     let lang = app.settings.tui_language;
+    if lines.len() < detail_limit {
+        if let Some(freshness) = selected.freshness_label() {
+            lines.push(Line::from(Span::styled(
+                truncate_string(
+                    &format!("  {freshness}"),
+                    inner.width as usize,
+                    app.glyphs.ellipsis,
+                ),
+                if selected.freshness.as_ref().is_some_and(|value| value.stale) {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    app.theme.subtle_text_style()
+                },
+            )));
+        }
+    }
+    if lines.len() < detail_limit && selected.freshness.as_ref().is_some_and(|value| value.stale) {
+        if let Some(diagnostic) = app.usage_fetch_diagnostics.iter().find(|diagnostic| {
+            diagnostic.provider == selected.provider
+                && diagnostic.account.as_ref().is_none_or(|account| {
+                    selected
+                        .account
+                        .as_ref()
+                        .is_some_and(|selected| selected.id == account.id)
+                })
+        }) {
+            lines.push(Line::from(Span::styled(
+                truncate_string(
+                    &format!("  {}", diagnostic.message),
+                    inner.width as usize,
+                    app.glyphs.ellipsis,
+                ),
+                Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
+            )));
+        }
+    }
     if lines.len() < detail_limit {
         push_kv_styled(
             &mut lines,
@@ -3151,6 +3189,7 @@ mod tests {
 
     fn output(provider: &str, account: Option<UsageAccount>) -> UsageOutput {
         UsageOutput {
+            freshness: None,
             provider: provider.to_string(),
             account,
             credential_source: None,
@@ -3379,6 +3418,31 @@ mod tests {
 
         assert!(body.contains("Usage Summary"), "{body}");
         assert!(!body.contains("x Reset"), "{body}");
+    }
+
+    #[test]
+    fn claude_cached_observation_is_dated_in_wide_and_compact_layouts() {
+        for width in [140, 80, 40] {
+            let mut app = make_app();
+            let mut sample = output("Claude", None);
+            sample.freshness = Some(crate::commands::usage::UsageFreshness {
+                fetched_at: 1_000,
+                stale: true,
+            });
+            app.subscription_usage = vec![sample];
+            app.usage_fetch_diagnostics = vec![UsageFetchDiagnostic::new(
+                "Claude",
+                None,
+                "rate-limited; retry in 60s",
+            )];
+            let body = render_body(&mut app, width, 34);
+            assert!(body.contains("Cached"), "width={width}: {body}");
+            assert!(
+                body.contains("1970-01-01 00:16 UTC"),
+                "width={width}: {body}"
+            );
+            assert!(body.contains("retry in 60s"), "width={width}: {body}");
+        }
     }
 
     #[test]
@@ -4604,6 +4668,7 @@ mod tests {
         let mut app = make_app();
         app.hide_usage_emails = true;
         app.subscription_usage = vec![UsageOutput {
+            freshness: None,
             provider: "Codex".to_string(),
             account: Some(UsageAccount {
                 id: "acct_secret_123456789".to_string(),

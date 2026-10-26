@@ -293,6 +293,7 @@ pub fn fetch() -> Result<UsageOutput> {
         }
 
         Ok(UsageOutput {
+            freshness: None,
             provider: "Kimi".into(),
             account: None,
             credential_source: None,

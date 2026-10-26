@@ -196,6 +196,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
                 continue;
             }
             outputs.push(UsageOutput {
+                freshness: None,
                 provider: "MiniMax Token Plan".into(),
                 account: Some(UsageAccount {
                     id: site.label.to_string(),

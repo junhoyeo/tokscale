@@ -312,6 +312,7 @@ pub fn fetch() -> Result<UsageOutput> {
         }
 
         Ok(UsageOutput {
+            freshness: None,
             provider: "Z.ai".into(),
             account: None,
             credential_source: None,

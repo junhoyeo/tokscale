@@ -1492,6 +1492,7 @@ async fn fetch_with_auth_async(
     });
 
     Ok(UsageOutput {
+        freshness: None,
         provider: provider_name,
         account,
         credential_source: None,

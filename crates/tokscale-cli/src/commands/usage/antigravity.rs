@@ -198,6 +198,7 @@ fn off_caller_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> std::thread::
 fn output_for_group(group: QuotaGroup) -> UsageOutput {
     let name = group.display_name;
     UsageOutput {
+        freshness: None,
         provider: PROVIDER.to_string(),
         // The "account" slot carries the model group. Antigravity has a single
         // account but several independently metered groups, and this is the

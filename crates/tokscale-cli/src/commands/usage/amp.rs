@@ -276,6 +276,7 @@ fn usage_output_from_text(display_text: &str) -> Result<UsageOutput> {
         anyhow::bail!("Amp returned no parseable usage (display text format may have changed)");
     }
     Ok(UsageOutput {
+        freshness: None,
         provider: "Amp".into(),
         account: None,
         credential_source: None,

@@ -855,6 +855,7 @@ pub fn fetch() -> Result<UsageOutput> {
         }
 
         Ok(UsageOutput {
+            freshness: None,
             provider: "Copilot".into(),
             account: None,
             credential_source: None,

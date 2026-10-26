@@ -54,6 +54,7 @@ pub fn fetch() -> Result<UsageOutput> {
     let metrics = build_metrics(&cache.usage);
 
     Ok(UsageOutput {
+        freshness: None,
         provider: "Warp/Oz".to_string(),
         account: None,
         credential_source: None,

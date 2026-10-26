@@ -74,6 +74,12 @@ pub struct UsageSpendControl {
     pub reached: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageFreshness {
+    pub fetched_at: u64,
+    pub stale: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UsageOutput {
     pub provider: String,
@@ -90,6 +96,8 @@ pub struct UsageOutput {
     pub credit_status: Option<UsageCreditStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_control: Option<UsageSpendControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<UsageFreshness>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -250,6 +258,17 @@ impl UsageFetchReport {
 }
 
 impl UsageOutput {
+    pub fn freshness_label(&self) -> Option<String> {
+        let freshness = self.freshness.as_ref()?;
+        let updated = i64::try_from(freshness.fetched_at)
+            .ok()
+            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+            .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "time unavailable".to_string());
+        let state = if freshness.stale { "Cached" } else { "Updated" };
+        Some(format!("{state} {updated}"))
+    }
+
     pub fn account_display_name(&self) -> Option<String> {
         let account = self.account.as_ref()?;
 
@@ -346,13 +365,33 @@ fn load_cache_at(path: &std::path::Path) -> Option<Vec<UsageOutput>> {
     if age > 300 {
         return None;
     }
-    serde_json::from_value(doc.get("data")?.clone()).ok()
+    let mut outputs: Vec<UsageOutput> = serde_json::from_value(doc.get("data")?.clone()).ok()?;
+    // Shared cards do not prove which Claude token supplied the observation.
+    // Rehydrate Claude only from its current-token state, including its time.
+    outputs.retain(|output| provider_id_for_label(&output.provider) != Some("claude"));
+    Some(outputs)
 }
 
 #[cfg_attr(test, allow(dead_code))]
 pub fn load_cache() -> Option<Vec<UsageOutput>> {
-    load_cache_at(&cache_path()?)
-        .map(|outputs| filter_disabled_outputs(outputs, &disabled_provider_ids()))
+    let path = cache_path()?;
+    Some(load_startup_cache_at(
+        &path,
+        &disabled_provider_ids(),
+        claude::startup_sample,
+    ))
+}
+
+fn load_startup_cache_at(
+    path: &std::path::Path,
+    disabled: &std::collections::HashSet<String>,
+    claude_sample: impl FnOnce() -> Option<UsageOutput>,
+) -> Vec<UsageOutput> {
+    let mut outputs = filter_disabled_outputs(load_cache_at(path).unwrap_or_default(), disabled);
+    if !disabled.contains("claude") {
+        outputs.extend(claude_sample());
+    }
+    outputs
 }
 
 // ── Public API ──
@@ -361,13 +400,26 @@ pub fn load_cache() -> Option<Vec<UsageOutput>> {
 enum Fetch {
     Single(fn() -> Result<UsageOutput>),
     Multi(fn() -> Result<Vec<UsageOutput>>),
+    Report(fn() -> UsageFetchReport),
 }
 
 impl Fetch {
+    #[cfg(test)]
     fn call(self) -> Result<Vec<UsageOutput>> {
         match self {
             Fetch::Single(fetch) => fetch().map(|output| vec![output]),
             Fetch::Multi(fetch) => fetch(),
+            Fetch::Report(_) => anyhow::bail!("report providers require call_report"),
+        }
+    }
+
+    fn call_report(self, provider: &'static str) -> UsageFetchReport {
+        match self {
+            Fetch::Single(fetch) => {
+                fetch_provider_report(provider, fetch().map(|output| vec![output]))
+            }
+            Fetch::Multi(fetch) => fetch_provider_report(provider, fetch()),
+            Fetch::Report(fetch) => fetch(),
         }
     }
 }
@@ -380,7 +432,7 @@ fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
             "claude",
             "Claude",
             claude::has_credentials,
-            Fetch::Single(claude::fetch),
+            Fetch::Report(claude::fetch_report),
         ),
         ("codex", "Codex", codex::has_credentials, codex_fetch),
         (
@@ -586,7 +638,7 @@ fn fetch_all_report_from_providers(
                 let handle = if provider == "Codex" {
                     scope.spawn(codex_fetch)
                 } else {
-                    scope.spawn(move || fetch_provider_report(provider, fetch.call()))
+                    scope.spawn(move || fetch.call_report(provider))
                 };
                 (provider, handle)
             })
@@ -679,6 +731,13 @@ fn render_light(output: &UsageOutput) {
         let plan = truncate(plan, CARD_WIDTH - 11);
         println!("│ {:<10}{:<width$}│", "Plan", plan, width = CARD_WIDTH - 11);
     }
+    if let Some(freshness) = output.freshness_label() {
+        println!(
+            "│ {:<width$}│",
+            truncate(&freshness, CARD_WIDTH - 1),
+            width = CARD_WIDTH - 1
+        );
+    }
     if let Some(ref credits) = output.reset_credits {
         println!(
             "│ {:<10}{:<width$}│",
@@ -688,6 +747,28 @@ fn render_light(output: &UsageOutput) {
         );
     }
     println!("╰{}╯", "─".repeat(CARD_WIDTH));
+}
+
+fn diagnostic_disposition(
+    report: &UsageFetchReport,
+    diagnostic: &UsageFetchDiagnostic,
+) -> &'static str {
+    match report
+        .outputs
+        .iter()
+        .find(|output| output.display_name() == diagnostic.display_name())
+    {
+        Some(output)
+            if output
+                .freshness
+                .as_ref()
+                .is_some_and(|freshness| freshness.stale) =>
+        {
+            "showing cached usage"
+        }
+        Some(_) => "usage available",
+        None => "skipped",
+    }
 }
 
 pub fn run(json: bool, _light: bool, debug: bool) -> Result<()> {
@@ -712,10 +793,12 @@ pub fn run(json: bool, _light: bool, debug: bool) -> Result<()> {
         // so they don't silently vanish from the output. One concise line per
         // failing provider, on stderr to keep stdout clean.
         for diagnostic in &report.diagnostics {
+            let disposition = diagnostic_disposition(&report, diagnostic);
             eprintln!(
-                "{}: {} — skipped",
+                "{}: {} — {}",
                 diagnostic.display_name(),
-                diagnostic.message
+                diagnostic.message,
+                disposition
             );
         }
     }
@@ -727,6 +810,19 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    #[test]
+    fn claude_freshness_survives_json_round_trip_without_changing_the_array_contract() {
+        let mut value = serde_json::to_value(sample_output("Claude")).unwrap();
+        value["freshness"] = serde_json::json!({"fetched_at": 1000, "stale": true});
+        let outputs: Vec<UsageOutput> = serde_json::from_value(serde_json::json!([value])).unwrap();
+        let serialized = serde_json::to_value(outputs).unwrap();
+        assert!(serialized.is_array());
+        assert_eq!(serialized[0]["freshness"]["fetched_at"], 1000);
+        assert_eq!(serialized[0]["freshness"]["stale"], true);
+        let legacy = serde_json::to_value(sample_output("Codex")).unwrap();
+        assert!(legacy.get("freshness").is_none());
+    }
 
     static COUNTERS: OnceLock<Mutex<(usize, usize)>> = OnceLock::new();
 
@@ -782,6 +878,101 @@ mod tests {
         assert!(expected.exists());
         clear_cache_at(&expected);
         assert!(!expected.exists());
+    }
+
+    #[test]
+    fn shared_cache_does_not_authenticate_a_legacy_claude_card() {
+        let temp = TempDir::new().unwrap();
+        let path = cache_path_in(temp.path()).unwrap();
+        save_cache_at(&path, &[sample_output("Claude"), sample_output("Codex")]);
+        let cached = load_cache_at(&path).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].provider, "Codex");
+    }
+
+    #[test]
+    fn startup_uses_only_the_current_claude_sample_without_refreshing_its_time() {
+        let temp = TempDir::new().unwrap();
+        let path = cache_path_in(temp.path()).unwrap();
+        save_cache_at(&path, &[sample_output("Claude"), sample_output("Codex")]);
+        let mut current = sample_output("Claude");
+        current.freshness = Some(UsageFreshness {
+            fetched_at: 1000,
+            stale: true,
+        });
+        let outputs = load_startup_cache_at(&path, &Default::default(), || Some(current));
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].provider, "Codex");
+        assert_eq!(outputs[1].freshness.as_ref().unwrap().fetched_at, 1000);
+        assert!(outputs[1].freshness.as_ref().unwrap().stale);
+        let without_login = load_startup_cache_at(&path, &Default::default(), || None);
+        assert_eq!(without_login.len(), 1);
+        assert_eq!(without_login[0].provider, "Codex");
+    }
+
+    #[test]
+    fn disabled_claude_does_not_probe_current_credentials_on_startup() {
+        let temp = TempDir::new().unwrap();
+        let disabled = std::collections::HashSet::from(["claude".to_string()]);
+        let outputs = load_startup_cache_at(&temp.path().join("missing.json"), &disabled, || {
+            panic!("disabled Claude must not probe credentials")
+        });
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn report_provider_keeps_its_cached_output_and_diagnostic_together() {
+        let report = fetch_all_report_from_providers(
+            vec![(
+                "copilot",
+                "Copilot",
+                || true,
+                Fetch::Report(copilot_report_fetch),
+            )],
+            &Default::default(),
+            empty_codex_fetch,
+        );
+        assert_eq!(report.outputs.len(), 1);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].message, "stale diagnostic");
+    }
+
+    #[test]
+    fn freshness_label_keeps_the_original_observation_time() {
+        let mut output = sample_output("Claude");
+        output.freshness = Some(UsageFreshness {
+            fetched_at: 1000,
+            stale: true,
+        });
+        assert_eq!(
+            output.freshness_label().as_deref(),
+            Some("Cached 1970-01-01 00:16 UTC")
+        );
+        output.freshness.as_mut().unwrap().stale = false;
+        assert_eq!(
+            output.freshness_label().as_deref(),
+            Some("Updated 1970-01-01 00:16 UTC")
+        );
+    }
+
+    #[test]
+    fn cli_diagnostic_describes_cached_fresh_and_missing_outputs_accurately() {
+        let diagnostic = UsageFetchDiagnostic::new("Claude", None, "rate-limited; retry in 60s");
+        let mut report = UsageFetchReport::from_outputs(vec![sample_output("Claude")]);
+        assert_eq!(
+            diagnostic_disposition(&report, &diagnostic),
+            "usage available"
+        );
+        report.outputs[0].freshness = Some(UsageFreshness {
+            fetched_at: 1000,
+            stale: true,
+        });
+        assert_eq!(
+            diagnostic_disposition(&report, &diagnostic),
+            "showing cached usage"
+        );
+        report.outputs.clear();
+        assert_eq!(diagnostic_disposition(&report, &diagnostic), "skipped");
     }
 
     #[test]
@@ -888,6 +1079,7 @@ mod tests {
     #[test]
     fn usage_output_display_name_includes_account_label() {
         let output = UsageOutput {
+            freshness: None,
             provider: "Codex".to_string(),
             account: Some(UsageAccount {
                 id: "acct_123".to_string(),
@@ -909,6 +1101,7 @@ mod tests {
     #[test]
     fn usage_output_display_name_prefers_email_over_account_id() {
         let output = UsageOutput {
+            freshness: None,
             provider: "Codex".to_string(),
             account: Some(UsageAccount {
                 id: "acct_123".to_string(),
@@ -930,6 +1123,7 @@ mod tests {
     #[test]
     fn usage_output_display_name_masks_long_account_id() {
         let output = UsageOutput {
+            freshness: None,
             provider: "Codex".to_string(),
             account: Some(UsageAccount {
                 id: "123e4567-e89b-12d3-a456-426614174000".to_string(),
@@ -989,6 +1183,7 @@ mod tests {
 
     fn sample_output(provider: &str) -> UsageOutput {
         UsageOutput {
+            freshness: None,
             provider: provider.to_string(),
             account: None,
             credential_source: None,
