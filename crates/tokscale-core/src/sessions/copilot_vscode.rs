@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub fn parse_copilot_vscode_sessions(paths: &[PathBuf]) -> Vec<UnifiedMessage> {
     let mut messages = Vec::new();
-    parse_copilot_vscode_sessions_into(paths, &mut |message| messages.push(message));
+    parse_copilot_vscode_sessions_into(paths, &mut |_, message| messages.push(message));
     messages
 }
 
@@ -18,14 +18,77 @@ pub fn parse_copilot_vscode_sessions(paths: &[PathBuf]) -> Vec<UnifiedMessage> {
 /// consumer here, at the parser boundary, avoids materialising a second vector
 /// containing one `UnifiedMessage` per request after the request projection has
 /// already accumulated the session. The collecting wrapper above remains for
-/// callers that genuinely need ownership of the complete result.
+/// callers that genuinely need ownership of the complete result. The path each
+/// message came from is handed along because callers label messages per file.
 pub(crate) fn parse_copilot_vscode_sessions_into(
     paths: &[PathBuf],
-    on_message: &mut dyn FnMut(UnifiedMessage),
+    on_message: &mut dyn FnMut(&Path, UnifiedMessage),
 ) {
-    for path in paths {
-        parse_file_into(path, on_message);
+    for group in session_groups(paths) {
+        // VS Code copies a session into workspace storage when an empty window
+        // enters a workspace, and keeps the empty-window original. Later writes
+        // go only to the workspace copy, so a request held by both files has
+        // its current state in the workspace copy and the preserved original is
+        // a stale prefix. Accepting each key once, workspace copy first, keeps
+        // the current state while still admitting requests that exist only in
+        // the original (the copies diverge after the migration).
+        let mut accepted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for path in group {
+            parse_file_into(path, &mut |message| {
+                if let Some(key) = message.dedup_key.as_deref() {
+                    if !accepted.insert(key.to_string()) {
+                        return;
+                    }
+                }
+                on_message(path, message);
+            });
+        }
     }
+}
+
+/// Group files that hold copies of one chat session, newest workspace copies
+/// first and empty-window originals last.
+///
+/// VS Code identifies a session by its file name, and the copies it makes keep
+/// that name, so the file stem is the session id across storage roots.
+fn session_groups(paths: &[PathBuf]) -> Vec<Vec<&Path>> {
+    let mut groups: Vec<Vec<&Path>> = Vec::new();
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+
+    for path in paths {
+        let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let index = *by_id.entry(session_id).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[index].push(path.as_path());
+    }
+
+    // Later writes go to the new workspace copy, making it newer than the
+    // preserved original. Equal mtimes keep the caller's order.
+    for group in &mut groups {
+        group.sort_by_key(|path| {
+            (
+                is_empty_window_session(path),
+                std::cmp::Reverse(
+                    path.metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH),
+                ),
+            )
+        });
+    }
+    groups
+}
+
+/// Whether `path` sits in the store VS Code uses for windows with no folder or
+/// workspace open. Sessions migrated out of such a window are copied into
+/// workspace storage with the original left behind.
+fn is_empty_window_session(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "emptyWindowChatSessions")
 }
 
 fn parse_file_into(path: &Path, on_message: &mut dyn FnMut(UnifiedMessage)) {
@@ -366,8 +429,11 @@ fn request_to_message(
 fn read_workspace_for_file(jsonl_path: &Path) -> Option<(String, Option<String>)> {
     // Path: workspaceStorage/{hash}/chatSessions/{uuid}.jsonl
     // workspace.json is at: workspaceStorage/{hash}/workspace.json
-    let hash_dir = jsonl_path.parent()?.parent()?;
-    let workspace_json = hash_dir.join("workspace.json");
+    let sessions_dir = jsonl_path.parent()?;
+    if sessions_dir.file_name().and_then(|name| name.to_str()) != Some("chatSessions") {
+        return None;
+    }
+    let workspace_json = sessions_dir.parent()?.join("workspace.json");
 
     let contents = std::fs::read_to_string(&workspace_json).ok()?;
     let obj: Value = serde_json::from_str(&contents).ok()?;
@@ -544,6 +610,183 @@ mod tests {
     }
 
     #[test]
+    fn parses_empty_window_session_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        // Empty-window layout: <sessionId>.jsonl directly under
+        // globalStorage/emptyWindowChatSessions, outside any workspace hash.
+        let global_storage = dir.path().join("globalStorage");
+        let sessions_dir = global_storage.join("emptyWindowChatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let uuid = "950e8400-e29b-41d4-a716-446655440004";
+        let path = sessions_dir.join(format!("{}.jsonl", uuid));
+        std::fs::write(
+            global_storage.join("workspace.json"),
+            r#"{"folder":"file:///not/the/session/workspace"}"#,
+        )
+        .unwrap();
+
+        // Shape seen in real empty-window sessions: a near-empty kind:0 stub,
+        // the request appended by kind:2, and tokens arriving as kind:1
+        // path updates with a BYOK modelId that only resolvedModel can
+        // attribute to Copilot.
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"version":3,"requests":[]}}"#,
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r0","timestamp":1790000000000,"modelId":"byok.example/byok.example:::custom-model-a"}]}"#,
+                r#"{"kind":1,"k":["requests",0,"result"],"v":{"metadata":{"resolvedModel":"byok.example:::custom-model-a"}}}"#,
+                r#"{"kind":1,"k":["requests",0,"promptTokens"],"v":1000}"#,
+                r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":200}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!(m.session_id, uuid);
+        assert_eq!(m.model_id, "byok.example:::custom-model-a");
+        assert_eq!(m.tokens.input, 1000);
+        assert_eq!(m.tokens.output, 200);
+        // globalStorage/workspace.json is not per-workspace metadata, so the
+        // message must stay unattributed rather than mis-attributed.
+        assert!(m.workspace_key.is_none());
+        assert!(m.workspace_label.is_none());
+    }
+
+    /// The two paths a migrated session can leave behind: the workspace copy
+    /// later writes go to, and the original kept in the empty-window store.
+    fn copied_session_paths(home: &Path, session_id: &str) -> (PathBuf, PathBuf) {
+        let workspace_dir = home.join("workspaceStorage/2f1c9a/chatSessions");
+        let empty_window_dir = home.join("globalStorage/emptyWindowChatSessions");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&empty_window_dir).unwrap();
+        (
+            workspace_dir.join(format!("{}.jsonl", session_id)),
+            empty_window_dir.join(format!("{}.jsonl", session_id)),
+        )
+    }
+
+    #[test]
+    fn counts_a_request_stored_in_both_copies_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let uuid = "960e8400-e29b-41d4-a716-446655440005";
+        let (workspace_path, empty_window_path) = copied_session_paths(dir.path(), uuid);
+        // The migration copies the file, so both copies start out identical.
+        let lines = [
+            r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":1000}]}}"#,
+        ];
+        write_jsonl(&workspace_path, &lines);
+        write_jsonl(&empty_window_path, &lines);
+
+        let messages =
+            parse_copilot_vscode_sessions(&[workspace_path.clone(), empty_window_path.clone()]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1000);
+
+        let mut streamed = Vec::new();
+        parse_copilot_vscode_sessions_into(&[workspace_path, empty_window_path], &mut |_, m| {
+            streamed.push(m.tokens.input);
+        });
+        assert_eq!(streamed, vec![1000]);
+    }
+
+    #[test]
+    fn keeps_requests_that_only_one_copy_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let uuid = "970e8400-e29b-41d4-a716-446655440006";
+        let (workspace_path, empty_window_path) = copied_session_paths(dir.path(), uuid);
+        // Shared request 1000, then each copy gains its own request after the
+        // migration. Dropping either file wholesale would lose real usage.
+        write_jsonl(
+            &workspace_path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":10}]}}"#,
+                r#"{"kind":2,"k":["requests"],"v":[{"timestamp":2000,"modelId":"copilot/gpt-4o","promptTokens":20}]}"#,
+            ],
+        );
+        write_jsonl(
+            &empty_window_path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":10}]}}"#,
+                r#"{"kind":2,"k":["requests"],"v":[{"timestamp":3000,"modelId":"copilot/gpt-4o","promptTokens":30}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[empty_window_path, workspace_path]);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| (m.timestamp, m.tokens.input))
+                .collect::<Vec<_>>(),
+            vec![(1000, 10), (2000, 20), (3000, 30)]
+        );
+    }
+
+    #[test]
+    fn prefers_the_workspace_copy_when_a_copied_request_diverges() {
+        let dir = tempfile::tempdir().unwrap();
+        let uuid = "980e8400-e29b-41d4-a716-446655440007";
+        let (workspace_path, empty_window_path) = copied_session_paths(dir.path(), uuid);
+        // Same request, but the workspace copy carries the state written after
+        // the migration. The empty-window original is a stale prefix, even when
+        // it is handed to the parser first.
+        write_jsonl(
+            &workspace_path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":1500}]}}"#,
+            ],
+        );
+        write_jsonl(
+            &empty_window_path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":1000}]}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[empty_window_path, workspace_path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1500);
+    }
+
+    #[test]
+    fn prefers_the_newer_workspace_copy_when_a_request_diverges() {
+        let dir = tempfile::tempdir().unwrap();
+        let uuid = "990e8400-e29b-41d4-a716-446655440009";
+        let older_dir = dir.path().join("workspaceStorage/aaaaaa/chatSessions");
+        let newer_dir = dir.path().join("workspaceStorage/zzzzzz/chatSessions");
+        std::fs::create_dir_all(&older_dir).unwrap();
+        std::fs::create_dir_all(&newer_dir).unwrap();
+        let older_path = older_dir.join(format!("{}.jsonl", uuid));
+        let newer_path = newer_dir.join(format!("{}.jsonl", uuid));
+        write_jsonl(
+            &older_path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":1000}]}}"#,
+            ],
+        );
+        write_jsonl(
+            &newer_path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"timestamp":1000,"modelId":"copilot/gpt-4o","promptTokens":1500}]}}"#,
+            ],
+        );
+        for (path, seconds) in [(&older_path, 100), (&newer_path, 200)] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap();
+        }
+
+        // Lexical path order would choose the stale copy; migration recency
+        // must choose the workspace copy that receives later writes.
+        let messages = parse_copilot_vscode_sessions(&[older_path, newer_path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 1500);
+    }
+
+    #[test]
     fn streaming_parser_preserves_path_and_request_order() {
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join("chatSessions");
@@ -565,7 +808,7 @@ mod tests {
         );
 
         let mut emitted = Vec::new();
-        parse_copilot_vscode_sessions_into(&[first, second], &mut |message| {
+        parse_copilot_vscode_sessions_into(&[first, second], &mut |_, message| {
             // Keep only a tiny projection: the streaming API must not require
             // its consumer to retain each full message.
             emitted.push((message.session_id, message.timestamp, message.tokens.input));
