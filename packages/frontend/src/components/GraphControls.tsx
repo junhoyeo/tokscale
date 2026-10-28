@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import styled, { css } from "styled-components";
 import type { ViewMode, ColorPaletteName, ClientType, GraphColorPalette } from "@/lib/types";
 import { getPaletteNames, colorPalettes } from "@/lib/themes";
-import { getDarkGraphColor } from "@/lib/darkGraphColors";
+import { DARK_GRAPH_EMPTY, getDarkGraphColor } from "@/lib/darkGraphColors";
+import { BAYER4 } from "dither-kit/pixel";
 import { SOURCE_DISPLAY_NAMES, SOURCE_LOGOS } from "@/lib/constants";
 import { formatTokenCount, toggleClientFilter } from "@/lib/utils";
 import { Select } from "@/components/ui/Select";
@@ -24,6 +26,47 @@ interface GraphControlsProps {
 }
 
 const INTENSITY_LEVELS = [0, 1, 2, 3, 4] as const;
+
+/** A legend or picker swatch painted with the same ordered-dither recipe as the
+ *  graph's cells, so every swatch is the mark it explains. */
+function DitherSwatch({
+  palette,
+  level,
+  size = 12,
+}: {
+  palette: GraphColorPalette;
+  level: (typeof INTENSITY_LEVELS)[number];
+  size?: number;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dither = 2;
+    const tiles = Math.max(1, Math.floor(size / dither));
+    canvas.width = tiles;
+    canvas.height = tiles;
+    const density = level > 0 ? level / 4 : 0.08;
+    const lit = getDarkGraphColor(palette, level > 0 ? level : 1);
+    for (let y = 0; y < tiles; y++) {
+      for (let x = 0; x < tiles; x++) {
+        ctx.fillStyle = density > BAYER4[y & 3][x & 3] ? lit : DARK_GRAPH_EMPTY;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }, [palette, level, size]);
+
+  return (
+    <canvas
+      ref={ref}
+      aria-hidden="true"
+      style={{ width: size, height: size, imageRendering: "pixelated", flex: "0 0 auto" }}
+    />
+  );
+}
 
 export function GraphControls({
   titleId,
@@ -118,7 +161,7 @@ export function GraphControls({
 
 interface GraphPaletteLegendProps {
   paletteName: ColorPaletteName;
-  onPaletteChange: (palette: ColorPaletteName) => void;
+  onPaletteChange: (paletteName: ColorPaletteName) => void;
   palette: GraphColorPalette;
 }
 
@@ -138,7 +181,7 @@ export function GraphPaletteLegend({ paletteName, onPaletteChange, palette }: Gr
               <PaletteOption>
                 <Swatches aria-hidden="true">
                   {([1, 2, 3, 4] as const).map((level) => (
-                    <Swatch key={level} $color={getDarkGraphColor(colorPalettes[name], level)} />
+                    <DitherSwatch key={level} palette={colorPalettes[name]} level={level} />
                   ))}
                 </Swatches>
                 {colorPalettes[name].name}
@@ -153,7 +196,7 @@ export function GraphPaletteLegend({ paletteName, onPaletteChange, palette }: Gr
         <span aria-hidden="true">Low</span>
         <Swatches aria-hidden="true">
           {INTENSITY_LEVELS.map((level) => (
-            <Swatch key={level} $color={getDarkGraphColor(palette, level)} $outlined={level === 0} />
+            <DitherSwatch key={level} palette={palette} level={level} size={14} />
           ))}
         </Swatches>
         <span aria-hidden="true">High</span>
@@ -192,9 +235,9 @@ const Title = styled.h2`
   min-width: 0;
   margin: 0;
   color: var(--service-text);
-  font-size: 1.125rem;
+  font-size: 1.25rem;
   font-weight: 500;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   line-height: 1.4;
 `;
 
@@ -235,58 +278,48 @@ const FilterRow = styled.div`
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 8px 18px;
   min-width: 0;
 
   @media (max-width: 560px) {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
-    padding-bottom: 4px;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
+    gap: 8px 14px;
   }
 `;
 
 const FilterLabel = styled.span`
   flex: 0 0 auto;
-  margin-right: 4px;
+  margin-right: 2px;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   font-weight: 500;
   white-space: nowrap;
 `;
 
+/* Selection follows the site's move: no filled pill, the selected client is
+   ink with a 1px accent line as wide as its label, the rest are muted. */
 const FilterChip = styled.button<{ $selected: boolean }>`
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   min-height: 30px;
-  padding: 0 12px 0 6px;
-  border: 1px solid ${({ $selected }) => ($selected ? "rgba(0, 115, 255, 0.55)" : "var(--service-border)")};
-  border-radius: 999px;
-  background: ${({ $selected }) => ($selected ? "var(--v2-accent-soft)" : "transparent")};
+  padding: 0 0 3px;
+  border: 0;
+  border-bottom: 1px solid
+    ${({ $selected }) => ($selected ? "var(--service-accent)" : "transparent")};
+  background: transparent;
   color: ${({ $selected }) => ($selected ? "var(--service-text)" : "var(--service-text-muted)")};
   font-size: 0.8125rem;
   font-weight: 500;
   white-space: nowrap;
   touch-action: manipulation;
-  transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease;
+  transition: color 120ms ease, border-color 120ms ease;
 
   img {
-    opacity: ${({ $selected }) => ($selected ? 1 : 0.5)};
+    opacity: ${({ $selected }) => ($selected ? 1 : 0.55)};
   }
 
   &:hover {
-    border-color: ${({ $selected }) => ($selected ? "rgba(0, 115, 255, 0.8)" : "var(--service-border-strong)")};
     color: var(--service-text);
   }
 
@@ -302,9 +335,9 @@ const FilterChip = styled.button<{ $selected: boolean }>`
 `;
 
 const ChipLogo = styled.img`
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
   border-radius: 50%;
   object-fit: cover;
 `;
@@ -312,8 +345,9 @@ const ChipLogo = styled.img`
 const TextButton = styled.button`
   flex: 0 0 auto;
   min-height: 30px;
-  padding: 0 8px;
-  border-radius: 6px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 2px;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   font-weight: 500;
@@ -354,6 +388,7 @@ const PaletteSelect = styled(Select)`
   --select-height: 32px;
   --select-font-size: 0.8125rem;
   --select-padding-x: 10px;
+  --select-radius: 2px;
   --select-background: var(--service-surface-muted);
   --select-border-color: var(--service-border);
 `;
@@ -367,15 +402,8 @@ const PaletteOption = styled.span`
 const Swatches = styled.span`
   display: inline-flex;
   flex: 0 0 auto;
-  gap: 3px;
-`;
-
-const Swatch = styled.span<{ $color: string; $outlined?: boolean }>`
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  background: ${({ $color }) => $color};
-  box-shadow: ${({ $outlined }) => ($outlined ? "inset 0 0 0 1px rgba(255, 255, 255, 0.08)" : "none")};
+  gap: 4px;
+  align-items: center;
 `;
 
 const Legend = styled.div`

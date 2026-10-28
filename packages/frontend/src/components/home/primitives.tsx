@@ -3,7 +3,12 @@
 import Link from "next/link";
 import styled, { css } from "styled-components";
 
-/** Shared v2 building blocks for the home and tracker pages. */
+/**
+ * Shared building blocks for the home and tracker pages, on the dither-cell
+ * motif: one text face (Figtree), one accent blue, square 2px corners, no
+ * lines — surfaces separate by a step in tone, selections by a dithered
+ * accent underline as wide as their label.
+ */
 
 export const focusRing = css`
   &:focus-visible {
@@ -22,44 +27,42 @@ export const PageShell = styled.div`
   font-variant-numeric: tabular-nums;
 `;
 
+/* One pair of margins for the whole page, on the same edges as the
+   navigation bar (max-width 1500, padding 32 / 16 below 520). */
 export const Container = styled.div`
   width: 100%;
-  max-width: 1200px;
+  max-width: 1500px;
   margin: 0 auto;
-  padding: 0 32px;
+  padding-inline: 32px;
 
   @media (max-width: 520px) {
-    padding: 0 16px;
+    padding-inline: 16px;
   }
 `;
-
-/* The shared eyebrow (Title Case, no letter-spacing). */
-export { Eyebrow } from "@/components/ui/Eyebrow";
 
 export const DisplayTitle = styled.h1`
   margin: 0;
   color: var(--v2-text);
-  font-family: var(--v2-font-display);
-  font-size: clamp(44px, 6.2vw, 84px);
-  font-weight: 400;
-  line-height: 1.02;
-  letter-spacing: -0.012em;
+  font-size: clamp(34px, 4.4vw, 56px);
+  font-weight: 500;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
   text-wrap: balance;
 `;
 
 export const SectionTitle = styled.h2`
   margin: 0;
   color: var(--v2-text);
-  font-family: var(--v2-font-display);
-  font-size: clamp(32px, 3.6vw, 38px);
-  font-weight: 400;
-  line-height: 1.08;
-  letter-spacing: -0.008em;
+  font-size: clamp(28px, 2.9vw, 36px);
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
   text-wrap: balance;
 `;
 
 export const Lead = styled.p`
   margin: 0;
+  max-width: 36rem;
   color: var(--v2-text-muted);
   font-size: 17px;
   line-height: 1.6;
@@ -70,73 +73,40 @@ export const Lead = styled.p`
   }
 `;
 
-const buttonBase = css`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 0 18px;
-  border-radius: 8px;
-  font-size: 15px;
-  font-weight: 600;
-  white-space: nowrap;
-  text-decoration: none;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-  ${focusRing}
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
-`;
-
-/* White on #0073FF is 4.3:1, just under AA for 15px text, so filled buttons
-   use the slightly deeper --v2-accent-strong (5.2:1). */
-export const PrimaryButton = styled(Link)`
-  ${buttonBase}
-  border: 1px solid var(--v2-accent-strong);
-  background: var(--v2-accent-strong);
-  color: #fff;
-
-  &:hover {
-    border-color: var(--v2-accent);
-    background: var(--v2-accent);
-  }
-`;
-
-export const SecondaryButton = styled(Link)`
-  ${buttonBase}
-  border: 1px solid var(--v2-rule-strong);
-  background: transparent;
-  color: var(--v2-text);
-
-  &:hover {
-    border-color: rgba(255, 255, 255, 0.34);
-    background: rgba(255, 255, 255, 0.05);
-  }
-`;
-
 export const TextLink = styled(Link)`
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: 4px;
+  min-height: 32px;
+  border-radius: 2px;
   color: var(--v2-text);
   font-size: 15px;
-  font-weight: 600;
-  text-decoration: none;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 0.08em;
+  transition: text-decoration-color 160ms ease;
   ${focusRing}
 
   span[aria-hidden] {
     color: var(--v2-accent);
-    transition: transform 120ms ease;
+    transition: transform 160ms ease;
   }
 
-  &:hover span[aria-hidden] {
-    transform: translateX(2px);
+  @media (hover: hover) {
+    &:hover {
+      text-decoration-color: currentColor;
+
+      span[aria-hidden] {
+        transform: translateX(2px);
+      }
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
+    transition: none;
+
     span[aria-hidden] {
       transition: none;
     }
@@ -149,31 +119,24 @@ export const TextLink = styled(Link)`
 
 export const Section = styled.section`
   position: relative;
-  padding: 120px 0 0;
+  padding-top: 128px;
 
   @media (max-width: 720px) {
     padding-top: 80px;
   }
 `;
 
-export const SectionHeader = styled.header<{ $center?: boolean }>`
+export const SectionHeader = styled.header`
   display: flex;
   flex-direction: column;
   gap: 16px;
   max-width: 640px;
-  ${({ $center }) =>
-    $center &&
-    css`
-      align-items: center;
-      margin: 0 auto;
-      text-align: center;
-    `}
 `;
 
 export const VisuallyHidden = styled.span`
   position: absolute;
   width: 1px;
-  height: 1px;
+  height: 1px; /* taste-skill-ignore: screen-reader-only text */
   margin: -1px;
   padding: 0;
   overflow: hidden;

@@ -4,18 +4,16 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import styled from "styled-components";
 import {
-  CompactBadge,
   GroupMark,
-  PrimaryActionLink,
   SecondaryButton,
   SegmentedControl,
 } from "@/components/leaderboard/RankingUI";
 import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
 
-// Inlined view of the groups list that lives under the /leaderboard ?view=groups
-// segmented control. The /groups/[slug], /groups/new, and /groups/join/[token]
-// subpages still exist as standalone routes; this component just replaces the
-// old /groups top-level listing page so groups is no longer a separate nav tab.
+// The groups directory under the /leaderboard ?view=groups view. The
+// /groups/[slug], /groups/new, and /groups/join/[token] subpages are separate
+// routes; this list is the directory, one row per group on the page ground
+// (no cards), the whole row a link to the group.
 
 type GroupRole = "owner" | "admin" | "member";
 
@@ -56,187 +54,215 @@ interface GroupsBrowserProps {
 
 type ActiveTab = "public" | "mine";
 
-const Toolbar = styled.section`
+const Toolbar = styled.div`
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
   align-items: center;
-  margin-bottom: 16px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 14px;
+`;
 
-  @media (max-width: 640px) {
-    align-items: stretch;
-    flex-direction: column-reverse;
-  }
+const ToolbarLeft = styled.div`
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
 `;
 
 const DirectoryStatus = styled.p`
   margin: 0;
   color: var(--service-text-muted);
-  font-size: 0.8125rem;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 `;
 
-const FilterGroup = styled.div`
-  display: grid;
-  gap: 8px;
-`;
-
-const DirectoryAction = styled(PrimaryActionLink)`
-  align-self: flex-start;
-`;
-
-const Grid = styled.ul`
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
-  gap: 12px;
+const Table = styled.ul`
   margin: 0;
   padding: 0;
-
-  @media (min-width: 1240px) {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-`;
-
-const GridItem = styled.li`
-  min-width: 0;
   list-style: none;
+  border-bottom: 1px solid var(--service-border);
 `;
 
-const Card = styled(Link)`
+const Row = styled.li`
+  position: relative;
+  border-top: 1px solid var(--service-border);
+`;
+
+/* The row is one link: the name anchors it and its ::after covers the row. */
+const RowLink = styled(Link)`
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
-  min-height: 100%;
-  padding: 14px;
-  border: 1px solid var(--service-border);
-  border-radius: 10px;
-  background: var(--service-surface);
+  grid-template-columns: 42px minmax(0, 1fr) 96px 104px 88px;
+  column-gap: 16px;
+  align-items: center;
+  padding: 12px 0;
   color: inherit;
   text-decoration: none;
 
-  &:hover {
-    border-color: var(--service-border-strong);
-    background: var(--service-surface-muted);
+  &::after {
+    position: absolute;
+    inset: 0;
+    content: "";
   }
 
   &:focus-visible {
+    outline: none;
+  }
+
+  &:focus-visible::after {
     outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
+    outline-offset: -2px;
+  }
+
+  @media (max-width: 720px) {
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+    row-gap: 2px;
   }
 `;
 
-const SkeletonGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
-  gap: 12px;
-  pointer-events: none;
-`;
-
-const SkeletonCard = styled.div`
-  min-height: 94px;
-  border: 1px solid var(--service-border);
-  border-radius: 10px;
-  background: linear-gradient(
-    90deg,
-    var(--service-surface) 0%,
-    var(--service-surface-muted) 50%,
-    var(--service-surface) 100%
-  );
-  background-size: 200% 100%;
-  animation: groups-skeleton-shimmer 1.6s ease-in-out infinite;
-
-  @keyframes groups-skeleton-shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    animation: none;
-  }
-`;
-
-const CardContent = styled.div`
+const RowBody = styled.div`
   min-width: 0;
 `;
 
-const CardTitle = styled.h2`
+const RowName = styled.p`
   margin: 0;
   overflow: hidden;
   color: var(--service-text);
   font-size: 0.9375rem;
-  font-weight: 600;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
 `;
 
-const Meta = styled.div`
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-`;
-
-const BodyText = styled.p`
-  display: -webkit-box;
-  margin: 10px 0 0;
+const RowDescription = styled.p`
+  margin: 2px 0 0;
   overflow: hidden;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   line-height: 1.45;
-  text-wrap: pretty;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 
-  @media (max-width: 640px) {
-    font-size: 1rem;
-    line-height: 1.5;
+  /* On a phone the second line carries the fields, not the prose. */
+  @media (max-width: 720px) {
+    display: none;
   }
 `;
 
-const EmptyState = styled.div`
-  padding: 28px 0;
+const RowCell = styled.span`
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+
+  &.visibility {
+    text-align: left;
+  }
+
+  @media (max-width: 720px) {
+    display: none;
+  }
+`;
+
+const RowMobileMeta = styled.p`
+  display: none;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  @media (max-width: 720px) {
+    display: block;
+  }
+`;
+
+const HeaderRow = styled.div`
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 96px 104px 88px;
+  column-gap: 16px;
+  padding-bottom: 8px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+
+  span:nth-child(n + 3) {
+    text-align: right;
+  }
+
+  /* Visibility is a word column; its values read from the left. */
+  span:nth-child(3) {
+    text-align: left;
+  }
+
+  @media (max-width: 720px) {
+    display: none;
+  }
+`;
+
+const SkeletonRow = styled.li`
+  height: 67px;
+  border-top: 1px solid var(--service-border);
+  background: var(--service-surface-muted);
+  opacity: 0.5;
+`;
+
+const EmptyState = styled.p`
+  margin: 0;
+  padding: 32px 0;
   border-top: 1px solid var(--service-border);
   border-bottom: 1px solid var(--service-border);
   color: var(--service-text-muted);
   font-size: 0.875rem;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
 `;
 
 const ErrorText = styled.p`
   margin: 0 0 12px;
-  color: #ff8c85;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+`;
+
+const LoadMoreRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+`;
+
+const LoadMoreCount = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
 `;
 
 const LoadMoreButton = styled(SecondaryButton)`
-  margin-top: 16px;
+  margin: 0;
 `;
 
-function GroupCard({ group }: { group: GroupCardData }) {
+function roleLabel(role: GroupRole): string {
+  return role === "owner" ? "Owner" : role === "admin" ? "Admin" : "Member";
+}
+
+function GroupRow({ group }: { group: GroupCardData }) {
   return (
-    <GridItem>
-      <Card href={`/groups/${group.slug}`}>
+    <Row>
+      <RowLink href={`/groups/${group.slug}`}>
         <GroupMark name={group.name} avatarUrl={group.avatarUrl} />
-        <CardContent>
-          <CardTitle>{group.name}</CardTitle>
-          <Meta>
-            <CompactBadge>{group.isPublic ? "Public" : "Private"}</CompactBadge>
-            <CompactBadge>{formatGroupMemberCount(group.memberCount)}</CompactBadge>
-            {group.role && <CompactBadge>{group.role}</CompactBadge>}
-          </Meta>
-          {group.description && <BodyText>{group.description}</BodyText>}
-        </CardContent>
-      </Card>
-    </GridItem>
+        <RowBody>
+          <RowName>{group.name}</RowName>
+          <RowDescription>{group.description || "No description."}</RowDescription>
+          <RowMobileMeta>
+            {`${group.isPublic ? "Public" : "Private"} · ${formatGroupMemberCount(group.memberCount)}`}
+            {group.role ? ` · ${roleLabel(group.role)}` : ""}
+          </RowMobileMeta>
+        </RowBody>
+        <RowCell className="visibility">{group.isPublic ? "Public" : "Private"}</RowCell>
+        <RowCell>{group.memberCount.toLocaleString("en-US")}</RowCell>
+        <RowCell>{group.role ? roleLabel(group.role) : "—"}</RowCell>
+      </RowLink>
+    </Row>
   );
 }
 
@@ -375,15 +401,12 @@ export default function GroupsBrowser({
     loadGroups(activeTab, true);
   };
 
-  // Send unauthenticated users back to /leaderboard?view=groups so they land
-  // on the groups view after sign-in (was /groups before the consolidation).
-  const signInHref = "/api/auth/github?returnTo=/leaderboard?view=groups";
   const directoryCount = activePagination.total;
 
   return (
     <>
       <Toolbar>
-        <FilterGroup>
+        <ToolbarLeft>
           <SegmentedControl
             label="Group filter"
             value={activeTab}
@@ -393,50 +416,56 @@ export default function GroupsBrowser({
             ]}
             onChange={handleTabChange}
           />
-          <DirectoryStatus role="status" aria-live="polite">
-            {activeTab === "mine"
-              ? `${directoryCount.toLocaleString("en-US")} ${directoryCount === 1 ? "group" : "groups"}`
-              : `${directoryCount.toLocaleString("en-US")} public ${directoryCount === 1 ? "group" : "groups"}`}
-          </DirectoryStatus>
-        </FilterGroup>
-        {currentUser ? (
-          <DirectoryAction href="/groups/new">New group</DirectoryAction>
-        ) : (
-          <DirectoryAction href={signInHref}>Sign in</DirectoryAction>
-        )}
+        </ToolbarLeft>
+        <DirectoryStatus role="status" aria-live="polite">
+          {activeTab === "mine"
+            ? `${directoryCount.toLocaleString("en-US")} ${directoryCount === 1 ? "group" : "groups"} of yours`
+            : `${directoryCount.toLocaleString("en-US")} public ${directoryCount === 1 ? "group" : "groups"}`}
+        </DirectoryStatus>
       </Toolbar>
 
       {error && <ErrorText role="alert">{error}</ErrorText>}
+
       {isLoading && groups.length === 0 ? (
-        <SkeletonGrid aria-busy="true" aria-live="polite" aria-label="Loading groups">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <SkeletonCard key={i} />
+        <Table aria-busy="true" aria-live="polite" aria-label="Loading groups">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <SkeletonRow key={i} />
           ))}
-        </SkeletonGrid>
+        </Table>
+      ) : groups.length === 0 ? (
+        <EmptyState>
+          {activeTab === "mine"
+            ? "You are not in any groups yet."
+            : "No public groups yet."}
+        </EmptyState>
       ) : (
         <>
-          {groups.length === 0 ? (
-            <EmptyState>
-              {activeTab === "mine" ? "You are not in any groups yet." : "No public groups yet."}
-            </EmptyState>
-          ) : (
-            <>
-              <Grid role="list">
-                {groups.map((group) => (
-                  <GroupCard key={group.id} group={group} />
-                ))}
-              </Grid>
-              {activePagination.hasNext ? (
-                <LoadMoreButton
-                  type="button"
-                  onClick={handleLoadMore}
-                  disabled={isLoading}
-                >
-                  {isLoading ? "Loading..." : "Load more"}
-                </LoadMoreButton>
-              ) : null}
-            </>
-          )}
+          <HeaderRow aria-hidden="true">
+            <span />
+            <span>Group</span>
+            <span>Visibility</span>
+            <span>Members</span>
+            <span>Your role</span>
+          </HeaderRow>
+          <Table role="list">
+            {groups.map((group) => (
+              <GroupRow key={group.id} group={group} />
+            ))}
+          </Table>
+          <LoadMoreRow>
+            {activePagination.hasNext ? (
+              <LoadMoreButton
+                type="button"
+                onClick={handleLoadMore}
+                disabled={isLoading}
+              >
+                {isLoading ? "Loading…" : "Load more groups"}
+              </LoadMoreButton>
+            ) : null}
+            <LoadMoreCount>
+              {groups.length.toLocaleString("en-US")} of {directoryCount.toLocaleString("en-US")} shown
+            </LoadMoreCount>
+          </LoadMoreRow>
         </>
       )}
     </>

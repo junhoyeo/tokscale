@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
-import { SecondaryActionLink } from "@/components/leaderboard/RankingUI";
+import { DitherAvatar } from "dither-kit/DitherAvatar";
+import { PrimaryButton, SecondaryActionLink } from "@/components/leaderboard/RankingUI";
 
 interface InvitePreview {
   group: {
@@ -18,24 +19,44 @@ interface InvitePreview {
 }
 
 const Shell = styled.section`
-  max-width: 620px;
+  max-width: 600px;
   margin: 0 auto;
-  padding: 20px 0;
-  border-top: 1px solid var(--service-border);
-  border-bottom: 1px solid var(--service-border);
+`;
+
+const Identity = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+`;
+
+const AvatarFrame = styled.span`
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  margin-top: 2px;
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface-muted);
 `;
 
 const Title = styled.h1`
   margin: 0;
   color: var(--service-text);
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 1.75rem;
+  font-weight: 500;
   letter-spacing: -0.02em;
+  line-height: 1.15;
   text-wrap: balance;
+
+  @media (max-width: 640px) {
+    font-size: 1.5rem;
+  }
 `;
 
 const Text = styled.p`
-  margin: 6px 0 16px;
+  margin: 6px 0 0;
   color: var(--service-text-muted);
   font-size: 0.875rem;
   line-height: 1.5;
@@ -46,77 +67,52 @@ const Text = styled.p`
   }
 `;
 
+/* The invite's terms as a divided key-value strip: label above value. */
 const Meta = styled.dl`
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 8px 16px;
-  margin: 18px 0;
-  padding: 14px 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+  padding: 16px 0;
   border-top: 1px solid var(--service-border);
   border-bottom: 1px solid var(--service-border);
+
+  /* Terms are short except the expiry date, so the columns take the width
+   * they need instead of splitting the strip into four equal parts. */
+  @media (min-width: 560px) {
+    grid-template-columns: repeat(4, max-content);
+    column-gap: 40px;
+  }
+`;
+
+const MetaItem = styled.div`
+  min-width: 0;
 `;
 
 const MetaLabel = styled.dt`
-  color: var(--service-text);
+  color: var(--service-text-muted);
   font-size: 0.8125rem;
-  font-weight: 500;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
 `;
 
 const MetaValue = styled.dd`
-  margin: 0;
+  margin: 4px 0 0;
   overflow-wrap: anywhere;
-  color: var(--service-text-muted);
-  font-size: 0.8125rem;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
 `;
 
 const Actions = styled.div`
   display: flex;
-  gap: 10px;
   flex-wrap: wrap;
-`;
-
-const Button = styled.button`
-  min-height: 36px;
-  padding: 0 12px;
-  border-radius: 8px;
-  border: 1px solid var(--service-accent);
-  background: var(--service-accent);
-  color: #fff;
-  font-size: 0.875rem;
-  font-weight: 600;
-
-  &:hover:not(:disabled) {
-    border-color: var(--service-accent-hover);
-    background: var(--service-accent-hover);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  &:disabled {
-    opacity: 0.65;
-    cursor: not-allowed;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
+  align-items: center;
+  gap: 16px;
 `;
 
 const ErrorText = styled.p`
-  margin: 0;
-  color: #ff8c85;
+  margin: 0 0 16px;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
 `;
 
 function formatRole(role: InvitePreview["role"]): string {
@@ -179,7 +175,7 @@ export default function JoinGroupClient({ token }: { token: string }) {
   if (isLoading) {
     return (
       <Shell>
-        <Text>Loading invite...</Text>
+        <Text>Loading invite…</Text>
       </Shell>
     );
   }
@@ -188,8 +184,8 @@ export default function JoinGroupClient({ token }: { token: string }) {
     return (
       <Shell>
         <Title>Invite unavailable</Title>
-        <ErrorText role="alert">{error || "This invite is invalid or expired."}</ErrorText>
-        <Actions>
+        {error && <ErrorText role="alert">{error}</ErrorText>}
+        <Actions style={{ marginTop: 16 }}>
           <SecondaryActionLink href="/leaderboard?view=groups">Browse groups</SecondaryActionLink>
         </Actions>
       </Shell>
@@ -198,34 +194,58 @@ export default function JoinGroupClient({ token }: { token: string }) {
 
   return (
     <Shell>
-      <Title>Join {preview.group.name}</Title>
-      <Text>You were invited to join this group leaderboard. Each account can use this link once.</Text>
+      <Identity>
+        <AvatarFrame aria-hidden="true">
+          <DitherAvatar
+            name={preview.group.name}
+            color="blue"
+            size={48}
+            grid={8}
+            cellPx={6}
+            density={-0.1}
+            animate={false}
+            bloom="off"
+          />
+        </AvatarFrame>
+        <div>
+          <Title>Join {preview.group.name}</Title>
+          <Text>You were invited to join this group leaderboard. Each account can use this link once.</Text>
+        </div>
+      </Identity>
       <Meta>
-        <MetaLabel>Role</MetaLabel>
-        <MetaValue>{formatRole(preview.role)}</MetaValue>
-        <MetaLabel>Visibility</MetaLabel>
-        <MetaValue>{preview.group.isPublic ? "Public" : "Private"}</MetaValue>
+        <MetaItem>
+          <MetaLabel>Role</MetaLabel>
+          <MetaValue>{formatRole(preview.role)}</MetaValue>
+        </MetaItem>
+        <MetaItem>
+          <MetaLabel>Visibility</MetaLabel>
+          <MetaValue>{preview.group.isPublic ? "Public" : "Private"}</MetaValue>
+        </MetaItem>
         {preview.invitedUsername && (
-          <>
+          <MetaItem>
             <MetaLabel>Invited account</MetaLabel>
             <MetaValue>@{preview.invitedUsername}</MetaValue>
-          </>
+          </MetaItem>
         )}
-        <MetaLabel>Joins remaining</MetaLabel>
-        <MetaValue>{preview.remainingUses}</MetaValue>
-        <MetaLabel>Expires</MetaLabel>
-        <MetaValue>
-          {new Date(preview.expiresAt).toLocaleString(undefined, {
-            dateStyle: "medium",
-            timeStyle: "short",
-          })}
-        </MetaValue>
+        <MetaItem>
+          <MetaLabel>Joins remaining</MetaLabel>
+          <MetaValue>{preview.remainingUses}</MetaValue>
+        </MetaItem>
+        <MetaItem>
+          <MetaLabel>Expires</MetaLabel>
+          <MetaValue>
+            {new Date(preview.expiresAt).toLocaleString(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })}
+          </MetaValue>
+        </MetaItem>
       </Meta>
       {error && <ErrorText role="alert">{error}</ErrorText>}
       <Actions>
-        <Button type="button" onClick={acceptInvite} disabled={isJoining}>
-          {isJoining ? "Joining..." : "Join group"}
-        </Button>
+        <PrimaryButton type="button" onClick={acceptInvite} disabled={isJoining}>
+          {isJoining ? "Joining…" : "Join group"}
+        </PrimaryButton>
         <SecondaryActionLink href="/leaderboard?view=groups">Cancel</SecondaryActionLink>
       </Actions>
     </Shell>

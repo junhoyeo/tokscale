@@ -106,14 +106,14 @@ export default async function ModelsPage({ searchParams }: PageProps) {
           minUsers={DASHBOARD_MIN_USERS}
           topEci={DASHBOARD_TOP_ECI}
         />
-        <div style={{ marginTop: 40 }}>
+        <div style={{ marginTop: 16 }}>
           <CapabilityCharts
             models={chartModels}
             periodLabel={periodLabel(period)}
             cacheReadShare={mixes ? mixShares(mixes.community).cacheRead : null}
           />
         </div>
-        <div style={{ marginTop: 40 }}>
+        <div style={{ marginTop: 8 }}>
           <SourcesFooter notes={sourceNotes(benchmarkData, { slugs: DASHBOARD_BENCHMARKS, includeCatalog: true })} />
         </div>
       </main>

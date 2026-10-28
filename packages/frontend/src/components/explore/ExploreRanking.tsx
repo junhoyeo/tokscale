@@ -10,9 +10,14 @@ const CoverageRow = styled(CoverageLine)`
 `;
 
 const After = styled.p`
-  margin: 20px 0 0;
+  margin: 16px 0 0;
   color: var(--service-text-muted);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
+  }
 `;
 
 type ExploreRankingProps = {

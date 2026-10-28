@@ -3,17 +3,15 @@
 import styled from "styled-components";
 import type { ModelRef } from "@/lib/explore";
 
+/* The mark sits on the ground at its own size: no chip, no tint, no box. */
 const ModelTile = styled.span<{ $size: number }>`
   display: inline-grid;
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--service-border-strong);
-  border-radius: ${({ $size }) => ($size >= 32 ? 9 : $size >= 22 ? 6 : 4)}px;
-  background: var(--service-surface-muted);
   color: var(--service-text-muted);
-  font-size: ${({ $size }) => Math.max(9, Math.round($size * 0.45))}px;
+  font-size: ${({ $size }) => Math.max(11, Math.round($size * 0.5))}px;
   font-weight: 600;
   line-height: 1;
 `;

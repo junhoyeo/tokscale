@@ -13,7 +13,6 @@ import { EventFeed } from "../../_components/EventFeed";
 import { JsonLd } from "../../_components/JsonLd";
 import { OrgCell } from "../../_components/OrgMark";
 import styles from "../../_components/capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
@@ -70,7 +69,6 @@ export default async function SectorPage({ params }: PageProps) {
       />
       <Breadcrumbs items={[{ label: "Capital", href: capitalPath() }, { label: "Companies", href: companiesPath() }, { label: sector.name }]} />
       <header className={styles.pageHead}>
-        <Eyebrow>Sector</Eyebrow>
         <h1 className={`${styles.display} ${styles.pageTitle}`}>{sector.name}</h1>
         <p className={styles.lede}>{sector.summary}</p>
         <p className={styles.metaLine}>

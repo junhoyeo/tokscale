@@ -448,18 +448,25 @@ describe("profile contribution calendar", () => {
     expect(details[0].totalTokens).toBe(250);
   });
 
-  it("defaults the persistent breakdown to the visible range end", () => {
+  it("defaults the persistent breakdown to the latest active day in range", () => {
     const contributions = [contribution("2026-07-10", 250, 10)];
 
+    // The range outruns the newest submission by a day; opening on the idle
+    // range end would show a zero as the profile's first fact.
     expect(
       getDefaultContributionDate(contributions, "2026-07-05", "2026-07-11"),
-    ).toBe("2026-07-11");
+    ).toBe("2026-07-10");
     expect(
-      getContributionDayForDate(contributions, "2026-07-11"),
+      getContributionDayForDate(contributions, "2026-07-10"),
     ).toMatchObject({
-      date: "2026-07-11",
-      totals: { cost: 0, messages: 0, tokens: 0 },
+      date: "2026-07-10",
+      totals: { tokens: 250 },
     });
+
+    // An idle range has no active day, so its end stays the honest default.
+    expect(
+      getDefaultContributionDate([], "2026-07-05", "2026-07-11"),
+    ).toBe("2026-07-11");
   });
 
   it("does not revive a requested day after the visible range changes", () => {

@@ -41,7 +41,7 @@ const Item = styled.div`
   dd {
     margin: 0;
     color: var(--service-text);
-    font-size: 0.9375rem;
+    font-size: 0.875rem;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }

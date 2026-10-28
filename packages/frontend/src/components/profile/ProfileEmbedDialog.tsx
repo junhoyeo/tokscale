@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { toast } from "react-toastify";
+import { DitherButton } from "dither-kit/DitherButton";
+import { useFocusTrap } from "dither-kit/use-focus-trap";
 import { Select } from "@/components/ui/Select";
 import {
   EMBED_TEMPLATES,
@@ -11,6 +13,7 @@ import {
   type EmbedTemplate,
 } from "@/lib/embed/embedShared";
 import { getPaletteNames, type ColorPaletteName } from "@/lib/themes";
+import { DitherSelectionGroup } from "./ditherControls";
 import {
   buildEmbedPreviewPath,
   buildProfileEmbedLinks,
@@ -80,11 +83,14 @@ export function ProfileEmbedDialog({
     view,
   });
 
+  // The kit's focus trap owns Tab cycling and focus restoration; Escape and
+  // the scroll lock stay here because they are dialog policy, not the trap.
+  useFocusTrap(dialogRef, open);
+
   useEffect(() => {
     if (!open) return;
 
     const previousOverflow = document.body.style.overflow;
-    const previousFocus = document.activeElement as HTMLElement | null;
     const focusDialog = window.requestAnimationFrame(() => {
       dialogRef.current?.focus();
     });
@@ -92,44 +98,6 @@ export function ProfileEmbedDialog({
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
-        return;
-      }
-
-      if (event.key !== "Tab" || !dialogRef.current) {
-        return;
-      }
-
-      const focusableElements = Array.from(
-        dialogRef.current.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((element) => element.getClientRects().length > 0);
-
-      if (focusableElements.length === 0) {
-        event.preventDefault();
-        dialogRef.current.focus();
-        return;
-      }
-
-      const firstElement = focusableElements[0];
-      const lastElement = focusableElements[focusableElements.length - 1];
-      const activeElement = document.activeElement;
-
-      if (
-        event.shiftKey &&
-        (activeElement === firstElement ||
-          activeElement === dialogRef.current ||
-          !dialogRef.current.contains(activeElement))
-      ) {
-        event.preventDefault();
-        lastElement.focus();
-      } else if (
-        !event.shiftKey &&
-        (activeElement === lastElement ||
-          !dialogRef.current.contains(activeElement))
-      ) {
-        event.preventDefault();
-        firstElement.focus();
       }
     };
 
@@ -140,7 +108,6 @@ export function ProfileEmbedDialog({
       window.cancelAnimationFrame(focusDialog);
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
-      previousFocus?.focus();
     };
   }, [open, onClose]);
 
@@ -209,8 +176,8 @@ export function ProfileEmbedDialog({
               Embed @{username}
             </DialogTitle>
             <DialogDescription id="profile-embed-dialog-description">
-              Customize the live card, then copy it into GitHub or any HTML
-              page.
+              The live card updates with the profile. Pick a template, then
+              copy the markdown into a README.
             </DialogDescription>
           </HeaderCopy>
 
@@ -225,24 +192,22 @@ export function ProfileEmbedDialog({
 
         <DialogBody>
           <PreviewPanel>
-            <PreviewSurface>
-              <PreviewLabel>Live preview</PreviewLabel>
-              <PreviewFrame $threeD={view === "3d"}>
-                <PreviewImage
-                  src={previewUrl}
-                  alt={`Tokscale README embed preview for ${displayName || username}`}
-                />
-              </PreviewFrame>
-            </PreviewSurface>
+            <PreviewLabel>Live preview</PreviewLabel>
+            <PreviewFrame $threeD={view === "3d"}>
+              <PreviewImage
+                src={previewUrl}
+                alt={`Tokscale README embed preview for ${displayName || username}`}
+              />
+            </PreviewFrame>
+            <PreviewMeta>
+              {EMBED_TEMPLATE_LABELS[template]} · {view.toUpperCase()} ·{" "}
+              {titleCase(theme)}
+            </PreviewMeta>
           </PreviewPanel>
 
           <ControlsPanel aria-label="Embed customization">
-            <ControlsHeader>
-              <ControlsTitle>Card settings</ControlsTitle>
-            </ControlsHeader>
-
             {capabilities.showTemplate && (
-              <OptionGroup>
+              <OptionRow>
                 <OptionLabel id="embed-template-label">Template</OptionLabel>
                 <TemplateSelect
                   name="profile-embed-template"
@@ -254,84 +219,51 @@ export function ProfileEmbedDialog({
                   }))}
                   onChange={(next) => setTemplate(next as EmbedTemplate)}
                 />
-              </OptionGroup>
+              </OptionRow>
             )}
 
-            <OptionGroup>
+            <OptionRow>
               <OptionLabel id="embed-view-label">View</OptionLabel>
-              <SegmentedControl role="group" aria-labelledby="embed-view-label">
-                <SegmentButton
-                  type="button"
-                  $active={view === "2d"}
-                  aria-pressed={view === "2d"}
-                  onClick={() => setView("2d")}
-                >
-                  2D
-                </SegmentButton>
-                <SegmentButton
-                  type="button"
-                  $active={view === "3d"}
-                  aria-pressed={view === "3d"}
-                  onClick={() => setView("3d")}
-                >
-                  3D
-                </SegmentButton>
-              </SegmentedControl>
-            </OptionGroup>
+              <DitherSelectionGroup
+                label="Embed view"
+                value={view}
+                options={[
+                  { value: "2d", label: "2D" },
+                  { value: "3d", label: "3D" },
+                ]}
+                onChange={(next) => setView(next as EmbedView)}
+              />
+            </OptionRow>
 
-            <OptionGroup>
+            <OptionRow>
               <OptionLabel id="embed-theme-label">Theme</OptionLabel>
-              <SegmentedControl
-                role="group"
-                aria-labelledby="embed-theme-label"
-              >
-                <SegmentButton
-                  type="button"
-                  $active={theme === "dark"}
-                  aria-pressed={theme === "dark"}
-                  onClick={() => setTheme("dark")}
-                >
-                  Dark
-                </SegmentButton>
-                <SegmentButton
-                  type="button"
-                  $active={theme === "light"}
-                  aria-pressed={theme === "light"}
-                  onClick={() => setTheme("light")}
-                >
-                  Light
-                </SegmentButton>
-              </SegmentedControl>
-            </OptionGroup>
+              <DitherSelectionGroup
+                label="Embed theme"
+                value={theme}
+                options={[
+                  { value: "dark", label: "Dark" },
+                  { value: "light", label: "Light" },
+                ]}
+                onChange={(next) => setTheme(next as EmbedTheme)}
+              />
+            </OptionRow>
 
-            <OptionGroup>
+            <OptionRow>
               <OptionLabel id="embed-period-label">Time range</OptionLabel>
-              <SegmentedControl
-                role="group"
-                aria-labelledby="embed-period-label"
-              >
-                {(
-                  [
-                    ["all", "Lifetime"],
-                    ["month", "30d"],
-                    ["week", "7d"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <SegmentButton
-                    key={value}
-                    type="button"
-                    $active={period === value}
-                    aria-pressed={period === value}
-                    onClick={() => setPeriod(value)}
-                  >
-                    {label}
-                  </SegmentButton>
-                ))}
-              </SegmentedControl>
-            </OptionGroup>
+              <DitherSelectionGroup
+                label="Embed time range"
+                value={period}
+                options={[
+                  { value: "all", label: "Lifetime" },
+                  { value: "month", label: "30d" },
+                  { value: "week", label: "7d" },
+                ]}
+                onChange={(next) => setPeriod(next as EmbedPeriod)}
+              />
+            </OptionRow>
 
             {capabilities.showAccent && (
-              <OptionGroup $stacked>
+              <OptionRow $stacked>
                 <OptionLabel id="embed-accent-label">Accent color</OptionLabel>
                 <SwatchRow role="group" aria-labelledby="embed-accent-label">
                   <Swatch
@@ -356,177 +288,114 @@ export function ProfileEmbedDialog({
                     />
                   ))}
                 </SwatchRow>
-              </OptionGroup>
+              </OptionRow>
             )}
 
-            <OptionGroup>
+            <OptionRow>
               <OptionLabel id="embed-ranking-label">Ranking</OptionLabel>
-              <SegmentedControl
-                role="group"
-                aria-labelledby="embed-ranking-label"
-              >
-                <SegmentButton
-                  type="button"
-                  $active={sortBy === "tokens"}
-                  aria-pressed={sortBy === "tokens"}
-                  onClick={() => setSortBy("tokens")}
-                >
-                  Tokens
-                </SegmentButton>
-                <SegmentButton
-                  type="button"
-                  $active={sortBy === "cost"}
-                  aria-pressed={sortBy === "cost"}
-                  onClick={() => setSortBy("cost")}
-                >
-                  Cost
-                </SegmentButton>
-              </SegmentedControl>
-            </OptionGroup>
+              <DitherSelectionGroup
+                label="Embed ranking metric"
+                value={sortBy}
+                options={[
+                  { value: "tokens", label: "Tokens" },
+                  { value: "cost", label: "Cost" },
+                ]}
+                onChange={(next) => setSortBy(next as EmbedSortBy)}
+              />
+            </OptionRow>
 
             {capabilities.showRankFormat && (
-              <OptionGroup>
+              <OptionRow>
                 <OptionLabel id="embed-rank-format-label">
                   Rank format
                 </OptionLabel>
-                <SegmentedControl
-                  role="group"
-                  aria-labelledby="embed-rank-format-label"
-                >
-                  {(["plain", "percent", "total"] as const).map((mode) => (
-                    <SegmentButton
-                      key={mode}
-                      type="button"
-                      $active={rankFormat === mode}
-                      aria-pressed={rankFormat === mode}
-                      onClick={() => setRankFormat(mode)}
-                    >
-                      {titleCase(mode)}
-                    </SegmentButton>
-                  ))}
-                </SegmentedControl>
-              </OptionGroup>
+                <DitherSelectionGroup
+                  label="Embed rank format"
+                  value={rankFormat}
+                  options={["plain", "percent", "total"].map((mode) => ({
+                    value: mode,
+                    label: titleCase(mode),
+                  }))}
+                  onChange={(next) => setRankFormat(next as EmbedRankFormat)}
+                />
+              </OptionRow>
             )}
 
             {capabilities.showLayout && (
-              <OptionGroup>
+              <OptionRow>
                 <OptionLabel id="embed-layout-label">
                   {view === "3d" ? "Number format" : "Layout"}
                 </OptionLabel>
-                <SegmentedControl
-                  role="group"
-                  aria-labelledby="embed-layout-label"
-                >
-                  <SegmentButton
-                    type="button"
-                    $active={!compact}
-                    aria-pressed={!compact}
-                    onClick={() => setCompactForView(false)}
-                  >
-                    Full
-                  </SegmentButton>
-                  <SegmentButton
-                    type="button"
-                    $active={compact}
-                    aria-pressed={compact}
-                    onClick={() => setCompactForView(true)}
-                  >
-                    Compact
-                  </SegmentButton>
-                </SegmentedControl>
-              </OptionGroup>
+                <DitherSelectionGroup
+                  label={view === "3d" ? "Embed number format" : "Embed layout"}
+                  value={compact ? "compact" : "full"}
+                  options={[
+                    { value: "full", label: "Full" },
+                    { value: "compact", label: "Compact" },
+                  ]}
+                  onChange={(next) => setCompactForView(next === "compact")}
+                />
+              </OptionRow>
             )}
 
             {capabilities.showGraph && (
-              <OptionGroup>
+              <OptionRow>
                 <OptionLabel id="embed-graph-label">
                   Contribution graph
                 </OptionLabel>
-                <SegmentedControl
-                  role="group"
-                  aria-labelledby="embed-graph-label"
-                >
-                  <SegmentButton
-                    type="button"
-                    $active={!graph}
-                    aria-pressed={!graph}
-                    onClick={() => setGraph(false)}
-                  >
-                    Off
-                  </SegmentButton>
-                  <SegmentButton
-                    type="button"
-                    $active={graph}
-                    aria-pressed={graph}
-                    onClick={() => setGraph(true)}
-                  >
-                    On
-                  </SegmentButton>
-                </SegmentedControl>
-              </OptionGroup>
+                <DitherSelectionGroup
+                  label="Embed contribution graph"
+                  value={graph ? "on" : "off"}
+                  options={[
+                    { value: "off", label: "Off" },
+                    { value: "on", label: "On" },
+                  ]}
+                  onChange={(next) => setGraph(next === "on")}
+                />
+              </OptionRow>
             )}
 
             {capabilities.showNumberFormats && (
               <>
-                <OptionGroup>
+                <OptionRow>
                   <OptionLabel id="embed-token-format-label">
                     Token format
                   </OptionLabel>
-                  <SegmentedControl
-                    role="group"
-                    aria-labelledby="embed-token-format-label"
-                  >
-                    <SegmentButton
-                      type="button"
-                      $active={tokensFormat === "compact"}
-                      aria-pressed={tokensFormat === "compact"}
-                      onClick={() => setTokensFormat("compact")}
-                    >
-                      Compact
-                    </SegmentButton>
-                    <SegmentButton
-                      type="button"
-                      $active={tokensFormat === "full"}
-                      aria-pressed={tokensFormat === "full"}
-                      onClick={() => setTokensFormat("full")}
-                    >
-                      Full
-                    </SegmentButton>
-                  </SegmentedControl>
-                </OptionGroup>
+                  <DitherSelectionGroup
+                    label="Embed token format"
+                    value={tokensFormat}
+                    options={[
+                      { value: "compact", label: "Compact" },
+                      { value: "full", label: "Full" },
+                    ]}
+                    onChange={(next) =>
+                      setTokensFormat(next as EmbedNumberFormat)
+                    }
+                  />
+                </OptionRow>
 
-                <OptionGroup>
+                <OptionRow>
                   <OptionLabel id="embed-cost-format-label">
                     Cost format
                   </OptionLabel>
-                  <SegmentedControl
-                    role="group"
-                    aria-labelledby="embed-cost-format-label"
-                  >
-                    <SegmentButton
-                      type="button"
-                      $active={costFormat === "compact"}
-                      aria-pressed={costFormat === "compact"}
-                      onClick={() => setCostFormat("compact")}
-                    >
-                      Compact
-                    </SegmentButton>
-                    <SegmentButton
-                      type="button"
-                      $active={costFormat === "full"}
-                      aria-pressed={costFormat === "full"}
-                      onClick={() => setCostFormat("full")}
-                    >
-                      Full
-                    </SegmentButton>
-                  </SegmentedControl>
-                </OptionGroup>
+                  <DitherSelectionGroup
+                    label="Embed cost format"
+                    value={costFormat}
+                    options={[
+                      { value: "compact", label: "Compact" },
+                      { value: "full", label: "Full" },
+                    ]}
+                    onChange={(next) =>
+                      setCostFormat(next as EmbedNumberFormat)
+                    }
+                  />
+                </OptionRow>
               </>
             )}
 
             <SnippetSection>
               <SnippetHeader>
-                <SnippetTitle>Markdown snippet</SnippetTitle>
+                <SnippetTitle>Markdown</SnippetTitle>
                 <InlineActions>
                   <InlineActionButton
                     type="button"
@@ -546,14 +415,17 @@ export function ProfileEmbedDialog({
               <CodeBlock>{markdownSnippet}</CodeBlock>
 
               <PrimaryActions>
-                <PrimaryButton
+                <DitherButton
                   type="button"
+                  color="blue"
+                  variant="solid"
+                  className="embed-primary-action"
                   onClick={() =>
                     copyToClipboard(markdownSnippet, "Markdown snippet")
                   }
                 >
                   Copy markdown
-                </PrimaryButton>
+                </DitherButton>
                 <SecondaryLink
                   href={profileUrl}
                   target="_blank"
@@ -579,8 +451,7 @@ const Overlay = styled.div`
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: rgba(5, 7, 12, 0.78);
-  backdrop-filter: blur(10px);
+  background: rgb(0 0 0 / 0.72);
   overscroll-behavior: contain;
 
   @media (max-width: 640px) {
@@ -591,15 +462,17 @@ const Overlay = styled.div`
 
 const Dialog = styled.div`
   display: grid;
-  width: min(100%, 960px);
-  height: min(84dvh, 760px);
+  width: min(100%, 1040px);
+  height: min(86dvh, 780px);
   max-height: calc(100dvh - 32px);
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--service-border-strong);
-  border-radius: 14px;
+  border-radius: var(--radius);
   outline: none;
   background: var(--service-surface);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.5);
+  container-type: inline-size;
 
   @media (max-width: 840px) {
     height: min(92dvh, 860px);
@@ -610,21 +483,19 @@ const Dialog = styled.div`
     height: min(96dvh, 860px);
     max-height: calc(100dvh - 8px);
     border-bottom: 0;
-    border-radius: 14px 14px 0 0;
   }
 `;
 
 const DialogHeader = styled.div`
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 13px 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--service-border);
-  background: var(--service-surface);
 
   @media (max-width: 640px) {
-    padding: 12px 14px;
+    padding: 11px 14px;
   }
 `;
 
@@ -632,28 +503,27 @@ const HeaderCopy = styled.div`
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 `;
 
 const DialogTitle = styled.h2`
   overflow: hidden;
   margin: 0;
   color: var(--service-text);
-  font-size: 1.125rem;
+  font-size: 1.0625rem;
   font-weight: 600;
-  line-height: 1.35;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
 
 const DialogDescription = styled.p`
-  overflow: hidden;
+  max-width: 60ch;
   margin: 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
 
   @media (max-width: 480px) {
     display: none;
@@ -662,19 +532,16 @@ const DialogDescription = styled.p`
 
 const CloseButton = styled.button`
   display: inline-flex;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  background: var(--service-surface-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
   color: var(--service-text-muted);
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease,
-    color 150ms ease;
+  cursor: pointer;
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
@@ -683,7 +550,7 @@ const CloseButton = styled.button`
 
   @media (hover: hover) {
     &:hover {
-      background: var(--service-accent-soft);
+      border-color: var(--service-border-strong);
       color: var(--service-text);
     }
   }
@@ -692,38 +559,14 @@ const CloseButton = styled.button`
     width: 44px;
     height: 44px;
   }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
 `;
 
 const DialogBody = styled.div`
   display: grid;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
   overflow: hidden;
-  scrollbar-color: color-mix(
-      in srgb,
-      var(--service-text-muted) 52%,
-      transparent
-    )
-    var(--service-canvas);
   scrollbar-width: thin;
-
-  &::-webkit-scrollbar {
-    width: 9px;
-  }
-
-  &::-webkit-scrollbar-track {
-    background: var(--service-canvas);
-  }
-
-  &::-webkit-scrollbar-thumb {
-    border: 2px solid var(--service-canvas);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--service-text-muted) 52%, transparent);
-  }
 
   @media (max-width: 840px) {
     grid-template-columns: 1fr;
@@ -732,12 +575,6 @@ const DialogBody = styled.div`
     padding-bottom: max(24px, env(safe-area-inset-bottom));
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
-    scroll-padding-bottom: max(24px, env(safe-area-inset-bottom));
-  }
-
-  @media (max-width: 640px) {
-    padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 16px));
-    scroll-padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 16px));
   }
 `;
 
@@ -746,6 +583,7 @@ const PreviewPanel = styled.div`
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  gap: 8px;
   overflow: hidden;
   padding: 16px;
   border-right: 1px solid var(--service-border);
@@ -762,18 +600,9 @@ const PreviewPanel = styled.div`
   }
 `;
 
-const PreviewSurface = styled.div`
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 8px;
-`;
-
 const PreviewLabel = styled.span`
-  color: var(--service-text);
-  font-size: 0.8125rem;
-  font-weight: 600;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
   line-height: 1.3;
 `;
 
@@ -784,7 +613,6 @@ const PreviewFrame = styled.div<{ $threeD: boolean }>`
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 20px 0;
 
   @media (max-width: 840px) {
     height: ${({ $threeD }) => ($threeD ? "320px" : "200px")};
@@ -793,7 +621,6 @@ const PreviewFrame = styled.div<{ $threeD: boolean }>`
 
   @media (max-width: 640px) {
     height: ${({ $threeD }) => ($threeD ? "272px" : "160px")};
-    padding: 8px 0;
   }
 `;
 
@@ -805,38 +632,24 @@ const PreviewImage = styled.img`
   object-fit: contain;
 `;
 
+const PreviewMeta = styled.span`
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+`;
+
 const ControlsPanel = styled.div`
   display: flex;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
   overflow-y: auto;
-  padding: 14px 16px 16px;
+  padding: 6px 16px 16px;
   background: var(--service-surface);
   overscroll-behavior: contain;
-  scrollbar-color: color-mix(
-      in srgb,
-      var(--service-text-muted) 52%,
-      transparent
-    )
-    var(--service-canvas);
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-
-  &::-webkit-scrollbar {
-    width: 9px;
-  }
-
-  &::-webkit-scrollbar-track {
-    border-left: 1px solid var(--service-border);
-    background: var(--service-canvas);
-  }
-
-  &::-webkit-scrollbar-thumb {
-    border: 2px solid var(--service-canvas);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--service-text-muted) 52%, transparent);
-  }
 
   @media (max-width: 840px) {
     overflow: visible;
@@ -844,43 +657,28 @@ const ControlsPanel = styled.div`
   }
 
   @media (max-width: 640px) {
-    padding: 12px 14px max(16px, env(safe-area-inset-bottom));
+    padding: 4px 14px max(16px, env(safe-area-inset-bottom));
+  }
+
+  button.embed-primary-action {
+    padding-right: 1rem;
+    padding-left: 1rem;
+    font-size: 0.875rem;
   }
 `;
 
-const ControlsHeader = styled.div`
-  display: flex;
-  align-items: center;
-  padding-bottom: 9px;
-  border-bottom: 1px solid var(--service-border);
-`;
-
-const ControlsTitle = styled.h3`
-  margin: 0;
-  color: var(--service-text);
-  font-size: 0.875rem;
-  font-weight: 600;
-  line-height: 1.3;
-`;
-
-const OptionGroup = styled.div<{ $stacked?: boolean }>`
+const OptionRow = styled.div<{ $stacked?: boolean }>`
   display: grid;
   grid-template-columns: ${({ $stacked }) =>
-    $stacked ? "1fr" : "7rem minmax(0, 1fr)"};
+    $stacked ? "1fr" : "6.5rem minmax(0, 1fr)"};
   align-items: ${({ $stacked }) => ($stacked ? "start" : "center")};
-  gap: ${({ $stacked }) => ($stacked ? "7px" : "10px")};
-  padding: 8px 0;
+  gap: ${({ $stacked }) => ($stacked ? "8px" : "12px")};
+  padding: 10px 0;
   border-bottom: 1px solid var(--service-border);
-
-  @media (max-width: 400px) {
-    grid-template-columns: ${({ $stacked }) =>
-      $stacked ? "1fr" : "6.25rem minmax(0, 1fr)"};
-    gap: ${({ $stacked }) => ($stacked ? "7px" : "8px")};
-  }
 `;
 
 const OptionLabel = styled.span`
-  color: var(--service-text-muted);
+  color: var(--service-text);
   font-size: 0.8125rem;
   font-weight: 500;
   line-height: 1.3;
@@ -888,118 +686,34 @@ const OptionLabel = styled.span`
 
 const TemplateSelect = styled(Select)`
   --select-width: 100%;
-  --select-height: 34px;
+  --select-height: 32px;
   --select-font-size: 0.8125rem;
   --select-padding-x: 10px;
   --select-background: var(--service-surface-muted);
-  --select-border-color: var(--service-border-strong);
-
-  @media (pointer: coarse) {
-    --select-font-size: 1rem;
-  }
-`;
-
-const SegmentedControl = styled.div`
-  display: inline-flex;
-  width: fit-content;
-  max-width: 100%;
-  flex-wrap: wrap;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--service-border);
-  border-radius: 8px;
-  background: var(--service-surface-muted);
-`;
-
-const SegmentButton = styled.button<{ $active: boolean }>`
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid
-    ${({ $active }) =>
-      $active ? "var(--service-border-strong)" : "transparent"};
-  border-radius: 6px;
-  padding: 4px 8px;
-  background: ${({ $active }) =>
-    $active ? "var(--service-accent-soft)" : "transparent"};
-  color: ${({ $active }) =>
-    $active ? "var(--service-text)" : "var(--service-text-muted)"};
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 550;
-  line-height: 1;
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease,
-    color 150ms ease,
-    transform 120ms ease;
-
-  &:active {
-    transform: translateY(1px);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 1px;
-  }
-
-  @media (hover: hover) {
-    &:hover {
-      color: var(--service-text);
-    }
-  }
-
-  @media (pointer: coarse) {
-    min-height: 44px;
-    padding-right: 12px;
-    padding-left: 12px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
+  --select-border-color: var(--service-border);
+  --select-max-width: 100%;
 `;
 
 const SwatchRow = styled.div`
-  display: grid;
+  display: flex;
   width: 100%;
-  grid-template-columns: repeat(10, 28px);
-  justify-content: space-between;
-  gap: 0;
-
-  @media (pointer: coarse) {
-    width: fit-content;
-    grid-template-columns: repeat(5, 44px);
-    justify-content: start;
-    gap: 8px;
-  }
-
-  @media (max-width: 640px) {
-    width: fit-content;
-    grid-template-columns: repeat(5, 44px);
-    justify-content: start;
-    gap: 8px;
-  }
+  flex-wrap: wrap;
+  gap: 8px;
 `;
 
 const Swatch = styled.button<{ $active: boolean; $color: string }>`
-  width: 28px;
-  height: 28px;
-  border: 2px solid var(--service-surface);
-  border-radius: 7px;
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
   background: ${({ $color }) => $color};
-  box-shadow:
-    0 0 0 1px
-      ${({ $active }) =>
-        $active ? "var(--service-text)" : "var(--service-border-strong)"},
-    inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+  box-shadow: ${({ $active }) =>
+    $active
+      ? "0 0 0 2px var(--service-text)"
+      : "inset 0 0 0 1px rgb(255 255 255 / 0.14)"};
   cursor: pointer;
-  transition: transform 120ms ease;
-
-  &:active {
-    transform: translateY(1px);
-  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
@@ -1007,17 +721,13 @@ const Swatch = styled.button<{ $active: boolean; $color: string }>`
   }
 
   @media (pointer: coarse) {
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
   }
 
   @media (max-width: 640px) {
-    width: 44px;
-    height: 44px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
+    width: 40px;
+    height: 40px;
   }
 `;
 
@@ -1025,11 +735,7 @@ const SnippetSection = styled.div`
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 10px;
-  padding: 12px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 10px;
-  background: var(--service-canvas);
+  margin-top: 14px;
 `;
 
 const SnippetHeader = styled.div`
@@ -1051,48 +757,34 @@ const SnippetTitle = styled.h3`
 const InlineActions = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 12px;
 `;
 
 const InlineActionButton = styled.button`
   display: inline-flex;
   min-height: 28px;
   align-items: center;
-  justify-content: center;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 7px;
-  padding: 4px 8px;
-  background: var(--service-surface-muted);
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--service-text-muted);
   font: inherit;
   font-size: 0.75rem;
-  font-weight: 550;
-  line-height: 1;
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease,
-    color 150ms ease;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--service-text);
+    text-decoration: underline;
+  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
 
-  @media (hover: hover) {
-    &:hover {
-      background: var(--service-accent-soft);
-      color: var(--service-text);
-    }
-  }
-
   @media (pointer: coarse) {
     min-height: 44px;
-    padding-right: 12px;
-    padding-left: 12px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
   }
 `;
 
@@ -1102,11 +794,10 @@ const CodeBlock = styled.pre`
   margin: 0;
   padding: 10px;
   border: 1px solid var(--service-border);
-  border-radius: 8px;
-  background: #080b11;
+  border-radius: var(--radius);
+  background: var(--service-canvas);
   color: var(--service-text);
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1120,87 +811,30 @@ const CodeBlock = styled.pre`
 const PrimaryActions = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
-`;
-
-const PrimaryButton = styled.button`
-  display: inline-flex;
-  min-height: 34px;
   align-items: center;
-  justify-content: center;
-  border: 1px solid var(--service-accent);
-  border-radius: 8px;
-  padding: 7px 11px;
-  background: var(--service-accent);
-  color: var(--service-accent-foreground);
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 650;
-  line-height: 1;
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease;
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (hover: hover) {
-    &:hover {
-      border-color: var(--service-accent-hover);
-      background: var(--service-accent-hover);
-    }
-  }
-
-  @media (pointer: coarse) {
-    min-height: 44px;
-    padding-right: 14px;
-    padding-left: 14px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
+  gap: 14px;
 `;
 
 const SecondaryLink = styled.a`
   display: inline-flex;
   min-height: 34px;
   align-items: center;
-  justify-content: center;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  padding: 7px 11px;
-  background: var(--service-surface-muted);
   color: var(--service-text);
-  font-size: 0.75rem;
-  font-weight: 550;
-  line-height: 1;
+  font-size: 0.8125rem;
+  font-weight: 500;
   text-decoration: none;
-  transition:
-    border-color 150ms ease,
-    background-color 150ms ease;
+
+  &:hover {
+    text-decoration: underline;
+  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (hover: hover) {
-    &:hover {
-      background: var(--service-accent-soft);
-    }
+    outline-offset: 3px;
   }
 
   @media (pointer: coarse) {
     min-height: 44px;
-    padding-right: 14px;
-    padding-left: 14px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
   }
 `;
 

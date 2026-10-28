@@ -1,16 +1,18 @@
 "use client";
 
-import { describeRankingWindow } from "@/lib/reportingPeriods";
-
 import { useMemo, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
-import styled, { css } from "styled-components";
+import styled from "styled-components";
+import { DitherAvatar } from "dither-kit/DitherAvatar";
+import { DitherButton } from "dither-kit/DitherButton";
 import { toast } from "react-toastify";
+import { describeRankingWindow } from "@/lib/reportingPeriods";
 import { formatCurrency, formatNumber } from "@/lib/utils";
+import { DitherSelectionNav } from "./ditherControls";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
 import type { ProfileStatsData, ProfileUser } from "./types";
 
-import { PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
+import { PROFILE_PERIODS, PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
 
 export interface ProfileOverviewProps {
   user: ProfileUser;
@@ -31,29 +33,27 @@ export function getProfileRankLabel(
 ): string {
   if (period === "month") return "30d rank (UTC)";
   if (period === "week") return "7d rank (UTC)";
-  if (period === "this-month" || period === "last-month") return `${PROFILE_PERIOD_LABELS[period]} rank (UTC)`;
+  if (period === "this-month" || period === "last-month") {
+    return `${PROFILE_PERIOD_LABELS[period]} rank (UTC)`;
+  }
   return "All-time rank";
 }
 
 const OverviewPanel = styled.section`
-  overflow: hidden;
-  border: 1px solid var(--service-border);
-  border-radius: 12px;
-  background: var(--service-surface);
   color: var(--service-text);
   container-type: inline-size;
 `;
 
-const OverviewHeader = styled.div`
+const IdentityRow = styled.div`
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 0.875rem 1.25rem;
-  padding: 0.875rem 1rem;
+  gap: 1rem 1.25rem;
 
-  @media (min-width: 640px) {
-    padding: 1rem 1.125rem;
+  @container (max-width: 34rem) {
+    flex-direction: column;
+    align-items: stretch;
   }
 `;
 
@@ -63,6 +63,10 @@ const Identity = styled.div`
   flex: 1 1 19rem;
   align-items: center;
   gap: 1rem;
+
+  @container (max-width: 34rem) {
+    flex: 0 0 auto;
+  }
 `;
 
 const Avatar = styled.div`
@@ -72,10 +76,10 @@ const Avatar = styled.div`
   overflow: hidden;
   flex: 0 0 auto;
   border: 1px solid var(--service-border-strong);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--service-surface-muted);
 
-  @media (min-width: 640px) {
+  @container (min-width: 40rem) {
     width: 80px;
     height: 80px;
   }
@@ -83,6 +87,11 @@ const Avatar = styled.div`
 
 const AvatarImage = styled(Image)`
   object-fit: cover;
+`;
+
+const AvatarFallback = styled(DitherAvatar)`
+  position: absolute;
+  inset: 0;
 `;
 
 const IdentityCopy = styled.div`
@@ -93,8 +102,9 @@ const DisplayName = styled.h1`
   overflow: hidden;
   margin: 0;
   color: var(--service-text);
-  font-size: clamp(1.125rem, 4vw, 1.375rem);
+  font-size: clamp(1.25rem, 3vw, 1.5rem);
   font-weight: 600;
+  letter-spacing: -0.02em;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -110,50 +120,33 @@ const Handle = styled.p`
   white-space: nowrap;
 `;
 
-const Metadata = styled.ul`
+const Metadata = styled.p`
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   gap: 0.25rem 0.5rem;
-  margin-top: 0.4rem;
-  margin-bottom: 0;
-  padding: 0;
+  margin: 0.45rem 0 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   line-height: 1.3;
-  list-style: none;
-`;
 
-const MetadataItem = styled.li`
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-
-  &:not(:first-child)::before {
-    width: 2px;
-    height: 2px;
-    border-radius: 50%;
-    background: var(--service-border-strong);
-    content: "";
+  > span:not(:last-child)::after {
+    margin-left: 0.5rem;
+    color: var(--service-border-strong);
+    content: "·";
   }
 `;
 
-const RankItem = styled.li`
+const RankMark = styled.span`
   display: inline-flex;
   align-items: baseline;
-  gap: 0.25rem;
-  padding: 0.1875rem 0.4375rem;
-  border: 1px solid color-mix(in srgb, var(--service-accent) 42%, transparent);
-  border-radius: 0.375rem;
-  background: var(--service-accent-soft);
-  color: var(--service-text);
-  font-size: 0.75rem;
-  font-weight: 600;
-  line-height: 1.2;
+  gap: 0.3rem;
+  color: var(--service-text-muted);
 
   strong {
     color: var(--service-accent);
-    font-weight: 700;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 `;
 
@@ -162,158 +155,148 @@ const Actions = styled.div`
   flex: 0 0 auto;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.375rem;
+  gap: 0.875rem;
 
-  @media (max-width: 479px) {
+  button.profile-primary-action {
+    padding-right: 1rem;
+    padding-left: 1rem;
+    font-size: 0.875rem;
+  }
+
+  @container (max-width: 34rem) {
     width: 100%;
   }
 `;
 
-const actionStyles = css`
+const TextAction = styled.button`
   display: inline-flex;
   min-height: 34px;
   align-items: center;
-  justify-content: center;
-  gap: 0.375rem;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  padding: 0.4rem 0.625rem;
+  padding: 0;
   color: var(--service-text);
+  background: transparent;
+  border: 0;
   font: inherit;
-  font-size: 0.8125rem;
-  font-weight: 550;
-  line-height: 1;
+  font-size: 0.875rem;
+  font-weight: 500;
   text-decoration: none;
   cursor: pointer;
-  transition:
-    border-color 140ms ease,
-    background-color 140ms ease,
-    color 140ms ease;
+
+  &:hover {
+    text-decoration: underline;
+  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (hover: hover) {
-    &:hover {
-      border-color: var(--service-border-strong);
-    }
+    outline-offset: 3px;
   }
 
   @media (pointer: coarse) {
     min-height: 44px;
-    padding-top: 0.65rem;
-    padding-bottom: 0.65rem;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
   }
 `;
 
-const PrimaryAction = styled.button`
-  ${actionStyles}
-  border-color: var(--service-accent);
-  background: var(--service-accent);
-  color: var(--service-accent-foreground);
+const TextLink = styled.a`
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
 
-  @media (hover: hover) {
-    &:hover {
-      border-color: var(--service-accent-hover);
-      background: var(--service-accent-hover);
-    }
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 3px;
+  }
+
+  @media (pointer: coarse) {
+    min-height: 44px;
   }
 `;
 
-const SecondaryAction = styled.button`
-  ${actionStyles}
-  background: var(--service-surface-muted);
+const FactsHeader = styled.div`
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem 1.25rem;
+  margin-top: 1.25rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--service-border);
 
-  @media (hover: hover) {
-    &:hover {
-      background: var(--service-accent-soft);
-    }
+  @container (max-width: 30rem) {
+    align-items: flex-start;
+    flex-direction: column-reverse;
+    gap: 0.5rem;
   }
 `;
 
-const GhostAction = styled.a`
-  ${actionStyles}
-  background: transparent;
-
-  @media (hover: hover) {
-    &:hover {
-      background: var(--service-surface-muted);
-    }
-  }
-`;
+const PeriodNav = styled(DitherSelectionNav)``;
 
 const Metrics = styled.dl`
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 0;
-  border-top: 1px solid var(--service-border);
-  text-align: left;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0.75rem 0 0;
 
-  @container (min-width: 40rem) {
-    grid-template-columns: repeat(4, 9.25rem);
-    justify-content: start;
+  @container (max-width: 36rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 0.875rem;
   }
 `;
 
 const Metric = styled.div`
-  display: flex;
   min-width: 0;
-  flex-direction: column;
-  align-items: flex-start;
-  padding: 0.6875rem 1rem;
-  text-align: left;
+  padding-right: 1rem;
 
-  &:nth-child(even) {
+  & + & {
+    padding-left: 1rem;
     border-left: 1px solid var(--service-border);
   }
 
-  &:nth-child(n + 3) {
-    border-top: 1px solid var(--service-border);
-  }
+  @container (max-width: 36rem) {
+    &:nth-child(odd) {
+      padding-left: 0;
+      border-left: 0;
+    }
 
-  @container (min-width: 40rem) {
-    padding-right: 1.25rem;
-    padding-left: 1.25rem;
-
-    &:not(:first-child) {
+    &:nth-child(even) {
+      padding-left: 1rem;
       border-left: 1px solid var(--service-border);
     }
 
     &:nth-child(n + 3) {
-      border-top: 0;
+      margin-top: 0.875rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--service-border);
     }
   }
 `;
 
 const MetricLabel = styled.dt`
-  width: 100%;
   overflow: hidden;
   color: var(--service-text-muted);
   font-size: 0.75rem;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
 `;
 
-const MetricValue = styled.dd`
+const MetricValue = styled.dd<{ $lead?: boolean }>`
   width: 100%;
   overflow: hidden;
   margin: 0.3rem 0 0;
   color: var(--service-text);
-  font-size: clamp(1.05rem, 4vw, 1.35rem);
+  font-size: ${(props) => (props.$lead ? "2rem" : "1.375rem")};
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
 `;
 
 const subscribeNoop = () => () => {};
@@ -353,6 +336,14 @@ export function formatJoined(
   return date.toLocaleDateString("en-US", options);
 }
 
+function buildProfilePeriodHref(
+  username: string,
+  period: ProfilePeriod,
+): string {
+  const basePath = `/u/${encodeURIComponent(username)}`;
+  return period === "all" ? basePath : `${basePath}?period=${period}`;
+}
+
 export function ProfileOverview({
   user,
   stats,
@@ -362,6 +353,7 @@ export function ProfileOverview({
   className,
 }: ProfileOverviewProps) {
   const [isEmbedDialogOpen, setIsEmbedDialogOpen] = useState(false);
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const isMounted = useSyncExternalStore(
     subscribeNoop,
     () => true,
@@ -376,7 +368,17 @@ export function ProfileOverview({
     [user.createdAt, isMounted, timeZone],
   );
   const displayName = user.displayName || user.username;
-  const avatarUrl = user.avatarUrl || `https://github.com/${user.username}.png`;
+  const avatarUrl = user.avatarUrl;
+  const showAvatar = Boolean(avatarUrl) && !avatarFailed;
+  const periodOptions = useMemo(
+    () =>
+      PROFILE_PERIODS.map((value) => ({
+        value,
+        label: PROFILE_PERIOD_LABELS[value],
+        href: buildProfilePeriodHref(user.username, value),
+      })),
+    [user.username],
+  );
 
   const handleShareClick = async () => {
     try {
@@ -397,6 +399,7 @@ export function ProfileOverview({
             : `${PROFILE_PERIOD_LABELS[period]} tokens`,
       value: formatNumber(stats.totalTokens),
       title: stats.totalTokens.toLocaleString("en-US"),
+      lead: true,
     },
     {
       label:
@@ -422,7 +425,7 @@ export function ProfileOverview({
       title: stats.activeDays.toLocaleString("en-US"),
     },
     {
-      label: "All submissions",
+      label: "Submissions (all-time)",
       value: (stats.submissionCount ?? 0).toLocaleString("en-US"),
       title: (stats.submissionCount ?? 0).toLocaleString("en-US"),
     },
@@ -433,16 +436,26 @@ export function ProfileOverview({
       className={className}
       aria-labelledby="profile-overview-heading"
     >
-      <OverviewHeader>
+      <IdentityRow>
         <Identity>
           <Avatar>
-            <AvatarImage
-              src={avatarUrl}
-              alt={`${displayName}'s avatar`}
-              fill
-              sizes="(min-width: 640px) 80px, 72px"
-              priority
-            />
+            {showAvatar ? (
+              <AvatarImage
+                src={avatarUrl as string}
+                alt={`${displayName}'s avatar`}
+                fill
+                sizes="(min-width: 640px) 80px, 72px"
+                priority
+                onError={() => setAvatarFailed(true)}
+              />
+            ) : (
+              <AvatarFallback
+                name={user.username}
+                color="blue"
+                grid={8}
+                cellPx={5}
+              />
+            )}
           </Avatar>
 
           <IdentityCopy>
@@ -452,18 +465,18 @@ export function ProfileOverview({
             <Handle>@{user.username}</Handle>
 
             {(user.rank != null || joined || formattedLastUpdated) && (
-              <Metadata aria-label="Profile details">
+              <Metadata>
                 {user.rank != null && (
-                  <RankItem title={describeRankingWindow(user.rankDateRange)}>
+                  <RankMark title={describeRankingWindow(user.rankDateRange)}>
                     <span>{getProfileRankLabel(period)}</span>
                     <strong>#{user.rank.toLocaleString("en-US")}</strong>
-                  </RankItem>
+                  </RankMark>
                 )}
-                {joined && <MetadataItem>Joined {joined}</MetadataItem>}
+                {joined && <span>Joined {joined}</span>}
                 {formattedLastUpdated && (
-                  <MetadataItem suppressHydrationWarning>
+                  <span suppressHydrationWarning>
                     Updated {formattedLastUpdated}
-                  </MetadataItem>
+                  </span>
                 )}
               </Metadata>
             )}
@@ -471,50 +484,49 @@ export function ProfileOverview({
         </Identity>
 
         <Actions aria-label="Profile actions">
-          <PrimaryAction
+          <DitherButton
             type="button"
+            color="blue"
+            variant="solid"
+            className="profile-primary-action"
             onClick={() => setIsEmbedDialogOpen(true)}
             aria-label={`Open GitHub README embed options for ${displayName}`}
           >
             Embed
-          </PrimaryAction>
-          <SecondaryAction
+          </DitherButton>
+          <TextAction
             type="button"
             onClick={handleShareClick}
             aria-label={`Share ${displayName}'s profile`}
           >
-            <Image
-              src="/icons/icon-share.svg"
-              alt=""
-              width={16}
-              height={16}
-              aria-hidden="true"
-            />
             Share
-          </SecondaryAction>
-          <GhostAction
+          </TextAction>
+          <TextLink
             href={`https://github.com/${user.username}`}
             target="_blank"
             rel="noopener noreferrer"
             aria-label={`View ${user.username}'s GitHub profile (opens in new tab)`}
           >
-            <Image
-              src="/icons/icon-github.svg"
-              alt=""
-              width={16}
-              height={16}
-              aria-hidden="true"
-            />
             GitHub
-          </GhostAction>
+          </TextLink>
         </Actions>
-      </OverviewHeader>
+      </IdentityRow>
+
+      <FactsHeader>
+        <PeriodNav
+          label="Usage period"
+          value={period}
+          options={periodOptions}
+        />
+      </FactsHeader>
 
       <Metrics aria-label="Profile summary">
         {headlineMetrics.map((metric) => (
           <Metric key={metric.label}>
             <MetricLabel>{metric.label}</MetricLabel>
-            <MetricValue title={metric.title}>{metric.value}</MetricValue>
+            <MetricValue $lead={metric.lead} title={metric.title}>
+              {metric.value}
+            </MetricValue>
           </Metric>
         ))}
       </Metrics>

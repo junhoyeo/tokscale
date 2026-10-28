@@ -21,7 +21,6 @@ import { Breadcrumbs } from "./Breadcrumbs";
 import { OrgCell } from "./OrgMark";
 import { SourceLink, sourceShortLabel } from "./SourceLink";
 import styles from "./capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 import { titleCase } from "@/lib/text/titleCase";
 
 const DATE_LABELS: Record<string, string> = {
@@ -82,7 +81,7 @@ function AmountRow({ a }: { a: AmountView }) {
       <td data-label="Status">
         <span className={`${styles.statusText} ${a.amount.status === "reported" ? styles.reported : ""}`}>{a.statusLabel}</span>
       </td>
-      <td data-label="Source">
+      <td className={styles.tightCol} data-label="Source">
         <SourceLink source={a.source} />
       </td>
     </tr>
@@ -113,9 +112,10 @@ export function EventDetail({ e }: { e: EventView }) {
     <>
       <Breadcrumbs items={[{ label: "Capital", href: capitalPath() }, crumb, { label: e.title }]} />
       <header className={styles.pageHead}>
-        <Eyebrow>{titleCase(`${e.tag} · ${e.typeLabels.join(" · ")} · ${e.statusLabel}`)}</Eyebrow>
         <h1 className={`${styles.display} ${styles.pageTitle}`}>{e.title}</h1>
-        <p className={styles.lede}>{e.event.summary}</p>
+        <p className={styles.lede}>
+          {titleCase(`${e.tag} · ${e.typeLabels.join(" · ")} · ${e.statusLabel}`)}. {e.event.summary}
+        </p>
         <p className={styles.metaLine}>
           {dates.map(([key, value]) => (
             <span key={key}>
@@ -162,7 +162,7 @@ export function EventDetail({ e }: { e: EventView }) {
             <div className={styles.stat}>
               <dt className={styles.statLabel}>{quantity.quantity.label ?? capitalize(QUANTITY_UNITS[quantity.quantity.measure].label)}</dt>
               <dd className={styles.statValue}>
-                <span className={`${styles.num} ${styles.cyan}`}>{quantity.short}</span>
+                <span className={styles.num}>{quantity.short}</span>
               </dd>
               <dd className={styles.statSub}>
                 {sourceShortLabel(quantity.source)}
@@ -188,7 +188,7 @@ export function EventDetail({ e }: { e: EventView }) {
             </h2>
             <p className={styles.sectionNote}>Each number with its type, status and the sentence it comes from</p>
           </div>
-          <table className={`${styles.ledgerTable} ${styles.ledgerStack}`}>
+          <table className={`${styles.ledgerTable} ${styles.ledgerStack} ${styles.narrowTable}`}>
             <thead>
               <tr>
                 <th scope="col">Amount</th>
@@ -196,7 +196,9 @@ export function EventDetail({ e }: { e: EventView }) {
                   Value
                 </th>
                 <th scope="col">Status</th>
-                <th scope="col">Source</th>
+                <th scope="col" className={styles.tightCol}>
+                  Source
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -237,7 +239,7 @@ export function EventDetail({ e }: { e: EventView }) {
                   <td className={`${styles.right} ${styles.num}`} data-label="Value">
                     {q.short}
                   </td>
-                  <td data-label="Source">
+                  <td className={styles.tightCol} data-label="Source">
                     <SourceLink source={q.source} />
                   </td>
                 </tr>

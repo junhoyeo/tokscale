@@ -4,16 +4,18 @@ import { useState, useEffect, useRef, useMemo, memo, useCallback } from "react";
 import Link from "next/link";
 import { useSearchParams, usePathname } from "next/navigation";
 import styled from "styled-components";
-import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
+import { DitherClipboard } from "dither-kit/DitherClipboard";
+import { DitherPagination } from "dither-kit/DitherPagination";
+import { DitherSearchInput } from "dither-kit/DitherSearchInput";
+import { CheckIcon, CopyIcon } from "@/components/ui/Icons";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import {
-  MetricItem,
-  MetricLabel,
-  MetricStrip,
-  MetricValue,
   MobileRankingList,
   MobileRankingRow,
+  PersonAvatar,
+  RankMark,
   SegmentedControl,
+  UsageBars,
 } from "@/components/leaderboard/RankingUI";
 import { getLeaderboardPeriodLabel } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
@@ -24,74 +26,311 @@ import {
 } from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
+import type { RecentUsage } from "@/lib/leaderboard/recentUsage";
+
+/* App-screen list pattern: title row (ViewSelector) → underline tabs →
+ * toolbar (scope left, search middle, count and sort right) → a table on the
+ * page ground with no card around it, numbers right-aligned on tabular
+ * figures, whole rows as links. */
 
 const Section = styled.div`
   display: grid;
-  gap: 10px;
-  margin-bottom: 24px;
+  gap: 16px;
 `;
 
-const ScopeLabel = styled.p`
+/* The summary strip: one row split by 1px rules, label above value. On a
+ * phone the three cells stay one row (narrow columns, not a stacked list)
+ * so the ranking still starts high on the screen. */
+const Summary = styled.dl`
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin: 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
+
+  @media (min-width: 641px) {
+    display: flex;
+    max-width: max-content;
+  }
+`;
+
+const SummaryItem = styled.div`
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 1px solid var(--service-border);
+
+  &:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  &:last-child {
+    padding-right: 0;
+  }
+
+  @media (min-width: 641px) {
+    padding: 12px 28px;
+
+    &:first-child {
+      padding-left: 0;
+    }
+
+    &:last-child {
+      padding-right: 0;
+    }
+  }
+`;
+
+const SummaryLabel = styled.dt`
+  overflow: hidden;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+`;
+
+const SummaryValue = styled.dd`
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--service-text);
+  font-size: 1.125rem;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  @media (min-width: 641px) {
+    font-size: 1.25rem;
+  }
+`;
+
+/* "Your rank": the signed-in viewer's own line on a raised surface, one link
+ * to their profile. */
+const YourRankCard = styled(Link)`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface-muted);
+  color: inherit;
+  text-decoration: none;
+
+  &:hover {
+    background: var(--v2-row-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: -2px;
+  }
 
   @media (max-width: 640px) {
+    flex-wrap: wrap;
+    gap: 8px 16px;
+  }
+`;
+
+const YourRankIdentity = styled.div`
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+`;
+
+const YourRankName = styled.p`
+  margin: 0;
+  overflow: hidden;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const YourRankUsername = styled.p`
+  margin: 0;
+  overflow: hidden;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const YourRankStats = styled.div`
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 32px;
+
+  @media (max-width: 640px) {
+    gap: 24px;
+  }
+`;
+
+const YourRankStat = styled.div`
+  text-align: right;
+`;
+
+const YourRankStatLabel = styled.p`
+  margin: 0 0 4px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+`;
+
+const YourRankStatValue = styled.p`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.25rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+`;
+
+const ErrorBanner = styled.p`
+  margin: 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+`;
+
+/* Toolbar: scope on the left (the date first), search in the middle, the
+   count and sort on the right. */
+const Toolbar = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin: 0 0 14px;
+`;
+
+const ToolbarLeft = styled.div`
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+`;
+
+const ToolbarRight = styled.div`
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 24px;
+`;
+
+const SearchWrap = styled.div`
+  flex: 1 1 220px;
+  max-width: 340px;
+
+  @media (max-width: 640px) {
+    order: 2;
+    max-width: none;
+    width: 100%;
+  }
+`;
+
+/* The range is stated again at the foot of the list; on a phone the toolbar
+ * keeps the sort control only. */
+const CountLine = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+
+  @media (max-width: 640px) {
+    display: none;
+  }
+`;
+
+const SortGroup = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+`;
+
+const SortLabel = styled.span`
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+`;
+
+const DateRangeRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 14px;
+  flex-wrap: wrap;
+`;
+
+const DateInput = styled.input`
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface);
+  color: var(--service-text);
+  font-size: 0.875rem;
+  min-width: 140px;
+  color-scheme: dark;
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
     font-size: 1rem;
   }
 `;
 
-const TabSection = styled.div`
-  width: 100%;
-  max-width: 100%;
-  margin-bottom: 14px;
-  overflow: hidden;
+const DateSeparator = styled.span`
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
 `;
 
-const TableContainer = styled.div`
-  border-top: 1px solid var(--service-border);
-  border-bottom: 1px solid var(--service-border);
+const DateApplyButton = styled.button`
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: var(--radius, 2px);
+  background: transparent;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+
+  &:hover:not(:disabled) {
+    background: var(--service-surface-muted);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: -1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 44px;
+  }
 `;
 
 const LoadingNotice = styled.p`
   margin: 0 0 10px;
   color: var(--service-text-muted);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 `;
 
-const EmptyState = styled.div`
-  padding: 32px;
-  text-align: center;
-`;
-
-const EmptyMessage = styled.p`
-  margin-bottom: 16px;
-  color: var(--color-fg-muted);
-`;
-
-const EmptyHint = styled.p`
-  font-size: 14px;
-  color: var(--color-fg-subtle);
-`;
-
-const RetryButton = styled.button`
-  margin-top: 16px;
-  padding: 8px 16px;
-  background-color: var(--color-primary);
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-`;
-
-const CodeSnippet = styled.code`
-  padding-left: 8px;
-  padding-right: 8px;
-  padding-top: 4px;
-  padding-bottom: 4px;
-  border-radius: 4px;
-  background-color: var(--color-bg-subtle);
+/* The table sits on the page ground, no card. */
+const TableContainer = styled.div`
+  border-bottom: 1px solid var(--service-border);
 `;
 
 const TableWrapper = styled.div`
@@ -110,130 +349,117 @@ const Table = styled.table`
 `;
 
 const TableHead = styled.thead`
-  border-bottom: 1px solid var(--service-border);
+  /* The one heavier line in the table. */
+  border-bottom: 1px solid var(--service-border-strong);
 `;
 
 const TableHeaderCell = styled.th`
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 12px;
-  padding-bottom: 12px;
+  padding: 10px 16px;
   text-align: left;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 0.8125rem;
+  font-weight: 400;
   color: var(--service-text-muted);
   white-space: nowrap;
-  
-  @media (min-width: 640px) {
-    padding-left: 24px;
-    padding-right: 24px;
+
+  &:first-child {
+    padding-left: 0;
   }
-  
+
+  &:last-child {
+    padding-right: 0;
+  }
+
   &.text-right {
     text-align: right;
   }
-  
-  &.hidden-mobile {
-    display: none;
-    
-    @media (min-width: 768px) {
-      display: table-cell;
-    }
-  }
-  
-  &.w-24 {
-    width: 96px;
-  }
-  
+
   &.rank-cell {
-    width: 1%;
-    white-space: nowrap;
-    
+    width: 72px;
+  }
+
+  /* Columns that hold numbers get the width their figure needs at that
+   * breakpoint; the identity column takes the rest. */
+  &.recent-cell {
+    width: 180px;
+  }
+
+  &.cost-cell {
+    width: 104px;
+  }
+
+  &.tokens-cell {
+    width: 120px;
+  }
+
+  @media (min-width: 1100px) {
+    &.recent-cell {
+      width: 300px;
+    }
+
+    &.cost-cell {
+      width: 110px;
+    }
+
+    &.tokens-cell {
+      width: 150px;
+    }
   }
 `;
 
-const TableBody = styled.tbody``;
-
-const TableRow = styled.tr`
+const TableRow = styled.tr<{ $current: boolean }>`
   &:not(:last-child) td {
     border-bottom: 1px solid var(--service-border);
   }
 
   &[data-current-user="true"] {
-    background: var(--service-accent-soft);
-    box-shadow: inset 2px 0 0 var(--service-accent);
-    
-    &:hover {
-      background: var(--service-accent-soft);
-    }
+    background: var(--service-surface-muted);
+  }
+
+  /* Your own row keeps its tone under the row-link hover. */
+  &[data-row-link]:hover {
+    background: ${({ $current }) => $current ? "var(--service-surface-muted)" : "var(--v2-row-hover)"};
   }
 `;
 
 const TableCell = styled.td`
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding: 10px 16px;
   white-space: nowrap;
   vertical-align: middle;
-  
-  @media (min-width: 640px) {
-    padding-left: 18px;
-    padding-right: 18px;
+
+  &:first-child {
+    padding-left: 0;
   }
-  
+
+  &:last-child {
+    padding-right: 0;
+  }
+
   &.text-right {
     text-align: right;
   }
-  
-  &.hidden-mobile {
-    display: none;
-    
-    @media (min-width: 768px) {
-      display: table-cell;
-    }
-  }
-  
-  &.w-24 {
-    width: 96px;
-  }
-  
-  &.rank-cell {
-    width: 1%;
-    white-space: nowrap;
-    
-  }
 `;
 
-const RankBadge = styled.span`
+/* Rank as data (a plain number on tabular figures); the top three carry the
+ * small dithered mark, denser the higher the rank. */
+const RankCell = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
   color: var(--service-text-muted);
   font-size: 0.875rem;
-  font-weight: 600;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
-  
-  &[data-rank="1"] { color: #f4c95d; }
-  &[data-rank="2"] { color: #c4ccda; }
-  &[data-rank="3"] { color: #d99a68; }
 `;
 
 /* The row's primary link: the whole row opens the profile (row links, globals.css). */
 const UserContainer = styled(Link)`
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
   color: inherit;
   text-decoration: none;
-`;
-
-const DesktopAvatar = styled.img`
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  object-fit: cover;
-  outline: 1px solid var(--service-border);
-  outline-offset: -1px;
 `;
 
 const UserInfo = styled.div`
@@ -241,30 +467,52 @@ const UserInfo = styled.div`
 `;
 
 const UserDisplayName = styled.p`
-  font-weight: 500;
-  font-size: 0.875rem;
   overflow: hidden;
+  font-weight: 500;
+  font-size: 0.9375rem;
   text-overflow: ellipsis;
-  max-width: 120px;
   color: var(--service-text);
-  
-  @media (min-width: 640px) {
-    font-size: 0.9375rem;
-    max-width: none;
-  }
+  margin: 0;
 `;
 
 const Username = styled.p`
-  font-size: 0.75rem;
   overflow: hidden;
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
-  max-width: 120px;
   color: var(--service-text-muted);
-  
-  @media (min-width: 640px) {
-    font-size: 0.8125rem;
-    max-width: none;
-  }
+  margin: 2px 0 0;
+`;
+
+const YouTag = styled.span`
+  margin-left: 6px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 400;
+`;
+
+/* Past 30 days: thirty dithered day columns, then the window's total, so the
+ * figure column stays aligned and every row's bars start on the same x. */
+const RecentCell = styled.span`
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 12px;
+`;
+
+const RecentBarsBox = styled.span`
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 200px;
+`;
+
+const RecentValue = styled.span`
+  min-width: 52px;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
 `;
 
 const StatSpan = styled.span`
@@ -272,540 +520,222 @@ const StatSpan = styled.span`
   font-size: 0.875rem;
   color: var(--service-text);
   font-variant-numeric: tabular-nums;
-  
-  @media (min-width: 640px) {
-    font-size: 0.9375rem;
-  }
 `;
 
 const TokenValue = styled.span`
   font-weight: 500;
-  font-size: 0.875rem;
-  color: var(--service-accent-hover);
+  font-size: 0.9375rem;
+  color: var(--service-text);
   font-variant-numeric: tabular-nums;
-  
-  @media (min-width: 640px) {
-    font-size: 0.9375rem;
-  }
 `;
 
 const TokenValueFull = styled.span`
   display: none;
-  
-  @media (min-width: 768px) {
+
+  @media (min-width: 900px) {
     display: inline;
   }
 `;
 
 const TokenValueAbbrev = styled.span`
   display: inline;
-  
-  @media (min-width: 768px) {
+
+  @media (min-width: 900px) {
     display: none;
   }
 `;
 
-const CombinedValueContainer = styled.div`
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  
-  @media (min-width: 561px) {
-    display: block;
+const EmptyState = styled.div`
+  padding: 40px 16px;
+  border-top: 1px solid var(--service-border);
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  text-align: center;
+`;
+
+const RetryButton = styled.button`
+  margin: 0 0 0 12px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
   }
 `;
 
-const CostValue = styled.span`
-  font-weight: 400;
-  font-size: 12px;
-  color: var(--color-fg-muted);
-  font-variant-numeric: tabular-nums;
-  
-  @media (min-width: 561px) {
-    display: none;
-  }
+const CodeSnippet = styled.code`
+  padding: 1px 6px;
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface-muted);
+  color: var(--service-text);
 `;
 
-const PaginationContainer = styled.div`
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 12px;
-  padding-bottom: 12px;
-  border-top: 1px solid var(--color-border-default);
+const PaginationBar = styled.div`
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  
-  @media (min-width: 640px) {
-    padding-left: 24px;
-    padding-right: 24px;
-    padding-top: 16px;
-    padding-bottom: 16px;
-    flex-direction: row;
+  padding: 12px 0;
+
+  @media (max-width: 640px) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
   }
 `;
 
 const PaginationText = styled.p`
-  font-size: 12px;
-  text-align: center;
-  color: var(--color-fg-muted);
-  
-  @media (min-width: 640px) {
-    font-size: 14px;
-    text-align: left;
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+
+  @media (min-width: 641px) {
+    font-size: 0.875rem;
   }
 `;
 
-const CTASection = styled.div`
-  margin-top: 32px;
-  padding-top: 24px;
-  border-top: 1px solid var(--service-border);
+/* The kit's pagination, stripped of its boxes: numbers in tabular figures,
+ * the current page marked by the accent line (the same selection mark as
+ * every other control on the screen). */
+const Pager = styled(DitherPagination)`
+  gap: 2px;
+
+  button,
+  span {
+    height: 32px;
+    min-width: 32px;
+    border: 0;
+    background: transparent;
+    font-size: 0.875rem;
+  }
+
+  button {
+    position: relative;
+    color: var(--service-text-muted);
+  }
+
+  button[aria-current="page"] {
+    color: var(--service-text);
+
+    &::after {
+      position: absolute;
+      right: 6px;
+      bottom: 4px;
+      left: 6px;
+      height: 2px;
+      background: var(--service-accent);
+      content: "";
+    }
+  }
+
+  button:not([disabled]):hover {
+    color: var(--service-text);
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: -2px;
+  }
+`;
+
+const CTASection = styled.section`
+  margin-top: 40px;
 `;
 
 const CTATitle = styled.h2`
-  font-size: 18px;
-  font-weight: 600;
-  margin-bottom: 12px;
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   color: var(--service-text);
 `;
 
 const CTADescription = styled.p`
-  margin-bottom: 16px;
+  margin: 6px 0 16px;
+  max-width: 68ch;
   color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
 `;
 
 const CodeBlock = styled.div`
-  display: flex;
+  display: grid;
   min-width: 0;
-  flex-direction: column;
-  gap: 8px;
-  font-family: monospace;
-  font-size: 14px;
+  max-width: 720px;
 `;
 
-const CodeLine = styled.div`
-  width: 100%;
-  min-width: 0;
-  padding: 12px;
-  border-radius: 8px;
+const CodeLine = styled.pre`
   display: flex;
+  min-width: 0;
   align-items: center;
-  font-size: 16px;
-  font-weight: 500;
-  letter-spacing: -0.8px;
-  border: 1px solid var(--service-border);
-  background: var(--service-surface);
-  overflow: hidden;
+  margin: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--service-border);
+  font-size: 0.8125rem;
 
-  * {
-    font-family: "Inconsolata", monospace !important;
+  &:first-child {
+    border-top: 1px solid var(--service-border);
   }
+`;
+
+const Code = styled.code`
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  white-space: pre;
 `;
 
 const CommandPrompt = styled.span`
   flex: 0 0 auto;
-  color: #4B6486;
-  margin-right: 8px;
+  margin-right: 10px;
+  color: var(--service-text-muted);
 `;
 
-const CommandPrefix = styled.span`
+const CopyCommandButton = styled.button`
+  display: grid;
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
-  color: #FFF;
-  &::after {
-    content: " ";
-    white-space: pre;
-  }
-`;
-
-const CommandName = styled.span`
-  flex: 0 0 auto;
-  background: linear-gradient(90deg, #0CF 0%, #0073FF 100%);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-`;
-
-const CommandArg = styled.span`
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-  color: #FFF;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  &::before {
-    content: " ";
-    white-space: pre;
-  }
-`;
-
-const CopyIconButton = styled.button`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: auto;
-  padding: 6px;
-  border: none;
-  background: transparent;
-  color: #4B6486;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: all 150ms;
-  flex-shrink: 0;
-
-  &:hover {
-    color: #FFF;
-    background: rgba(255, 255, 255, 0.1);
-  }
-
-  &.copied {
-    color: #3FB950;
-  }
-`;
-
-const CurrentUserCard = styled(Link)`
-  margin-bottom: 24px;
-  padding: 16px;
-  border-radius: 12px;
-  border: 1px solid var(--service-accent);
-  background: var(--service-accent-soft);
-  color: inherit;
-  text-decoration: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  cursor: pointer;
-
-  &:hover {
-    background: var(--service-accent-soft);
-    border-color: var(--service-accent);
-    opacity: 0.9;
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (max-width: 640px) {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
-  }
-`;
-
-const CurrentUserInfo = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: 1;
-  min-width: 0;
-`;
-
-const CurrentUserAvatar = styled.img`
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  object-fit: cover;
-  outline: 1px solid var(--service-border);
-  outline-offset: -1px;
-`;
-
-const CurrentUserDetails = styled.div`
-  min-width: 0;
-  flex: 1;
-`;
-
-const CurrentUserName = styled.p`
-  font-weight: 600;
-  font-size: 16px;
-  color: var(--service-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-`;
-
-const CurrentUserUsername = styled.p`
-  font-size: 14px;
-  color: var(--service-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-`;
-
-const CurrentUserStats = styled.div`
-  display: flex;
-  gap: 24px;
-  align-items: center;
-
-  @media (max-width: 640px) {
-    justify-content: space-between;
-  }
-`;
-
-const CurrentUserStat = styled.div`
-  text-align: right;
-
-  @media (max-width: 640px) {
-    text-align: left;
-  }
-`;
-
-const CurrentUserStatLabel = styled.p`
-  font-size: 12px;
-  color: var(--service-text-muted);
-  margin-bottom: 4px;
-`;
-
-const CurrentUserStatValue = styled.p`
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--service-accent-hover);
-`;
-
-const ErrorBanner = styled.div`
-  margin-bottom: 24px;
-  padding: 12px 16px;
-  border-radius: 8px;
-  border: 1px solid rgba(248, 81, 73, 0.55);
-  background: rgba(248, 81, 73, 0.1);
-  color: #ff8c85;
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-`;
-
-const SortLabel = styled.span`
-  color: var(--service-text-muted);
-  font-size: 0.8125rem;
-  font-weight: 500;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
-`;
-
-const SearchSortRow = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-
-  @media (max-width: 560px) {
-    flex-direction: column;
-    align-items: stretch;
-  }
-`;
-
-const SearchInputWrapper = styled.div`
-  position: relative;
-  flex: 1;
-  max-width: 360px;
-
-  @media (max-width: 560px) {
-    max-width: none;
-  }
-`;
-
-const SearchInputIcon = styled.span`
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--service-text-muted);
-  pointer-events: none;
-  display: flex;
-  align-items: center;
-`;
-
-const SearchInput = styled.input`
-  width: 100%;
-  min-height: 36px;
-  padding: 0 36px;
-  border-radius: 8px;
-  border: 1px solid var(--service-border-strong);
-  background: var(--service-surface);
-  color: var(--service-text);
-  font-size: 0.875rem;
-  outline: none;
-
-  &::placeholder {
-    color: var(--service-text-muted);
-  }
-
-  &:focus-visible {
-    border-color: var(--service-focus);
-    outline: 2px solid var(--service-focus);
-    outline-offset: -1px;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
-`;
-
-const ClearSearchButton = styled.button`
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px;
-  border: none;
+  place-items: center;
+  margin-left: 12px;
+  padding: 0;
+  border: 0;
   background: transparent;
   color: var(--service-text-muted);
   cursor: pointer;
-  border-radius: 4px;
+
   &:hover {
     color: var(--service-text);
   }
-`;
 
-const SortToggleInner = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: 0 0 auto;
-
-  @media (max-width: 560px) {
-    justify-content: space-between;
-  }
-`;
-
-const DateRangeRow = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-`;
-
-const DateInput = styled.input`
-  min-height: 36px;
-  padding: 0 10px;
-  border-radius: 8px;
-  border: 1px solid var(--service-border-strong);
-  background: var(--service-surface);
-  color: var(--service-text);
-  font-size: 0.875rem;
-  outline: none;
-  min-width: 140px;
-
-  &:focus-visible {
-    border-color: var(--service-focus);
-    outline: 2px solid var(--service-focus);
-    outline-offset: -1px;
-  }
-
-  &::-webkit-calendar-picker-indicator {
-    filter: invert(0.7);
-    cursor: pointer;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
-`;
-
-const DateSeparator = styled.span`
-  font-size: 14px;
-  color: var(--service-text-muted);
-`;
-
-const DateApplyButton = styled.button`
-  min-height: 36px;
-  padding: 0 12px;
-  border-radius: 8px;
-  border: 1px solid var(--service-accent);
-  background: var(--service-accent);
-  color: #fff;
-  font-size: 0.875rem;
-  font-weight: 500;
-
-  &:hover {
-    border-color: var(--service-accent-hover);
-    background: var(--service-accent-hover);
-  }
-
-  &:disabled {
-    opacity: 0.4;
-    cursor: default;
+  &.copied {
+    color: var(--positive, #44a282);
   }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
+    outline-offset: -2px;
   }
 
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
-`;
-
-const PaginationNav = styled.nav`
-  display: flex;
-  align-items: center;
-  gap: 4px;
-`;
-
-const PageButton = styled.button<{ $active?: boolean }>`
-  min-width: 32px;
-  height: 32px;
-  padding: 0 8px;
-  border-radius: 6px;
-  border: 1px solid ${({ $active }) => $active ? '#0073FF' : 'var(--color-border-default)'};
-  background: ${({ $active }) => $active ? '#0073FF' : 'transparent'};
-  color: ${({ $active }) => $active ? '#fff' : 'var(--color-fg-muted)'};
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 150ms;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-
-  &:hover:not(:disabled) {
-    border-color: #0073FF;
-    color: ${({ $active }) => $active ? '#fff' : 'var(--color-fg-default)'};
-  }
-
-  &:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-`;
-
-const PageEllipsis = styled.span`
-  min-width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-fg-muted);
-  font-size: 13px;
-`;
-
-const PaginationPages = styled.div`
-  display: none;
-  gap: 4px;
-
-  @media (min-width: 768px) {
-    display: flex;
+  @media (pointer: coarse) {
+    width: 44px;
+    height: 44px;
   }
 `;
 
 interface LeaderboardClientProps {
   initialData: LeaderboardData;
+  /** Past-30-day daily tokens for the users on the first page, read on the server. */
+  initialRecentUsage: RecentUsage | null;
   currentUser: { id: string; username: string; displayName: string | null; avatarUrl: string | null } | null;
   initialSortBy: LeaderboardSortBy;
 }
@@ -821,24 +751,41 @@ function isValidLeaderboardData(data: unknown): data is LeaderboardData {
   );
 }
 
+function describeRecent(values: number[], start: string): string {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return "No submitted usage in the past 30 days";
+  const active = values.filter((value) => value > 0).length;
+  const busiest = values.indexOf(Math.max(...values));
+  const busiestDate = new Date(Date.parse(`${start}T00:00:00Z`) + busiest * 86_400_000);
+  const busiestLabel = busiestDate.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  return `${total.toLocaleString("en-US")} tokens in the past 30 days, active ${active} of 30 days, busiest ${busiestLabel} (${formatNumber(values[busiest])})`;
+}
+
 interface LeaderboardRowProps {
   user: LeaderboardUser;
+  /** Daily tokens over the past 30 days, oldest first; undefined while loading. */
+  recent: number[] | undefined;
+  recentStart: string;
   isCurrentUser: boolean;
 }
 
 const LeaderboardRow = memo(function LeaderboardRow({
   user,
+  recent,
+  recentStart,
   isCurrentUser,
 }: LeaderboardRowProps) {
   const formattedTokens = useMemo(() => user.totalTokens.toLocaleString('en-US'), [user.totalTokens]);
   const formattedCost = useMemo(() => user.totalCost.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }), [user.totalCost]);
-  
+  const recentTotal = recent ? recent.reduce((sum, value) => sum + value, 0) : 0;
+
   return (
-    <TableRow data-row-link="" data-current-user={isCurrentUser}>
-      <TableCell className="rank-cell">
-        <RankBadge data-rank={user.rank <= 3 ? user.rank : undefined}>
-          #{user.rank}
-        </RankBadge>
+    <TableRow data-row-link="" data-current-user={isCurrentUser} $current={isCurrentUser}>
+      <TableCell className="rank-cell text-right">
+        <RankCell>
+          {user.rank <= 3 && <RankMark level={user.rank as 1 | 2 | 3} />}
+          {user.rank}
+        </RankCell>
       </TableCell>
       <TableCell>
         <UserContainer
@@ -846,35 +793,42 @@ const LeaderboardRow = memo(function LeaderboardRow({
           data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
-          <DesktopAvatar
+          <PersonAvatar
             src={user.avatarUrl || `https://github.com/${user.username}.png`}
-            alt=""
+            name={user.displayName || user.username}
+            size={36}
           />
           <UserInfo>
             <UserDisplayName>
               {user.displayName || user.username}
+              {isCurrentUser && <YouTag>You</YouTag>}
             </UserDisplayName>
-            <Username>
-              @{user.username}
-            </Username>
+            <Username>@{user.username}</Username>
           </UserInfo>
         </UserContainer>
       </TableCell>
-      <TableCell className="text-right hidden-cost-mobile">
+      <TableCell className="text-right">
+        {recent ? (
+          <InstantTooltip as={RecentCell} content={describeRecent(recent, recentStart)}>
+            <RecentBarsBox>
+              <UsageBars values={recent} label={`${user.username}: ${describeRecent(recent, recentStart)}`} />
+            </RecentBarsBox>
+            <RecentValue>{recentTotal > 0 ? formatNumber(recentTotal) : "0"}</RecentValue>
+          </InstantTooltip>
+        ) : (
+          <RecentValue aria-label="Loading the past 30 days">—</RecentValue>
+        )}
+      </TableCell>
+      <TableCell className="text-right">
         <InstantTooltip as={StatSpan} content={formattedCost}>
           {formatCurrency(user.totalCost)}
         </InstantTooltip>
       </TableCell>
       <TableCell className="text-right">
-        <CombinedValueContainer>
-          <InstantTooltip as={TokenValue} content={formattedTokens}>
-            <TokenValueFull>{formattedTokens}</TokenValueFull>
-            <TokenValueAbbrev>{formatNumber(user.totalTokens)}</TokenValueAbbrev>
-          </InstantTooltip>
-          <InstantTooltip as={CostValue} content={formattedCost}>
-            {formatCurrency(user.totalCost)}
-          </InstantTooltip>
-        </CombinedValueContainer>
+        <InstantTooltip as={TokenValue} content={formattedTokens}>
+          <TokenValueFull>{formattedTokens}</TokenValueFull>
+          <TokenValueAbbrev>{formatNumber(user.totalTokens)}</TokenValueAbbrev>
+        </InstantTooltip>
       </TableCell>
     </TableRow>
   );
@@ -882,10 +836,12 @@ const LeaderboardRow = memo(function LeaderboardRow({
 
 function LeaderboardMobileRow({
   user,
+  recent,
   isCurrentUser,
   sortBy,
 }: {
   user: LeaderboardUser;
+  recent: number[] | undefined;
   isCurrentUser: boolean;
   sortBy: LeaderboardSortBy;
 }) {
@@ -907,6 +863,7 @@ function LeaderboardMobileRow({
       primaryValue={primary.value}
       meta={secondary}
       isCurrentUser={isCurrentUser}
+      recent={recent ?? null}
     />
   );
 }
@@ -918,7 +875,7 @@ function parsePeriodParam(value: string | null): Period | null {
   return VALID_PERIODS.includes(value as Period) ? (value as Period) : null;
 }
 
-export default function LeaderboardClient({ initialData, currentUser, initialSortBy }: LeaderboardClientProps) {
+export default function LeaderboardClient({ initialData, initialRecentUsage, currentUser, initialSortBy }: LeaderboardClientProps) {
   const searchParams = useSearchParams();
   const pathname = usePathname();
 
@@ -933,7 +890,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const [data, setData] = useState<LeaderboardData>(initialData);
   const [error, setError] = useState<string | null>(null);
-  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   // Server/client divergence note: when ?period=custom&from=BAD&to=BAD is
   // requested, the server falls back to period="all" (see page.tsx) while the
   // client keeps period="custom" from the URL. This is intentionally safe
@@ -1118,193 +1074,221 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const sortedUsers = data.users || [];
 
-  const handleCopyCommand = (command: string) => {
-    navigator.clipboard.writeText(command);
-    setCopiedCommand(command);
-    setTimeout(() => setCopiedCommand(null), 2000);
-  };
+  // Past 30 days for the users on screen. The first page arrives from the
+  // server; a new page, period, sort or search fetches the ids it lacks.
+  const [recentUsage, setRecentUsage] = useState<RecentUsage | null>(initialRecentUsage);
+  const visibleIds = sortedUsers.map((user) => user.userId).join(",");
+  useEffect(() => {
+    if (!visibleIds) return;
+    const ids = visibleIds.split(",");
+    if (recentUsage && ids.every((id) => id in recentUsage.byUser)) return;
+    const controller = new AbortController();
+    fetch(`/api/leaderboard/recent?users=${encodeURIComponent(visibleIds)}`, { signal: controller.signal })
+      .then((response) => (response.ok ? (response.json() as Promise<RecentUsage>) : null))
+      .then((usage) => {
+        if (!usage) return;
+        setRecentUsage((previous) =>
+          previous && previous.end === usage.end
+            ? { ...usage, byUser: { ...previous.byUser, ...usage.byUser } }
+            : usage,
+        );
+      })
+      .catch(() => {
+        // The column keeps its dash; the table itself is unaffected.
+      });
+    return () => controller.abort();
+  }, [visibleIds, recentUsage]);
+
+  const periodLabel = getLeaderboardPeriodLabel(period, appliedFrom, appliedTo);
+  const rangeStart = (data.pagination.page - 1) * data.pagination.limit + 1;
+  const rangeEnd = Math.min(data.pagination.page * data.pagination.limit, data.pagination.totalUsers);
+
+  const commands = useMemo(() => {
+    const list: { command: string; describe: string }[] = [];
+    if (mounted && typeof window !== "undefined" && window.location.hostname !== "tokscale.ai") {
+      list.push({
+        command: `export TOKSCALE_API_URL=${window.location.origin}`,
+        describe: "the API URL export",
+      });
+    }
+    list.push({ command: "bunx tokscale login", describe: "tokscale login" });
+    list.push({ command: "bunx tokscale submit", describe: "tokscale submit" });
+    return list;
+  }, [mounted]);
 
   return (
-    <>
-      <Section>
-        <ScopeLabel>
-          {getLeaderboardPeriodLabel(period, appliedFrom, appliedTo)} aggregate
-        </ScopeLabel>
-
-        <MetricStrip>
-          <MetricItem>
-            <MetricLabel>Ranked users</MetricLabel>
-            <MetricValue>{data.stats.uniqueUsers.toLocaleString("en-US")}</MetricValue>
-          </MetricItem>
-          <MetricItem>
-            <MetricLabel>Tokens</MetricLabel>
-            <MetricValue $accent aria-label={`Tokens ${data.stats.totalTokens.toLocaleString("en-US")}`}>
-              <InstantTooltip content={data.stats.totalTokens.toLocaleString("en-US")} describe={false}>
-                {formatNumber(data.stats.totalTokens)}
-              </InstantTooltip>
-            </MetricValue>
-          </MetricItem>
-          <MetricItem>
-            <MetricLabel>Est. cost</MetricLabel>
-            <MetricValue
-              aria-label={`Estimated cost ${data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}`}
+    <Section>
+      <Summary>
+        <SummaryItem>
+          <SummaryLabel>Ranked profiles</SummaryLabel>
+          <SummaryValue>{data.stats.uniqueUsers.toLocaleString("en-US")}</SummaryValue>
+        </SummaryItem>
+        <SummaryItem>
+          <SummaryLabel>Tokens</SummaryLabel>
+          <SummaryValue aria-label={`Tokens ${data.stats.totalTokens.toLocaleString("en-US")}`}>
+            <InstantTooltip content={data.stats.totalTokens.toLocaleString("en-US")} describe={false}>
+              {formatNumber(data.stats.totalTokens)}
+            </InstantTooltip>
+          </SummaryValue>
+        </SummaryItem>
+        <SummaryItem>
+          <SummaryLabel>Est. cost</SummaryLabel>
+          <SummaryValue
+            aria-label={`Estimated cost ${data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}`}
+          >
+            <InstantTooltip
+              content={data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
+              describe={false}
             >
-              <InstantTooltip
-                content={data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
-                describe={false}
-              >
-                {formatCurrency(data.stats.totalCost)}
-              </InstantTooltip>
-            </MetricValue>
-          </MetricItem>
-        </MetricStrip>
-      </Section>
+              {formatCurrency(data.stats.totalCost)}
+            </InstantTooltip>
+          </SummaryValue>
+        </SummaryItem>
+      </Summary>
 
       {currentUser && currentUserRankError && (
-        <ErrorBanner>
-          <span>Unable to load your ranking. Please refresh the page.</span>
+        <ErrorBanner role="status">
+          Unable to load your ranking. Please refresh the page.
         </ErrorBanner>
       )}
 
       {currentUser && currentUserRank && (
-        <CurrentUserCard href={`/u/${currentUser.username}`}>
-          <CurrentUserInfo>
-            <CurrentUserAvatar
+        <YourRankCard href={`/u/${currentUser.username}`}>
+          <YourRankIdentity>
+            <PersonAvatar
               src={currentUser.avatarUrl || `https://github.com/${currentUser.username}.png`}
-              alt=""
+              name={currentUser.displayName || currentUser.username}
+              size={44}
             />
-            <CurrentUserDetails>
-              <CurrentUserName>
+            <div>
+              <YourRankName>
                 {currentUser.displayName || currentUser.username}
-              </CurrentUserName>
-              <CurrentUserUsername>
-                @{currentUser.username}
-              </CurrentUserUsername>
-            </CurrentUserDetails>
-          </CurrentUserInfo>
-          <CurrentUserStats>
-            <CurrentUserStat>
-              <CurrentUserStatLabel>Your Rank</CurrentUserStatLabel>
-              <CurrentUserStatValue>#{currentUserRank.rank}</CurrentUserStatValue>
-            </CurrentUserStat>
-            <CurrentUserStat>
-              <CurrentUserStatLabel>Tokens</CurrentUserStatLabel>
-              <CurrentUserStatValue>
+              </YourRankName>
+              <YourRankUsername>@{currentUser.username}</YourRankUsername>
+            </div>
+          </YourRankIdentity>
+          <YourRankStats>
+            <YourRankStat>
+              <YourRankStatLabel>Your rank</YourRankStatLabel>
+              <YourRankStatValue>#{currentUserRank.rank}</YourRankStatValue>
+            </YourRankStat>
+            <YourRankStat>
+              <YourRankStatLabel>Tokens</YourRankStatLabel>
+              <YourRankStatValue>
                 <InstantTooltip content={currentUserRank.totalTokens.toLocaleString("en-US")}>
                   {formatNumber(currentUserRank.totalTokens)}
                 </InstantTooltip>
-              </CurrentUserStatValue>
-            </CurrentUserStat>
-            <CurrentUserStat>
-              <CurrentUserStatLabel>Est. cost</CurrentUserStatLabel>
-              <CurrentUserStatValue>
+              </YourRankStatValue>
+            </YourRankStat>
+            <YourRankStat>
+              <YourRankStatLabel>Est. cost</YourRankStatLabel>
+              <YourRankStatValue>
                 <InstantTooltip
                   content={currentUserRank.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
                 >
                   {formatCurrency(currentUserRank.totalCost)}
                 </InstantTooltip>
-              </CurrentUserStatValue>
-            </CurrentUserStat>
-          </CurrentUserStats>
-        </CurrentUserCard>
+              </YourRankStatValue>
+            </YourRankStat>
+          </YourRankStats>
+        </YourRankCard>
       )}
 
-      <TabSection>
-        <SegmentedControl
-          label="Leaderboard period"
-          options={[
-            { value: "all" as Period, label: "All time" },
-            { value: "last-month" as Period, label: "Last month" },
-            { value: "month" as Period, label: "This month" },
-            { value: "week" as Period, label: "This week" },
-            { value: "custom" as Period, label: "Custom" },
-          ]}
-          value={period}
-          onChange={(value) => {
-            setPeriod(value);
-            setPage(1);
-            if (value !== "custom") {
-              setAppliedFrom("");
-              setAppliedTo("");
-              setCustomFrom("");
-              setCustomTo("");
-            }
-          }}
-        />
-      </TabSection>
+      <div>
+        <Toolbar>
+          <ToolbarLeft>
+            <SegmentedControl
+              label="Leaderboard period"
+              options={[
+                { value: "all" as Period, label: "All time" },
+                { value: "last-month" as Period, label: "Last month" },
+                { value: "month" as Period, label: "This month" },
+                { value: "week" as Period, label: "This week" },
+                { value: "custom" as Period, label: "Custom" },
+              ]}
+              value={period}
+              onChange={(value) => {
+                setPeriod(value);
+                setPage(1);
+                if (value !== "custom") {
+                  setAppliedFrom("");
+                  setAppliedTo("");
+                  setCustomFrom("");
+                  setCustomTo("");
+                }
+              }}
+            />
+          </ToolbarLeft>
+          <SearchWrap>
+            <DitherSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search users"
+              aria-label="Search leaderboard users"
+              name="leaderboard-search"
+            />
+          </SearchWrap>
+          <ToolbarRight>
+            <CountLine>
+              {debouncedSearch
+                ? `${data.pagination.totalUsers.toLocaleString("en-US")} ${data.pagination.totalUsers === 1 ? "result" : "results"} for “${debouncedSearch}”`
+                : `${period === "custom" ? `${periodLabel} · ` : ""}${rangeStart.toLocaleString("en-US")}–${rangeEnd.toLocaleString("en-US")} of ${data.pagination.totalUsers.toLocaleString("en-US")}`}
+            </CountLine>
+            <SortGroup>
+              <SortLabel>Sort</SortLabel>
+              <SegmentedControl
+                label="Leaderboard sort"
+                value={effectiveSortBy}
+                options={[
+                  { value: "tokens", label: "Tokens" },
+                  { value: "cost", label: "Est. cost" },
+                ]}
+                onChange={(value) => {
+                  setUrlSortOverride(null);
+                  setLeaderboardSort(value);
+                }}
+              />
+            </SortGroup>
+          </ToolbarRight>
+        </Toolbar>
 
-      {period === "custom" && (
-        <DateRangeRow>
-          <DateInput
-            type="date"
-            name="leaderboard-from"
-            aria-label="Leaderboard start date"
-            value={customFrom}
-            onChange={(e) => setCustomFrom(e.target.value)}
-            max={customTo || undefined}
-          />
-          <DateSeparator>~</DateSeparator>
-          <DateInput
-            type="date"
-            name="leaderboard-to"
-            aria-label="Leaderboard end date"
-            value={customTo}
-            onChange={(e) => setCustomTo(e.target.value)}
-            min={customFrom || undefined}
-          />
-          <DateApplyButton
-            type="button"
-            disabled={!parseCustomDateRange(customFrom, customTo)}
-            onClick={() => {
-              const parsed = parseCustomDateRange(customFrom, customTo);
-              if (!parsed) {
-                return;
-              }
-              setAppliedFrom(parsed.from);
-              setAppliedTo(parsed.to);
-              setPage(1);
-            }}
-          >
-            Apply
-          </DateApplyButton>
-        </DateRangeRow>
-      )}
-
-      <SearchSortRow>
-        <SearchInputWrapper>
-          <SearchInputIcon>
-            <SearchIcon size={16} />
-          </SearchInputIcon>
-          <SearchInput
-            type="text"
-            name="leaderboard-search"
-            aria-label="Search leaderboard users"
-            placeholder="Search users..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-          {searchQuery && (
-            <ClearSearchButton type="button" onClick={() => setSearchQuery("")} aria-label="Clear search">
-              <XIcon size={16} />
-            </ClearSearchButton>
-          )}
-        </SearchInputWrapper>
-        <SortToggleInner>
-          <SortLabel>Sort</SortLabel>
-          <SegmentedControl
-            label="Leaderboard sort"
-            value={effectiveSortBy}
-            options={[
-              { value: "tokens", label: "Tokens" },
-              { value: "cost", label: "Est. cost" },
-            ]}
-            onChange={(value) => {
-              setUrlSortOverride(null);
-              setLeaderboardSort(value);
-            }}
-          />
-        </SortToggleInner>
-      </SearchSortRow>
+        {period === "custom" && (
+          <DateRangeRow>
+            <DateInput
+              type="date"
+              name="leaderboard-from"
+              aria-label="Leaderboard start date"
+              value={customFrom}
+              onChange={(e) => setCustomFrom(e.target.value)}
+              max={customTo || undefined}
+            />
+            <DateSeparator>to</DateSeparator>
+            <DateInput
+              type="date"
+              name="leaderboard-to"
+              aria-label="Leaderboard end date"
+              value={customTo}
+              onChange={(e) => setCustomTo(e.target.value)}
+              min={customFrom || undefined}
+            />
+            <DateApplyButton
+              type="button"
+              disabled={!parseCustomDateRange(customFrom, customTo)}
+              onClick={() => {
+                const parsed = parseCustomDateRange(customFrom, customTo);
+                if (!parsed) {
+                  return;
+                }
+                setAppliedFrom(parsed.from);
+                setAppliedTo(parsed.to);
+                setPage(1);
+              }}
+            >
+              Apply
+            </DateApplyButton>
+          </DateRangeRow>
+        )}
+      </div>
 
       {isLoading && (
         <LoadingNotice role="status" aria-live="polite">
@@ -1314,9 +1298,8 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
       {error ? (
         <TableContainer>
-          <EmptyState>
-            <EmptyMessage>Failed to load leaderboard</EmptyMessage>
-            <EmptyHint>{error}</EmptyHint>
+          <EmptyState role="alert">
+            Failed to load the leaderboard.
             <RetryButton type="button" onClick={() => setRetryToken((prev) => prev + 1)}>
               Retry
             </RetryButton>
@@ -1328,15 +1311,11 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <EmptyState>
               {debouncedSearch ? (
                 <>
-                  <EmptyMessage>No users found for &ldquo;{debouncedSearch}&rdquo;</EmptyMessage>
-                  <EmptyHint>Try a different search term</EmptyHint>
+                  No users found for &ldquo;{debouncedSearch}&rdquo;. Try a different search.
                 </>
               ) : (
                 <>
-                  <EmptyMessage>No submissions yet. Be the first!</EmptyMessage>
-                  <EmptyHint>
-                    Run <CodeSnippet>tokscale login && tokscale submit</CodeSnippet>
-                  </EmptyHint>
+                  No submissions yet. Be the first: run <CodeSnippet>tokscale login &amp;&amp; tokscale submit</CodeSnippet>
                 </>
               )}
             </EmptyState>
@@ -1346,21 +1325,24 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                 <Table>
                   <TableHead>
                     <tr>
-                      <TableHeaderCell className="rank-cell">Rank</TableHeaderCell>
-                      <TableHeaderCell>User</TableHeaderCell>
-                      <TableHeaderCell className="text-right hidden-cost-mobile">Est. cost</TableHeaderCell>
-                      <TableHeaderCell className="text-right">Tokens</TableHeaderCell>
+                      <TableHeaderCell scope="col" className="rank-cell text-right">Rank</TableHeaderCell>
+                      <TableHeaderCell scope="col">User</TableHeaderCell>
+                      <TableHeaderCell scope="col" className="recent-cell text-right">Past 30 days</TableHeaderCell>
+                      <TableHeaderCell scope="col" className="cost-cell text-right">Est. cost</TableHeaderCell>
+                      <TableHeaderCell scope="col" className="tokens-cell text-right">Tokens</TableHeaderCell>
                     </tr>
                   </TableHead>
-                  <TableBody>
+                  <tbody>
                     {sortedUsers.map((user) => (
                       <LeaderboardRow
                         key={user.userId}
                         user={user}
+                        recent={recentUsage?.byUser[user.userId]}
+                        recentStart={recentUsage?.start ?? ""}
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
                       />
                     ))}
-                  </TableBody>
+                  </tbody>
                 </Table>
               </TableWrapper>
 
@@ -1369,6 +1351,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                   <LeaderboardMobileRow
                     key={user.userId}
                     user={user}
+                    recent={recentUsage?.byUser[user.userId]}
                     isCurrentUser={!!(currentUser && user.username === currentUser.username)}
                     sortBy={effectiveSortBy}
                   />
@@ -1376,116 +1359,52 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
               </MobileRankingList>
 
               {data.pagination.totalPages > 1 && (
-                <PaginationContainer>
+                <PaginationBar>
                   <PaginationText>
-                    Showing {(data.pagination.page - 1) * data.pagination.limit + 1}-
-                    {Math.min(data.pagination.page * data.pagination.limit, data.pagination.totalUsers)} of{" "}
-                    {data.pagination.totalUsers}
+                    Showing {rangeStart.toLocaleString("en-US")}–{rangeEnd.toLocaleString("en-US")} of{" "}
+                    {data.pagination.totalUsers.toLocaleString("en-US")}
                   </PaginationText>
-                  <PaginationNav>
-                    <PageButton
-                      type="button"
-                      disabled={data.pagination.page <= 1}
-                      onClick={() => setPage(data.pagination.page - 1)}
-                      aria-label="Previous page"
-                    >
-                      ←
-                    </PageButton>
-                    <PaginationPages>
-                      {(() => {
-                        const pages: React.ReactNode[] = [];
-                        const total = data.pagination.totalPages;
-                        const current = data.pagination.page;
-                        const delta = 2;
-                        const visible = new Set<number>();
-                        visible.add(1);
-                        visible.add(total);
-                        for (let i = Math.max(2, current - delta); i <= Math.min(total - 1, current + delta); i++) {
-                          visible.add(i);
-                        }
-
-                        const sorted = Array.from(visible).sort((a, b) => a - b);
-                        let last = 0;
-                        for (const p of sorted) {
-                          if (last && p - last > 1) {
-                            pages.push(<PageEllipsis key={`e${p}`}>…</PageEllipsis>);
-                          }
-                          pages.push(
-                            <PageButton type="button" key={p} $active={p === current} onClick={() => setPage(p)}>
-                              {p}
-                            </PageButton>
-                          );
-                          last = p;
-                        }
-                        return pages;
-                      })()}
-                    </PaginationPages>
-                    <PageButton
-                      type="button"
-                      disabled={data.pagination.page >= data.pagination.totalPages}
-                      onClick={() => setPage(data.pagination.page + 1)}
-                      aria-label="Next page"
-                    >
-                      →
-                    </PageButton>
-                  </PaginationNav>
-                </PaginationContainer>
+                  <Pager
+                    page={data.pagination.page}
+                    total={data.pagination.totalPages}
+                    siblings={1}
+                    onPageChange={setPage}
+                  />
+                </PaginationBar>
               )}
             </>
           )}
         </TableContainer>
       )}
 
-      <CTASection>
-        <CTATitle>Join the Leaderboard</CTATitle>
-        <CTADescription>Install Tokscale CLI and submit your usage data:</CTADescription>
+      <CTASection id="submit">
+        <CTATitle>Submit your usage</CTATitle>
+        <CTADescription>
+          Install the Tokscale CLI and submit your usage data to appear on the leaderboard.
+        </CTADescription>
         <CodeBlock>
-          {mounted && typeof window !== "undefined" && window.location.hostname !== "tokscale.ai" && (
-            <CodeLine>
-              <CommandPrompt>$</CommandPrompt>
-              <CommandPrefix>export</CommandPrefix>
-              <CommandName>TOKSCALE_API_URL</CommandName>
-              <CommandArg>={`${window.location.origin}`}</CommandArg>
-              <CopyIconButton
-                type="button"
-                onClick={() => handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`)}
-                className={copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? "copied" : ""}
-                aria-label="Copy command"
-              >
-                {copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
-              </CopyIconButton>
+          {commands.map(({ command, describe }) => (
+            <CodeLine key={command}>
+              <CommandPrompt aria-hidden="true">$</CommandPrompt>
+              <DitherClipboard value={command}>
+                {({ copied, copy }) => (
+                  <>
+                    <Code>{command}</Code>
+                    <CopyCommandButton
+                      type="button"
+                      onClick={() => void copy()}
+                      className={copied ? "copied" : ""}
+                      aria-label={copied ? `Copied ${describe}` : `Copy ${describe}`}
+                    >
+                      {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
+                    </CopyCommandButton>
+                  </>
+                )}
+              </DitherClipboard>
             </CodeLine>
-          )}
-          <CodeLine>
-            <CommandPrompt>$</CommandPrompt>
-            <CommandPrefix>bunx</CommandPrefix>
-            <CommandName>tokscale</CommandName>
-            <CommandArg>login</CommandArg>
-            <CopyIconButton
-              type="button"
-              onClick={() => handleCopyCommand("bunx tokscale login")}
-              className={copiedCommand === "bunx tokscale login" ? "copied" : ""}
-              aria-label="Copy command"
-            >
-              {copiedCommand === "bunx tokscale login" ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
-            </CopyIconButton>
-          </CodeLine>
-          <CodeLine>
-            <CommandPrompt>$</CommandPrompt>
-            <CommandPrefix>bunx</CommandPrefix>
-            <CommandName>tokscale</CommandName>
-            <CommandArg>submit</CommandArg>
-            <CopyIconButton
-              type="button"
-              onClick={() => handleCopyCommand("bunx tokscale submit")}
-              className={copiedCommand === "bunx tokscale submit" ? "copied" : ""}
-              aria-label="Copy command"
-            >
-              {copiedCommand === "bunx tokscale submit" ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
-            </CopyIconButton>
-          </CodeLine>
+          ))}
         </CodeBlock>
       </CTASection>
-    </>
+    </Section>
   );
 }

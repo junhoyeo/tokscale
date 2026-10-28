@@ -21,7 +21,7 @@ import {
 } from "@/lib/capital/ledger";
 import { calendarSpanLabel, fiscalLabel } from "@/lib/capital/ledger/capex";
 import { loadUsageSnapshot, usageForLabs, type LabUsage } from "@/lib/capital/ledger/usage";
-import { Amount, Missing } from "../../_components/Amount";
+import { Amount, AmountBar, Missing, maxByCurrency } from "../../_components/Amount";
 import { Breadcrumbs } from "../../_components/Breadcrumbs";
 import { CapexTable } from "../../_components/CapexTable";
 import { CapexSources } from "../../_components/CapexSources";
@@ -31,7 +31,6 @@ import { JsonLd } from "../../_components/JsonLd";
 import { OrgMark } from "../../_components/OrgMark";
 import { SourceLink, sourceShortLabel } from "../../_components/SourceLink";
 import styles from "../../_components/capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 import { titleCase } from "@/lib/text/titleCase";
 
 interface PageProps {
@@ -117,7 +116,7 @@ function HeaderFacts({ p }: { p: CompanyProfile }) {
       <Fact
         key="equity"
         label="Equity raised*"
-        value={<span className={styles.cyan}>{usd.map((t) => formatTotal(t)).join(" + ")}</span>}
+        value={<span className={styles.num}>{usd.map((t) => formatTotal(t)).join(" + ")}</span>}
         sub={
           <>
             in {p.equityRaised.rounds} closed {p.equityRaised.rounds === 1 ? "round" : "rounds"} Tokscale tracks ·{" "}
@@ -130,7 +129,7 @@ function HeaderFacts({ p }: { p: CompanyProfile }) {
     <Fact
       key="runrate"
       label="Run-rate revenue"
-      value={<span className={`${styles.num} ${styles.cyan}`}>{p.latestRunRate.short}</span>}
+      value={<span className={styles.num}>{p.latestRunRate.short}</span>}
       sub={
         <>
           {formatPartialDate(p.latestRunRate.asOf)} · company stated · <SourceLink source={p.latestRunRate.source} />
@@ -151,7 +150,7 @@ function HeaderFacts({ p }: { p: CompanyProfile }) {
     <Fact
       key="capex"
       label={`Cash capex, ${fiscalLabel(latestCapex)}`}
-      value={<span className={`${styles.num} ${styles.cyan}`}>{formatMoney(latestCapex.value, latestCapex.currency)}</span>}
+      value={<span className={styles.num}>{formatMoney(latestCapex.value, latestCapex.currency)}</span>}
       sub={
         <>
           {calendarSpanLabel(latestCapex.start, latestCapex.end)}
@@ -182,7 +181,7 @@ function HeaderFacts({ p }: { p: CompanyProfile }) {
       <Fact
         key="capacity"
         label={`Largest stated ${QUANTITY_UNITS[capacity[0].quantity.measure].label}`}
-        value={<span className={`${styles.num} ${styles.cyan}`}>{capacity[0].short}</span>}
+        value={<span className={styles.num}>{capacity[0].short}</span>}
         sub={`${capacity.length} ${capacity.length === 1 ? "deal states" : "deals state"} this measure; they are not added`}
       />
     ) : null;
@@ -294,16 +293,22 @@ function HeaderFacts({ p }: { p: CompanyProfile }) {
 }
 
 function FundingTable({ p }: { p: CompanyProfile }) {
+  const scale = maxByCurrency(
+    p.rounds.map((e) => {
+      const main = financingAmount(e, [...EQUITY_MEASURES, "ipo_proceeds", "form_d_amount_sold"], p.org.id) ?? financingAmount(e, ["debt_raised"], p.org.id);
+      return { value: main?.amount.value ?? null, currency: main?.amount.currency ?? "" };
+    })
+  );
   return (
     <table className={`${styles.ledgerTable} ${styles.ledgerStack}`}>
       <thead>
         <tr>
           <th scope="col">Date</th>
           <th scope="col">Round</th>
-          <th scope="col" className={styles.right}>
+          <th scope="col" className={`${styles.right} ${styles.amountCell}`}>
             Equity
           </th>
-          <th scope="col" className={styles.right}>
+          <th scope="col" className={`${styles.right} ${styles.amountCell}`}>
             Debt
           </th>
           <th scope="col" className={styles.right}>
@@ -329,6 +334,7 @@ function FundingTable({ p }: { p: CompanyProfile }) {
               leads={leads.map((l) => l.org)}
               coLeads={coLeads.map((l) => l.org)}
               includes={includes}
+              scale={scale}
             />
           );
         })}
@@ -344,6 +350,7 @@ function FundingRow({
   leads,
   coLeads,
   includes,
+  scale,
 }: {
   e: EventView;
   equity: EventView["amounts"][number] | undefined;
@@ -351,6 +358,7 @@ function FundingRow({
   leads: OrgView[];
   coLeads: OrgView[];
   includes: EventView["relations"];
+  scale: Map<string, number>;
 }) {
   // Rounds have a label ("Series H"); other financings show the instrument the source names.
   const detail =
@@ -372,11 +380,25 @@ function FundingRow({
           {detail ? <span className={styles.cellSub}>{detail}</span> : null}
           {equity?.skipped === "included_in" || debt?.skipped === "included_in" ? <span className={styles.cellSub}>counted in a later event</span> : null}
         </td>
-        <td className={`${styles.right} ${equity ? "" : styles.emptyStacked}`} data-label="Equity">
-          {equity ? <Amount view={equity} /> : <Missing />}
+        <td className={`${styles.right} ${styles.amountCell} ${equity ? "" : styles.emptyStacked}`} data-label="Equity">
+          {equity ? (
+            <>
+              <Amount view={equity} />
+              <AmountBar value={equity.amount.value} max={scale.get(equity.amount.currency) ?? 0} />
+            </>
+          ) : (
+            <Missing />
+          )}
         </td>
-        <td className={`${styles.right} ${debt ? "" : styles.emptyStacked}`} data-label="Debt">
-          {debt ? <Amount view={debt} /> : <Missing />}
+        <td className={`${styles.right} ${styles.amountCell} ${debt ? "" : styles.emptyStacked}`} data-label="Debt">
+          {debt ? (
+            <>
+              <Amount view={debt} />
+              <AmountBar value={debt.amount.value} max={scale.get(debt.amount.currency) ?? 0} />
+            </>
+          ) : (
+            <Missing />
+          )}
         </td>
         <td className={`${styles.right} ${e.valuation ? "" : styles.emptyStacked}`} data-label="Post-money">
           {e.valuation ? <Amount view={e.valuation} /> : <Missing />}
@@ -414,7 +436,7 @@ function ComputeTable({ p }: { p: CompanyProfile }) {
           <th scope="col">Date</th>
           <th scope="col">Deal</th>
           <th scope="col">Role</th>
-          <th scope="col" className={styles.right}>
+          <th scope="col" className={`${styles.right} ${styles.amountCell}`}>
             Value (basis)
           </th>
           <th scope="col" className={styles.right}>
@@ -446,7 +468,7 @@ function ComputeTable({ p }: { p: CompanyProfile }) {
                 </span>
               </td>
               <td data-label="Role">{role}</td>
-              <td className={`${styles.right} ${value ? "" : styles.emptyStacked}`} data-label="Value">
+              <td className={`${styles.right} ${styles.amountCell} ${value ? "" : styles.emptyStacked}`} data-label="Value">
                 {value ? (
                   <>
                     <Amount view={value} />
@@ -621,9 +643,10 @@ async function V2Profile({ p }: { p: CompanyProfile }) {
       <header className={styles.profileHead}>
         <OrgMark org={p.org} large />
         <div>
-          <Eyebrow>{titleCase(eyebrow)}</Eyebrow>
           <h1 className={`${styles.display} ${styles.profileTitle}`}>{p.org.name}</h1>
-          <p className={styles.lede}>{org.description}</p>
+          <p className={styles.lede}>
+            {titleCase(eyebrow)}. {org.description}
+          </p>
           <p className={styles.metaLine}>
             {org.legalNames[0] ? <span>Legal name: {org.legalNames[0]}</span> : null}
             {p.founded ? (

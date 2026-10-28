@@ -3,6 +3,11 @@
 /**
  * Models and Agents rankings: dense tables on wide screens, and
  * information-complete stacked rows below them (no horizontal scrolling).
+ *
+ * Tables follow the app-screen rules: 13px grey sentence-case headers with no
+ * fill band, 1px row rules and no zebra, numbers right-aligned in tabular
+ * figures, and the identity and the key number as the only ink. The adoption
+ * meter is the site's dithered share bar, right-aligned with its figure.
  */
 import Link from "next/link";
 import styled from "styled-components";
@@ -45,16 +50,22 @@ const Table = styled.table`
 `;
 
 const Th = styled.th<{ $align?: "right" }>`
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--service-border);
   color: var(--service-text-muted);
-  font-size: 0.75rem;
-  font-weight: 500;
+  font-size: 0.8125rem;
+  font-weight: 400;
   text-align: ${({ $align }) => $align ?? "left"};
   white-space: nowrap;
 
   &[aria-sort] {
     color: var(--service-text);
+    font-weight: 500;
+
+    &::after {
+      content: " ↓";
+      color: var(--service-text-muted);
+    }
   }
 
   &:first-child {
@@ -67,7 +78,7 @@ const Th = styled.th<{ $align?: "right" }>`
 `;
 
 const Td = styled.td<{ $align?: "right" }>`
-  padding: 12px;
+  padding: 11px 12px;
   vertical-align: middle;
   color: var(--service-text);
   font-size: 0.875rem;
@@ -81,23 +92,21 @@ const Td = styled.td<{ $align?: "right" }>`
   &:last-child {
     padding-right: 0;
   }
+
+  @media (max-width: 640px) {
+    font-size: 0.9375rem;
+  }
 `;
 
 const Tr = styled.tr`
   &:not(:last-child) td {
     border-bottom: 1px solid var(--service-border);
   }
-
-  /* Agent rows have no page: a light reading aid instead of the row-link hover. */
-  &:not([data-row-link]):hover td {
-    background: rgba(255, 255, 255, 0.02);
-  }
 `;
 
 const Rank = styled.span`
   color: var(--service-text-muted);
   font-size: 0.8125rem;
-  font-weight: 600;
   font-variant-numeric: tabular-nums;
 `;
 
@@ -118,17 +127,18 @@ const NameLink = styled(Link)`
   overflow: hidden;
   color: var(--service-text);
   font-size: 0.9375rem;
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -148,7 +158,7 @@ const NameText = styled.span`
   gap: 8px;
   color: var(--service-text);
   font-size: 0.9375rem;
-  font-weight: 600;
+  font-weight: 500;
   overflow-wrap: anywhere;
 `;
 
@@ -163,16 +173,18 @@ const SubText = styled.span`
 const UsersCell = styled.div`
   display: grid;
   justify-items: end;
-  gap: 2px;
+  gap: 1px;
 `;
 
 const UsersValue = styled.span`
   font-size: 0.9375rem;
-  font-weight: 600;
+  font-weight: 500;
 `;
 
 const MeterCell = styled.div`
-  width: 150px;
+  width: 100%;
+  min-width: 140px;
+  max-width: 100%;
 `;
 
 const TopList = styled.ul`
@@ -203,11 +215,12 @@ const TopModelLink = styled(Link)`
   text-decoration: none;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -220,6 +233,7 @@ const TopModelLink = styled(Link)`
 `;
 
 const Footnote = styled.p`
+  max-width: 100ch;
   margin: 12px 0 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
@@ -254,11 +268,11 @@ const MobileItem = styled.li`
 const MobileRow = styled.div`
   position: relative;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   gap: 4px 10px;
   align-items: start;
   min-height: 88px;
-  padding: 14px 4px;
+  padding: 12px 2px;
 
   &:has(a:active) {
     background: rgba(255, 255, 255, 0.03);
@@ -282,6 +296,7 @@ const MobileRank = styled(Rank)`
   grid-row: 1 / span 4;
   padding-top: 2px;
   font-size: 0.875rem;
+  text-align: left;
 `;
 
 const MobileName = styled.span`
@@ -291,8 +306,8 @@ const MobileName = styled.span`
   gap: 8px;
   overflow: hidden;
   color: var(--service-text);
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: 0.9375rem;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
@@ -311,15 +326,15 @@ const MobilePrimary = styled.span`
 
 const MobilePrimaryValue = styled.span`
   color: var(--service-text);
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: 0.9375rem;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 `;
 
 const MobilePrimaryLabel = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   white-space: nowrap;
 `;
 
@@ -344,8 +359,10 @@ const MobileWide = styled.span`
   line-height: 1.45;
 `;
 
+/** Label, the dithered share bar, then the share at the row's right edge. */
 const MobileMeterLabel = styled.span`
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 10px;
 
@@ -395,12 +412,18 @@ export function ModelBoard({ rows, coverage, period, sort }: BoardProps<ModelUsa
           </caption>
           <thead>
             <tr>
-              <Th scope="col">#</Th>
+              <Th scope="col" $align="right">
+                #
+              </Th>
               <Th scope="col">Model</Th>
               <UsersHeader sort={sort} />
-              <Th scope="col">Adoption</Th>
+              <Th scope="col" $align="right">
+                Adoption
+              </Th>
               <TokensHeader sort={sort} />
-              <Th scope="col" $align="right">Est. cost</Th>
+              <Th scope="col" $align="right">
+                Est. cost
+              </Th>
               <Th scope="col">Top agents</Th>
             </tr>
           </thead>
@@ -409,7 +432,7 @@ export function ModelBoard({ rows, coverage, period, sort }: BoardProps<ModelUsa
               const change = describeUsersChange(row.activeUsers, row.previousActiveUsers, row.isNew, period);
               return (
                 <Tr key={row.key} data-row-link="">
-                  <Td>
+                  <Td $align="right">
                     <Rank>{row.rank}</Rank>
                   </Td>
                   <Td>
@@ -525,12 +548,18 @@ export function AgentBoard({ rows, coverage, period, sort }: BoardProps<AgentUsa
           </caption>
           <thead>
             <tr>
-              <Th scope="col">#</Th>
+              <Th scope="col" $align="right">
+                #
+              </Th>
               <Th scope="col">Agent</Th>
               <UsersHeader sort={sort} />
-              <Th scope="col">Adoption</Th>
+              <Th scope="col" $align="right">
+                Adoption
+              </Th>
               <TokensHeader sort={sort} />
-              <Th scope="col" $align="right">Est. cost</Th>
+              <Th scope="col" $align="right">
+                Est. cost
+              </Th>
               <Th scope="col">Top models</Th>
             </tr>
           </thead>
@@ -539,7 +568,7 @@ export function AgentBoard({ rows, coverage, period, sort }: BoardProps<AgentUsa
               const change = describeUsersChange(row.activeUsers, row.previousActiveUsers, row.isNew, period);
               return (
                 <Tr key={row.key}>
-                  <Td>
+                  <Td $align="right">
                     <Rank>{row.rank}</Rank>
                   </Td>
                   <Td>

@@ -41,7 +41,7 @@
   --color-badge-text: #85caff;
 
   /* Compact service UI (leaderboard, models, capital, profiles, benchmarks).
-     Same black canvas, dark cards and thin rules as the v2 landing below; the
+     Same black canvas, dark cards and quiet rules as the v2 landing below; the
      names stay separate so the shared local visualizer keeps its own theme. */
   --service-canvas: var(--v2-canvas);
   --service-surface: var(--v2-surface);
@@ -58,14 +58,13 @@
   --background: #000;
   --foreground: #ffffff;
 
-  /* tokscale.ai v2. Additive: black canvas, thin rules, one accent blue,
-     cyan only for numbers that need emphasis. --font-display comes from
-     next/font in app/layout.tsx. */
+  /* tokscale.ai v2. Additive: black canvas, one accent blue, surfaces one
+     neutral tone step apart, numbers in ink. */
   --v2-canvas: #000000;
-  --v2-surface: #07090d;
-  --v2-surface-raised: #0d1016;
-  --v2-rule: rgba(255, 255, 255, 0.1);
-  --v2-rule-strong: rgba(255, 255, 255, 0.18);
+  --v2-surface: #0a0a0a;
+  --v2-surface-raised: #141414;
+  --v2-rule: #1a1a1a;
+  --v2-rule-strong: #2e2e2e;
   --v2-text: #f4f7fb;
   --v2-text-muted: #a3adbd;
   --v2-text-subtle: #848d9c;
@@ -73,16 +72,40 @@
   /* Filled controls with white text: #0073ff is 4.3:1 with white, this is 5.2:1. */
   --v2-accent-strong: #0066e6;
   --v2-accent-soft: rgba(0, 115, 255, 0.14);
-  --v2-numeric: #53d1f3;
+  /* Numbers are ink: the sign lives in the text, never in a second hue. */
+  --v2-numeric: var(--v2-text);
   --v2-focus: #75b6ff;
-  --v2-font-display: var(--font-display), "Iowan Old Style", Georgia, serif;
+  --v2-font-display: var(--v2-font-ui);
   --v2-font-ui: var(--font-figtree), system-ui, -apple-system, sans-serif;
-  --v2-font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
-  /* Faint blue light from the top edge, as behind the home hero. Paint it in
-     the hero itself or in a 720px band at the top of a page shell. */
-  --v2-glow: radial-gradient(52% 70% at 50% 0%, rgba(22, 64, 160, 0.26), rgba(22, 64, 160, 0) 72%);
+  /* Real code only; no prose on the site is set in it. */
+  --v2-font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace; /* taste-skill-ignore: code token */
   /* Hover background of a row or card header that is one link. */
   --v2-row-hover: rgba(255, 255, 255, 0.04);
+}
+
+/* dither-kit tokens. The kit reads these shadcn-style properties; its own
+   dark values sit in a cascade layer, so these unlayered ones win. Every
+   kit component therefore draws on the Tokscale canvas, rules, type and
+   blue. The body carries `dither-kit dark` (app/layout.tsx). */
+.dither-kit.dark,
+.dither-kit .dark {
+  --background: var(--v2-canvas);
+  --foreground: var(--v2-text);
+  --card: var(--v2-surface);
+  --card-foreground: var(--v2-text);
+  --popover: var(--v2-surface-raised);
+  --popover-foreground: var(--v2-text);
+  --muted: var(--v2-surface-raised);
+  --muted-foreground: var(--v2-text-muted);
+  --border: var(--v2-rule-strong);
+  --ring: var(--v2-focus);
+  --accent: var(--v2-accent-strong);
+  --accent-foreground: #ffffff;
+  /* The dither cell is square; corners stay nearly square to match it. */
+  --radius: 2px;
+  --font-sans: var(--v2-font-ui);
+  --font-mono: var(--v2-font-mono); /* taste-skill-ignore: code token */
+  --swatch-blue: var(--service-accent);
 }
 
 /* Row links. In a table or list where each row is one thing with its own
@@ -141,8 +164,8 @@
 
 /* Figtree is set on the document root and inherited. It used to be forced on
    every element with `* { font-family: ... !important }`, which blocked any
-   component from choosing another face (for example the v2 display serif).
-   Form controls inherit through the global style in lib/providers. */
+   component from choosing another face. Form controls inherit through the
+   global style in lib/providers. */
 html {
   font-family:
     var(--font-figtree),
@@ -165,61 +188,103 @@ body {
 }
 
 code,
-pre,
-.font-mono {
+pre {
   font-family:
     var(--font-mono), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace !important;
+}
+
+/* dither-kit sets its labels (button text, calendar axes, tab labels) in
+   monospace. Tokscale keeps one text face: the kit's pixels carry its look,
+   and monospace stays reserved for real code. */
+.dither-kit .font-mono:not(:is(code, pre, kbd, samp)) {
+  font-family: var(--v2-font-ui); /* taste-skill-ignore: this rule removes monospace */
+  font-variant-numeric: tabular-nums;
 }
 
 button {
   cursor: pointer;
 }
 
-a:hover {
-  text-decoration: none !important;
+/* The kit draws its controls with Tailwind utilities that live in a cascade
+   layer, and styled-reset (unlayered) zeroes every padding, margin and border,
+   so the kit's utilities lose and control text collides with its own glyphs.
+   Restore the kit's declarations, in the kit's own order, for the elements
+   that carry them. Specificity is (0,0,2): above the reset's element
+   selectors (0,0,1), below any styled-components class (0,1,0), so a call
+   site that styles a kit control (a 44px touch target, its own padding)
+   always wins. Nothing in the app uses Tailwind class names. */
+html body :where(.p-0) { padding:0; }
+html body :where(.p-1) { padding:var(--spacing); }
+html body :where(.p-2) { padding:calc(var(--spacing) * 2); }
+html body :where(.p-3) { padding:calc(var(--spacing) * 3); }
+html body :where(.p-4) { padding:calc(var(--spacing) * 4); }
+html body :where(.p-6) { padding:calc(var(--spacing) * 6); }
+html body :where(.px-1) { padding-inline:var(--spacing); }
+html body :where(.px-2) { padding-inline:calc(var(--spacing) * 2); }
+html body :where(.px-3) { padding-inline:calc(var(--spacing) * 3); }
+html body :where(.px-4) { padding-inline:calc(var(--spacing) * 4); }
+html body :where(.py-1) { padding-block:var(--spacing); }
+html body :where(.py-2) { padding-block:calc(var(--spacing) * 2); }
+html body :where(.py-3) { padding-block:calc(var(--spacing) * 3); }
+html body :where(.py-4) { padding-block:calc(var(--spacing) * 4); }
+html body :where(.py-6) { padding-block:calc(var(--spacing) * 6); }
+html body :where(.py-px) { padding-block:1px; }
+html body :where(.pt-1) { padding-top:var(--spacing); }
+html body :where(.pt-2) { padding-top:calc(var(--spacing) * 2); }
+html body :where(.pt-3) { padding-top:calc(var(--spacing) * 3); }
+html body :where(.pt-4) { padding-top:calc(var(--spacing) * 4); }
+html body :where(.pt-px) { padding-top:1px; }
+html body :where(.pr-1) { padding-right:var(--spacing); }
+html body :where(.pr-2) { padding-right:calc(var(--spacing) * 2); }
+html body :where(.pr-3) { padding-right:calc(var(--spacing) * 3); }
+html body :where(.pr-6) { padding-right:calc(var(--spacing) * 6); }
+html body :where(.pr-8) { padding-right:calc(var(--spacing) * 8); }
+html body :where(.pr-9) { padding-right:calc(var(--spacing) * 9); }
+html body :where(.pb-1) { padding-bottom:var(--spacing); }
+html body :where(.pb-2) { padding-bottom:calc(var(--spacing) * 2); }
+html body :where(.pb-3) { padding-bottom:calc(var(--spacing) * 3); }
+html body :where(.pb-5) { padding-bottom:calc(var(--spacing) * 5); }
+html body :where(.pl-2) { padding-left:calc(var(--spacing) * 2); }
+html body :where(.pl-3) { padding-left:calc(var(--spacing) * 3); }
+html body :where(.pl-4) { padding-left:calc(var(--spacing) * 4); }
+html body :where(.pl-7) { padding-left:calc(var(--spacing) * 7); }
+html body :where(.pl-8) { padding-left:calc(var(--spacing) * 8); }
+html body :where(.pl-11) { padding-left:calc(var(--spacing) * 11); }
+
+html body :where(.border) { border-width: 1px; border-style: solid; }
+html body :where(.rounded-md) { border-radius: var(--radius); }
+html body :where(.min-h-10) { min-height: 2.5rem; }
+
+/* A kit button's label span holds an icon and words: keep them on one line. */
+.dither-kit button > span.relative:not(.grid),
+.dither-kit a[role="link"] > span.relative:not(.grid) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
 }
 
-.bg-canvas {
-  background-color: var(--color-canvas-default);
+/* Icons sit in text, not on their own line; the block rule above is for
+   charts, marks and pictures. */
+button svg,
+a svg,
+label svg {
+  display: inline-block;
+  vertical-align: middle;
 }
-.bg-canvas-subtle {
-  background-color: var(--color-canvas-subtle);
-}
-.bg-card {
-  background-color: var(--color-card-bg);
-}
-.text-fg {
-  color: var(--color-fg-default);
-}
-.text-fg-muted {
-  color: var(--color-fg-muted);
-}
+
 .border-default {
   border-color: var(--color-border-default);
 }
-.border-subtle {
-  border-color: var(--color-border-subtle);
-}
 
-.main-container {
-  flex: 1;
-  max-width: 1280px;
-  margin-left: auto;
-  margin-right: auto;
-  padding-left: 24px;
-  padding-right: 24px;
-  padding-bottom: 40px;
-  width: 100%;
-}
-
+/* The public/app page frame: a flat black canvas, no glow, no gradient. */
 .service-page-shell {
   isolation: isolate;
   color-scheme: dark;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  background: var(--service-canvas);
   color: var(--service-text);
 }
 
@@ -238,20 +303,6 @@ a:hover {
   }
 }
 
-@media (max-width: 560px) {
-  .main-container {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
-}
-
-@media (max-width: 400px) {
-  .main-container {
-    padding-left: 8px;
-    padding-right: 8px;
-  }
-}
-
 /* Static legal/informational pages (/privacy, /terms, /contact).
    Plain CSS rather than styled-components so this content ships with no
    client JS -- it never changes and crawlers should get it in the HTML. */
@@ -262,71 +313,179 @@ a:hover {
 }
 
 .legal-prose h1 {
-  margin: 0 0 8px;
-  font-size: 2rem;
-  font-weight: 650;
+  margin: 0;
+  font-size: clamp(2.5rem, 5vw, 4.5rem);
+  font-weight: 500;
   letter-spacing: -0.02em;
+  line-height: 1.02;
+}
+
+.legal-prose--contents {
+  max-width: 1064px;
+}
+
+/* The text column and, beside it on wide screens, the page's contents. Space
+   separates them; no rules. */
+.legal-prose--contents .legal-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 760px) 240px;
+  justify-content: space-between;
+  gap: 64px;
+  align-items: start;
+}
+
+.legal-prose .legal-contents {
+  position: sticky;
+  top: 88px;
+  order: 2;
+}
+
+.legal-prose .legal-contents-title {
+  margin: 0 0 12px;
+  max-width: none;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.legal-prose .legal-contents ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legal-prose .legal-contents li {
+  margin: 0;
+  padding: 0;
+  max-width: none;
+  font-size: 0.9375rem;
+  line-height: 1.4;
+}
+
+.legal-prose .legal-contents li::marker {
+  content: none;
+}
+
+.legal-prose .legal-contents a {
+  color: var(--service-text-muted);
+  text-decoration: none;
+}
+
+.legal-prose .legal-contents a:hover,
+.legal-prose .legal-contents a:focus-visible {
+  color: var(--service-text);
+  text-decoration: underline;
+}
+
+.legal-prose h2[id] {
+  scroll-margin-top: 88px;
+}
+
+.legal-prose .legal-lede {
+  max-width: 52ch;
+  margin: 20px 0 0;
+  color: var(--service-text);
+  font-size: 1.25rem;
+  line-height: 1.5;
+  text-wrap: pretty;
 }
 
 .legal-prose .legal-updated {
-  margin: 0 0 40px;
+  margin: 16px 0 48px;
   color: var(--service-text-muted);
-  font-size: 0.8125rem;
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .legal-prose h2 {
-  margin: 40px 0 12px;
-  font-size: 1.125rem;
-  font-weight: 600;
+  margin: 56px 0 16px;
+  font-size: 1.5rem;
+  font-weight: 500;
   letter-spacing: -0.01em;
+  line-height: 1.25;
 }
 
 .legal-prose p,
 .legal-prose li {
-  color: var(--service-text-muted);
-  font-size: 0.9375rem;
-  line-height: 1.7;
+  max-width: 66ch;
+  color: var(--service-text);
+  font-size: 1.0625rem;
+  line-height: 1.65;
 }
 
 .legal-prose p {
-  margin: 0 0 16px;
+  margin: 0 0 18px;
 }
 
 .legal-prose ul {
-  margin: 0 0 16px;
-  padding-left: 20px;
+  margin: 0 0 18px;
+  padding-left: 1.25em;
+  list-style: square;
 }
 
 .legal-prose li {
   margin-bottom: 8px;
+  padding-left: 4px;
+}
+
+.legal-prose li::marker {
+  color: var(--v2-accent);
 }
 
 .legal-prose strong {
-  color: var(--service-text);
   font-weight: 600;
 }
 
 .legal-prose a {
-  color: var(--service-accent);
-  text-decoration: none;
+  color: var(--service-text);
+  text-decoration: underline;
+  text-decoration-color: var(--v2-accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
 }
 
 .legal-prose a:hover {
-  text-decoration: underline;
+  text-decoration-color: currentColor;
 }
 
 .legal-prose a:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--service-focus);
+  outline: 2px solid var(--v2-focus);
   outline-offset: 3px;
+  border-radius: 2px;
 }
 
 .legal-prose code {
-  padding: 2px 6px;
-  border: 1px solid var(--service-border);
-  border-radius: 4px;
-  background: var(--service-surface-muted);
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--service-text);
-  font-family: var(--font-mono), monospace;
-  font-size: 0.8125rem;
+  font-size: 0.9em;
+}
+
+@media (max-width: 1099px) {
+  .legal-prose--contents {
+    max-width: 760px;
+  }
+
+  .legal-prose--contents .legal-layout {
+    display: block;
+  }
+
+  .legal-prose .legal-contents {
+    position: static;
+    margin: 0 0 40px;
+  }
+}
+
+@media (max-width: 520px) {
+  .legal-prose .legal-lede {
+    font-size: 1.125rem;
+  }
+
+  .legal-prose h2 {
+    margin-top: 44px;
+    font-size: 1.3125rem;
+  }
 }

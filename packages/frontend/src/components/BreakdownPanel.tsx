@@ -6,7 +6,6 @@ import { formatCurrency, formatTokenCount, groupClientsByType, sortClientsByCost
 import { formatContributionDateFull } from "@/lib/date-utils";
 import { SOURCE_DISPLAY_NAMES, SOURCE_COLORS, SOURCE_LOGOS } from "@/lib/constants";
 import { SourceLogo } from "./SourceLogo";
-import { Eyebrow as SharedEyebrow } from "@/components/ui/Eyebrow";
 
 interface BreakdownPanelProps {
   day: DailyContribution | null;
@@ -17,7 +16,7 @@ const PanelContainer = styled.section`
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: 2px;
   background: var(--service-surface);
   font-variant-numeric: tabular-nums;
 `;
@@ -39,17 +38,13 @@ const PanelHeading = styled.div`
   min-width: 0;
 `;
 
-/* The shared eyebrow (Title Case, no letter-spacing), tucked close to the title. */
-const Eyebrow = styled(SharedEyebrow)`
-  margin-bottom: 2px;
-`;
-
 const PanelTitle = styled.h3`
   margin: 0;
   color: var(--service-text);
-  font-size: 1rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 `;
 
 const CloseButton = styled.button`
@@ -59,7 +54,7 @@ const CloseButton = styled.button`
   height: 32px;
   place-items: center;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 2px;
   color: var(--service-text-muted);
 
   &:hover {
@@ -99,7 +94,7 @@ const SourceList = styled.div`
   display: grid;
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 10px;
+  border-radius: 2px;
 `;
 
 const SummaryFooter = styled.div`
@@ -136,7 +131,6 @@ export function BreakdownPanel({ day, onClose }: BreakdownPanelProps) {
     <PanelContainer role="region" aria-label="Day breakdown">
       <PanelHeader>
         <PanelHeading>
-          <Eyebrow as="div">Detailed Breakdown</Eyebrow>
           <PanelTitle>{formatContributionDateFull(day)}</PanelTitle>
         </PanelHeading>
         <CloseButton type="button" onClick={onClose} aria-label="Close breakdown panel">
@@ -229,7 +223,7 @@ const ClientName = styled.span`
   font-weight: 600;
 
   img {
-    border-radius: 4px;
+    border-radius: 2px;
   }
 `;
 
@@ -238,7 +232,7 @@ const ClientDot = styled.span<{ $color: string }>`
   width: 8px;
   height: 8px;
   border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 999px;
+  border-radius: 1px;
   background: ${({ $color }) => $color};
 `;
 
@@ -365,8 +359,8 @@ const ModelName = styled.span`
   min-width: 0;
   overflow: hidden;
   color: var(--service-text);
-  font-family: var(--v2-font-mono);
   font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
@@ -378,23 +372,20 @@ const ModelCost = styled.span`
   font-weight: 600;
 `;
 
+/* The token mix as one divided strip: label over value, figures tabular, so
+   the numbers line up instead of trailing after their labels. */
 const TokenBadgesGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 16px;
-  margin-top: 8px;
-  font-size: 0.75rem;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  margin-top: 10px;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
+  font-variant-numeric: tabular-nums;
 
-  @media (max-width: 400px) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  @media (min-width: 640px) {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  @media (min-width: 768px) {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+  @media (max-width: 520px) {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 `;
 
@@ -437,25 +428,46 @@ function ModelRow({ model, isLast }: ModelRowProps) {
 }
 
 const BadgeContainer = styled.div`
-  display: flex;
+  display: grid;
   min-width: 0;
-  align-items: baseline;
-  gap: 6px;
+  gap: 2px;
+  padding: 8px 12px 8px 0;
+
+  & + & {
+    padding-left: 12px;
+    border-left: 1px solid var(--service-border);
+  }
+
+  @media (max-width: 520px) {
+    & + & {
+      border-left: 0;
+    }
+
+    &:nth-child(even) {
+      padding-left: 12px;
+      border-left: 1px solid var(--service-border);
+    }
+  }
 `;
 
 const BadgeLabel = styled.span`
   color: var(--service-text-muted);
+  font-size: 0.75rem;
 `;
 
 const BadgeValue = styled.span`
+  overflow: hidden;
   color: var(--service-text);
-  font-weight: 600;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 `;
 
 function TokenBadge({ label, value }: { label: string; value: number }) {
   return (
     <BadgeContainer>
-      <BadgeLabel>{label}:</BadgeLabel>
+      <BadgeLabel>{label}</BadgeLabel>
       <BadgeValue>{formatTokenCount(value)}</BadgeValue>
     </BadgeContainer>
   );

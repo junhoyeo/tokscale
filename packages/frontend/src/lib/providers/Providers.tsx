@@ -50,6 +50,18 @@ const GlobalStyle = createGlobalStyle`
     border: none;
     cursor: pointer;
   }
+
+  /* One focus treatment on the site: a 2px ring in the focus blue. Components
+     may place it closer to their own shape, never remove it. */
+  :focus-visible {
+    outline: 2px solid var(--v2-focus, #75b6ff);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--v2-accent, #0073ff);
+    color: #ffffff;
+  }
 `;
 
 export function Providers({ children }: { children: React.ReactNode }) {

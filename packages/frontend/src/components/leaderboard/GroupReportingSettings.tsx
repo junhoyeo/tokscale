@@ -2,6 +2,8 @@
 
 import { useRef, useState } from "react";
 import styled from "styled-components";
+import { DitherField } from "dither-kit/DitherField";
+import { DitherInput } from "dither-kit/DitherInput";
 import { SecondaryButton } from "./RankingUI";
 import { Select } from "@/components/ui/Select";
 import { COMMON_TIMEZONE_GROUPS, isValidTimeZone } from "@/lib/timezone";
@@ -16,44 +18,72 @@ interface GroupReportingSettingsProps {
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const WEEKDAY_OPTIONS = WEEKDAYS.map((day, index) => ({ value: String(index), label: day }));
 
-const Panel = styled.section`
+/* Settings row: the label column (title + one sentence) beside its panel,
+ * split from the section above by a full-width rule. */
+const Section = styled.section`
   display: grid;
   gap: 16px;
-  margin-top: 24px;
-  padding: 20px;
-  border: 1px solid var(--service-border);
-  border-radius: 12px;
-  background: var(--service-surface);
-  h2, p { margin: 0; }
-  h2 { font-size: 0.9375rem; font-weight: 600; }
-  p { color: var(--service-text-muted); font-size: 0.875rem; line-height: 1.6; }
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--service-border);
+
+  @media (min-width: 900px) {
+    grid-template-columns: 320px minmax(0, 1fr);
+    gap: 40px;
+  }
+`;
+
+const LabelColumn = styled.div`
+  min-width: 0;
+`;
+
+const SectionTitle = styled.h2`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 500;
+`;
+
+const SectionNote = styled.p`
+  margin: 6px 0 0;
+  max-width: 46ch;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+`;
+
+const Panel = styled.div`
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 16px;
+
+  label {
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
 `;
 
 const Controls = styled.div`
-  --select-height: 44px;
-  --select-padding-x: 8px;
-  --select-font-size: 0.875rem;
-  --select-background: var(--service-surface);
-  --select-border-color: var(--service-border-strong);
+  display: grid;
+  gap: 16px;
 
-  display: flex;
-  max-width: 100%;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 12px;
-  label { display: grid; max-width: 100%; gap: 6px; color: var(--service-text-muted); font-size: 0.8125rem; }
-  input {
-    min-height: 44px;
-    max-width: 100%;
-    padding: 8px;
-    border: 1px solid var(--service-border-strong);
-    border-radius: 8px;
-    background: var(--service-surface);
-    color: var(--service-text);
-    font-size: 0.875rem;
-    color-scheme: dark;
+  @media (min-width: 560px) {
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   }
-  input:focus-visible { outline: 2px solid var(--service-focus); }
+`;
+
+const Actions = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+`;
+
+const Notice = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
 `;
 
 export function GroupReportingSettings({ slug, timeZone, weekStartsOn, onChanged }: GroupReportingSettingsProps) {
@@ -92,41 +122,59 @@ export function GroupReportingSettings({ slug, timeZone, weekStartsOn, onChanged
     }
   }
 
+  const canSave = !pending
+    && isValidTimeZone(selectedTimeZone)
+    && (selectedTimeZone !== timeZone || selectedWeekStart !== weekStartsOn);
+
   return (
-    <Panel aria-label="Group reporting settings">
-      <h2>Reporting calendar</h2>
-      <p>Choose the shared calendar for this group. Enter any IANA time zone; common zones are suggested. Submitted daily totals keep their original dates.</p>
-      <form onSubmit={(event) => { event.preventDefault(); void saveCalendar(); }}>
-        <Controls>
-          <label>Time zone
-            <input
-              aria-label="Time zone"
-              list="group-reporting-time-zones"
-              value={selectedTimeZone}
-              onChange={(event) => setSelectedTimeZone(event.target.value)}
-              disabled={pending}
-              spellCheck={false}
-            />
-            <datalist id="group-reporting-time-zones">
-              {COMMON_TIMEZONE_GROUPS.flatMap((group) => group.zones).map((zone) => (
-                <option key={zone} value={zone} />
-              ))}
-            </datalist>
-          </label>
-          <label>Week starts on
-            <Select
-              aria-label="Week starts on"
-              value={String(selectedWeekStart)}
-              options={WEEKDAY_OPTIONS}
-              onChange={(next) => setSelectedWeekStart(Number(next))}
-              disabled={pending}
-            />
-          </label>
-          <SecondaryButton type="submit" disabled={pending || !isValidTimeZone(selectedTimeZone) || (selectedTimeZone === timeZone && selectedWeekStart === weekStartsOn)}>Save calendar</SecondaryButton>
-        </Controls>
-      </form>
-      {notice && <p role="status">{notice}</p>}
-      {error && <p role="alert">{error}</p>}
-    </Panel>
+    <Section aria-label="Group reporting settings">
+      <LabelColumn>
+        <SectionTitle>Reporting calendar</SectionTitle>
+        <SectionNote>
+          The shared calendar for this group. Enter any IANA time zone; common zones are suggested. Submitted daily totals keep their original dates.
+        </SectionNote>
+      </LabelColumn>
+      <Panel>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveCalendar();
+          }}
+        >
+          <Controls>
+            <DitherField label="Time zone">
+              <DitherInput
+                aria-label="Time zone"
+                list="group-reporting-time-zones"
+                value={selectedTimeZone}
+                onChange={setSelectedTimeZone}
+                disabled={pending}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </DitherField>
+            <DitherField label="Week starts on">
+              <Select
+                aria-label="Week starts on"
+                value={String(selectedWeekStart)}
+                options={WEEKDAY_OPTIONS}
+                onChange={(next) => setSelectedWeekStart(Number(next))}
+                disabled={pending}
+              />
+            </DitherField>
+          </Controls>
+          <datalist id="group-reporting-time-zones">
+            {COMMON_TIMEZONE_GROUPS.flatMap((group) => group.zones).map((zone) => (
+              <option key={zone} value={zone} />
+            ))}
+          </datalist>
+          <Actions>
+            <SecondaryButton type="submit" disabled={!canSave}>Save calendar</SecondaryButton>
+            {notice && <Notice role="status">{notice}</Notice>}
+          </Actions>
+        </form>
+        {error && <Notice role="alert">{error}</Notice>}
+      </Panel>
+    </Section>
   );
 }

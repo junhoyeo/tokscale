@@ -17,7 +17,7 @@
  *   --select-padding-x     left padding before the text (default 12px)
  *   --select-background    trigger background (default var(--v2-surface))
  *   --select-border-color  trigger border (default var(--v2-rule-strong))
- *   --select-radius        corner radius (default 8px)
+ *   --select-radius        corner radius (default 2px)
  *   --select-width         trigger width (default auto: the widest option)
  *   --select-max-width     trigger max width (default 100%)
  * The chevron always sits 10px from the right edge and the text truncates
@@ -573,8 +573,8 @@ const Trigger = styled.button<{ $variant: "field" | "inline" }>`
   gap: 6px;
   margin: 0;
   padding: 0 28px 0 var(--select-padding-x, 12px);
-  border: 1px solid var(--select-border-color, var(--v2-rule-strong));
-  border-radius: var(--select-radius, 8px);
+  border: 1px solid var(--select-border-color, var(--v2-rule-strong)); /* taste-skill-ignore: form control */
+  border-radius: var(--select-radius, 2px);
   background: var(--select-background, var(--v2-surface));
   color: var(--v2-text);
   font-family: var(--v2-font-ui);
@@ -594,7 +594,7 @@ const Trigger = styled.button<{ $variant: "field" | "inline" }>`
 
   &:hover:not(:disabled),
   &[aria-expanded="true"] {
-    border-color: rgba(255, 255, 255, 0.3);
+    border-color: var(--v2-text-subtle);
   }
 
   &:focus-visible {
@@ -621,13 +621,14 @@ const Trigger = styled.button<{ $variant: "field" | "inline" }>`
       min-height: var(--select-height, 1.25rem);
       padding: 0 18px 1px 0;
       border: 0;
-      border-bottom: 1px dotted currentColor;
+      border-bottom: 1px solid var(--v2-rule-strong); /* taste-skill-ignore: form field */
       border-radius: 0;
       background: transparent;
       color: var(--v2-text-muted);
 
       &:hover:not(:disabled),
       &[aria-expanded="true"] {
+        border-bottom-color: var(--v2-accent);
         color: var(--v2-text);
       }
 
@@ -693,12 +694,10 @@ const Listbox = styled.div`
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--v2-rule-strong);
-  border-radius: 8px;
+  border: 1px solid var(--v2-rule); /* taste-skill-ignore: floating listbox */
+  border-radius: var(--radius, 2px);
   background: var(--v2-surface-raised);
-  box-shadow:
-    0 18px 40px rgba(0, 0, 0, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55); /* taste-skill-ignore: floating listbox */
   color: var(--v2-text);
   font-family: var(--v2-font-ui);
   font-size: 0.875rem;
@@ -720,9 +719,7 @@ const Listbox = styled.div`
 const Group = styled.div`
   & + &,
   [role="option"] + & {
-    margin-top: 4px;
-    padding-top: 4px;
-    border-top: 1px solid var(--v2-rule);
+    margin-top: 8px;
   }
 
   & + [role="option"] {
@@ -731,12 +728,12 @@ const Group = styled.div`
 `;
 
 const GroupLabel = styled.div`
-  padding: 6px var(--select-option-padding-x, 8px) 4px;
-  color: var(--v2-text-subtle);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  padding: 8px var(--select-option-padding-x, 8px) 4px;
+  color: var(--v2-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
   cursor: default;
 `;
 
@@ -746,13 +743,13 @@ const OptionRow = styled.div`
   align-items: center;
   gap: 12px;
   padding: 6px 8px 6px var(--select-option-padding-x, 8px);
-  border-radius: 6px;
+  border-radius: var(--radius, 2px);
   color: var(--v2-text);
   cursor: pointer;
   white-space: nowrap;
 
   &[data-active="true"] {
-    background: rgba(255, 255, 255, 0.06);
+    background: #232323;
   }
 
   &[aria-selected="true"] {

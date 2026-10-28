@@ -10,11 +10,26 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import styled, { css } from "styled-components";
+import styled from "styled-components";
+import { DitherCheckbox } from "dither-kit/DitherCheckbox";
+import { Area } from "dither-kit/Area";
+import { Grid } from "dither-kit/Grid";
+import { XAxis } from "dither-kit/XAxis";
+import { YAxis } from "dither-kit/YAxis";
+import { defineCartesianChart } from "dither-kit/cartesian-root";
+import { useChart } from "dither-kit/chart-context";
+import { backingSize, paintColumn, resample } from "dither-kit/dither-paint";
+import {
+  clearRasterBuffer,
+  createRasterBuffer,
+  putRasterBuffer,
+} from "dither-kit/raster";
+import type { Seed } from "dither-kit/palette";
 import { Select } from "@/components/ui/Select";
 import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import type { DailyContribution } from "@/lib/types";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
+import { DitherSelectionGroup } from "./ditherControls";
 import {
   ALL_USAGE_PROVIDERS,
   MAX_LEGEND_MODELS,
@@ -26,18 +41,14 @@ import {
   reverseUsageChartData,
   selectLegendModels,
   toTrailingAverage,
-  type UsageChartSeries,
+  type AggregatedUsageDay,
+  type UsageProviderTotal,
   type UsageMetric,
   type UsageProviderFilter,
   type UsageProviderId,
   type UsageTooltipRow,
   type UsageView,
 } from "./usageChartData";
-import {
-  createNonCrossingStackGeometry,
-  pointToChartPercent,
-  type CubicValueBoundary,
-} from "./usageChartGeometry";
 
 export interface ProfileUsageChartProps {
   contributions: DailyContribution[];
@@ -48,15 +59,18 @@ export interface ProfileUsageChartProps {
   rangeEnd?: string | null;
 }
 
-const VIEWBOX_WIDTH = 848;
-const VIEWBOX_HEIGHT = 256;
-const PLOT_LEFT = 0;
-const PLOT_RIGHT = 0;
-const PLOT_TOP = 8;
-const PLOT_BOTTOM = 30;
-const PLOT_WIDTH = VIEWBOX_WIDTH - PLOT_LEFT - PLOT_RIGHT;
-const PLOT_HEIGHT = VIEWBOX_HEIGHT - PLOT_TOP - PLOT_BOTTOM;
-const GRID_STEPS = 4;
+/**
+ * Charts are the kit's cartesian engine, but the profile needs a fill that is
+ * never animated (the data-terminal contract: no chart animation, nothing
+ * performs an entrance) and repaints synchronously when a filter changes.
+ * `defineCartesianChart` is the kit's own extension point: same root, same
+ * scales, same `<Area>`/`<Grid>`/axis parts, with a painter on its engine
+ * exports (`paintColumn`, `backingSize`, `resample`, `RasterBuffer`).
+ */
+const UsageAreaChart = defineCartesianChart("area", UsageDitherCanvas);
+
+const CHART_MARGINS = { top: 12, right: 12, bottom: 26, left: 44 } as const;
+const CHART_CELL = 2;
 const MAX_TOOLTIP_MODELS = 8;
 const MAX_TOOLTIP_PROVIDERS = 3;
 const TOOLTIP_WIDTH = 320;
@@ -65,22 +79,11 @@ const TOOLTIP_EDGE = 8;
 const TOOLTIP_VIEWPORT_EDGE = 16;
 const TOOLTIP_MAX_HEIGHT = 416;
 const NEWEST_FIRST_STORAGE_KEY = "tokscale:usage-newest-first";
+const CROSSHAIR_ALPHA = 0.55;
 
 const subscribeUsageChartMounted = () => () => {};
 
 type InteractionMode = "idle" | "hover" | "committed";
-
-interface ChartLayer {
-  series: UsageChartSeries;
-  areaPath: string;
-  linePath: string;
-  upperValues: number[];
-}
-
-interface ChartStack {
-  layers: ChartLayer[];
-  maximum: number;
-}
 
 interface ProviderCostRow {
   provider: UsageProviderId;
@@ -89,110 +92,8 @@ interface ProviderCostRow {
   value: number;
 }
 
-function xForIndex(index: number, pointCount: number): number {
-  if (pointCount <= 1) return PLOT_LEFT + PLOT_WIDTH / 2;
-  return PLOT_LEFT + (index / (pointCount - 1)) * PLOT_WIDTH;
-}
-
-function yForValue(value: number, maximum: number): number {
-  const safeMaximum = maximum > 0 ? maximum : 1;
-  const finiteValue = Number.isFinite(value) ? Math.max(0, value) : 0;
-  return PLOT_TOP + PLOT_HEIGHT - (finiteValue / safeMaximum) * PLOT_HEIGHT;
-}
-
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
-}
-
-function curvePath(boundary: CubicValueBoundary, maximum: number): string {
-  const pointCount = boundary.values.length;
-  if (pointCount === 0) return "";
-  if (pointCount === 1) {
-    const x = xForIndex(0, 1);
-    const y = yForValue(boundary.values[0] ?? 0, maximum);
-    return `M ${x - 4} ${y} L ${x + 4} ${y}`;
-  }
-  return [
-    `M ${xForIndex(0, pointCount)} ${yForValue(boundary.values[0] ?? 0, maximum)}`,
-    ...boundary.segments.map((segment) => {
-      const fromX = xForIndex(segment.index, pointCount);
-      const toX = xForIndex(segment.index + 1, pointCount);
-      const third = (toX - fromX) / 3;
-      return `C ${fromX + third} ${yForValue(segment.control1, maximum)} ${toX - third} ${yForValue(segment.control2, maximum)} ${toX} ${yForValue(segment.to, maximum)}`;
-    }),
-  ].join(" ");
-}
-
-function stackedAreaPath(
-  lower: CubicValueBoundary,
-  upper: CubicValueBoundary,
-  maximum: number,
-): string {
-  const pointCount = upper.values.length;
-  if (pointCount === 0) return "";
-  if (pointCount === 1) {
-    const x = xForIndex(0, 1);
-    return [
-      `M ${x - 4} ${yForValue(lower.values[0] ?? 0, maximum)}`,
-      `L ${x - 4} ${yForValue(upper.values[0] ?? 0, maximum)}`,
-      `L ${x + 4} ${yForValue(upper.values[0] ?? 0, maximum)}`,
-      `L ${x + 4} ${yForValue(lower.values[0] ?? 0, maximum)}`,
-      "Z",
-    ].join(" ");
-  }
-
-  return [
-    `M ${xForIndex(0, pointCount)} ${yForValue(upper.values[0] ?? 0, maximum)}`,
-    ...upper.segments.map((segment) => {
-      const fromX = xForIndex(segment.index, pointCount);
-      const toX = xForIndex(segment.index + 1, pointCount);
-      const third = (toX - fromX) / 3;
-      return `C ${fromX + third} ${yForValue(segment.control1, maximum)} ${toX - third} ${yForValue(segment.control2, maximum)} ${toX} ${yForValue(segment.to, maximum)}`;
-    }),
-    `L ${xForIndex(pointCount - 1, pointCount)} ${yForValue(lower.values.at(-1) ?? 0, maximum)}`,
-    ...[...lower.segments].reverse().map((segment) => {
-      const fromX = xForIndex(segment.index, pointCount);
-      const toX = xForIndex(segment.index + 1, pointCount);
-      const third = (toX - fromX) / 3;
-      return `C ${toX - third} ${yForValue(segment.control2, maximum)} ${fromX + third} ${yForValue(segment.control1, maximum)} ${fromX} ${yForValue(segment.from, maximum)}`;
-    }),
-    "Z",
-  ].join(" ");
-}
-
-function createChartStack(
-  series: readonly UsageChartSeries[],
-  pointCount: number,
-  baselineMaximum: number,
-): ChartStack {
-  const geometry = createNonCrossingStackGeometry(
-    series.map(({ values }) => values),
-    pointCount,
-  );
-  const maximum = Math.max(baselineMaximum, geometry.maximum);
-  const layers = series.map((item, index) => {
-    const layerGeometry = geometry.layers[index];
-    if (!layerGeometry) {
-      return {
-        series: item,
-        areaPath: "",
-        linePath: "",
-        upperValues: [],
-      };
-    }
-    return {
-      series: item,
-      areaPath: stackedAreaPath(
-        layerGeometry.lower,
-        layerGeometry.upper,
-        maximum,
-      ),
-      linePath: curvePath(layerGeometry.upper, maximum),
-      upperValues: layerGeometry.upper.values,
-    };
-  });
-
-  return { layers, maximum };
 }
 
 function providerName(provider: UsageProviderId): string {
@@ -204,12 +105,42 @@ function formatMetric(value: number, metric: UsageMetric): string {
   return metric === "tokens" ? formatNumber(value) : formatCurrency(value);
 }
 
+function formatAxisValue(value: number, metric: UsageMetric): string {
+  if (!Number.isFinite(value)) return "";
+  if (metric === "cost") {
+    if (value === 0) return "$0";
+    if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}k`;
+    if (value >= 1) return `$${value.toFixed(0)}`;
+    return `$${value.toFixed(2)}`;
+  }
+  if (value === 0) return "0";
+  if (value >= 1_000_000_000) {
+    return `${(value / 1_000_000_000).toFixed(value >= 10_000_000_000 ? 0 : 1)}B`;
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  }
+  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}k`;
+  return value.toFixed(0);
+}
+
 function metricLabel(metric: UsageMetric): string {
   return metric === "tokens" ? "Tokens" : "Cost";
 }
 
 function viewLabel(view: UsageView, averageWindowDays: number): string {
   return view === "average" ? `${averageWindowDays}d average` : "Daily";
+}
+
+function formatAxisDate(value: string, compact: boolean): string {
+  const full = formatDate(value);
+  return compact ? full.replace(/, \d{4}$/, "") : full;
+}
+
+function nearestIndex(px: number, length: number, plotWidth: number): number {
+  if (length <= 1 || plotWidth <= 0) return 0;
+  const ratio = Math.max(0, Math.min(1, px / plotWidth));
+  return Math.round(ratio * (length - 1));
 }
 
 function tooltipLeft(activeOffset: number, plotWidth: number): number {
@@ -256,8 +187,8 @@ function tooltipLabels(rows: readonly UsageTooltipRow[]): Map<string, string> {
 }
 
 function getProviderCostRows(
-  days: ReturnType<typeof aggregateDailyUsage>,
-  providerTotals: ReturnType<typeof getUsageProviderTotals>,
+  days: readonly AggregatedUsageDay[],
+  providerTotals: readonly UsageProviderTotal[],
   providerFilter: UsageProviderFilter,
   activeIndex: number,
   view: UsageView,
@@ -291,13 +222,121 @@ function getProviderCostRows(
     );
 }
 
+/**
+ * Synchronous dither painter for the kit's area root. It mirrors the kit's
+ * own cartesian painter — each series is resampled to backing columns, then
+ * `paintColumn` scatters its band — without the RAF entrance/tween loop, so a
+ * scoped change lands in the same frame and nothing animates.
+ */
+function UsageDitherCanvas() {
+  const ctx = useChart();
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !ctx.ready) return;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
+
+    const { cols, rows } = backingSize(ctx.plot.width, ctx.plot.height, CHART_CELL);
+    if (canvas.width !== cols || canvas.height !== rows) {
+      canvas.width = cols;
+      canvas.height = rows;
+    }
+
+    const frame = createRasterBuffer(cols, rows);
+    clearRasterBuffer(frame);
+    const stacked =
+      ctx.stackType === "stacked" || ctx.stackType === "percent";
+    const height = ctx.plot.height || 1;
+    const layers: {
+      seed: Seed;
+      top: number[];
+      floor: number[];
+    }[] = [];
+
+    for (const key of ctx.configKeys) {
+      const band = ctx.bands[key];
+      if (!band) continue;
+      const top = resample(
+        band.map((pair) => (ctx.y(pair[1]) / height) * (rows - 1)),
+        cols,
+      );
+      const floor = resample(
+        band.map((pair) => (ctx.y(pair[0]) / height) * (rows - 1)),
+        cols,
+      );
+      const seed = ctx.seedOf(key);
+      const variant = ctx.seriesSpecs[key]?.variant ?? "gradient";
+      layers.push({ seed, top, floor });
+      for (let x = 0; x < cols; x += 1) {
+        paintColumn(frame, x, top[x] ?? 0, floor[x] ?? 0, seed, {
+          variant,
+          intensity: 0,
+          dim: 1,
+          stacked,
+          sparse: 0,
+        });
+      }
+    }
+
+    const marker = ctx.hoverIndex ?? ctx.markerIndex;
+    if (marker != null && ctx.dataLength > 1) {
+      const markerX = Math.round((marker / (ctx.dataLength - 1)) * (cols - 1));
+      if (markerX >= 0 && markerX < cols) {
+        for (const layer of layers) {
+          const markerY = Math.round(layer.top[markerX] ?? 0);
+          for (let y = Math.max(0, markerY); y < rows; y += 1) {
+            const index = (y * cols + markerX) * 4;
+            const alpha = CROSSHAIR_ALPHA;
+            frame.data[index] = (layer.seed.fill[0] * alpha + 0.5) | 0;
+            frame.data[index + 1] = (layer.seed.fill[1] * alpha + 0.5) | 0;
+            frame.data[index + 2] = (layer.seed.fill[2] * alpha + 0.5) | 0;
+            frame.data[index + 3] = (alpha * 255 + 0.5) | 0;
+          }
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              const px = markerX + dx;
+              const py = markerY + dy;
+              if (px < 0 || px >= cols || py < 0 || py >= rows) continue;
+              const index = (py * cols + px) * 4;
+              frame.data[index] = layer.seed.fill[0];
+              frame.data[index + 1] = layer.seed.fill[1];
+              frame.data[index + 2] = layer.seed.fill[2];
+              frame.data[index + 3] = 255;
+            }
+          }
+        }
+      }
+    }
+
+    putRasterBuffer(context, frame, undefined);
+  }, [ctx]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden="true"
+      style={{
+        position: "absolute",
+        left: `${ctx.margins.left}px`,
+        top: `${ctx.margins.top}px`,
+        width: `${ctx.plot.width}px`,
+        height: `${ctx.plot.height}px`,
+        imageRendering: "pixelated",
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
 const Section = styled.section`
   min-width: 0;
   overflow: visible;
   color: var(--service-text);
   background: var(--service-surface);
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   container-type: inline-size;
 `;
 
@@ -306,13 +345,13 @@ const Header = styled.div`
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1rem 1rem 0.875rem;
+  padding: 0.875rem 1rem 0.75rem;
   border-bottom: 1px solid var(--service-border);
 
   @container (max-width: 34rem) {
     align-items: stretch;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.5rem;
   }
 `;
 
@@ -345,18 +384,19 @@ const Total = styled.div`
     display: flex;
     align-items: baseline;
     justify-content: space-between;
+    gap: 0.75rem;
     text-align: left;
   }
 `;
 
 const TotalLabel = styled.div`
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   color: var(--service-text-muted);
 `;
 
 const TotalValue = styled.div`
   margin-top: 0.125rem;
-  font-size: 1rem;
+  font-size: 1.125rem;
   font-weight: 600;
   color: var(--service-text);
 `;
@@ -366,7 +406,7 @@ const Controls = styled.div`
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.5rem 1rem;
   padding: 0.625rem 1rem;
 `;
 
@@ -374,79 +414,17 @@ const ControlCluster = styled.div`
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.5rem;
-`;
+  gap: 0.5rem 0.75rem;
 
-const MetricControl = styled.div`
-  display: inline-flex;
-  align-items: center;
-  padding: 0.125rem;
-  background: var(--service-surface-muted);
-  border: 1px solid var(--service-border);
-  border-radius: 0.5rem;
-`;
-
-const MetricButton = styled.button<{ $active: boolean }>`
-  position: relative;
-  min-height: 1.75rem;
-  padding: 0.25rem 0.625rem;
-  color: var(--service-text-muted);
-  background: transparent;
-  border: 0;
-  border-radius: 0.375rem;
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 500;
-  cursor: pointer;
-
-  ${(props) =>
-    props.$active &&
-    css`
-      color: var(--service-accent);
-      background: var(--service-accent-soft);
-    `}
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 1px;
-  }
-
-  @media (pointer: coarse) {
-    min-height: 2.75rem;
+  button.profile-checkbox span {
+    font-size: 0.8125rem;
   }
 `;
 
-const NewestFirstControl = styled.label`
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 0.375rem;
-  color: var(--service-text-muted);
-  font-size: 0.75rem;
-  white-space: nowrap;
-  cursor: pointer;
-
-  input {
-    width: 0.8125rem;
-    height: 0.8125rem;
-    margin: 0;
-    accent-color: var(--service-focus);
-    cursor: pointer;
-  }
-
-  &:focus-within {
-    color: var(--service-text);
-  }
-
-  @media (pointer: coarse) {
-    min-height: 2.75rem;
-  }
-`;
-
-/** The Select trigger itself is the bordered box; "Display" / "Provider" sit inside it as a prefix. */
+/** The Select trigger is the bordered control; a prefix names the setting. */
 const CompactSelect = styled(Select)`
   --select-height: 2rem;
-  --select-font-size: 0.75rem;
+  --select-font-size: 0.8125rem;
   --select-padding-x: 0.625rem;
   --select-background: var(--service-surface-muted);
   --select-border-color: var(--service-border);
@@ -454,8 +432,9 @@ const CompactSelect = styled(Select)`
 `;
 
 const PlotRegion = styled.div`
+  position: relative;
   min-width: 0;
-  padding: 0.5rem 1rem 0;
+  padding: 0 1rem;
 
   @container (max-width: 34rem) {
     padding-right: 0.75rem;
@@ -463,100 +442,40 @@ const PlotRegion = styled.div`
   }
 `;
 
-const InteractivePlot = styled.div`
+const Plot = styled.div`
   position: relative;
   min-width: 0;
   height: 16rem;
-  overflow: visible;
   touch-action: pan-y;
+
+  @container (max-width: 34rem) {
+    height: 14rem;
+  }
+
+  @container (min-width: 70rem) {
+    height: 18rem;
+  }
+
+  svg text {
+    font-size: 12px;
+  }
+`;
+
+const InteractionLayer = styled.div`
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   cursor: crosshair;
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
-
-  @container (max-width: 34rem) {
-    height: 14rem;
-  }
 `;
 
-const ChartSvg = styled.svg`
+const ChartMount = styled.div`
   position: absolute;
   inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  overflow: visible;
-`;
-
-const GridLine = styled.line`
-  stroke: rgb(255 255 255 / 0.035);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-`;
-
-const LayerArea = styled.path<{ $color: string }>`
-  fill: ${(props) => props.$color};
-  fill-opacity: 0.4;
-  stroke: none;
-`;
-
-const LayerLine = styled.path<{ $color: string }>`
-  fill: none;
-  stroke: ${(props) => props.$color};
-  stroke-width: 1;
-  stroke-opacity: 1;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
-`;
-
-const ActiveRule = styled.line`
-  stroke: var(--service-border-strong);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-`;
-
-const ActivePoint = styled.span<{
-  $color: string;
-  $left: number;
-  $top: number;
-}>`
-  position: absolute;
-  z-index: 2;
-  top: ${(props) => props.$top}%;
-  left: ${(props) => props.$left}%;
-  width: 10px;
-  height: 10px;
-  background: var(--service-surface);
-  border: 2px solid ${(props) => props.$color};
-  border-radius: 50%;
-  pointer-events: none;
-  transform: translate(-50%, -50%);
-`;
-
-const DateRange = styled.div`
-  position: absolute;
-  right: 0;
-  bottom: 0.25rem;
-  left: 0;
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-
-  @container (max-width: 34rem) {
-    justify-content: flex-end;
-
-    span:first-child:not(:last-child) {
-      display: none;
-    }
-  }
 `;
 
 const EmptyState = styled.div`
@@ -571,13 +490,20 @@ const EmptyState = styled.div`
   }
 `;
 
+const DateRangeRow = styled.div`
+  padding: 0.375rem 0.25rem 0.625rem;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+`;
+
 const Legend = styled.ul`
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 0.375rem 1rem;
   margin: 0;
-  padding: 0.625rem 1rem 0.875rem;
+  padding: 0 1rem 0.75rem;
   color: var(--service-text-muted);
   list-style: none;
 `;
@@ -595,7 +521,7 @@ const Swatch = styled.span<{ $color: string }>`
   width: 0.5rem;
   height: 0.5rem;
   background: ${(props) => props.$color};
-  border-radius: 999px;
+  border-radius: 1px;
 `;
 
 const TooltipSurface = styled.div<{ $left: number; $maxHeight: number }>`
@@ -608,41 +534,14 @@ const TooltipSurface = styled.div<{ $left: number; $maxHeight: number }>`
   max-height: ${(props) => props.$maxHeight}px;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 0.625rem;
+  padding: 0.625rem 0.75rem;
   color: var(--service-text);
-  background:
-    linear-gradient(var(--service-surface-muted) 30%, transparent) center top,
-    linear-gradient(transparent, var(--service-surface-muted) 70%) center bottom,
-    radial-gradient(farthest-side at 50% 0, rgb(0 0 0 / 0.24), transparent)
-      center top,
-    radial-gradient(farthest-side at 50% 100%, rgb(0 0 0 / 0.3), transparent)
-      center bottom,
-    var(--service-surface-muted);
-  background-attachment: local, local, scroll, scroll, scroll;
-  background-repeat: no-repeat;
-  background-size:
-    100% 1rem,
-    100% 1rem,
-    100% 0.5rem,
-    100% 0.5rem,
-    100% 100%;
+  background: var(--service-surface-muted);
   border: 1px solid var(--service-border-strong);
-  border-radius: 0.625rem;
-  box-shadow: 0 18px 48px rgb(0 0 0 / 0.34);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.4);
   overscroll-behavior: contain;
-  pointer-events: auto;
-  scrollbar-color: color-mix(in srgb, var(--service-accent) 65%, transparent)
-    transparent;
   scrollbar-width: thin;
-
-  &::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  &::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, var(--service-accent) 65%, transparent);
-    border-radius: 999px;
-  }
 
   @container (max-width: 34rem) {
     display: none;
@@ -716,39 +615,25 @@ const CostSection = styled.div`
   gap: 0.25rem;
   margin-top: 0.5rem;
   padding-top: 0.5rem;
-  border-top: 1px solid var(--service-border-strong);
+  border-top: 1px solid var(--service-border);
 `;
 
 const CostHeading = styled.div`
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 `;
 
-const BreakdownTotal = styled.div<{ $sticky: boolean }>`
+const BreakdownTotal = styled.div`
   display: flex;
   justify-content: space-between;
   gap: 1rem;
   margin-top: 0.5rem;
   padding-top: 0.5rem;
   color: var(--service-text);
-  border-top: 1px solid var(--service-border-strong);
+  border-top: 1px solid var(--service-border);
   font-size: 0.8125rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-
-  ${(props) =>
-    props.$sticky &&
-    css`
-      position: sticky;
-      bottom: -0.625rem;
-      z-index: 1;
-      margin-right: -0.625rem;
-      margin-bottom: -0.625rem;
-      margin-left: -0.625rem;
-      padding: 0.625rem;
-      background: var(--service-surface-muted);
-      box-shadow: 0 -8px 16px rgb(0 0 0 / 0.18);
-    `}
 `;
 
 const PinnedBreakdown = styled.div`
@@ -783,7 +668,6 @@ interface BreakdownProps {
   metric: UsageMetric;
   rows: UsageTooltipRow[];
   providerCosts: ProviderCostRow[];
-  stickyTotal?: boolean;
   total: number;
 }
 
@@ -793,7 +677,6 @@ function BreakdownContent({
   metric,
   rows,
   providerCosts,
-  stickyTotal = false,
   total,
 }: BreakdownProps) {
   const labels = tooltipLabels(rows);
@@ -851,7 +734,7 @@ function BreakdownContent({
           )}
         </CostSection>
       )}
-      <BreakdownTotal $sticky={stickyTotal}>
+      <BreakdownTotal>
         <span>Total {metricLabel(metric).toLowerCase()}</span>
         <span>{formatMetric(total, metric)}</span>
       </BreakdownTotal>
@@ -868,8 +751,6 @@ export function ProfileUsageChart({
   rangeEnd = null,
 }: ProfileUsageChartProps) {
   const headingId = useId();
-  const chartTitleId = useId();
-  const chartDescriptionId = useId();
   const keyboardInstructionsId = useId();
   const [metric, setMetric] = useState<UsageMetric>(initialMetric);
   const [view, setView] = useState<UsageView>("average");
@@ -957,17 +838,27 @@ export function ProfileUsageChart({
         : chronologicalChartData,
     [chronologicalChartData, newestFirst],
   );
-  const chartStack = useMemo(
+  const chartRows = useMemo(
     () =>
-      createChartStack(
-        chartData.series,
-        chartData.dates.length,
-        chartData.maxDailyTotal,
-      ),
+      chartData.dates.map((date, index) => {
+        const row: Record<string, unknown> = { date };
+        for (const series of chartData.series) {
+          row[series.id] = series.values[index] ?? 0;
+        }
+        return row;
+      }),
     [chartData],
   );
-  const { layers } = chartStack;
-  const chartMaximum = chartStack.maximum;
+  const chartConfig = useMemo(
+    () =>
+      Object.fromEntries(
+        chartData.series.map((series) => [
+          series.id,
+          { label: series.label, color: series.color },
+        ]),
+      ),
+    [chartData.series],
+  );
 
   useEffect(() => {
     const plot = plotRef.current;
@@ -975,19 +866,16 @@ export function ProfileUsageChart({
 
     const measure = () => {
       const bounds = plot.getBoundingClientRect();
-      const nextWidth = bounds.width;
       const availableHeight =
         window.innerHeight -
         Math.max(
           TOOLTIP_EDGE,
           bounds.top + TOOLTIP_EDGE + TOOLTIP_VIEWPORT_EDGE,
         );
-      setPlotWidth((currentWidth) =>
-        currentWidth === nextWidth ? currentWidth : nextWidth,
-      );
-      setTooltipMaxHeight((currentHeight) => {
-        const nextHeight = clamp(availableHeight, 0, TOOLTIP_MAX_HEIGHT);
-        return currentHeight === nextHeight ? currentHeight : nextHeight;
+      setPlotWidth((current) => (current === bounds.width ? current : bounds.width));
+      setTooltipMaxHeight((current) => {
+        const next = clamp(availableHeight, 0, TOOLTIP_MAX_HEIGHT);
+        return current === next ? current : next;
       });
     };
     measure();
@@ -1011,6 +899,10 @@ export function ProfileUsageChart({
     };
   }, [chartData.dates.length]);
 
+  const plotPixelWidth = Math.max(
+    0,
+    plotWidth - CHART_MARGINS.left - CHART_MARGINS.right,
+  );
   const requestedActiveIndex = activeDate
     ? chartData.dates.indexOf(activeDate)
     : -1;
@@ -1072,14 +964,9 @@ export function ProfileUsageChart({
   ) => {
     if (chartData.dates.length === 0) return;
     const bounds = event.currentTarget.getBoundingClientRect();
-    const viewBoxX =
-      ((event.clientX - bounds.left) / bounds.width) * VIEWBOX_WIDTH;
-    const progress = Math.max(
-      0,
-      Math.min(1, (viewBoxX - PLOT_LEFT) / PLOT_WIDTH),
-    );
+    const pointer = event.clientX - bounds.left - CHART_MARGINS.left;
     setActiveIndex(
-      Math.round(progress * (chartData.dates.length - 1)),
+      nearestIndex(pointer, chartData.dates.length, plotPixelWidth),
       announce,
     );
   };
@@ -1116,29 +1003,12 @@ export function ProfileUsageChart({
     }
   };
 
-  const activeX =
-    activeIndex >= 0
-      ? xForIndex(activeIndex, chartData.dates.length)
-      : PLOT_LEFT;
-  const activeOffset = (activeX / VIEWBOX_WIDTH) * 100;
-  const activeTooltipLeft = tooltipLeft(activeOffset, plotWidth);
+  const activeOffset =
+    chartData.dates.length > 1
+      ? (activeIndex / (chartData.dates.length - 1)) * 100
+      : 0;
+  const activeTooltipLeft = tooltipLeft(activeOffset, plotPixelWidth);
   const modeLabel = viewLabel(view, chartData.averageWindowDays);
-  const chartTitle = `${modeLabel} ${metricLabel(metric).toLowerCase()} usage by model and provider`;
-  // Screen readers should hear the true chronological span, so build from/to
-  // from `chronologicalChartData` (unmirrored source) rather than the possibly
-  // reversed display order. When "Newest first" mirrors the visible axis, note
-  // it so AT users know the plotted direction is flipped.
-  const descriptionDates = chronologicalChartData.dates;
-  const chartDescription = `${chartTitle} from ${
-    descriptionDates[0] ? formatDate(descriptionDates[0]) : "no start date"
-  } to ${
-    descriptionDates.at(-1)
-      ? formatDate(descriptionDates.at(-1) as string)
-      : "no end date"
-  }${newestFirst ? ", displayed newest first" : ""}. Raw range total: ${formatMetric(
-    chartData.total,
-    metric,
-  )}.`;
   const announcedIndex = announcedDate
     ? chartData.dates.indexOf(announcedDate)
     : -1;
@@ -1165,6 +1035,7 @@ export function ProfileUsageChart({
         }`
       : "";
   const isInspecting = interactionMode !== "idle" && currentDate !== null;
+  const showChart = isMounted && plotWidth > 0;
 
   return (
     <Section aria-labelledby={headingId}>
@@ -1185,19 +1056,15 @@ export function ProfileUsageChart({
 
       <Controls>
         <ControlCluster>
-          <MetricControl aria-label="Usage metric">
-            {(["tokens", "cost"] as const).map((option) => (
-              <MetricButton
-                key={option}
-                type="button"
-                $active={metric === option}
-                aria-pressed={metric === option}
-                onClick={() => setMetric(option)}
-              >
-                {metricLabel(option)}
-              </MetricButton>
-            ))}
-          </MetricControl>
+          <DitherSelectionGroup
+            label="Usage metric"
+            value={metric}
+            options={[
+              { value: "tokens", label: "Tokens" },
+              { value: "cost", label: "Cost" },
+            ]}
+            onChange={(next) => setMetric(next as UsageMetric)}
+          />
 
           <CompactSelect
             prefix="Display"
@@ -1215,18 +1082,14 @@ export function ProfileUsageChart({
         </ControlCluster>
 
         <ControlCluster>
-          <NewestFirstControl title="Show newest activity on the left">
-            <input
-              type="checkbox"
-              name="profile-usage-newest-first"
-              aria-label="Show newest activity on the left"
-              checked={newestFirst}
-              onChange={(event) =>
-                commitNewestFirst(event.currentTarget.checked)
-              }
-            />
-            <span>Newest first</span>
-          </NewestFirstControl>
+          <DitherCheckbox
+            value={newestFirst}
+            onChange={commitNewestFirst}
+            color="#2f8fff"
+            className="profile-checkbox"
+          >
+            Newest first
+          </DitherCheckbox>
           <CompactSelect
             prefix="Provider"
             name="profile-usage-provider"
@@ -1239,114 +1102,78 @@ export function ProfileUsageChart({
                 label: providerName(provider),
               })),
             ]}
-            onChange={(next) =>
-              setProviderFilter(next as UsageProviderFilter)
-            }
+            onChange={(next) => setProviderFilter(next as UsageProviderFilter)}
           />
         </ControlCluster>
       </Controls>
 
       <PlotRegion>
         {chartData.dates.length > 0 ? (
-          <InteractivePlot
-            ref={plotRef}
-            tabIndex={0}
-            role="group"
-            aria-describedby={keyboardInstructionsId}
-            aria-label={`Interactive ${metricLabel(metric).toLowerCase()} chart`}
-            onKeyDown={handleKeyDown}
-            onPointerMove={(event) => {
-              if (event.pointerType === "mouse") {
-                setInteractionMode("hover");
-                handlePointer(event);
+          <Plot ref={plotRef}>
+            {showChart && (
+              <ChartMount>
+                <UsageAreaChart
+                  data={chartRows}
+                  config={chartConfig}
+                  stackType="stacked"
+                  margins={CHART_MARGINS}
+                  animate={false}
+                  sparkles={false}
+                  hoverLift={false}
+                  interactive={false}
+                  markerIndex={isInspecting ? activeIndex : null}
+                >
+                  <Grid
+                    horizontal
+                    strokeDasharray="3 3"
+                    tickCount={4}
+                  />
+                  <YAxis
+                    tickCount={4}
+                    tickFormatter={(value) => formatAxisValue(value, metric)}
+                  />
+                  <XAxis
+                    dataKey="date"
+                    maxTicks={plotPixelWidth < 480 ? 4 : 6}
+                    tickFormatter={(value) =>
+                      formatAxisDate(String(value), plotPixelWidth < 480)
+                    }
+                  />
+                  {chartData.series.map((series) => (
+                    <Area key={series.id} dataKey={series.id} />
+                  ))}
+                </UsageAreaChart>
+              </ChartMount>
+            )}
+            <InteractionLayer
+              tabIndex={0}
+              role="group"
+              aria-describedby={keyboardInstructionsId}
+              aria-label={`Interactive ${metricLabel(metric).toLowerCase()} chart, ${chartData.dates.length} days`}
+              onKeyDown={handleKeyDown}
+              onPointerMove={(event) => {
+                if (event.pointerType === "mouse") {
+                  setInteractionMode("hover");
+                  handlePointer(event);
+                }
+              }}
+              onPointerLeave={() =>
+                setInteractionMode((mode) => (mode === "hover" ? "idle" : mode))
               }
-            }}
-            onPointerLeave={() =>
-              setInteractionMode((mode) => (mode === "hover" ? "idle" : mode))
-            }
-            onPointerDown={(event) => {
-              setInteractionMode("committed");
-              handlePointer(event, true);
-            }}
-          >
-            <ChartSvg
-              viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
-              preserveAspectRatio="none"
-              role="img"
-              aria-labelledby={`${chartTitleId} ${chartDescriptionId}`}
-            >
-              <title id={chartTitleId}>{chartTitle}</title>
-              <desc id={chartDescriptionId}>{chartDescription}</desc>
-
-              {Array.from({ length: GRID_STEPS + 1 }, (_, index) => {
-                const value = (chartMaximum * index) / GRID_STEPS;
-                const y = yForValue(value, chartMaximum);
-                return (
-                  <GridLine
-                    key={index}
-                    x1={PLOT_LEFT}
-                    x2={PLOT_LEFT + PLOT_WIDTH}
-                    y1={y}
-                    y2={y}
-                  />
-                );
-              })}
-
-              {layers.map((layer) => (
-                <g key={layer.series.id}>
-                  <LayerArea d={layer.areaPath} $color={layer.series.color} />
-                  <LayerLine d={layer.linePath} $color={layer.series.color} />
-                </g>
-              ))}
-
-              {isInspecting && (
-                <ActiveRule
-                  x1={activeX}
-                  x2={activeX}
-                  y1={PLOT_TOP}
-                  y2={PLOT_TOP + PLOT_HEIGHT}
-                />
-              )}
-            </ChartSvg>
-
-            {isInspecting &&
-              layers.map((layer) => {
-                if ((layer.series.values[activeIndex] ?? 0) <= 0) return null;
-                const position = pointToChartPercent(
-                  activeX,
-                  yForValue(layer.upperValues[activeIndex] ?? 0, chartMaximum),
-                  VIEWBOX_WIDTH,
-                  VIEWBOX_HEIGHT,
-                );
-                return (
-                  <ActivePoint
-                    key={layer.series.id}
-                    aria-hidden="true"
-                    data-profile-usage-point
-                    $color={layer.series.color}
-                    $left={position.left}
-                    $top={position.top}
-                  />
-                );
-              })}
-
-            <DateRange aria-label="Chart date range">
-              <span>{formatDate(chartData.dates[0])}</span>
-              {chartData.dates.length > 1 && (
-                <span>{formatDate(chartData.dates.at(-1) as string)}</span>
-              )}
-            </DateRange>
+              onPointerDown={(event) => {
+                setInteractionMode("committed");
+                handlePointer(event, true);
+              }}
+            />
 
             {isInspecting && currentDate && (
               <TooltipSurface
                 role="tooltip"
                 data-profile-usage-tooltip
-                tabIndex={interactionMode === "committed" ? 0 : undefined}
                 $left={activeTooltipLeft}
                 $maxHeight={tooltipMaxHeight}
                 onPointerMove={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
-                onKeyDown={(event) => event.stopPropagation()}
               >
                 <BreakdownContent
                   date={currentDate}
@@ -1354,14 +1181,24 @@ export function ProfileUsageChart({
                   metric={metric}
                   rows={activeRows}
                   providerCosts={providerCostRows}
-                  stickyTotal
                   total={currentTotal}
                 />
               </TooltipSurface>
             )}
-          </InteractivePlot>
+          </Plot>
         ) : (
-          <EmptyState>No usage data yet.</EmptyState>
+          <EmptyState>No usage data in this range.</EmptyState>
+        )}
+
+        {chartData.dates.length > 0 && (
+          <DateRangeRow role="group" aria-label="Chart date range">
+            <span>
+              {formatDate(chartData.dates[0])}
+              {chartData.dates.length > 1
+                ? ` – ${formatDate(chartData.dates.at(-1) as string)}`
+                : ""}
+            </span>
+          </DateRangeRow>
         )}
         <VisuallyHidden id={keyboardInstructionsId}>
           Use Left Arrow and Right Arrow to inspect adjacent days. Use Home and
@@ -1370,7 +1207,7 @@ export function ProfileUsageChart({
         </VisuallyHidden>
       </PlotRegion>
 
-      {(modelLegend.visible.length > 0 || modelLegend.hiddenCount > 0) && (
+      {modelLegend.visible.length > 0 && (
         <Legend role="list" aria-label="Usage models">
           {modelLegend.visible.map((entry) => (
             <LegendItem key={entry.id}>
@@ -1404,3 +1241,4 @@ export function ProfileUsageChart({
     </Section>
   );
 }
+

@@ -1,18 +1,23 @@
 "use client";
 
 import styled from "styled-components";
+import { DitherGradient } from "dither-kit/DitherGradient";
 import type { CommunitySnapshot as Snapshot, Coverage, HumanRow, ModelUsageRow } from "@/lib/explore";
+import type { HomeCapital } from "@/lib/capital/ledger/home";
 import { PublicFooter } from "@/components/layout/PublicFooter";
 import { CapitalPreview } from "./CapitalPreview";
-import type { HomeCapital } from "@/lib/capital/ledger/home";
-import { CommunitySnapshot } from "./CommunitySnapshot";
 import { CopyCommand } from "./CopyCommand";
+import { HeroArt } from "./HeroArt";
+import { CommunitySnapshot } from "./CommunitySnapshot";
 import { HumansSection } from "./HumansSection";
 import { ModelsSection } from "./ModelsSection";
 import { InstagramSection } from "./InstagramSection";
 import { TrustedBy } from "./TrustedBy";
-import { TwinkleArt } from "./TwinkleArt";
-import { Container, DisplayTitle, Lead, PageShell, PrimaryButton, SecondaryButton, SectionTitle } from "./primitives";
+import { DitherBand } from "./DitherCells";
+import { PrimaryAction } from "./DitherButtonLink";
+import { Arrow, Container, DisplayTitle, Lead, PageShell, TextLink } from "./primitives";
+import { MotionStyles, Reveal } from "./Reveal";
+import { wholeNumber } from "./format";
 
 export interface HomePageProps {
   snapshot: Snapshot | null;
@@ -24,70 +29,70 @@ export interface HomePageProps {
 }
 
 export function HomePage({ snapshot, featuredHuman, humansCoverage, models, modelsCoverage, capital }: HomePageProps) {
+  const humans = snapshot?.humans.length ? snapshot.humans : featuredHuman ? [featuredHuman] : [];
+
   return (
     <PageShell>
+      <MotionStyles />
       <main>
         <Hero aria-labelledby="home-title">
-          <Container>
-            <HeroCopy>
-              <HeroTitle id="home-title">See how people build with AI.</HeroTitle>
-              <HeroLead>
-                Discover what builders use, compare AI models, and follow the companies and capital behind them.
-              </HeroLead>
-              <Actions>
-                <PrimaryButton href="/leaderboard">Explore leaderboards</PrimaryButton>
-                <SecondaryButton href="/tracker">Track your usage</SecondaryButton>
-              </Actions>
-            </HeroCopy>
-          </Container>
+          <HeroGrid>
+            <Card>
+              <AgentStripe snapshot={snapshot} />
+              <CardBody>
+                  <Reveal delay={0}>
+                    <DisplayTitle id="home-title">AI coding, counted in tokens.</DisplayTitle>
+                  </Reveal>
+                  <Reveal delay={70}>
+                    <HeroLead>
+                      Tokscale reads the logs your coding agents keep, counts the tokens, and publishes the leaderboards of
+                      who uses what.
+                    </HeroLead>
+                  </Reveal>
+                  <Reveal delay={140}>
+                    <Actions>
+                      <PrimaryAction href="/tracker">Track your usage</PrimaryAction>
+                      <TextLink href="/leaderboard">
+                        See the leaderboards <Arrow />
+                      </TextLink>
+                    </Actions>
+                  </Reveal>
+                  <Reveal delay={210}>
+                    <Meta>
+                      Public usage, last 30 days
+                      {snapshot ? ` · ${wholeNumber(snapshot.coverage.accounts)} accounts` : ""} ·{" "}
+                      <TextLink href="/methodology">How counts work</TextLink>
+                    </Meta>
+                  </Reveal>
+                <Reveal delay={240}>
+                  <CommunitySnapshot snapshot={snapshot} />
+                </Reveal>
+              </CardBody>
+            </Card>
+
+            <HeroArt />
+          </HeroGrid>
         </Hero>
 
-        <SnapshotStage>
-          <Backdrop aria-hidden="true">
-            <TwinkleArt
-              src="/assets/v2/observatory-blue.webp"
-              width={2472}
-              height={1392}
-              mobileSrc="/assets/v2/observatory-blue-960.webp"
-              mobileWidth={1356}
-              mobileHeight={768}
-            />
-          </Backdrop>
-          <Container>
-            <CommunitySnapshot snapshot={snapshot} />
-            <TrustedBy />
-          </Container>
-        </SnapshotStage>
+        <TrustedBy />
 
-        <HumansSection human={featuredHuman} coverage={humansCoverage} />
+        <HumansSection humans={humans} coverage={humansCoverage} />
         <ModelsSection models={models} coverage={modelsCoverage} />
         <CapitalPreview data={capital} />
         <InstagramSection />
 
         <Closing aria-labelledby="home-closing-title">
-          <ClosingArt aria-hidden="true">
-            <ClosingArtImage
-              src="/assets/v2/instruments-blue.webp"
-              width={2880}
-              height={1620}
-              mobileSrc="/assets/v2/instruments-blue-960.webp"
-              mobileWidth={1248}
-              mobileHeight={696}
-              loading="lazy"
-            />
-          </ClosingArt>
           <Container>
-            <ClosingInner>
-              <SectionTitle id="home-closing-title">
-                Track your usage. <Line>Join the community.</Line>
-              </SectionTitle>
-              <Lead>
-                Tokscale reads the session logs your coding agents already keep, on your machine. Nothing leaves it
-                until you submit.
-              </Lead>
-              <CopyCommand command="bunx tokscale@latest" label="Copy the command to run Tokscale" />
-              <PrimaryButton href="/tracker">Start tracking</PrimaryButton>
-            </ClosingInner>
+            <ClosingPanel>
+              <ClosingField aria-hidden="true">
+                <DitherGradient from="blue" to="transparent" direction="left" cell={5} renderMode="static" className="field" />
+              </ClosingField>
+              <ClosingCopy>
+                <ClosingTitle id="home-closing-title">Count your own tokens.</ClosingTitle>
+                <ClosingNote>One command, no account, reads only your machine.</ClosingNote>
+                <CopyCommand command="bunx tokscale@latest" label="Copy the command to run Tokscale" typed />
+              </ClosingCopy>
+            </ClosingPanel>
           </Container>
         </Closing>
       </main>
@@ -96,174 +101,168 @@ export function HomePage({ snapshot, featuredHuman, humansCoverage, models, mode
   );
 }
 
-const Line = styled.span`
-  @media (min-width: 721px) {
-    display: block;
-  }
-`;
+/**
+ * The stripe across the card's top: one block per top agent, its width its
+ * share of those agents' tokens in the window. The only ornament on the card,
+ * and it is data.
+ */
+function AgentStripe({ snapshot }: { snapshot: Snapshot | null }) {
+  const agents = snapshot?.agents.slice(0, 6) ?? [];
+  const total = agents.reduce((sum, agent) => sum + agent.tokens, 0);
+  if (!agents.length || total <= 0) return <StripeBand aria-hidden="true" />;
 
-/* One line at 48px; narrow screens scale the size down so it never wraps (the line is ~9.6 em wide). */
-const HeroTitle = styled(DisplayTitle)`
-  font-size: 48px;
-  line-height: 1.1;
-  white-space: nowrap;
+  return (
+    <StripeBand aria-hidden="true">
+      <DitherBand weights={agents.map((agent) => agent.tokens)} cells={64} />
+    </StripeBand>
+  );
+}
 
-  @media (max-width: 520px) {
-    font-size: min(48px, calc((100vw - 32px) * 0.104));
-  }
-`;
-
-/* Above the snapshot backdrop, which reaches up behind the hero's lower edge. */
+/* The first screen: a printed card on the left, the room on the right. */
 const Hero = styled.section`
   position: relative;
-  z-index: 1;
-  padding: 128px 0 36px;
-  /* A faint blue glow behind the title, matching the blue backdrop below. */
-  background: var(--v2-glow);
+  overflow: hidden;
+  padding: 80px 0 56px;
 
   @media (max-width: 720px) {
-    padding: 112px 0 28px;
+    padding-top: 72px;
   }
 `;
 
-const HeroCopy = styled.div`
+const HeroGrid = styled(Container)`
+  position: relative;
+  display: grid;
+  /* The card carries the words and the live boards; the dithered pillars are
+     the first screen's mass in the open right half. */
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 12px;
+  align-items: stretch;
+
+  @media (max-width: 980px) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+`;
+
+const Card = styled.div`
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  max-width: 860px;
-  margin: 0 auto;
-  text-align: center;
+  overflow: hidden;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
+
+  @media (max-width: 980px) {
+    order: 2;
+    margin-top: -24px;
+  }
+`;
+
+/* The card's one ornament, and it is data: a full-width field of equal cells,
+   denser where one agent's share of these tokens is larger. */
+const StripeBand = styled.div`
+  flex-shrink: 0;
+  padding: 12px 12px 4px;
+  background: var(--v2-surface);
+`;
+
+/* The card reads down: headline, lead, actions, then the live boards. */
+const CardBody = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 28px 24px 20px;
+
+  @media (max-width: 520px) {
+    padding: 24px 16px 16px;
+  }
 `;
 
 const HeroLead = styled(Lead)`
-  max-width: 34rem;
-  font-size: 18px;
-
-  @media (max-width: 520px) {
-    font-size: 16px;
-  }
+  max-width: 32rem;
 `;
 
 const Actions = styled.div`
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 8px;
-
-  @media (max-width: 400px) {
-    flex-direction: column;
-    align-self: stretch;
-  }
+  align-items: center;
+  gap: 10px 20px;
 `;
 
-const SnapshotStage = styled.div`
-  position: relative;
-  isolation: isolate;
-  /*
-   * Room under the card and the logo row for the observatory engraving. The
-   * padding tracks the engraving height, so the telescope always starts below
-   * the logo row.
-   */
-  padding-bottom: min(440px, 42vw);
-
-  @media (max-width: 720px) {
-    padding-bottom: 64vw;
-  }
+const Meta = styled.p`
+  margin: 10px 0 0;
+  color: var(--v2-text-subtle);
+  font-size: 13px;
 `;
 
-const Backdrop = styled.div`
-  position: absolute;
-  z-index: -1;
-  bottom: -24px;
-  left: 50%;
-  width: min(1240px, 118vw);
-  transform: translateX(-50%);
-  pointer-events: none;
-  opacity: 0.92;
-  /*
-   * Blue dot-matrix rendering of the observatory engraving (ordered dither).
-   * Sits below the snapshot card: the card covers only the sky, and the dome
-   * and telescope show in the space under it. Fade the sides, the top (behind
-   * the card), and the base so it runs softly into the next section.
-   */
-  -webkit-mask-image:
-    radial-gradient(ellipse 66% 90% at 50% 58%, #000 50%, transparent 100%),
-    linear-gradient(to bottom, transparent 0%, #000 30%, #000 74%, transparent 100%);
-  -webkit-mask-composite: source-in;
-  mask-image:
-    radial-gradient(ellipse 66% 90% at 50% 58%, #000 50%, transparent 100%),
-    linear-gradient(to bottom, transparent 0%, #000 30%, #000 74%, transparent 100%);
-  mask-composite: intersect;
 
-  img {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-
-  @media (max-width: 720px) {
-    bottom: -12px;
-    width: 175vw;
-    opacity: 0.85;
-  }
-`;
-
+/* The closing panel: the page's one action again, on a dithered field that
+   thickens toward the right edge — the motif as a quiet surface, not a word
+   blown up past the viewport. */
 const Closing = styled.section`
-  position: relative;
-  isolation: isolate;
-  margin-top: 120px;
-  padding: 120px 0 240px;
-  border-top: 1px solid var(--v2-rule);
+  margin-top: 128px;
 
   @media (max-width: 720px) {
     margin-top: 80px;
-    padding: 80px 0 160px;
   }
 `;
 
-const ClosingArt = styled.div`
-  position: absolute;
-  z-index: -1;
-  inset: 0;
+const ClosingPanel = styled.div`
+  position: relative;
   display: flex;
-  align-items: flex-end;
-  justify-content: center;
+  align-items: center;
+  min-height: 320px;
   overflow: hidden;
+  padding: 56px;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
+
+  @media (max-width: 720px) {
+    min-height: 0;
+    padding: 32px 24px;
+  }
+`;
+
+/* Right 60% of the panel; hidden on phones, where the copy stands alone. */
+const ClosingField = styled.div`
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 60%;
   pointer-events: none;
-  opacity: 0.85;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 55%);
-  mask-image: linear-gradient(to bottom, transparent 0%, #000 55%);
+
+  .field {
+    position: absolute;
+    inset: 0;
+  }
+
+  @media (max-width: 720px) {
+    display: none;
+  }
 `;
 
-/* Blue dot-matrix rendering of the instruments engraving, with twinkling dots. */
-const ClosingArtImage = styled(TwinkleArt)`
-  flex-shrink: 0;
-  width: min(1440px, 160vw);
-`;
-
-const ClosingInner = styled.div`
+const ClosingCopy = styled.div`
   position: relative;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 20px;
-  max-width: 640px;
-  margin: 0 auto;
-  text-align: center;
+  align-items: flex-start;
+  gap: 16px;
+  max-width: 520px;
+`;
 
-  > p {
-    max-width: 30rem;
-  }
+const ClosingTitle = styled.h2`
+  margin: 0;
+  color: var(--v2-text);
+  font-size: clamp(32px, 4vw, 56px);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.04;
+  text-wrap: balance;
+`;
 
-  /* Keep the copy readable over the instruments engraving. */
-  &::before {
-    position: absolute;
-    z-index: -1;
-    inset: -80px -160px;
-    background: radial-gradient(closest-side, rgba(0, 0, 0, 0.92) 55%, rgba(0, 0, 0, 0) 100%);
-    content: "";
-    pointer-events: none;
-  }
+const ClosingNote = styled.p`
+  margin: 0 0 8px;
+  color: var(--v2-text-muted);
+  font-size: 17px;
+  line-height: 1.5;
 `;

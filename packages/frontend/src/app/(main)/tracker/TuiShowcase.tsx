@@ -159,7 +159,6 @@ export function TuiShowcase({ views = TUI_VIEWS, intro, tourMs = TUI_TOUR_MS }: 
               onClick={() => pick(index)}
             >
               <TabLabel>{item.label}</TabLabel>
-              <TabCaption aria-hidden="true">{item.caption}</TabCaption>
               {index === active ? (
                 touring ? (
                   <Progress
@@ -264,21 +263,14 @@ const Side = styled.div`
 const TabList = styled.div`
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--v2-rule);
+  gap: 2px;
 
   @media (max-width: ${SIDE_BY_SIDE}) {
     flex-direction: row;
-    gap: 2px;
+    flex-wrap: wrap;
+    gap: 6px;
     max-width: 100%;
-    overflow-x: auto;
-    padding: 2px;
-    border-top: 0;
-    border-bottom: 1px solid var(--v2-rule);
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
+    padding-bottom: 2px;
   }
 `;
 
@@ -288,12 +280,14 @@ const Tab = styled.button<{ $active: boolean }>`
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding: 14px 0 16px;
+  width: fit-content;
+  padding: 10px 12px 12px;
   border: 0;
-  border-bottom: 1px solid var(--v2-rule);
-  background: transparent;
+  border-radius: var(--radius, 2px);
+  background: ${({ $active }) => ($active ? "var(--v2-surface)" : "transparent")};
   color: ${({ $active }) => ($active ? "var(--v2-text)" : "var(--v2-text-muted)")};
   text-align: left;
+  cursor: pointer;
 
   &:hover {
     color: var(--v2-text);
@@ -307,9 +301,7 @@ const Tab = styled.button<{ $active: boolean }>`
   @media (max-width: ${SIDE_BY_SIDE}) {
     flex-shrink: 0;
     min-height: 40px;
-    padding: 0 14px;
-    border-bottom: 0;
-    border-radius: 6px 6px 0 0;
+    padding: 8px 12px 10px;
     justify-content: center;
 
     &:focus-visible {
@@ -324,50 +316,24 @@ const Tab = styled.button<{ $active: boolean }>`
 
 const TabLabel = styled.span`
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 500;
 
   @media (max-width: ${SIDE_BY_SIDE}) {
     font-size: 14px;
-    font-weight: 500;
-
-    [aria-selected="true"] > & {
-      font-weight: 600;
-    }
-  }
-`;
-
-/* Wide screens: the selected view shows its caption under its name. */
-const TabCaption = styled.span`
-  display: none;
-  max-width: 34rem;
-  color: var(--v2-text-muted);
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 1.5;
-
-  [aria-selected="true"] > & {
-    display: block;
-  }
-
-  @media (max-width: ${SIDE_BY_SIDE}) {
-    [aria-selected="true"] > & {
-      display: none;
-    }
   }
 `;
 
 const barPosition = css`
   position: absolute;
   right: 0;
-  bottom: -1px;
+  bottom: 0;
   left: 0;
   height: 2px;
   background: var(--v2-accent);
 
   @media (max-width: ${SIDE_BY_SIDE}) {
-    right: 10px;
-    bottom: -3px;
-    left: 10px;
+    right: 8px;
+    left: 8px;
   }
 `;
 
@@ -389,14 +355,15 @@ const TourToggle = styled.button`
   align-items: center;
   align-self: flex-start;
   gap: 8px;
-  min-height: 32px;
+  min-height: 36px;
   padding: 0 12px;
-  border: 1px solid var(--v2-rule-strong);
-  border-radius: 999px;
-  background: transparent;
+  border: 0;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
   color: var(--v2-text-muted);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
+  cursor: pointer;
 
   &:hover {
     color: var(--v2-text);
@@ -420,26 +387,21 @@ const Panel = styled.div`
   min-width: 0;
 `;
 
-/* Narrow screens only; wide screens show the caption in the list. */
+/* The selected view's one-line caption, above its screenshot at every width. */
 const Caption = styled.p`
-  display: none;
   margin: 0;
   color: var(--v2-text-muted);
-  font-size: 15px;
-
-  @media (max-width: ${SIDE_BY_SIDE}) {
-    display: block;
-  }
+  font-size: 16px;
+  line-height: 1.5;
 `;
 
 /* The screenshots carry their own window chrome; stacked so a change can cross-fade. */
 const Frame = styled.div`
   position: relative;
   aspect-ratio: 1800 / 1270;
-  border-radius: 12px;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08),
-    0 32px 100px -36px rgba(0, 0, 0, 0.95);
+  overflow: hidden;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
 
   img {
     position: absolute;
@@ -447,7 +409,6 @@ const Frame = styled.div`
     display: block;
     width: 100%;
     height: 100%;
-    border-radius: 12px;
     opacity: 0;
   }
 

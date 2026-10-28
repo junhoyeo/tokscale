@@ -1,12 +1,15 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useId, useMemo } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
-import { KeyIcon } from "@/components/ui/Icons";
-import { Select } from "@/components/ui/Select";
+import { DitherButton } from "dither-kit/DitherButton";
+import { DitherDialog } from "dither-kit/DitherDialog";
+import { DitherInput } from "dither-kit/DitherInput";
+import { DitherAvatar } from "dither-kit/DitherAvatar";
 import { Navigation } from "@/components/layout/Navigation";
-import { Footer } from "@/components/layout/Footer";
+import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { Select } from "@/components/ui/Select";
 import { deviceDisplayLabel } from "@/lib/devices/shared";
 import { formatNumber, formatCurrency } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
@@ -64,27 +67,27 @@ function validateDeviceName(name: string): string | null {
 }
 
 // ============================================================================
-// Shared styled components
+// Page frame
 // ============================================================================
 
 const PageWrapper = styled.div`
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  background: var(--service-canvas);
   color: var(--service-text);
 `;
 
 /* Clears the fixed navigation, like .service-main on the other pages. */
 const MainContent = styled.main`
   flex: 1;
-  max-width: 768px;
-  margin: 0 auto;
-  padding: 96px 24px 40px;
   width: 100%;
+  max-width: 1152px;
+  margin: 0 auto;
+  padding: 112px 32px 64px;
 
-  @media (max-width: 520px) {
-    padding: 88px 16px 40px;
+  @media (max-width: 640px) {
+    padding: 96px 20px 48px;
   }
 `;
 
@@ -93,405 +96,552 @@ const LoadingMain = styled.main`
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--service-text-muted);
+  font-size: 0.9375rem;
+`;
+
+const PageHead = styled.header`
+  margin-bottom: 40px;
 `;
 
 const Title = styled.h1`
-  font-size: 30px;
-  font-weight: bold;
-  margin-bottom: 32px;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.75rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
 `;
 
-const Section = styled.section`
-  border-radius: 16px;
-  border: 1px solid;
-  padding: 24px;
-  margin-bottom: 24px;
+const PageLead = styled.p`
+  margin: 10px 0 0;
+  max-width: 66ch;
+  color: var(--service-text-muted);
+  font-size: 1rem;
+  line-height: 1.6;
+`;
+
+// ============================================================================
+// Section: a label column beside its panel, both on one pair of rules
+// ============================================================================
+
+const SectionRow = styled.section`
+  display: grid;
+  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  gap: 48px;
+  padding: 32px 0;
+  border-top: 1px solid var(--service-border);
+
+  &:last-of-type {
+    border-bottom: 1px solid var(--service-border);
+  }
+
+  @media (max-width: 900px) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+`;
+
+const LabelColumn = styled.div`
+  min-width: 0;
 `;
 
 const SectionTitle = styled.h2`
-  font-size: 18px;
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
   font-weight: 600;
-  margin-bottom: 16px;
 `;
 
-const ProfileWrapper = styled.div`
-  display: flex;
-  align-items: center;
+const SectionDescription = styled.p`
+  margin: 8px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+`;
+
+const Panel = styled.div`
+  display: grid;
   gap: 16px;
-`;
-
-const ProfileText = styled.p`
-  font-weight: 500;
-`;
-
-const SmallText = styled.p`
-  font-size: 14px;
-`;
-
-const CodeText = styled.code`
-  padding: 2px 4px;
-  border-radius: 4px;
-  font-size: 12px;
-`;
-
-const Description = styled.p`
-  font-size: 14px;
-  margin-bottom: 16px;
+  min-width: 0;
+  padding: 20px;
+  border-radius: 2px;
+  background: var(--service-surface);
 `;
 
 const FieldLabel = styled.label`
   display: block;
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 8px;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 500;
 `;
 
-const ActionRow = styled.div`
+const FieldHint = styled.p`
+  margin: 6px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+`;
+
+const Actions = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+`;
+
+const InlineForm = styled.div`
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 12px;
-  margin-bottom: 16px;
 
   @media (max-width: 560px) {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 `;
 
-const TextInput = styled.input`
+const NameField = styled(DitherInput)`
   height: 40px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: 1px solid var(--service-border-strong);
-  background: var(--service-canvas);
-  color: var(--service-text);
-  font-size: 14px;
+  border-radius: 2px;
+  font-size: 0.875rem;
 `;
 
 const TimezoneSelect = styled(Select)`
   --select-height: 40px;
   --select-max-width: 360px;
   --select-padding-x: 12px;
-  --select-radius: 6px;
-  --select-background: var(--service-canvas);
+  --select-radius: 2px;
+  --select-background: var(--service-surface-muted);
   --select-border-color: var(--service-border-strong);
-  --select-font-size: 14px;
+  --select-font-size: 0.875rem;
 `;
 
-const PrimaryButton = styled.button`
-  height: 40px;
+/* Bordered control for a section's Save: visible enough to press, not filled,
+   so the screen keeps its one primary action. */
+const SaveButton = styled.button`
+  min-height: 36px;
   padding: 0 14px;
-  border-radius: 6px;
-  border: 1px solid var(--v2-accent-strong);
-  background: var(--v2-accent-strong);
-  color: #ffffff;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: opacity 150ms;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+
+  &:hover:not(:disabled) {
+    border-color: var(--service-text-muted);
+  }
 
   &:disabled {
     cursor: not-allowed;
-    opacity: 0.6;
+    opacity: 0.45;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
   }
 `;
 
-const TokenReveal = styled.div`
-  padding: 12px;
-  border-radius: 6px;
-  border: 1px solid var(--color-success-fg);
-  background: rgba(63, 185, 80, 0.08);
-  margin-bottom: 16px;
+const TextButton = styled.button`
+  min-height: 32px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
 `;
 
-const TokenCodeRow = styled.div`
+const ErrorText = styled.p`
+  margin: 0;
+  color: #ff9b9b;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+`;
+
+const Muted = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+`;
+
+const VisuallyHidden = styled.span`
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+`;
+
+// ============================================================================
+// Profile
+// ============================================================================
+
+const ProfileRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 16px;
+`;
+
+const Avatar = styled.img`
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border-radius: 2px;
+  object-fit: cover;
+`;
+
+/* A real GitHub avatar stays a picture; when there is none (or it fails to
+   load) the deterministic dither avatar stands in, never a broken image. */
+function ProfileAvatar({ src, name }: { src: string | null; name: string }) {
+  const [failed, setFailed] = useState(false);
+
+  if (src && !failed) {
+    return (
+      <Avatar
+        src={src}
+        alt={name}
+        width={48}
+        height={48}
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+
+  return <DitherAvatar name={name} color="blue" size={48} grid={8} cellPx={4} animate={false} bloom="off" />;
+}
+
+const ProfileName = styled.p`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  font-weight: 500;
+`;
+
+const ProfileMeta = styled.p`
+  margin: 2px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+`;
+
+// ============================================================================
+// Token reveal
+// ============================================================================
+
+const Reveal = styled.div`
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 2px;
+  background: var(--service-surface-muted);
+`;
+
+const RevealTitle = styled.p`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+`;
+
+const RevealRow = styled.div`
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 8px;
-  margin-top: 8px;
-
-  @media (max-width: 560px) {
-    grid-template-columns: 1fr;
-  }
 `;
 
 const TokenCode = styled.code`
   display: block;
   overflow-x: auto;
-  white-space: nowrap;
-  padding: 10px 12px;
-  border-radius: 6px;
+  padding: 8px 10px;
+  border-radius: 2px;
   background: var(--service-canvas);
-  font-size: 13px;
-`;
-
-const SecondaryButton = styled.button`
-  height: 38px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: 1px solid var(--service-border-strong);
-  background: var(--service-surface-muted);
   color: var(--service-text);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
+  font-size: 0.8125rem;
+  white-space: nowrap;
 `;
 
-const ErrorText = styled.p`
-  color: #f85149;
-  font-size: 13px;
-  margin: -4px 0 16px;
+// ============================================================================
+// Lists (tokens, devices)
+// ============================================================================
+
+const List = styled.ul`
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 `;
 
-const EmptyState = styled.div`
-  padding: 32px 0;
-  text-align: center;
-`;
-
-const EmptyIcon = styled.div`
-  margin: 0 auto 12px;
-  opacity: 0.5;
-`;
-
-const EmptyText = styled.p`
-  font-size: 14px;
-  margin-top: 8px;
-`;
-
-const TokenList = styled.div`
+const ListRow = styled.li<{ $editing?: boolean }>`
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-`;
-
-const TokenItem = styled.div`
-  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  padding: 16px;
-  border-radius: 12px;
+  gap: 8px 16px;
+  min-width: 0;
+  padding: 12px 0 12px 12px;
+  border-top: 1px solid var(--service-border);
+  border-left: 1px solid ${({ $editing }) => ($editing ? "var(--service-accent)" : "transparent")};
+  margin-left: -12px;
+  font-variant-numeric: tabular-nums;
+
+  &:first-child {
+    border-top: 0;
+  }
 `;
 
-const TokenInfo = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 12px;
+const RowMain = styled.div`
+  min-width: 0;
 `;
 
-const IconWrapper = styled.div`
+const RowName = styled.p`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+`;
+
+const RowMeta = styled.p`
+  margin: 2px 0 0;
   color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
 `;
 
 const DeviceEditRow = styled.div`
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 8px;
-  align-items: center;
   width: 100%;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
 
   @media (max-width: 560px) {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 `;
 
-
-const DangerButton = styled.button`
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 6px;
-  border: 1px solid #F85149;
-  background: transparent;
-  color: #F85149;
-  cursor: pointer;
-  transition: all 150ms;
-  &:hover { background: #F85149; color: #FFFFFF; }
-`;
-
-const InfoBanner = styled.div`
-  padding: 12px 16px;
-  border-radius: 6px;
-  border: 1px solid var(--service-border);
-  background: var(--service-surface-muted);
-  color: var(--service-text-muted);
-  font-size: 14px;
-`;
-
-const AvatarImg = styled.img`
-  border-radius: 6px;
-  object-fit: cover;
-  flex-shrink: 0;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
-`;
-
-const TokenName = styled.p`
-  font-weight: 500;
-`;
-
 // ============================================================================
-// Danger Zone styled components
+// Danger zone
 // ============================================================================
 
-const DangerSection = styled(Section)`
-  border-color: rgba(248, 81, 73, 0.4);
-`;
-
-const DangerSectionTitle = styled(SectionTitle)`
-  color: #F85149;
-`;
-
-const DangerActionRow = styled.div`
-  display: flex;
+const DangerRow = styled.div`
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  gap: 8px 16px;
   padding: 16px 0;
 
-  &:not(:last-child) {
-    border-bottom: 1px solid var(--service-border);
+  & + & {
+    border-top: 1px solid var(--service-border);
+  }
+
+  @media (max-width: 560px) {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
   }
 `;
 
-const DangerActionInfo = styled.div`
-  flex: 1;
-  min-width: 0;
-`;
-
-const DangerActionTitle = styled.p`
-  font-size: 14px;
-  font-weight: 500;
+const DangerTitle = styled.p`
+  margin: 0;
   color: var(--service-text);
-  margin-bottom: 4px;
+  font-size: 0.875rem;
+  font-weight: 500;
 `;
 
-const DangerActionDescription = styled.p`
-  font-size: 13px;
+const DangerDescription = styled.p`
+  margin: 2px 0 0;
   color: var(--service-text-muted);
-`;
-
-const DangerActionButton = styled(DangerButton)`
-  flex-shrink: 0;
-  padding: 6px 16px;
-  font-size: 13px;
-`;
-
-// ============================================================================
-// Confirmation modal styled components
-// ============================================================================
-
-const ModalOverlay = styled.div`
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
-`;
-
-const ModalCard = styled.div`
-  background: var(--service-surface);
-  border: 1px solid var(--service-border-strong);
-  border-radius: 16px;
-  padding: 24px;
-  max-width: 480px;
-  width: calc(100% - 32px);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
-`;
-
-const ModalTitle = styled.h3`
-  font-size: 16px;
-  font-weight: 600;
-  color: #F85149;
-  margin-bottom: 12px;
-`;
-
-const ModalBody = styled.p`
-  font-size: 14px;
-  color: var(--service-text-muted);
+  font-size: 0.8125rem;
   line-height: 1.5;
-  margin-bottom: 20px;
 `;
 
-const ModalBulletList = styled.ul`
-  list-style: disc;
-  padding-left: 20px;
-  margin-bottom: 20px;
+const DangerButton = styled.button`
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 107, 107, 0.55);
+  border-radius: 2px;
+  background: transparent;
+  color: #ff9b9b;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+
+  &:hover {
+    border-color: #ff9b9b;
+    color: #ffb3b3;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
+  }
+`;
+
+/* A paragraph of the confirmation's story: steps sit under each other with one
+   gap, so an inline <strong> never breaks onto its own line. */
+const DialogBody = styled.p`
+  margin: 0 0 12px;
   color: var(--service-text-muted);
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.6;
 `;
 
-const ModalInput = styled.input`
-  width: 100%;
-  padding: 8px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--service-border);
-  background: var(--service-surface-muted);
-  color: var(--service-text);
-  font-size: 14px;
-  margin-bottom: 16px;
-  outline: none;
-  box-sizing: border-box;
-  &:focus {
-    border-color: #F85149;
-    box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.2);
+const DialogList = styled.ul`
+  margin: 0 0 12px;
+  padding: 0 0 0 20px;
+  list-style: disc;
+
+  li {
+    margin-bottom: 4px;
+  }
+
+  li::marker {
+    color: var(--service-text-muted);
   }
 `;
 
-const ModalActions = styled.div`
+const DialogStrong = styled.strong`
+  color: var(--service-text);
+  font-weight: 600;
+`;
+
+const StepDots = styled.div`
   display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+`;
+
+const StepDot = styled.span<{ $active: boolean }>`
+  width: 6px;
+  height: 6px;
+  background: ${({ $active }) => ($active ? "var(--service-text)" : "var(--service-border-strong)")};
+`;
+
+/* The kit draws its dialog with Tailwind utilities that live in a cascade
+   layer; this app's reset is unlayered, so the header lost its row. These
+   unlayered rules restore the layout and put our type, rule and radius on it. */
+const ConfirmationDialog = styled(DitherDialog)`
+  width: min(480px, calc(100vw - 32px));
+  border: 1px solid var(--service-border-strong);
+  border-radius: 2px;
+  background: var(--service-surface);
+  color: var(--service-text);
+  font-family: var(--v2-font-ui);
+
+  header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 12px 14px 16px;
+    border-bottom: 1px solid var(--service-border);
+  }
+
+  header h2 {
+    margin: 0;
+    color: var(--service-text);
+    font-family: var(--v2-font-ui);
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  header button {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--service-text-muted);
+    font-size: 1.125rem;
+    line-height: 1;
+
+    &:hover {
+      color: var(--service-text);
+    }
+  }
+
+  > div {
+    padding: 16px;
+  }
+
+  footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--service-border);
+  }
+`;
+
+const DialogActions = styled.div`
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
 `;
 
-const CancelButton = styled.button`
-  padding: 6px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  border-radius: 6px;
-  border: 1px solid var(--service-border);
+const DialogCancel = styled.button`
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text);
-  cursor: pointer;
-  transition: all 150ms;
-  &:hover {
-    background: var(--service-surface-muted);
-  }
-`;
-
-const ConfirmDangerButton = styled.button<{ $disabled?: boolean }>`
-  padding: 6px 16px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 500;
-  border-radius: 6px;
-  border: 1px solid #F85149;
-  background: ${({ $disabled }) => ($disabled ? "transparent" : "#F85149")};
-  color: ${({ $disabled }) => ($disabled ? "rgba(248, 81, 73, 0.4)" : "#FFFFFF")};
-  cursor: ${({ $disabled }) => ($disabled ? "not-allowed" : "pointer")};
-  opacity: ${({ $disabled }) => ($disabled ? 0.5 : 1)};
-  transition: all 150ms;
-  &:hover {
-    background: ${({ $disabled }) => ($disabled ? "transparent" : "#da3633")};
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
   }
 `;
 
-const StepIndicator = styled.div`
-  display: flex;
-  gap: 6px;
-  margin-bottom: 16px;
-`;
-
-const StepDot = styled.div<{ $active: boolean }>`
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: ${({ $active }) => ($active ? "#F85149" : "var(--service-border)")};
-  transition: background 150ms;
+const DialogConfirm = styled(DitherButton)`
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 2px;
+  font-size: 0.8125rem;
 `;
 
 // ============================================================================
-// Confirmation modal component
+// Confirmation dialog
 // ============================================================================
 
 type DangerAction = "delete-data" | "delete-account";
@@ -513,26 +663,25 @@ const CONFIRMATION_CONFIGS: Record<DangerAction, ConfirmationConfig> = {
       {
         body: (
           <>
-            <ModalBody>This will permanently remove all submitted usage data from your account:</ModalBody>
-            <ModalBulletList>
+            <DialogBody>This permanently removes the usage data you have submitted:</DialogBody>
+            <DialogList>
               <li>Leaderboard entries</li>
               <li>Public profile stats</li>
               <li>Daily usage history</li>
-            </ModalBulletList>
-            <ModalBody style={{ marginBottom: 0 }}>
-              Your account and API tokens will remain active. You can submit new data at any time.
-            </ModalBody>
+            </DialogList>
+            <DialogBody>
+              Your account and API tokens stay active. You can submit new data at any time.
+            </DialogBody>
           </>
         ),
         confirmLabel: "I want to delete my data",
       },
       {
         body: (
-          <ModalBody>
-            This action <strong>cannot be undone</strong>. All your historical
-            token usage and cost data will be permanently erased from the
+          <DialogBody>
+            This cannot be undone. All your historical token usage and cost data is erased from the
             leaderboard and your public profile.
-          </ModalBody>
+          </DialogBody>
         ),
         confirmLabel: "I understand, continue",
       },
@@ -549,27 +698,25 @@ const CONFIRMATION_CONFIGS: Record<DangerAction, ConfirmationConfig> = {
       {
         body: (
           <>
-            <ModalBody>This will permanently delete your entire account and all associated data:</ModalBody>
-            <ModalBulletList>
+            <DialogBody>This permanently deletes your account and everything attached to it:</DialogBody>
+            <DialogList>
               <li>User profile</li>
               <li>All submitted usage data</li>
               <li>Leaderboard entries</li>
               <li>API tokens and active sessions</li>
-            </ModalBulletList>
-            <ModalBody style={{ marginBottom: 0 }}>
-              You will be signed out immediately. This cannot be reversed.
-            </ModalBody>
+            </DialogList>
+            <DialogBody>You are signed out immediately. This cannot be reversed.</DialogBody>
           </>
         ),
         confirmLabel: "I want to delete my account",
       },
       {
         body: (
-          <ModalBody>
-            This action is <strong>permanent and irreversible</strong>. Your
-            username will become available for others to register. All your data
-            — submissions, tokens, sessions — will be wiped.
-          </ModalBody>
+          <DialogBody>
+            This is <DialogStrong>permanent and irreversible</DialogStrong>. Your username becomes
+            available for others to register, and all your data (submissions, tokens, sessions) is
+            wiped.
+          </DialogBody>
         ),
         confirmLabel: "I understand, continue",
       },
@@ -582,7 +729,7 @@ const CONFIRMATION_CONFIGS: Record<DangerAction, ConfirmationConfig> = {
   },
 };
 
-function DangerConfirmationModal({
+function DangerConfirmationDialog({
   action,
   onClose,
   onSuccess,
@@ -592,10 +739,11 @@ function DangerConfirmationModal({
   onSuccess: () => void;
 }) {
   const config = CONFIRMATION_CONFIGS[action];
-  const totalSteps = config.steps.length + 1; // +1 for typed confirmation step
+  const totalSteps = config.steps.length + 1; // +1 for the typed confirmation step
   const [step, setStep] = useState(0);
   const [typedValue, setTypedValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const typedId = useId();
 
   const isTypedStep = step === config.steps.length;
   const typedMatch = typedValue.toLowerCase().trim() === config.typedConfirmation;
@@ -608,7 +756,9 @@ function DangerConfirmationModal({
         await config.onConfirm();
         onSuccess();
       } catch {
-        alert(`Failed to ${action === "delete-data" ? "delete submitted data" : "delete account"}. Please try again.`);
+        alert(
+          `Failed to ${action === "delete-data" ? "delete submitted data" : "delete account"}. Please try again.`,
+        );
         setIsSubmitting(false);
       }
     } else {
@@ -617,57 +767,61 @@ function DangerConfirmationModal({
   }, [isTypedStep, typedMatch, isSubmitting, config, onSuccess, action]);
 
   return (
-    <ModalOverlay onClick={isSubmitting ? undefined : onClose}>
-      <ModalCard onClick={(e) => e.stopPropagation()}>
-        <StepIndicator>
-          {["step-1", "step-2", "step-3"].slice(0, totalSteps).map((id, i) => (
-            <StepDot key={id} $active={i <= step} />
-          ))}
-        </StepIndicator>
-
-        <ModalTitle>⚠ {config.title}</ModalTitle>
-
-        {isTypedStep ? (
-          <>
-            <ModalBody>
-              Type <strong>{config.typedConfirmation}</strong> to confirm:
-            </ModalBody>
-            <ModalInput
-              autoFocus
-              value={typedValue}
-              onChange={(e) => setTypedValue(e.target.value)}
-              placeholder={config.typedConfirmation}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && typedMatch && !isSubmitting) {
-                  handleConfirm();
-                }
-              }}
-            />
-          </>
-        ) : (
-          config.steps[step].body
-        )}
-
-        <ModalActions>
-          <CancelButton onClick={onClose} disabled={isSubmitting}>
+    <ConfirmationDialog
+      open
+      title={config.title}
+      closeOnBackdrop={!isSubmitting}
+      onClose={onClose}
+      footer={
+        <DialogActions>
+          <DialogCancel type="button" onClick={onClose} disabled={isSubmitting}>
             Cancel
-          </CancelButton>
-          <ConfirmDangerButton
-            $disabled={isTypedStep ? !typedMatch : false}
-            disabled={(isTypedStep && !typedMatch) || isSubmitting}
+          </DialogCancel>
+          <DialogConfirm
+            color="red"
+            variant="solid"
             onClick={handleConfirm}
+            disabled={(isTypedStep && !typedMatch) || isSubmitting}
           >
             {isSubmitting
               ? "Deleting..."
               : isTypedStep
-                ? config.steps[config.steps.length - 1].confirmLabel.replace("I understand, continue", "Delete permanently")
+                ? "Delete permanently"
                 : config.steps[step].confirmLabel}
-          </ConfirmDangerButton>
-        </ModalActions>
-      </ModalCard>
-    </ModalOverlay>
+          </DialogConfirm>
+        </DialogActions>
+      }
+    >
+      <StepDots aria-hidden="true">
+        {Array.from({ length: totalSteps }, (_, i) => (
+          <StepDot key={i} $active={i <= step} />
+        ))}
+      </StepDots>
+
+      {isTypedStep ? (
+        <div>
+          <DialogBody>
+            Type <DialogStrong>{config.typedConfirmation}</DialogStrong> to confirm:
+          </DialogBody>
+          <FieldLabel htmlFor={typedId} style={{ marginBottom: 6 }}>Confirmation</FieldLabel>
+          <DitherInput
+            id={typedId}
+            value={typedValue}
+            onChange={setTypedValue}
+            placeholder={config.typedConfirmation}
+            style={{ height: 38, borderRadius: 2 }}
+          />
+        </div>
+      ) : (
+        config.steps[step].body
+      )}
+    </ConfirmationDialog>
   );
 }
+
+// ============================================================================
+// Data helpers
+// ============================================================================
 
 function apiTokenListItem(token: CreatedApiToken): ApiToken {
   return {
@@ -682,14 +836,9 @@ function prependApiToken(tokens: ApiToken[], token: ApiToken): ApiToken[] {
   return [token, ...tokens.filter((item) => item.id !== token.id)];
 }
 
-function mergeApiTokenList(
-  serverTokens: ApiToken[],
-  currentTokens: ApiToken[]
-): ApiToken[] {
+function mergeApiTokenList(serverTokens: ApiToken[], currentTokens: ApiToken[]): ApiToken[] {
   const serverTokenIds = new Set(serverTokens.map((token) => token.id));
-  const localTokens = currentTokens.filter(
-    (token) => !serverTokenIds.has(token.id)
-  );
+  const localTokens = currentTokens.filter((token) => !serverTokenIds.has(token.id));
   return [...localTokens, ...serverTokens];
 }
 
@@ -700,12 +849,25 @@ async function fetchApiTokens(): Promise<ApiToken[]> {
 }
 
 async function fetchDevices(username: string): Promise<SettingsDevice[]> {
-  const devicesResponse = await fetch(
-    `/api/users/${encodeURIComponent(username)}/devices`
-  );
+  const devicesResponse = await fetch(`/api/users/${encodeURIComponent(username)}/devices`);
   if (!devicesResponse.ok) return [];
   const devicesData = await devicesResponse.json();
   return Array.isArray(devicesData.devices) ? devicesData.devices : [];
+}
+
+const timeFormatterCache = new Map<string, Intl.DateTimeFormat>();
+function formatTimeIn(zone: string, date: Date): string {
+  const key = zone;
+  let formatter = timeFormatterCache.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: zone === "auto" ? undefined : zone,
+    });
+    timeFormatterCache.set(key, formatter);
+  }
+  return formatter.format(date);
 }
 
 // ============================================================================
@@ -732,6 +894,15 @@ export default function SettingsClient() {
   const [editingDeviceName, setEditingDeviceName] = useState("");
   const [isSavingDeviceName, setIsSavingDeviceName] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [pendingTimezone, setPendingTimezone] = useState(timezone);
+  const [timezoneSaved, setTimezoneSaved] = useState("");
+  const tokenNameId = useId();
+  const timezoneId = useId();
+  const timezoneLabelId = useId();
+
+  useEffect(() => {
+    setPendingTimezone(timezone);
+  }, [timezone]);
 
   useEffect(() => {
     let cancelled = false;
@@ -749,9 +920,7 @@ export default function SettingsClient() {
 
         const [loadedTokens, loadedDevices] = await Promise.all([
           fetchApiTokens().catch(() => []),
-          fetchDevices(sessionData.user.username).catch(
-            () => [] as SettingsDevice[]
-          ),
+          fetchDevices(sessionData.user.username).catch(() => [] as SettingsDevice[]),
         ]);
 
         if (!cancelled) {
@@ -794,7 +963,7 @@ export default function SettingsClient() {
       // Account is gone — redirect to home.
       window.location.href = "/";
     } else {
-      // Data deleted — close modal and stay.
+      // Data deleted — close the dialog and stay.
       setDangerAction(null);
       alert("Submitted data has been deleted.");
     }
@@ -817,9 +986,7 @@ export default function SettingsClient() {
       }
 
       setCreatedToken(data.token);
-      setTokens((current) =>
-        prependApiToken(current, apiTokenListItem(data.token))
-      );
+      setTokens((current) => prependApiToken(current, apiTokenListItem(data.token)));
     } catch (error) {
       setCreateTokenError(error instanceof Error ? error.message : "Failed to create token");
     } finally {
@@ -872,21 +1039,16 @@ export default function SettingsClient() {
           item.id === device.id
             ? {
                 ...item,
-                displayName: deviceDisplayLabel(
-                  data.device.deviceKey,
-                  data.device.displayName
-                ),
+                displayName: deviceDisplayLabel(data.device.deviceKey, data.device.displayName),
                 customName: data.device.displayName ?? null,
               }
-            : item
-        )
+            : item,
+        ),
       );
       setEditingDeviceId(null);
       setEditingDeviceName("");
     } catch (error) {
-      setDeviceError(
-        error instanceof Error ? error.message : "Failed to rename device"
-      );
+      setDeviceError(error instanceof Error ? error.message : "Failed to rename device");
     } finally {
       setIsSavingDeviceName(false);
     }
@@ -903,14 +1065,45 @@ export default function SettingsClient() {
     setCreatedToken(null);
   };
 
+  const handleSaveTimezone = () => {
+    setTimezone(pendingTimezone);
+    setTimezoneSaved(`Saved. Profile timestamps now use ${pendingTimezone === "auto" ? "your browser's timezone" : pendingTimezone.replace(/_/g, " ")}.`);
+  };
+
+  const timezoneOptions = useMemo(
+    () => [
+      { value: "auto", label: `Auto (browser): ${browserTimeZone}` },
+      ...COMMON_TIMEZONE_GROUPS.map((group) => ({
+        label: group.region,
+        options: group.zones.map((zone) => ({
+          value: zone,
+          label: zone.replace(/_/g, " "),
+        })),
+      })),
+      ...(timezone !== "auto" && !COMMON_TIMEZONE_GROUPS.some((group) => group.zones.includes(timezone))
+        ? [{ value: timezone, label: timezone.replace(/_/g, " ") }]
+        : []),
+    ],
+    [browserTimeZone, timezone],
+  );
+
+  // What the setting produces: a real profile timestamp in the chosen zone.
+  const timezonePreview = useMemo(() => {
+    if (!mounted) return "";
+    const sample = new Date(Date.UTC(2026, 6, 27, 16, 9));
+    try {
+      return formatTimeIn(pendingTimezone, sample);
+    } catch {
+      return formatTimeIn("auto", sample);
+    }
+  }, [mounted, pendingTimezone]);
+
   if (isLoading) {
     return (
       <PageWrapper>
         <Navigation />
-        <LoadingMain>
-          <div style={{ color: "var(--service-text-muted)" }}>Loading...</div>
-        </LoadingMain>
-        <Footer />
+        <LoadingMain>Loading…</LoadingMain>
+        <ServiceFooter />
       </PageWrapper>
     );
   }
@@ -919,341 +1112,265 @@ export default function SettingsClient() {
     return null;
   }
 
+  const timezoneDirty = pendingTimezone !== timezone;
+
   return (
     <PageWrapper>
       <Navigation />
 
       <MainContent>
-        <Title style={{ color: "var(--service-text)" }}>
-          Settings
-        </Title>
+        <PageHead>
+          <Title>Settings</Title>
+          <PageLead>
+            What Tokscale holds for @{user.username}, and the four things you control: how profile
+            timestamps read, the API tokens that submit your usage, the names of your machines, and
+            whether your data stays published.
+          </PageLead>
+        </PageHead>
 
-        <Section
-          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
-        >
-          <SectionTitle style={{ color: "var(--service-text)" }}>
-            Profile
-          </SectionTitle>
-          <ProfileWrapper>
-            <AvatarImg
-              src={user.avatarUrl || `https://github.com/${user.username}.png`}
-              alt={user.username}
-              width={64}
-              height={64}
-            />
+        <SectionRow aria-labelledby="settings-profile">
+          <LabelColumn>
+            <SectionTitle id="settings-profile">Profile</SectionTitle>
+            <SectionDescription>
+              Name, photo and email come from GitHub. Tokscale never writes to your account there.
+            </SectionDescription>
+          </LabelColumn>
+          <Panel>
+            <ProfileRow>
+              <ProfileAvatar src={user.avatarUrl} name={user.displayName || user.username} />
+              <div>
+                <ProfileName>{user.displayName || user.username}</ProfileName>
+                <ProfileMeta>@{user.username}</ProfileMeta>
+                {user.email && <ProfileMeta>{user.email}</ProfileMeta>}
+              </div>
+            </ProfileRow>
+          </Panel>
+        </SectionRow>
+
+        <SectionRow aria-labelledby="settings-timezone">
+          <LabelColumn>
+            <SectionTitle id="settings-timezone">Display timezone</SectionTitle>
+            <SectionDescription>
+              Sets the zone for timestamps on profile pages, such as &ldquo;Updated&rdquo; and
+              &ldquo;Joined&rdquo;, and is stored only in this browser. It does not move usage
+              between days: which day a session counts toward is decided by the machine that
+              scanned it, from that machine&rsquo;s own clock.
+            </SectionDescription>
+          </LabelColumn>
+          <Panel>
             <div>
-              <ProfileText style={{ color: "var(--service-text)" }}>
-                {user.displayName || user.username}
-              </ProfileText>
-              <SmallText style={{ color: "var(--service-text-muted)" }}>
-                @{user.username}
-              </SmallText>
-              {user.email && (
-                <SmallText style={{ color: "var(--service-text-muted)" }}>
-                  {user.email}
-                </SmallText>
-              )}
+              <FieldLabel id={timezoneLabelId} htmlFor={timezoneId}>
+                Timezone
+              </FieldLabel>
+              <div style={{ marginTop: 8 }}>
+                <TimezoneSelect
+                  id={timezoneId}
+                  aria-labelledby={timezoneLabelId}
+                  value={pendingTimezone}
+                  options={timezoneOptions}
+                  onChange={setPendingTimezone}
+                />
+              </div>
+              <FieldHint>
+                {timezonePreview
+                  ? `A profile update on 27 Jul 2026, 16:09 UTC reads “${timezonePreview}”.`
+                  : "Timestamps are formatted in the zone you pick."}
+              </FieldHint>
             </div>
-          </ProfileWrapper>
-          <InfoBanner style={{ marginTop: 16 }}>
-            Profile information is synced from GitHub and cannot be edited here.
-          </InfoBanner>
-        </Section>
+            <Actions>
+              <SaveButton type="button" onClick={handleSaveTimezone} disabled={!timezoneDirty}>
+                Save timezone
+              </SaveButton>
+            </Actions>
+            <VisuallyHidden aria-live="polite">{timezoneSaved}</VisuallyHidden>
+          </Panel>
+        </SectionRow>
 
-        <Section
-          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
-        >
-          <SectionTitle style={{ color: "var(--service-text)" }}>
-            Timezone
-          </SectionTitle>
-          <Description style={{ color: "var(--service-text-muted)" }}>
-            Renders the timestamps on profile pages — &ldquo;Updated&rdquo; and
-            &ldquo;Joined&rdquo; — in the zone you pick, and is stored only in
-            this browser. It does not move usage between days: which day a
-            session counts toward is decided by the machine that scanned it,
-            from that machine&rsquo;s own clock, so the contribution graph,
-            daily totals, and the leaderboard are unaffected.
-          </Description>
+        <SectionRow aria-labelledby="settings-tokens">
+          <LabelColumn>
+            <SectionTitle id="settings-tokens">API tokens</SectionTitle>
+            <SectionDescription>
+              Tokens let CI or the CLI submit usage as you. Treat them like passwords: any token can
+              submit data, and revoking one takes effect immediately.
+            </SectionDescription>
+          </LabelColumn>
+          <Panel>
+            <InlineForm>
+              <div>
+                <FieldLabel htmlFor={tokenNameId}>Token name</FieldLabel>
+                <div style={{ marginTop: 8 }}>
+                  <NameField
+                    id={tokenNameId}
+                    value={tokenName}
+                    onChange={setTokenName}
+                    maxLength={100}
+                    style={{ maxWidth: 320 }}
+                  />
+                </div>
+              </div>
+              <DitherButton
+                color="blue"
+                variant="solid"
+                onClick={handleCreateToken}
+                disabled={isCreatingToken}
+                style={{ minHeight: 40, padding: "0 16px", borderRadius: 2, fontSize: "0.8125rem" }}
+              >
+                {isCreatingToken ? "Creating…" : "Create token"}
+              </DitherButton>
+            </InlineForm>
 
-          <FieldLabel
-            id="timezone-select-label"
-            htmlFor="timezone-select"
-            style={{ color: "var(--service-text)" }}
-          >
-            Display timezone
-          </FieldLabel>
-          <TimezoneSelect
-            id="timezone-select"
-            aria-labelledby="timezone-select-label"
-            value={timezone}
-            options={[
-              { value: "auto", label: `Auto (browser) — ${browserTimeZone}` },
-              ...COMMON_TIMEZONE_GROUPS.map((group) => ({
-                label: group.region,
-                options: group.zones.map((zone) => ({
-                  value: zone,
-                  label: zone.replace(/_/g, " "),
-                })),
-              })),
-              ...(timezone !== "auto" &&
-              !COMMON_TIMEZONE_GROUPS.some((group) =>
-                group.zones.includes(timezone),
-              )
-                ? [{ value: timezone, label: timezone.replace(/_/g, " ") }]
-                : []),
-            ]}
-            onChange={setTimezone}
-          />
-        </Section>
+            {createTokenError && <ErrorText role="alert">{createTokenError}</ErrorText>}
 
-        <Section
-          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
-        >
-          <SectionTitle style={{ color: "var(--service-text)" }}>
-            API Tokens
-          </SectionTitle>
-          <Description style={{ color: "var(--service-text-muted)" }}>
-            Create a token for CI or use one generated by{" "}
-            <CodeText
-              style={{ backgroundColor: "var(--service-surface-muted)" }}
-            >
-              tokscale login
-            </CodeText>{" "}
-            from the CLI.
-          </Description>
+            {createdToken && (
+              <Reveal>
+                <RevealTitle>Copy this token now. It is not shown again.</RevealTitle>
+                <RevealRow>
+                  <TokenCode>{createdToken.token}</TokenCode>
+                  <SaveButton type="button" onClick={handleCopyCreatedToken}>
+                    Copy
+                  </SaveButton>
+                </RevealRow>
+              </Reveal>
+            )}
 
-          <FieldLabel
-            htmlFor="token-name"
-            style={{ color: "var(--service-text)" }}
-          >
-            Token name
-          </FieldLabel>
-          <ActionRow>
-            <TextInput
-              id="token-name"
-              value={tokenName}
-              onChange={(event) => setTokenName(event.target.value)}
-              maxLength={100}
-            />
-            <PrimaryButton
-              type="button"
-              disabled={isCreatingToken}
-              onClick={handleCreateToken}
-            >
-              {isCreatingToken ? "Creating..." : "Create token"}
-            </PrimaryButton>
-          </ActionRow>
-
-          {createTokenError && <ErrorText>{createTokenError}</ErrorText>}
-
-          {createdToken && (
-            <TokenReveal>
-              <SmallText style={{ color: "var(--service-text)", fontWeight: 600 }}>
-                Copy this token now. It will not be shown again.
-              </SmallText>
-              <TokenCodeRow>
-                <TokenCode style={{ color: "var(--service-text)" }}>
-                  {createdToken.token}
-                </TokenCode>
-                <SecondaryButton type="button" onClick={handleCopyCreatedToken}>
-                  Copy
-                </SecondaryButton>
-              </TokenCodeRow>
-            </TokenReveal>
-          )}
-
-          {tokens.length === 0 ? (
-            <EmptyState style={{ color: "var(--service-text-muted)" }}>
-              <EmptyIcon>
-                <KeyIcon size={32} />
-              </EmptyIcon>
-              <p>No API tokens yet.</p>
-              <EmptyText>
-                Create one here or run{" "}
-                <CodeText
-                  style={{ backgroundColor: "var(--service-surface-muted)" }}
-                >
-                  tokscale login
-                </CodeText>{" "}
-                from the CLI.
-              </EmptyText>
-            </EmptyState>
-          ) : (
-            <TokenList>
-              {tokens.map((token) => (
-                <TokenItem
-                  key={token.id}
-                  style={{ backgroundColor: "var(--service-surface-muted)" }}
-                >
-                  <TokenInfo>
-                    <IconWrapper>
-                      <KeyIcon size={20} />
-                    </IconWrapper>
-                    <div>
-                      <TokenName style={{ color: "var(--service-text)" }}>
-                        {token.name}
-                      </TokenName>
-                      <SmallText style={{ color: "var(--service-text-muted)" }}>
+            {tokens.length === 0 ? (
+              <Muted>
+                No API tokens yet. Create one above, or run <code>tokscale login</code> in your
+                terminal.
+              </Muted>
+            ) : (
+              <List aria-label="API tokens">
+                {tokens.map((token) => (
+                  <ListRow key={token.id}>
+                    <RowMain>
+                      <RowName>{token.name}</RowName>
+                      <RowMeta>
                         Created {new Date(token.createdAt).toLocaleDateString()}
-                        {token.lastUsedAt && (
-                          <> - Last used {new Date(token.lastUsedAt).toLocaleDateString()}</>
-                        )}
-                      </SmallText>
-                    </div>
-                  </TokenInfo>
-                  <DangerButton
-                    onClick={() => handleRevokeToken(token.id)}
-                  >
-                    Revoke
-                  </DangerButton>
-                </TokenItem>
-              ))}
-            </TokenList>
-          )}
-        </Section>
+                        {token.lastUsedAt && ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
+                      </RowMeta>
+                    </RowMain>
+                    <TextButton type="button" onClick={() => handleRevokeToken(token.id)}>
+                      Revoke
+                    </TextButton>
+                  </ListRow>
+                ))}
+              </List>
+            )}
+          </Panel>
+        </SectionRow>
 
-        <Section
-          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
-        >
-          <SectionTitle style={{ color: "var(--service-text)" }}>
-            Devices
-          </SectionTitle>
-          <Description style={{ color: "var(--service-text-muted)" }}>
-            Machines that have submitted usage data. Rename a device to tell
-            your machines apart — the name is shown on your public profile.
-          </Description>
+        <SectionRow aria-labelledby="settings-devices">
+          <LabelColumn>
+            <SectionTitle id="settings-devices">Devices</SectionTitle>
+            <SectionDescription>
+              Machines that have submitted usage. Rename one to tell them apart; the name is shown
+              on your public profile.
+            </SectionDescription>
+          </LabelColumn>
+          <Panel>
+            {deviceError && <ErrorText role="alert">{deviceError}</ErrorText>}
 
-          {deviceError && <ErrorText>{deviceError}</ErrorText>}
+            {devices.length === 0 ? (
+              <Muted>
+                No devices yet. Run <code>bunx tokscale submit</code> to register this machine.
+              </Muted>
+            ) : (
+              <List aria-label="Devices">
+                {devices.map((device) => (
+                  <ListRow key={device.id} $editing={editingDeviceId === device.id}>
+                    {editingDeviceId === device.id ? (
+                      <DeviceEditRow>
+                        <NameField
+                          aria-label="Device name"
+                          value={editingDeviceName}
+                          maxLength={DEVICE_NAME_MAX_LENGTH}
+                          placeholder="Device name (empty to reset)"
+                          autoFocus
+                          disabled={isSavingDeviceName}
+                          onChange={setEditingDeviceName}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              handleSaveDeviceName(device);
+                            } else if (event.key === "Escape") {
+                              cancelEditingDevice();
+                            }
+                          }}
+                        />
+                        <SaveButton
+                          type="button"
+                          disabled={isSavingDeviceName}
+                          onClick={() => handleSaveDeviceName(device)}
+                        >
+                          {isSavingDeviceName ? "Saving…" : "Save"}
+                        </SaveButton>
+                        <TextButton type="button" disabled={isSavingDeviceName} onClick={cancelEditingDevice}>
+                          Cancel
+                        </TextButton>
+                      </DeviceEditRow>
+                    ) : (
+                      <>
+                        <RowMain>
+                          <RowName>{device.displayName}</RowName>
+                          <RowMeta>
+                            {formatNumber(device.totalTokens)} tokens · {formatCurrency(device.totalCost)} ·{" "}
+                            {device.activeDays} active {device.activeDays === 1 ? "day" : "days"} · Last
+                            submit {formatRelativeTime(device.lastSubmittedAt)}
+                          </RowMeta>
+                        </RowMain>
+                        <TextButton type="button" onClick={() => startEditingDevice(device)}>
+                          Rename
+                        </TextButton>
+                      </>
+                    )}
+                  </ListRow>
+                ))}
+              </List>
+            )}
+          </Panel>
+        </SectionRow>
 
-          {devices.length === 0 ? (
-            <EmptyState style={{ color: "var(--service-text-muted)" }}>
-              <p>No devices yet.</p>
-              <EmptyText>
-                Run{" "}
-                <CodeText
-                  style={{ backgroundColor: "var(--service-surface-muted)" }}
-                >
-                  bunx tokscale submit
-                </CodeText>{" "}
-                to register this machine.
-              </EmptyText>
-            </EmptyState>
-          ) : (
-            <TokenList>
-              {devices.map((device) => (
-                <TokenItem
-                  key={device.id}
-                  style={{ backgroundColor: "var(--service-surface-muted)" }}
-                >
-                  {editingDeviceId === device.id ? (
-                    <DeviceEditRow>
-                      <TextInput
-                        aria-label="Device name"
-                        value={editingDeviceName}
-                        maxLength={DEVICE_NAME_MAX_LENGTH}
-                        placeholder="Device name (empty to reset)"
-                        autoFocus
-                        disabled={isSavingDeviceName}
-                        onChange={(event) =>
-                          setEditingDeviceName(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            handleSaveDeviceName(device);
-                          } else if (event.key === "Escape") {
-                            cancelEditingDevice();
-                          }
-                        }}
-                      />
-                      <PrimaryButton
-                        type="button"
-                        disabled={isSavingDeviceName}
-                        onClick={() => handleSaveDeviceName(device)}
-                      >
-                        {isSavingDeviceName ? "Saving..." : "Save"}
-                      </PrimaryButton>
-                      <SecondaryButton
-                        type="button"
-                        disabled={isSavingDeviceName}
-                        onClick={cancelEditingDevice}
-                      >
-                        Cancel
-                      </SecondaryButton>
-                    </DeviceEditRow>
-                  ) : (
-                    <>
-                      <TokenInfo>
-                        <div>
-                          <TokenName style={{ color: "var(--service-text)" }}>
-                            {device.displayName}
-                          </TokenName>
-                          <SmallText style={{ color: "var(--service-text-muted)" }}>
-                            {formatNumber(device.totalTokens)} tokens
-                            {" · "}
-                            {formatCurrency(device.totalCost)}
-                            {" · "}
-                            {device.activeDays} active{" "}
-                            {device.activeDays === 1 ? "day" : "days"}
-                            {" · "}
-                            Last submit {formatRelativeTime(device.lastSubmittedAt)}
-                          </SmallText>
-                        </div>
-                      </TokenInfo>
-                      <SecondaryButton
-                        type="button"
-                        onClick={() => startEditingDevice(device)}
-                      >
-                        Rename
-                      </SecondaryButton>
-                    </>
-                  )}
-                </TokenItem>
-              ))}
-            </TokenList>
-          )}
-        </Section>
+        <SectionRow aria-labelledby="settings-danger">
+          <LabelColumn>
+            <SectionTitle id="settings-danger">Danger zone</SectionTitle>
+            <SectionDescription>
+              Publishing is the point of Tokscale, so both options here remove data from it. Neither
+              can be undone.
+            </SectionDescription>
+          </LabelColumn>
+          <Panel>
+            <DangerRow>
+              <div>
+                <DangerTitle>Delete submitted data</DangerTitle>
+                <DangerDescription>
+                  Removes leaderboard entries, profile stats and usage history. Your account and API
+                  tokens stay active.
+                </DangerDescription>
+              </div>
+              <DangerButton type="button" onClick={() => setDangerAction("delete-data")}>
+                Delete data
+              </DangerButton>
+            </DangerRow>
 
-        <DangerSection
-          style={{ backgroundColor: "var(--service-surface)" }}
-        >
-          <DangerSectionTitle>
-            Danger Zone
-          </DangerSectionTitle>
-
-          <DangerActionRow>
-            <DangerActionInfo>
-              <DangerActionTitle>Delete submitted data</DangerActionTitle>
-              <DangerActionDescription>
-                Remove all leaderboard entries, profile stats, and usage
-                history. Your account and API tokens stay active.
-              </DangerActionDescription>
-            </DangerActionInfo>
-            <DangerActionButton onClick={() => setDangerAction("delete-data")}>
-              Delete data
-            </DangerActionButton>
-          </DangerActionRow>
-
-          <DangerActionRow>
-            <DangerActionInfo>
-              <DangerActionTitle>Delete account</DangerActionTitle>
-              <DangerActionDescription>
-                Permanently delete your account and all associated data. This
-                action is irreversible.
-              </DangerActionDescription>
-            </DangerActionInfo>
-            <DangerActionButton onClick={() => setDangerAction("delete-account")}>
-              Delete account
-            </DangerActionButton>
-          </DangerActionRow>
-        </DangerSection>
-
+            <DangerRow>
+              <div>
+                <DangerTitle>Delete account</DangerTitle>
+                <DangerDescription>
+                  Permanently deletes the account, its submissions, its tokens and its sessions.
+                </DangerDescription>
+              </div>
+              <DangerButton type="button" onClick={() => setDangerAction("delete-account")}>
+                Delete account
+              </DangerButton>
+            </DangerRow>
+          </Panel>
+        </SectionRow>
       </MainContent>
 
-      <Footer />
+      <ServiceFooter />
 
       {dangerAction && (
-        <DangerConfirmationModal
+        <DangerConfirmationDialog
           action={dangerAction}
           onClose={() => setDangerAction(null)}
           onSuccess={handleDangerSuccess}

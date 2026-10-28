@@ -4,21 +4,24 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
+import { DitherField } from "dither-kit/DitherField";
+import { DitherInput } from "dither-kit/DitherInput";
+import { DitherSearchInput } from "dither-kit/DitherSearchInput";
 import { GroupManagement } from "@/components/leaderboard/GroupManagement";
-import { CheckIcon, CopyIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
+import { CheckIcon, CopyIcon } from "@/components/ui/Icons";
 import { Select } from "@/components/ui/Select";
 import {
   CompactBadge,
   GroupMark,
-  MetricItem,
-  MetricLabel,
-  MetricStrip,
-  MetricValue,
   MobileRankingList,
   MobileRankingRow,
+  PersonAvatar,
+  PrimaryButton,
+  RankMark,
   SecondaryActionLink,
   SecondaryButton,
   SegmentedControl,
+  ShareBar,
 } from "@/components/leaderboard/RankingUI";
 import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
@@ -65,12 +68,18 @@ interface GroupDetailClientProps {
   initialData: GroupLeaderboardData;
 }
 
+/* Title row: the group's mark and name, its one sentence, then the
+ * secondary actions on the right. The primary action of the screen (for a
+ * manager) is Create invite, in the invite section. */
 const Header = styled.section`
   display: grid;
   gap: 16px;
   margin-bottom: 24px;
 `;
 
+/* On a phone the row flattens (display: contents) so the reading order is
+ * name, description, then the secondary actions — not the actions between
+ * the name and its sentence. */
 const HeaderTop = styled.div`
   display: flex;
   justify-content: space-between;
@@ -78,8 +87,7 @@ const HeaderTop = styled.div`
   align-items: flex-start;
 
   @media (max-width: 720px) {
-    align-items: stretch;
-    flex-direction: column;
+    display: contents;
   }
 `;
 
@@ -87,7 +95,11 @@ const Identity = styled.div`
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
+
+  @media (max-width: 720px) {
+    order: 1;
+  }
 `;
 
 const IdentityCopy = styled.div`
@@ -98,231 +110,163 @@ const Title = styled.h1`
   margin: 0;
   overflow-wrap: anywhere;
   color: var(--service-text);
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 1.75rem;
+  font-weight: 500;
   letter-spacing: -0.02em;
+  line-height: 1.15;
   text-wrap: balance;
+
+  @media (max-width: 640px) {
+    font-size: 1.5rem;
+  }
 `;
 
 const Meta = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
+  gap: 6px;
+  margin-top: 8px;
 `;
 
 const Description = styled.p`
+  order: 2;
   margin: 0;
   max-width: 76ch;
   color: var(--service-text-muted);
   font-size: 0.875rem;
   line-height: 1.5;
   text-wrap: pretty;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
 `;
 
 const Actions = styled.div`
   display: flex;
-  gap: 10px;
+  flex: 0 0 auto;
   flex-wrap: wrap;
-`;
-
-const Button = styled(SecondaryButton)`
-  gap: 8px;
-`;
-
-const InvitePanel = styled.div`
-  display: grid;
-  gap: 12px;
-  margin-top: 24px;
-  padding-top: 20px;
-  border-top: 1px solid var(--service-border);
-`;
-
-const InviteHeading = styled.div`
-  display: grid;
-  gap: 4px;
-`;
-
-const InviteTitle = styled.h2`
-  margin: 0;
-  color: var(--service-text);
-  font-size: 1rem;
-  font-weight: 600;
-`;
-
-const InviteDescription = styled.p`
-  margin: 0;
-  color: var(--service-text-muted);
-  font-size: 0.8125rem;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
-`;
-
-const InviteForm = styled.div`
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  align-items: end;
-  gap: 10px;
+  align-items: center;
+  gap: 16px;
 
   @media (max-width: 720px) {
-    grid-template-columns: 1fr;
+    order: 3;
   }
 `;
 
-const InviteField = styled.label`
+/* The summary strip: one row split by 1px rules, label above value. On a
+ * phone the four cells read as a 2×2 divided block. */
+const Summary = styled.dl`
+  order: 4;
   display: grid;
-  gap: 6px;
-  color: var(--service-text-muted);
-  font-size: 0.8125rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border);
 
-  /* Controls use the reporting calendar's field size, not the label size. */
-  input {
-    font-size: 0.875rem;
+  @media (min-width: 641px) {
+    display: flex;
+    max-width: max-content;
+  }
+`;
+
+const SummaryItem = styled.div`
+  min-width: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--service-border);
+  border-left: 1px solid var(--service-border);
+
+  &:nth-child(1),
+  &:nth-child(2) {
+    border-top: 0;
   }
 
-  @media (max-width: 640px) {
-    input {
-      font-size: 1rem;
+  &:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  @media (min-width: 641px) {
+    padding: 12px 28px;
+    border-top: 0;
+
+    &:first-child {
+      padding-left: 0;
+      border-left: 0;
+    }
+
+    &:not(:first-child) {
+      border-left: 1px solid var(--service-border);
+    }
+
+    &:last-child {
+      padding-right: 0;
     }
   }
 `;
 
-const InviteList = styled.ul`
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--service-border); }
-  span { overflow-wrap: anywhere; }
-`;
-
-const Input = styled.input`
-  min-height: 36px;
-  padding: 0 12px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  background: var(--service-surface);
-  color: var(--service-text);
-  font: inherit;
-
-  &:focus-visible {
-    border-color: var(--service-focus);
-    outline: 2px solid var(--service-focus);
-    outline-offset: -1px;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
-`;
-
-const InviteRoleSelect = styled(Select)`
-  --select-width: 100%;
-  --select-height: 36px;
-  --select-padding-x: 12px;
-  --select-font-size: 0.875rem;
-  --select-background: var(--service-surface);
-  --select-border-color: var(--service-border-strong);
-
-  @media (max-width: 640px) {
-    --select-height: 44px;
-    --select-font-size: 1rem;
-  }
-`;
-
-const LinkBox = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--service-border);
-  border-radius: 8px;
-  background: var(--service-surface);
-  color: var(--service-text);
+const SummaryLabel = styled.dt`
   overflow: hidden;
-`;
-
-const LinkText = styled.code`
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
   white-space: nowrap;
+  text-overflow: ellipsis;
+`;
+
+const SummaryValue = styled.dd`
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--service-text);
+  font-size: 1.125rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  @media (min-width: 641px) {
+    font-size: 1.25rem;
+  }
 `;
 
 const Toolbar = styled.div`
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
   flex-wrap: wrap;
+  gap: 12px 24px;
   margin: 0 0 14px;
 `;
 
-const SearchWrapper = styled.div`
+const ToolbarRight = styled.div`
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  background: var(--service-surface);
-  color: var(--service-text-muted);
-
-  &:focus-within {
-    border-color: var(--service-focus);
-    outline: 2px solid var(--service-focus);
-    outline-offset: -1px;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-  }
+  gap: 16px 24px;
 `;
 
-const SearchInput = styled.input`
-  width: 180px;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--service-text);
-  font: inherit;
+const SearchWrap = styled.div`
+  width: 240px;
 
   @media (max-width: 640px) {
     width: 100%;
-    min-width: 0;
-    font-size: 1rem;
   }
 `;
 
-const ClearSearchButton = styled.button`
-  display: inline-grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
+const SortGroup = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+`;
+
+const SortLabel = styled.span`
   color: var(--service-text-muted);
+  font-size: 0.875rem;
+`;
 
-  &:hover {
-    color: var(--service-text);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
+const PeriodLine = styled.p`
+  margin: 0 0 10px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
 `;
 
 const TableContainer = styled.div`
-  border-top: 1px solid var(--service-border);
   border-bottom: 1px solid var(--service-border);
 `;
 
@@ -334,71 +278,154 @@ const TableWrapper = styled.div`
   }
 `;
 
-/* Rows are row links (globals.css); the cells have padding, so the focus ring sits inside. */
 const Table = styled.table`
   --row-focus-offset: -2px;
 
   width: 100%;
 `;
 
-const Th = styled.th`
-  padding: 12px 16px;
+const TableHead = styled.thead`
+  border-bottom: 1px solid var(--service-border-strong);
+`;
+
+const TableHeaderCell = styled.th`
+  padding: 10px 16px;
   text-align: left;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.8125rem;
+  font-weight: 400;
   color: var(--service-text-muted);
-  border-bottom: 1px solid var(--service-border);
   white-space: nowrap;
+
+  &:first-child {
+    padding-left: 0;
+  }
+
+  &:last-child {
+    padding-right: 0;
+  }
+
+  &.right {
+    text-align: right;
+  }
+
+  &.rank-cell {
+    width: 72px;
+  }
+
+  &.role-cell {
+    width: 104px;
+  }
+
+  &.share-cell {
+    width: 170px;
+  }
+
+  &.cost-cell {
+    width: 108px;
+  }
+
+  &.tokens-cell {
+    width: 120px;
+  }
+
+  @media (min-width: 1100px) {
+    &.role-cell {
+      width: 120px;
+    }
+
+    &.share-cell {
+      width: 280px;
+    }
+
+    &.cost-cell {
+      width: 140px;
+    }
+
+    &.tokens-cell {
+      width: 150px;
+    }
+  }
+`;
+
+const TableRow = styled.tr<{ $current: boolean }>`
+  &:not(:last-child) td {
+    border-bottom: 1px solid var(--service-border);
+  }
+
+  background: ${({ $current }) => $current ? "var(--service-surface-muted)" : "transparent"};
+
+  /* Your own row keeps its tone under the row-link hover. */
+  &[data-row-link]:hover {
+    background: ${({ $current }) => $current ? "var(--service-surface-muted)" : "var(--v2-row-hover)"};
+  }
+`;
+
+const TableCell = styled.td`
+  padding: 10px 16px;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+
+  &:first-child {
+    padding-left: 0;
+  }
+
+  &:last-child {
+    padding-right: 0;
+  }
 
   &.right {
     text-align: right;
   }
 `;
 
-const Td = styled.td`
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--service-border);
-  color: var(--service-text);
+const RankCell = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--service-text-muted);
   font-size: 0.875rem;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
-
-  &.right {
-    text-align: right;
-  }
 `;
 
 /* The row's primary link: the whole row opens the profile (row links, globals.css). */
 const UserCell = styled(Link)`
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   color: inherit;
   text-decoration: none;
 `;
 
-const UserAvatar = styled.img`
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  object-fit: cover;
-  outline: 1px solid var(--service-border);
-  outline-offset: -1px;
-`;
-
 const Muted = styled.span`
   display: block;
+  margin-top: 2px;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 `;
 
-const DesktopRow = styled.tr<{ $current: boolean }>`
-  background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "transparent"};
-  box-shadow: ${({ $current }) => $current ? "inset 2px 0 0 var(--service-accent)" : "none"};
+const ShareCell = styled.span`
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+`;
 
-  /* Your own row keeps its tint under the row-link hover. */
-  &[data-row-link]:hover {
-    background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "var(--v2-row-hover)"};
-  }
+const ShareBarBox = styled.span`
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 180px;
+`;
+
+const ShareValue = styled.span`
+  min-width: 44px;
+  color: var(--service-text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 `;
 
 const Pagination = styled.div`
@@ -413,30 +440,146 @@ const PaginationStatus = styled.p`
   margin: 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
-
-  @media (max-width: 640px) {
-    font-size: 0.875rem;
-  }
+  font-variant-numeric: tabular-nums;
 `;
 
 const PaginationActions = styled.div`
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 16px;
 `;
 
-const EmptyState = styled.div`
-  padding: 32px;
-  text-align: center;
+const EmptyState = styled.p`
+  margin: 0;
+  padding: 32px 0;
+  border-top: 1px solid var(--service-border);
   color: var(--service-text-muted);
+  font-size: 0.875rem;
+`;
 
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
+/* A refresh keeps the rows on screen; only the notice changes. */
+const LoadingLine = styled.p`
+  margin: 0;
+  padding: 8px 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
 `;
 
 const ErrorText = styled.p`
+  margin: 8px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+`;
+
+/* Admin sections use the settings row: a label column (title + one sentence)
+ * beside its panel, separated by a full-width rule. */
+const AdminSection = styled.section`
+  display: grid;
+  gap: 16px;
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--service-border);
+
+  @media (min-width: 900px) {
+    grid-template-columns: 320px minmax(0, 1fr);
+    gap: 40px;
+  }
+`;
+
+const SectionLabel = styled.div`
+  min-width: 0;
+`;
+
+const SectionTitle = styled.h2`
   margin: 0;
-  color: #ff8c85;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 500;
+`;
+
+const SectionNote = styled.p`
+  margin: 6px 0 0;
+  max-width: 46ch;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+`;
+
+const Panel = styled.div`
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 16px;
+`;
+
+const FieldGrid = styled.div`
+  display: grid;
+  gap: 16px;
+
+  @media (min-width: 560px) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Field labels are 14px sentence case, not the kit's 12px caption. */
+  label {
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+`;
+
+const InviteActions = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+`;
+
+const LinkBox = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--service-border);
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface-muted);
+  overflow: hidden;
+`;
+
+const LinkText = styled.code`
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const InviteList = styled.ul`
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--service-border);
+`;
+
+const InviteRow = styled.li`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--service-border);
+`;
+
+const InviteRowText = styled.span`
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+`;
+
+const InviteRowStrong = styled.strong`
+  color: var(--service-text);
+  font-weight: 500;
 `;
 
 function isAdminRole(role: GroupRole | undefined): boolean {
@@ -447,42 +590,78 @@ function roleLabel(role: string): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
+function formatShare(share: number | null): string {
+  if (share === null) return "—";
+  if (share <= 0) return "0%";
+  const percent = share * 100;
+  if (percent < 0.1) return "<0.1%";
+  return `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`;
+}
+
 function GroupRow({
   user,
+  share,
+  maxShare,
   isCurrentUser,
 }: {
   user: GroupLeaderboardUser;
+  share: number | null;
+  maxShare: number;
   isCurrentUser: boolean;
 }) {
   return (
-    <DesktopRow $current={isCurrentUser} data-row-link="">
-      <Td>#{user.rank}</Td>
-      <Td>
+    <TableRow $current={isCurrentUser} data-row-link="" data-current-user={isCurrentUser}>
+      <TableCell className="rank-cell right">
+        <RankCell>
+          {user.rank <= 3 && <RankMark level={user.rank as 1 | 2 | 3} />}
+          {user.rank}
+        </RankCell>
+      </TableCell>
+      <TableCell>
         <UserCell
           href={`/u/${user.username}`}
           data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
-          <UserAvatar src={user.avatarUrl || `https://github.com/${user.username}.png`} alt="" />
+          <PersonAvatar
+            src={user.avatarUrl || `https://github.com/${user.username}.png`}
+            name={user.displayName || user.username}
+            size={34}
+          />
           <span>
             {user.displayName || user.username}
             <Muted>@{user.username}</Muted>
           </span>
         </UserCell>
-      </Td>
-      <Td>{roleLabel(user.role)}</Td>
-      <Td className="right">{formatCurrency(user.totalCost)}</Td>
-      <Td className="right">{formatNumber(user.totalTokens)}</Td>
-    </DesktopRow>
+      </TableCell>
+      <TableCell>{roleLabel(user.role)}</TableCell>
+      <TableCell className="right">
+        <ShareCell>
+          <ShareBarBox>
+            <ShareBar
+              value={maxShare > 0 ? (share ?? 0) / maxShare : 0}
+              label={`${user.username}: ${formatShare(share)} of the group's tokens`}
+            />
+          </ShareBarBox>
+          <ShareValue>{formatShare(share)}</ShareValue>
+        </ShareCell>
+      </TableCell>
+      <TableCell className="right">{formatCurrency(user.totalCost)}</TableCell>
+      <TableCell className="right">{formatNumber(user.totalTokens)}</TableCell>
+    </TableRow>
   );
 }
 
 function GroupMobileRow({
   user,
+  share,
+  maxShare,
   isCurrentUser,
   sortBy,
 }: {
   user: GroupLeaderboardUser;
+  share: number | null;
+  maxShare: number;
   isCurrentUser: boolean;
   sortBy: SortBy;
 }) {
@@ -507,6 +686,7 @@ function GroupMobileRow({
       primaryValue={primary.value}
       meta={secondary}
       isCurrentUser={isCurrentUser}
+      share={maxShare > 0 && share != null ? share / maxShare : null}
     />
   );
 }
@@ -698,6 +878,17 @@ export default function GroupDetailClient({
   }
 
   const sortedUsers = useMemo(() => data.users || [], [data.users]);
+  const totalTokens = data.stats.totalTokens;
+  const shareFor = (user: GroupLeaderboardUser) => (
+    totalTokens > 0 ? user.totalTokens / totalTokens : null
+  );
+  // The bar is the row's share of the largest share on the screen, so the
+  // ranking reads at a glance; the figure states the absolute share.
+  const maxShare = sortedUsers.reduce((max, user) => (
+    totalTokens > 0 ? Math.max(max, user.totalTokens / totalTokens) : max
+  ), 0);
+  const rangeStart = (data.pagination.page - 1) * data.pagination.limit + 1;
+  const rangeEnd = Math.min(data.pagination.page * data.pagination.limit, data.pagination.totalUsers);
 
   return (
     <>
@@ -710,38 +901,39 @@ export default function GroupDetailClient({
               <Meta>
                 <CompactBadge>{group.isPublic ? "Public" : "Private"}</CompactBadge>
                 {group.membership && <CompactBadge>{roleLabel(group.membership.role)}</CompactBadge>}
+                <CompactBadge>{formatGroupMemberCount(group.memberCount)}</CompactBadge>
               </Meta>
             </IdentityCopy>
           </Identity>
           <Actions>
             <SecondaryActionLink href="/leaderboard?view=groups">All groups</SecondaryActionLink>
             {group.membership && group.membership.role !== "owner" && (
-              <Button type="button" onClick={leaveGroup}>Leave group</Button>
+              <SecondaryButton type="button" onClick={leaveGroup}>Leave group</SecondaryButton>
             )}
           </Actions>
         </HeaderTop>
         {group.description && <Description>{group.description}</Description>}
 
-        <MetricStrip>
-          <MetricItem>
-            <MetricLabel>Active users</MetricLabel>
-            <MetricValue>{data.stats.activeUsers.toLocaleString("en-US")}</MetricValue>
-          </MetricItem>
-          <MetricItem>
-            <MetricLabel>Members</MetricLabel>
-            <MetricValue aria-label={formatGroupMemberCount(group.memberCount)}>
+        <Summary>
+          <SummaryItem>
+            <SummaryLabel>Active users</SummaryLabel>
+            <SummaryValue>{data.stats.activeUsers.toLocaleString("en-US")}</SummaryValue>
+          </SummaryItem>
+          <SummaryItem>
+            <SummaryLabel>Members</SummaryLabel>
+            <SummaryValue aria-label={formatGroupMemberCount(group.memberCount)}>
               {group.memberCount.toLocaleString("en-US")}
-            </MetricValue>
-          </MetricItem>
-          <MetricItem>
-            <MetricLabel>Tokens</MetricLabel>
-            <MetricValue $accent>{formatNumber(data.stats.totalTokens)}</MetricValue>
-          </MetricItem>
-          <MetricItem>
-            <MetricLabel>Cost</MetricLabel>
-            <MetricValue>{formatCurrency(data.stats.totalCost)}</MetricValue>
-          </MetricItem>
-        </MetricStrip>
+            </SummaryValue>
+          </SummaryItem>
+          <SummaryItem>
+            <SummaryLabel>Tokens</SummaryLabel>
+            <SummaryValue>{formatNumber(data.stats.totalTokens)}</SummaryValue>
+          </SummaryItem>
+          <SummaryItem>
+            <SummaryLabel>Est. cost</SummaryLabel>
+            <SummaryValue>{formatCurrency(data.stats.totalCost)}</SummaryValue>
+          </SummaryItem>
+        </Summary>
       </Header>
 
       <Toolbar>
@@ -761,68 +953,72 @@ export default function GroupDetailClient({
           }}
         />
 
-        <Actions>
-          <SearchWrapper>
-            <SearchIcon size={16} />
-            <SearchInput
-              type="text"
-              name="group-member-search"
-              aria-label="Search group members"
+        <ToolbarRight>
+          <SearchWrap>
+            <DitherSearchInput
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={setSearch}
               placeholder="Search members"
+              aria-label="Search group members"
+              name="group-member-search"
             />
-            {search && (
-              <ClearSearchButton type="button" onClick={() => setSearch("")} aria-label="Clear search">
-                <XIcon size={16} />
-              </ClearSearchButton>
-            )}
-          </SearchWrapper>
-          <SegmentedControl
-            label="Group leaderboard sort"
-            value={sortBy}
-            options={[
-              { value: "tokens" as SortBy, label: "Tokens" },
-              { value: "cost" as SortBy, label: "Cost" },
-            ]}
-            onChange={(value) => {
-              setSortBy(value);
-              setPage(1);
-            }}
-          />
-        </Actions>
+          </SearchWrap>
+          <SortGroup>
+            <SortLabel>Sort</SortLabel>
+            <SegmentedControl
+              label="Group leaderboard sort"
+              value={sortBy}
+              options={[
+                { value: "tokens" as SortBy, label: "Tokens" },
+                { value: "cost" as SortBy, label: "Cost" },
+              ]}
+              onChange={(value) => {
+                setSortBy(value);
+                setPage(1);
+              }}
+            />
+          </SortGroup>
+        </ToolbarRight>
       </Toolbar>
 
-      <Description aria-label="Group reporting period">
+      <PeriodLine>
         {data.dateRange ? `${data.dateRange.start} – ${data.dateRange.end}` : "All submitted dates"}
         {` · ${data.timeZone} · Week starts ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][data.weekStartsOn]}`}
-      </Description>
+      </PeriodLine>
 
       <TableContainer>
         {error ? (
           <EmptyState role="alert">{error}</EmptyState>
-        ) : isLoading ? (
-          <EmptyState role="status">Loading leaderboard...</EmptyState>
+        ) : sortedUsers.length === 0 && isLoading ? (
+          <EmptyState role="status">Loading leaderboard…</EmptyState>
         ) : sortedUsers.length === 0 ? (
-          <EmptyState>No submitted usage for this group yet.</EmptyState>
+          <EmptyState>
+            {debouncedSearch
+              ? `No members match “${debouncedSearch}”.`
+              : "No submitted usage for this group yet."}
+          </EmptyState>
         ) : (
           <>
+            {isLoading && <LoadingLine role="status" aria-live="polite">Updating leaderboard…</LoadingLine>}
             <TableWrapper>
               <Table>
-                <thead>
+                <TableHead>
                   <tr>
-                    <Th>Rank</Th>
-                    <Th>User</Th>
-                    <Th>Role</Th>
-                    <Th className="right">Cost</Th>
-                    <Th className="right">Tokens</Th>
+                    <TableHeaderCell scope="col" className="rank-cell right">Rank</TableHeaderCell>
+                    <TableHeaderCell scope="col">Member</TableHeaderCell>
+                    <TableHeaderCell scope="col" className="role-cell">Role</TableHeaderCell>
+                    <TableHeaderCell scope="col" className="share-cell right">Share</TableHeaderCell>
+                    <TableHeaderCell scope="col" className="cost-cell right">Est. cost</TableHeaderCell>
+                    <TableHeaderCell scope="col" className="tokens-cell right">Tokens</TableHeaderCell>
                   </tr>
-                </thead>
+                </TableHead>
                 <tbody>
                   {sortedUsers.map((user) => (
                     <GroupRow
                       key={user.userId}
                       user={user}
+                      share={shareFor(user)}
+                      maxShare={maxShare}
                       isCurrentUser={currentUser?.username === user.username}
                     />
                   ))}
@@ -834,6 +1030,8 @@ export default function GroupDetailClient({
                 <GroupMobileRow
                   key={user.userId}
                   user={user}
+                  share={shareFor(user)}
+                  maxShare={maxShare}
                   isCurrentUser={currentUser?.username === user.username}
                   sortBy={sortBy}
                 />
@@ -842,7 +1040,7 @@ export default function GroupDetailClient({
             {data.pagination.totalPages > 1 && (
               <Pagination>
                 <PaginationStatus>
-                  Showing {(data.pagination.page - 1) * data.pagination.limit + 1}–{Math.min(data.pagination.page * data.pagination.limit, data.pagination.totalUsers)} of {data.pagination.totalUsers.toLocaleString("en-US")}
+                  Showing {rangeStart.toLocaleString("en-US")}–{rangeEnd.toLocaleString("en-US")} of {data.pagination.totalUsers.toLocaleString("en-US")}
                 </PaginationStatus>
                 <PaginationActions>
                   <SecondaryButton
@@ -867,72 +1065,116 @@ export default function GroupDetailClient({
       </TableContainer>
 
       {canInvite && (
+        <AdminSection aria-label="Invite members">
+          <SectionLabel>
+            <SectionTitle>Invite members</SectionTitle>
+            <SectionNote>
+              Each account can use a link once, even after leaving. Account-specific links allow one join.
+            </SectionNote>
+          </SectionLabel>
+          <Panel>
+            <FieldGrid>
+              <DitherField label="GitHub username (optional)" description="Any account may join when left empty.">
+                <DitherInput
+                  value={inviteUsername}
+                  onChange={setInviteUsername}
+                  name="invite-username"
+                  aria-label="Invitee GitHub username"
+                  placeholder="Any account"
+                />
+              </DitherField>
+              <DitherField label="Role">
+                <Select
+                  name="invite-role"
+                  aria-label="Invite role"
+                  value={group.membership?.role === "owner" ? inviteRole : "member"}
+                  options={[
+                    { value: "member", label: "Member" },
+                    ...(group.membership?.role === "owner" ? [{ value: "admin", label: "Admin" }] : []),
+                  ]}
+                  onChange={(next) => setInviteRole(next as Exclude<GroupRole, "owner">)}
+                />
+              </DitherField>
+              <DitherField label="Maximum joins">
+                <DitherInput
+                  type="number"
+                  value={inviteUsername.trim() ? "1" : maxUses}
+                  onChange={setMaxUses}
+                  disabled={!!inviteUsername.trim()}
+                  name="invite-max-uses"
+                />
+              </DitherField>
+              <DitherField label="Expires in days">
+                <DitherInput
+                  type="number"
+                  value={expiresInDays}
+                  onChange={setExpiresInDays}
+                  name="invite-expires"
+                />
+              </DitherField>
+            </FieldGrid>
+            <InviteActions>
+              <PrimaryButton type="button" disabled={inviteBusy} onClick={createInvite}>
+                {inviteBusy ? "Saving…" : "Create invite"}
+              </PrimaryButton>
+              <SectionNote>Save the link when it appears; it cannot be retrieved later.</SectionNote>
+            </InviteActions>
+            {inviteError && <ErrorText role="alert">{inviteError}</ErrorText>}
+            {inviteUrl && (
+              <LinkBox>
+                <LinkText>{inviteUrl}</LinkText>
+                <SecondaryButton type="button" onClick={copyInvite} aria-label="Copy invite link">
+                  {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
+                  {copied ? "Copied" : "Copy"}
+                </SecondaryButton>
+              </LinkBox>
+            )}
+            <InviteActions>
+              <SecondaryButton type="button" onClick={() => void loadInvites()} disabled={inviteBusy}>
+                Refresh invites
+              </SecondaryButton>
+              <SectionNote>Showing the latest 100 invites.</SectionNote>
+            </InviteActions>
+            {inviteListError && <ErrorText role="alert">{inviteListError}</ErrorText>}
+            <InviteList aria-label="Recent invites">
+              {invites.length === 0 && (
+                <InviteRow>
+                  <InviteRowText>No invites yet. Create one to share this group.</InviteRowText>
+                </InviteRow>
+              )}
+              {invites.map((invite) => {
+                const expired = new Date(invite.expiresAt).getTime() <= Date.now();
+                const active = invite.status === "pending" && !expired;
+                return (
+                  <InviteRow key={invite.id}>
+                    <InviteRowText>
+                      <InviteRowStrong>
+                        {invite.invitedUsername ? `@${invite.invitedUsername}` : "Any account"}
+                      </InviteRowStrong>
+                      {` · ${invite.role} · ${invite.useCount}/${invite.maxUses} joined`}
+                      <br />
+                      {invite.status === "pending" && expired ? "expired" : invite.status} · expires {new Date(invite.expiresAt).toLocaleString()}
+                    </InviteRowText>
+                    {active && (
+                      <SecondaryButton type="button" disabled={inviteBusy} onClick={() => void revokeInvite(invite.id)}>
+                        Revoke
+                      </SecondaryButton>
+                    )}
+                  </InviteRow>
+                );
+              })}
+            </InviteList>
+          </Panel>
+        </AdminSection>
+      )}
+
+      {canInvite && (
         <GroupReportingSettings
           slug={group.slug}
           timeZone={group.timeZone}
           weekStartsOn={group.weekStartsOn}
           onChanged={refreshGroup}
         />
-      )}
-      {canInvite && (
-        <InvitePanel>
-          <InviteHeading>
-            <InviteTitle>Invite members</InviteTitle>
-            <InviteDescription>
-              Choose how many accounts can join. Each account can use a link once, even after leaving. Account-specific links allow one join.
-            </InviteDescription>
-          </InviteHeading>
-          <InviteForm>
-            <InviteField>GitHub username (optional)<Input
-              type="text"
-              name="invite-username"
-              aria-label="Invitee GitHub username"
-              value={inviteUsername}
-              onChange={(event) => setInviteUsername(event.target.value)}
-              placeholder="Any account"
-            /></InviteField>
-            <InviteField>Role<InviteRoleSelect
-              name="invite-role"
-              aria-label="Invite role"
-              value={group.membership?.role === "owner" ? inviteRole : "member"}
-              options={[
-                { value: "member", label: "Member" },
-                ...(group.membership?.role === "owner" ? [{ value: "admin", label: "Admin" }] : []),
-              ]}
-              onChange={(next) => setInviteRole(next as Exclude<GroupRole, "owner">)}
-            /></InviteField>
-            <InviteField>Maximum joins<Input type="number" min={1} max={1000} step={1}
-              value={inviteUsername.trim() ? "1" : maxUses} disabled={!!inviteUsername.trim()}
-              onChange={(event) => setMaxUses(event.target.value)} /></InviteField>
-            <InviteField>Expires in days<Input type="number" min={1} max={30} step={1}
-              value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)} /></InviteField>
-            <Button type="button" disabled={inviteBusy} onClick={createInvite}>{inviteBusy ? "Saving..." : "Create invite"}</Button>
-          </InviteForm>
-          {inviteError && <ErrorText role="alert">{inviteError}</ErrorText>}
-          {inviteUrl && (
-            <LinkBox>
-              <LinkText>{inviteUrl}</LinkText>
-              <Button type="button" onClick={copyInvite} aria-label="Copy invite link">
-                {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
-                {copied ? "Copied" : "Copy"}
-              </Button>
-            </LinkBox>
-          )}
-          <InviteDescription>Save the link now; it cannot be retrieved later. Showing the latest 100 invites.</InviteDescription>
-          <SecondaryButton type="button" onClick={() => void loadInvites()} disabled={inviteBusy}>Refresh invites</SecondaryButton>
-          {inviteListError && <ErrorText role="alert">{inviteListError}</ErrorText>}
-          <InviteList aria-label="Recent invites">
-            {invites.map((invite) => {
-              const expired = new Date(invite.expiresAt).getTime() <= Date.now();
-              const active = invite.status === "pending" && !expired;
-              return <li key={invite.id}>
-                <span>{invite.invitedUsername ? `@${invite.invitedUsername}` : "Any account"} · {invite.role} · {invite.useCount}/{invite.maxUses} joined<br />
-                  {invite.status === "pending" && expired ? "expired" : invite.status} · expires {new Date(invite.expiresAt).toLocaleString()}</span>
-                {active && <SecondaryButton type="button" disabled={inviteBusy} onClick={() => void revokeInvite(invite.id)}>Revoke</SecondaryButton>}
-              </li>;
-            })}
-          </InviteList>
-        </InvitePanel>
       )}
       {canInvite && currentUser && group.membership && (
         <GroupManagement

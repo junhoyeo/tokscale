@@ -5,8 +5,10 @@ import { Navigation } from "@/components/layout/Navigation";
 import { PublicFooter } from "@/components/layout/PublicFooter";
 import { LeaderboardSkeleton } from "@/components/Skeleton";
 import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
+import { getRecentUsage } from "@/lib/leaderboard/recentUsage";
 import type { LeaderboardData, Period, SortBy } from "@/lib/leaderboard/types";
-import { getSession } from "@/lib/auth/session";
+import { getSession, type SessionUser } from "@/lib/auth/session";
+import { PrimaryActionLink } from "@/components/leaderboard/RankingUI";
 import {
   SORT_BY_COOKIE_NAME,
   resolveSortByParam,
@@ -164,10 +166,26 @@ async function LeaderboardWithPreferences({
   }
 
   if (view === "groups") {
+    const session = await getSession().catch((error) => {
+      if (isMissingDatabaseUrl(error)) return null;
+      throw error;
+    });
     return (
       <>
-        <ViewSelector current="groups" searchParams={searchParams} />
-        <GroupsView />
+        <ViewSelector
+          current="groups"
+          searchParams={searchParams}
+          action={
+            session ? (
+              <PrimaryActionLink href="/groups/new">New group</PrimaryActionLink>
+            ) : (
+              <PrimaryActionLink href="/api/auth/github?returnTo=/leaderboard%3Fview%3Dgroups">
+                Sign in to create a group
+              </PrimaryActionLink>
+            )
+          }
+        />
+        <GroupsView session={session} />
       </>
     );
   }
@@ -215,11 +233,22 @@ async function LeaderboardWithPreferences({
     }),
   ]);
 
+  // The "Past 30 days" column; a failure here leaves the column to load on
+  // the client and never takes the ranking down with it.
+  const initialRecentUsage = initialData.users.length
+    ? await getRecentUsage(initialData.users.map((user) => user.userId)).catch(() => null)
+    : null;
+
   return (
     <>
-      <ViewSelector current="humans" searchParams={searchParams} />
+      <ViewSelector
+        current="humans"
+        searchParams={searchParams}
+        action={<PrimaryActionLink href="#submit">Submit your usage</PrimaryActionLink>}
+      />
       <LeaderboardClient
         initialData={initialData}
+        initialRecentUsage={initialRecentUsage}
         currentUser={session}
         initialSortBy={sortBy}
       />
@@ -227,7 +256,7 @@ async function LeaderboardWithPreferences({
   );
 }
 
-async function GroupsView() {
+async function GroupsView({ session }: { session: SessionUser | null; }) {
   const emptyPagination = {
     page: 1,
     limit: 20,
@@ -236,11 +265,6 @@ async function GroupsView() {
     hasNext: false,
     hasPrev: false,
   } as const;
-
-  const session = await getSession().catch((error) => {
-    if (isMissingDatabaseUrl(error)) return null;
-    throw error;
-  });
 
   const [publicGroups, myGroups] = await Promise.all([
     listPublicGroups(1, 20).catch((error) => {

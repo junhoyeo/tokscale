@@ -2,6 +2,7 @@
 
 import styled from "styled-components";
 import { formatCurrency, formatNumber } from "@/lib/utils";
+import { DitherMiniBar } from "./ditherControls";
 import {
   ListBody,
   ListCaption,
@@ -14,7 +15,6 @@ import {
   ListTable,
   NumericValue,
 } from "./listStyles";
-import { getModelColor } from "./modelColors";
 import type { ModelUsage } from "./types";
 
 export interface ProfileModelsProps {
@@ -23,21 +23,42 @@ export interface ProfileModelsProps {
   className?: string;
 }
 
-const ModelIdentity = styled.span`
-  display: flex;
+/** Ink for the leading model's share bar; grey for every other row. */
+const LEAD_BAR_COLOR = "#f4f7fb";
+const REST_BAR_COLOR = "#8a8c92";
+
+const ModelsSection = styled.section`
+  display: grid;
   min-width: 0;
-  align-items: center;
   gap: 0.5rem;
 `;
 
-const ModelMarker = styled.span`
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
+const SectionHeader = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+`;
+
+const SectionTitle = styled.h2`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+`;
+
+const SectionNote = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
 `;
 
 const ModelName = styled.span`
+  display: block;
   overflow: hidden;
   color: var(--service-text);
   text-overflow: ellipsis;
@@ -49,8 +70,11 @@ const ModelName = styled.span`
   }
 `;
 
-const ModelsFallback = styled(ListCard)`
-  padding: 0.75rem;
+const ShareCell = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
 `;
 
 const ModelsFallbackList = styled.ul`
@@ -68,12 +92,15 @@ const ModelTag = styled.li`
   align-items: center;
   gap: 0.375rem;
   border: 1px solid var(--service-border);
-  border-radius: 8px;
-  padding: 0.35rem 0.5rem;
-  background: var(--service-surface-muted);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.5rem;
   color: var(--service-text);
   font-size: 0.75rem;
   line-height: 1.2;
+`;
+
+const FallbackCard = styled(ListCard)`
+  padding: 0.75rem;
 `;
 
 export function ProfileModels({
@@ -90,71 +117,93 @@ export function ProfileModels({
 
   if (filteredUsage.length > 0) {
     return (
-      <ListCard className={className}>
-        <ListTable>
-          <ListCaption>Model usage</ListCaption>
-          <ListHead>
-            <tr>
-              <ListHeaderCell $width="52%">Model</ListHeaderCell>
-              <ListHeaderCell $width="18%" $align="right">
-                Tokens
-              </ListHeaderCell>
-              <ListHeaderCell $width="17%" $align="right">
-                Cost
-              </ListHeaderCell>
-              <ListHeaderCell $width="13%" $align="right">
-                Share
-              </ListHeaderCell>
-            </tr>
-          </ListHead>
-          <ListBody>
-            {filteredUsage.map((usage) => (
-              <ListRow key={usage.model}>
-                <ListPrimaryCell scope="row">
-                  <ModelIdentity>
-                    <ModelMarker
-                      aria-hidden="true"
-                      style={{ backgroundColor: getModelColor(usage.model) }}
-                    />
+      <ModelsSection
+        className={className}
+        aria-labelledby="profile-models-heading"
+      >
+        <SectionHeader>
+          <SectionTitle id="profile-models-heading">Models</SectionTitle>
+          <SectionNote>Tokens, cost and share by model, all-time.</SectionNote>
+        </SectionHeader>
+        <ListCard>
+          <ListTable>
+            <ListCaption>Model usage</ListCaption>
+            <ListHead>
+              <tr>
+                <ListHeaderCell $width="52%">Model</ListHeaderCell>
+                <ListHeaderCell $width="18%" $align="right">
+                  Tokens
+                </ListHeaderCell>
+                <ListHeaderCell $width="17%" $align="right">
+                  Cost
+                </ListHeaderCell>
+                <ListHeaderCell $width="13%" $align="right">
+                  Share
+                </ListHeaderCell>
+              </tr>
+            </ListHead>
+            <ListBody>
+              {filteredUsage.map((usage, index) => (
+                <ListRow key={usage.model}>
+                  <ListPrimaryCell scope="row">
                     <ModelName>{usage.model}</ModelName>
-                  </ModelIdentity>
-                </ListPrimaryCell>
-                <ListCell data-label="Tokens" $align="right">
-                  <NumericValue title={usage.tokens.toLocaleString("en-US")}>
-                    {formatNumber(usage.tokens)}
-                  </NumericValue>
-                </ListCell>
-                <ListCell data-label="Cost" $align="right">
-                  <NumericValue $accent>
-                    {formatCurrency(usage.cost)}
-                  </NumericValue>
-                </ListCell>
-                <ListCell data-label="Share" $align="right">
-                  <NumericValue>{usage.percentage.toFixed(1)}%</NumericValue>
-                </ListCell>
-              </ListRow>
-            ))}
-          </ListBody>
-        </ListTable>
-      </ListCard>
+                  </ListPrimaryCell>
+                  <ListCell data-label="Tokens" $align="right">
+                    <NumericValue title={usage.tokens.toLocaleString("en-US")}>
+                      {formatNumber(usage.tokens)}
+                    </NumericValue>
+                  </ListCell>
+                  <ListCell data-label="Cost" $align="right">
+                    <NumericValue $accent>
+                      {formatCurrency(usage.cost)}
+                    </NumericValue>
+                  </ListCell>
+                  <ListCell data-label="Share" $align="right">
+                    <ShareCell>
+                      <DitherMiniBar
+                        ratio={Math.max(
+                          0,
+                          Math.min(1, usage.percentage / 100),
+                        )}
+                        color={index === 0 ? LEAD_BAR_COLOR : REST_BAR_COLOR}
+                        width="4rem"
+                      />
+                      <NumericValue>
+                        {usage.percentage.toFixed(1)}%
+                      </NumericValue>
+                    </ShareCell>
+                  </ListCell>
+                </ListRow>
+              ))}
+            </ListBody>
+          </ListTable>
+        </ListCard>
+      </ModelsSection>
     );
   }
 
   if (filteredModels.length === 0) return null;
 
   return (
-    <ModelsFallback className={className}>
-      <ModelsFallbackList aria-label="Models used">
-        {filteredModels.map((model) => (
-          <ModelTag key={model}>
-            <ModelMarker
-              aria-hidden="true"
-              style={{ backgroundColor: getModelColor(model) }}
-            />
-            <ModelName>{model}</ModelName>
-          </ModelTag>
-        ))}
-      </ModelsFallbackList>
-    </ModelsFallback>
+    <ModelsSection
+      className={className}
+      aria-labelledby="profile-models-heading"
+    >
+      <SectionHeader>
+        <SectionTitle id="profile-models-heading">Models</SectionTitle>
+        <SectionNote>
+          Recorded by earlier submissions, without per-model totals.
+        </SectionNote>
+      </SectionHeader>
+      <FallbackCard>
+        <ModelsFallbackList aria-label="Models used">
+          {filteredModels.map((model) => (
+            <ModelTag key={model}>
+              <ModelName>{model}</ModelName>
+            </ModelTag>
+          ))}
+        </ModelsFallbackList>
+      </FallbackCard>
+    </ModelsSection>
   );
 }

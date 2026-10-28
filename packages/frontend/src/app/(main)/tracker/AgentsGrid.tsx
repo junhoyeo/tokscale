@@ -50,15 +50,16 @@ const Grid = styled.ul`
     align-items: center;
     gap: 10px;
     min-width: 0;
-    min-height: 36px;
+    min-height: 40px;
+    padding: 0 10px;
+    border-radius: var(--radius, 2px);
   }
 
   img {
     flex-shrink: 0;
     width: 20px;
     height: 20px;
-    border-radius: 5px;
-    box-shadow: 0 0 0 1px var(--v2-rule);
+    border-radius: var(--radius, 2px);
   }
 
   span {
@@ -84,15 +85,16 @@ const Toggle = styled.button`
   min-height: 44px;
   margin-top: 12px;
   padding: 0 16px;
-  border: 1px solid var(--v2-rule-strong);
-  border-radius: 8px;
-  background: transparent;
+  border: 0;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
   color: var(--v2-text);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--v2-surface-raised);
   }
 
   &:focus-visible {

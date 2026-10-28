@@ -34,18 +34,36 @@ const Head = styled.div`
   }
 `;
 
+const HeadLink = styled(InlineLink)`
+  flex: none;
+  font-size: 0.875rem;
+`;
+
+/* Header labels sit flush with their columns: score, rank and date on the right edge. */
 const ColumnHead = styled.div`
   display: none;
 
   ${WIDE} {
     display: grid;
     grid-template-columns: ${COLUMNS};
-    gap: 16px;
+    gap: 24px;
     padding: 8px 0;
     border-bottom: 1px solid var(--service-border);
     color: var(--service-text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: 0.8125rem;
+    font-weight: 400;
+
+    > span:nth-child(2),
+    > span:nth-child(3),
+    > span:nth-child(5) {
+      text-align: right;
+    }
+
+    /* The score's source popover (22px plus its 4px gap) follows the number, so the
+       header sits flush with the digits, not with the icon. */
+    > span:nth-child(2) {
+      padding-right: 26px;
+    }
   }
 `;
 
@@ -72,7 +90,7 @@ const Row = styled.li`
 
   ${WIDE} {
     grid-template-columns: ${COLUMNS};
-    gap: 6px 16px;
+    gap: 6px 24px;
   }
 `;
 
@@ -84,15 +102,15 @@ const Name = styled.div`
 
 const NameLink = styled(Link)`
   color: var(--service-text);
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline !important;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -104,16 +122,19 @@ const NameLink = styled(Link)`
 
 const Category = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 
   @media (max-width: 640px) {
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
   }
 `;
 
+/* The key number: right-aligned in its column, and at the row's right edge when the row stacks. */
 const Score = styled.div`
+  display: flex;
   min-width: 0;
-  font-size: 0.9375rem;
+  justify-content: flex-end;
+  font-size: 0.875rem;
   font-weight: 600;
 
   ${NARROW} {
@@ -160,6 +181,12 @@ const FactMuted = styled(Fact)`
   color: var(--service-text-muted);
 `;
 
+const RankFact = styled(Fact)`
+  ${WIDE} {
+    text-align: right;
+  }
+`;
+
 /* Keeps the rank column on wide screens for rows without a rank; gone on narrow ones. */
 const EmptyFact = styled.span`
   ${NARROW} {
@@ -178,16 +205,18 @@ const RankOf = styled.span`
   color: var(--service-text-muted);
 `;
 
-/* DOM order reads "Published Oct 6, 2026"; wide screens show the date first. */
+/* DOM order reads "Published Oct 6, 2026"; wide screens show the date first, on the column's right edge. */
 const DateFact = styled(Fact)`
   ${WIDE} {
     display: flex;
     flex-direction: column-reverse;
+    align-items: flex-end;
     gap: 2px;
+    text-align: right;
 
     > span:first-child {
       color: var(--service-text-muted);
-      font-size: 0.75rem;
+      font-size: 0.8125rem;
     }
   }
 `;
@@ -200,7 +229,7 @@ const SourceFact = styled(Fact)`
 `;
 
 const ExternalLink = styled.a`
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   text-decoration: none;
 
   &:hover {
@@ -208,7 +237,7 @@ const ExternalLink = styled.a`
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -242,11 +271,11 @@ const UsageLine = styled.p`
 const RowNote = styled.p`
   margin: 0;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   line-height: 1.5;
 
   @media (max-width: 640px) {
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
   }
 `;
 
@@ -255,7 +284,7 @@ const More = styled.details`
     display: inline-flex;
     min-height: 28px;
     align-items: center;
-    color: var(--service-accent-hover);
+    color: var(--service-text);
     font-size: 0.8125rem;
     cursor: pointer;
 
@@ -265,8 +294,12 @@ const More = styled.details`
     }
   }
 
+  > summary:hover {
+    text-decoration: underline;
+  }
+
   > summary:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -280,13 +313,12 @@ const More = styled.details`
 const OtherRows = styled.ul`
   margin: 4px 0 0;
   padding: 0;
-  border-top: 1px dashed var(--service-border);
+  border-top: 1px solid var(--service-border);
   list-style: none;
 `;
 
 const OtherRow = styled(Row)`
   padding: 8px 0;
-  border-bottom: 1px dashed var(--service-border);
 
   &:last-child {
     border-bottom: 0;
@@ -330,10 +362,10 @@ function ResultFacts({ result, rank }: { result: ModelResultView; rank: { rank: 
   return (
     <Facts>
       {rank ? (
-        <Fact>
+        <RankFact>
           <NarrowLabel>Rank </NarrowLabel>#{formatCount(rank.rank)} <RankOf>of {formatCount(rank.of)}</RankOf>
           <VisuallyHidden> matched models</VisuallyHidden>
-        </Fact>
+        </RankFact>
       ) : (
         <EmptyFact aria-hidden="true" />
       )}
@@ -420,7 +452,7 @@ function BenchmarkRow({
         </Category>
       </Name>
       <Score>
-        <ScoreValue cell={row.best.cell} info={info} modelName={modelName} align="start" showTag={false} />
+        <ScoreValue cell={row.best.cell} info={info} modelName={modelName} align="end" showTag={false} />
       </Score>
       <ResultFacts result={row.best} rank={{ rank: row.rank, of: row.rankedModels }} />
       {period && agentLines.length > 0 ? (
@@ -452,7 +484,7 @@ function BenchmarkRow({
                 <OtherRow key={other.id}>
                   <ListedAs>Listed as {other.cell.sourceName}</ListedAs>
                   <Score>
-                    <ScoreValue cell={other.cell} info={info} modelName={modelName} align="start" showTag={false} />
+                    <ScoreValue cell={other.cell} info={info} modelName={modelName} align="end" showTag={false} />
                   </Score>
                   <ResultFacts result={other} rank={null} />
                 </OtherRow>
@@ -490,7 +522,7 @@ export function ModelBenchmarks({
               : ""}
           </SectionNote>
         </div>
-        <InlineLink href={benchmarksPath()}>All benchmarks</InlineLink>
+        <HeadLink href={benchmarksPath()}>All benchmarks</HeadLink>
       </Head>
 
       {benchmarks.rows.length > 0 ? (

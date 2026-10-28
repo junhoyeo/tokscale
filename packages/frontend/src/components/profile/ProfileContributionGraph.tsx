@@ -33,7 +33,10 @@ import {
   type GraphColorPalette,
 } from "@/lib/themes";
 import { formatCurrency, formatTokenCount } from "@/lib/utils";
-import { Eyebrow } from "@/components/ui/Eyebrow";
+import { DARK_GRAPH_EMPTY } from "@/lib/darkGraphColors";
+import { BAYER4 } from "dither-kit/pixel";
+import { hexToRgb, rgb, type Rgb } from "dither-kit/palette";
+import { DitherSelectionGroup, DitherSwatch } from "./ditherControls";
 
 export interface ProfileContributionGraphProps {
   breakdownId?: string;
@@ -745,7 +748,18 @@ export function getDefaultContributionDate(
     rangeEnd,
     selectableRangeEnd,
   );
-  return calendar.selectableEndDate ?? calendar.endDate;
+  const rangeEndDate = calendar.selectableEndDate ?? calendar.endDate;
+  if (!rangeEndDate) return null;
+
+  // The contract opens the breakdown on the visible range end. When that day
+  // carries no usage (the calendar usually outruns the newest submission by a
+  // day), the latest day that does is the honest default; an idle range keeps
+  // its end.
+  for (let index = calendar.cells.length - 1; index >= 0; index -= 1) {
+    const cell = calendar.cells[index];
+    if (cell.selectable && cell.tokens > 0) return cell.date;
+  }
+  return rangeEndDate;
 }
 
 const ISOMETRIC_CELL_WIDTH = 7.5;
@@ -943,6 +957,152 @@ function clientHasLogo(client: ClientType): boolean {
   );
 }
 
+const CONTRIBUTION_EMPTY_COLOR = DARK_GRAPH_EMPTY;
+
+/**
+ * The 2D calendar paints every day as a 4×4 ordered-dither tile: the denser
+ * the scatter, the more tokens the day carried. Lit pixels take the day's
+ * grade colour; unlit pixels take the empty-cell tone, so a low day reads as
+ * a sparse texture rather than a dimmer shade. Both the profile calendar and
+ * the palette/legend swatches use this one recipe.
+ */
+function contributionPaintColor(
+  palette: GraphColorPalette,
+  level: ContributionCell["intensity"],
+): string {
+  return level === 0 ? CONTRIBUTION_EMPTY_COLOR : getContributionColor(palette, level);
+}
+
+export const PROFILE_CONTRIBUTION_MAX_CELL_SIZE = 24;
+const MONTH_LABEL_GUTTER = 28;
+/** css px per dither pixel: two, so a cell is `tile` 2px pixels wide. */
+const DITHER_PIXEL = 2;
+
+/**
+ * Cell size that lets the complete week grid fit the panel: the target is a
+ * calendar that fills its card instead of a small strip inside it, and on a
+ * phone the minimum keeps the cells readable and scrolls.
+ */
+export function fitContributionCellSize(
+  available: number,
+  weekCount: number,
+): number {
+  if (weekCount <= 0 || available <= 0) return PROFILE_CONTRIBUTION_CELL_SIZE;
+  for (
+    let cell = PROFILE_CONTRIBUTION_MAX_CELL_SIZE;
+    cell > PROFILE_CONTRIBUTION_CELL_SIZE;
+    cell -= 2
+  ) {
+    const total =
+      weekCount * (cell + PROFILE_CONTRIBUTION_CELL_GAP) -
+      PROFILE_CONTRIBUTION_CELL_GAP +
+      MONTH_LABEL_GUTTER;
+    if (total <= available) return cell;
+  }
+  return PROFILE_CONTRIBUTION_CELL_SIZE;
+}
+
+const tileForCell = (cellSize: number) =>
+  Math.max(4, Math.round(cellSize / DITHER_PIXEL));
+
+/** jsdom has no 2D canvas backend; skip painting there instead of logging. */
+function canvasContext(
+  canvas: HTMLCanvasElement,
+): CanvasRenderingContext2D | null {
+  if (typeof CanvasRenderingContext2D === "undefined") return null;
+  return canvas.getContext("2d", { willReadFrequently: true });
+}
+
+function paintContributionCalendar(
+  canvas: HTMLCanvasElement,
+  calendar: ContributionCalendar,
+  palette: GraphColorPalette,
+  tile: number,
+): void {
+  const ctx = canvasContext(canvas);
+  if (!ctx || calendar.weekCount <= 0) return;
+
+  const columns = calendar.weekCount * (tile + 1) - 1;
+  const rows = 7 * (tile + 1) - 1;
+  canvas.width = columns;
+  canvas.height = rows;
+  ctx.clearRect(0, 0, columns, rows);
+
+  const empty = hexToRgb(CONTRIBUTION_EMPTY_COLOR);
+  const colors = new Map<ContributionCell["intensity"], Rgb>([
+    [0, empty],
+    [1, hexToRgb(contributionPaintColor(palette, 1))],
+    [2, hexToRgb(contributionPaintColor(palette, 2))],
+    [3, hexToRgb(contributionPaintColor(palette, 3))],
+    [4, hexToRgb(contributionPaintColor(palette, 4))],
+  ]);
+
+  calendar.cells.forEach((cell, index) => {
+    if (!cell.inRange) return;
+    const week = Math.floor(index / 7);
+    const day = index % 7;
+    const originX = week * (tile + 1);
+    const originY = day * (tile + 1);
+    const level = cell.intensity;
+    const density = level === 0 ? 0 : level / 4;
+    const fill = colors.get(level) ?? empty;
+    for (let py = 0; py < tile; py += 1) {
+      for (let px = 0; px < tile; px += 1) {
+        const lit = density > BAYER4[py & 3][px & 3];
+        // Zero days still paint: the contract renders the complete range,
+        // so an idle year reads as a field of empty cells, not as holes.
+        const alpha =
+          level === 0
+            ? lit
+              ? 0.55
+              : 0.2
+            : lit
+              ? 0.35 + 0.6 * density
+              : 0.1 * density;
+        if (alpha <= 0.004) continue;
+        ctx.fillStyle = rgb(lit ? fill : empty, 1, alpha);
+        ctx.fillRect(originX + px, originY + py, 1, 1);
+      }
+    }
+  });
+}
+
+function ContributionCanvas({
+  calendar,
+  palette,
+  cellSize,
+}: {
+  calendar: ContributionCalendar;
+  palette: GraphColorPalette;
+  cellSize: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const tile = tileForCell(cellSize);
+  const width = (calendar.weekCount * (tile + 1) - 1) * DITHER_PIXEL;
+  const height = (7 * (tile + 1) - 1) * DITHER_PIXEL;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas) paintContributionCalendar(canvas, calendar, palette, tile);
+  }, [calendar, palette, tile]);
+
+  return (
+    <CanvasLayer
+      ref={canvasRef}
+      aria-hidden="true"
+      style={{ width: `${width}px`, height: `${height}px` }}
+    />
+  );
+}
+
+const CanvasLayer = styled.canvas`
+  position: absolute;
+  top: 0;
+  left: 0;
+  image-rendering: pixelated;
+  pointer-events: none;
+`;
+
 const Figure = styled.figure`
   width: 100%;
   min-width: 0;
@@ -954,7 +1114,7 @@ const Figure = styled.figure`
   color: var(--service-text);
   background: var(--service-surface);
   border: 1px solid var(--service-border);
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
   container-type: inline-size;
 `;
 
@@ -980,7 +1140,7 @@ const HeadingRow = styled.div`
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.625rem;
 `;
 
 const Heading = styled.h2`
@@ -993,7 +1153,7 @@ const Heading = styled.h2`
 
 /** Reads as underlined text next to the heading; the Select draws the chevron. */
 const RangeSelect = styled(Select)`
-  --select-font-size: 0.75rem;
+  --select-font-size: 0.8125rem;
 `;
 
 const Description = styled.p`
@@ -1007,73 +1167,13 @@ const Description = styled.p`
 const HeaderAside = styled.div`
   display: flex;
   flex: 0 0 auto;
-  align-items: flex-start;
-  gap: 0.75rem;
+  align-items: center;
+  gap: 1rem;
 
   @container (max-width: 28rem) {
     width: 100%;
     align-items: flex-start;
     justify-content: space-between;
-  }
-`;
-
-const ViewToggle = styled.div`
-  display: inline-flex;
-  padding: 2px;
-  border: 1px solid var(--service-border);
-  border-radius: 0.5rem;
-  background: var(--service-surface-muted);
-`;
-
-const ViewButton = styled.button<{ $active: boolean }>`
-  position: relative;
-  display: inline-flex;
-  min-width: 2rem;
-  height: 1.5rem;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 0.35rem;
-  background: transparent;
-  color: ${(props) =>
-    props.$active ? "var(--service-text)" : "var(--service-text-muted)"};
-  font-size: 0.625rem;
-  font-weight: 600;
-  cursor: pointer;
-
-  > span {
-    display: inline-flex;
-    width: 100%;
-    height: 100%;
-    align-items: center;
-    justify-content: center;
-    border-radius: inherit;
-    background: ${(props) =>
-      props.$active ? "var(--service-surface)" : "transparent"};
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 1px;
-  }
-
-  @media (pointer: coarse) {
-    min-width: 2.75rem;
-
-    &::after {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 100%;
-      height: 2.75rem;
-      content: "";
-      transform: translate(-50%, -50%);
-    }
-
-    > span {
-      width: 2rem;
-    }
   }
 `;
 
@@ -1099,7 +1199,7 @@ const ActiveDays = styled.div`
 const Range = styled.div`
   margin-top: 0.125rem;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   white-space: nowrap;
 `;
 
@@ -1111,9 +1211,25 @@ const CalendarBody = styled.div`
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  padding: 0.875rem 1rem 0.75rem;
+  padding: 0.875rem 1rem 0.5rem;
+  scrollbar-color: var(--service-border-strong) transparent;
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
+
+  /* A year of weeks cannot fit a phone: the scroll is the affordance, so it
+     keeps a visible thumb instead of a hidden one. */
+  &::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border-radius: 0;
+    background: var(--service-border-strong);
+  }
 
   @container (max-width: 24rem) {
     padding-right: 0.75rem;
@@ -1153,21 +1269,9 @@ const IsometricCell = styled.g<{ $active: boolean; $selected: boolean }>`
     cursor: default;
   }
 
-  polygon {
-    transition:
-      stroke 120ms ease,
-      filter 120ms ease;
-  }
-
   &:not([aria-hidden="true"]):hover polygon,
   &:not([aria-hidden="true"]):focus-visible polygon {
     filter: brightness(1.12);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    polygon {
-      transition: none;
-    }
   }
 `;
 
@@ -1185,24 +1289,18 @@ const IsometricTop = styled.polygon<{
   vector-effect: non-scaling-stroke;
 `;
 
-const MonthRow = styled.div<{ $weeks: number }>`
+
+
+const MonthRow = styled.div<{ $cell: number; $weeks: number }>`
   display: grid;
-  grid-template-columns: repeat(
-    ${(props) => props.$weeks},
-    ${(props) =>
-      props.$weeks <= 5 ? "1.25rem" : `${PROFILE_CONTRIBUTION_CELL_SIZE}px`}
-  );
+  grid-template-columns: repeat(${(props) => props.$weeks}, ${(props) => props.$cell}px);
   column-gap: ${PROFILE_CONTRIBUTION_CELL_GAP}px;
-  box-sizing: border-box;
+  box-sizing: content-box;
   width: max-content;
   min-width: 0;
-  height: 1.125rem;
+  height: 1.25rem;
   padding-left: 1.75rem;
   color: var(--service-text-muted);
-
-  @container (max-width: 22rem) {
-    padding-left: 0;
-  }
 `;
 
 const Month = styled.span<{
@@ -1212,14 +1310,14 @@ const Month = styled.span<{
   position: relative;
   grid-column: ${(props) => props.$week + 1};
   min-width: 0;
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
 
   &::after {
     position: absolute;
-    top: 0.75rem;
+    top: 0.875rem;
     left: 0;
     width: 1px;
     height: 0.25rem;
@@ -1236,6 +1334,12 @@ const Month = styled.span<{
   }
 `;
 
+const CalendarInner = styled.div<{ $width: number }>`
+  position: relative;
+  width: ${(props) => props.$width}px;
+  min-width: 0;
+`;
+
 const CalendarRow = styled.div`
   display: grid;
   grid-template-columns: 1.25rem max-content;
@@ -1243,23 +1347,18 @@ const CalendarRow = styled.div`
   gap: 0.5rem;
   width: max-content;
   min-width: 0;
-
-  @container (max-width: 22rem) {
-    grid-template-columns: max-content;
-  }
 `;
 
-const DayLabels = styled.div`
+const DayLabels = styled.div<{ $cell: number }>`
   display: grid;
-  grid-template-rows: repeat(7, minmax(0, 1fr));
+  grid-template-rows: repeat(
+    7,
+    ${(props) => props.$cell}px
+  );
   gap: ${PROFILE_CONTRIBUTION_CELL_GAP}px;
   color: var(--service-text-muted);
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   line-height: 1;
-
-  @container (max-width: 22rem) {
-    display: none;
-  }
 `;
 
 const DayLabel = styled.span<{ $row: number }>`
@@ -1267,19 +1366,12 @@ const DayLabel = styled.span<{ $row: number }>`
   align-self: center;
 `;
 
-const Grid = styled.div<{ $weeks: number }>`
+const GridOverlay = styled.div<{ $weeks: number; $cell: number }>`
+  position: relative;
   display: grid;
   grid-auto-flow: column;
-  grid-template-columns: repeat(
-    ${(props) => props.$weeks},
-    ${(props) =>
-      props.$weeks <= 5 ? "1.25rem" : `${PROFILE_CONTRIBUTION_CELL_SIZE}px`}
-  );
-  grid-template-rows: repeat(
-    7,
-    ${(props) =>
-      props.$weeks <= 5 ? "1.25rem" : `${PROFILE_CONTRIBUTION_CELL_SIZE}px`}
-  );
+  grid-template-columns: repeat(${(props) => props.$weeks}, ${(props) => props.$cell}px);
+  grid-template-rows: repeat(7, ${(props) => props.$cell}px);
   gap: ${PROFILE_CONTRIBUTION_CELL_GAP}px;
   width: max-content;
   min-width: 0;
@@ -1287,7 +1379,6 @@ const Grid = styled.div<{ $weeks: number }>`
 
 const Cell = styled.button<{
   $active: boolean;
-  $color: string;
   $inRange: boolean;
   $selected: boolean;
 }>`
@@ -1296,21 +1387,27 @@ const Cell = styled.button<{
   padding: 0;
   aspect-ratio: 1;
   visibility: ${(props) => (props.$inRange ? "visible" : "hidden")};
-  background: ${(props) => props.$color};
+  background: transparent;
   border: 0;
   border-radius: ${PROFILE_CONTRIBUTION_CELL_RADIUS}px;
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.035),
-    ${(props) =>
-      props.$selected
-        ? "0 0 0 1px var(--service-focus)"
-        : props.$active
-          ? "0 0 0 1px var(--service-text)"
-          : "0 0 0 0 transparent"};
+  outline: ${(props) =>
+    props.$selected
+      ? "1px solid var(--service-focus)"
+      : props.$active
+        ? "1px solid var(--service-text)"
+        : "none"};
+  outline-offset: -1px;
   cursor: pointer;
 
   &:disabled {
     cursor: default;
+  }
+
+  &:hover {
+    outline: ${(props) =>
+      props.$selected
+        ? "1px solid var(--service-focus)"
+        : "1px solid var(--service-text)"};
   }
 
   &:focus-visible {
@@ -1325,7 +1422,8 @@ const Footer = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
   padding: 0 1rem 0.875rem;
 
   @container (max-width: 24rem) {
@@ -1338,23 +1436,13 @@ const PaletteControl = styled.label`
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 0.375rem;
+  gap: 0.5rem;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 
   @media (pointer: coarse) {
     min-height: 2.75rem;
   }
-`;
-
-const PaletteSelect = styled(Select)`
-  --select-height: 1.75rem;
-  --select-font-size: 0.6875rem;
-  --select-padding-x: 0.5rem;
-  --select-background: var(--service-surface-muted);
-  --select-border-color: var(--service-border);
-  --select-radius: 0.4375rem;
-  --select-max-width: 7.5rem;
 `;
 
 const PalettePreview = styled.span`
@@ -1362,35 +1450,29 @@ const PalettePreview = styled.span`
   grid-template-columns: repeat(4, 0.625rem);
   gap: 0.1875rem;
   overflow: hidden;
-  border-radius: 2px;
 `;
 
-const PalettePreviewSwatch = styled.span<{ $color: string }>`
-  width: 0.625rem;
-  height: 0.625rem;
-  background: ${(props) => props.$color};
+const PaletteSelect = styled(Select)`
+  --select-height: 1.75rem;
+  --select-font-size: 0.75rem;
+  --select-padding-x: 0.5rem;
+  --select-background: var(--service-surface-muted);
+  --select-border-color: var(--service-border);
+  --select-max-width: 8.5rem;
 `;
 
 const Legend = styled.div`
   display: inline-flex;
   align-items: center;
-  gap: 0.3125rem;
+  gap: 0.375rem;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 `;
 
 const LegendSwatches = styled.span`
-  display: inline-grid;
-  grid-template-columns: repeat(5, 0.625rem);
+  display: inline-flex;
+  align-items: center;
   gap: 0.1875rem;
-`;
-
-const LegendSwatch = styled.span<{ $color: string }>`
-  width: 0.625rem;
-  height: 0.625rem;
-  background: ${(props) => props.$color};
-  border-radius: 2px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 `;
 
 const CellTooltip = styled.div<{
@@ -1410,15 +1492,15 @@ const CellTooltip = styled.div<{
   color: var(--service-text);
   background: var(--service-surface-muted);
   border: 1px solid var(--service-border-strong);
-  border-radius: 0.625rem;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 0.34);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.4);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 `;
 
 const CellTooltipDate = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 `;
 
 const TooltipTotal = styled.div`
@@ -1430,7 +1512,7 @@ const TooltipTotal = styled.div`
 
 const TooltipTotalLabel = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 `;
 
 const CellTooltipValue = styled.strong`
@@ -1450,7 +1532,7 @@ const TooltipMetricGrid = styled.div`
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.25rem 0.75rem;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 `;
 
 const TooltipMetricLabel = styled.span`
@@ -1469,22 +1551,23 @@ const TooltipMetricValue = styled.span`
 
 const TooltipSectionLabel = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.625rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.75rem;
+  font-weight: 500;
 `;
 
 const DetailPanel = styled.section<{ $standalone: boolean }>`
+  display: flex;
+  flex-direction: column;
+  flex: ${(props) => (props.$standalone ? "0 0 auto" : "1 1 auto")};
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--service-border);
   border-width: ${(props) => (props.$standalone ? "1px" : "1px 0 0")};
-  border-radius: ${(props) => (props.$standalone ? "0.75rem" : "0")};
-  background: color-mix(
-    in srgb,
-    var(--service-surface-muted) 42%,
-    var(--service-surface)
-  );
+  border-radius: ${(props) => (props.$standalone ? "var(--radius)" : "0")};
+  background: ${(props) =>
+    props.$standalone
+      ? "var(--service-surface)"
+      : "var(--service-surface-muted)"};
   container-type: inline-size;
 `;
 
@@ -1493,13 +1576,9 @@ const DetailHeader = styled.header`
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.875rem 1rem;
+  padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--service-border);
 `;
-
-const DetailEyebrow = styled(Eyebrow)`
-  margin-bottom: 0.125rem;
-`
 
 const DetailTitle = styled.h3`
   margin: 0;
@@ -1519,13 +1598,12 @@ const DetailClose = styled.button`
   color: var(--service-text-muted);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 0.4375rem;
+  border-radius: var(--radius);
   cursor: pointer;
 
   &:hover {
     color: var(--service-text);
-    background: var(--service-surface-muted);
-    border-color: var(--service-border);
+    border-color: var(--service-border-strong);
   }
 
   &:focus-visible {
@@ -1534,46 +1612,44 @@ const DetailClose = styled.button`
   }
 `;
 
-const DetailBody = styled.div`
-  display: grid;
+const DetailBody = styled.div<{ $standalone: boolean }>`
+  display: flex;
+  flex-direction: column;
+  flex: ${(props) => (props.$standalone ? "0 0 auto" : "1 1 auto")};
+  min-height: 0;
   gap: 1rem;
-  padding: 1rem;
+  padding: 0.875rem 1rem 1rem;
 `;
 
 const DetailSummary = styled.div`
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  overflow: hidden;
-  border: 1px solid var(--service-border);
-  border-radius: 0.5rem;
-
-  > div {
-    padding: 0.625rem;
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-  }
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--service-border);
 
   > div + div {
     border-left: 1px solid var(--service-border);
+    padding-left: 0.75rem;
   }
 `;
 
 const DetailMetric = styled.div`
   min-width: 0;
-  padding: 0.625rem 0.75rem;
+  padding: 0;
 `;
 
 const DetailMetricLabel = styled.div`
   margin-bottom: 0.125rem;
   color: var(--service-text-muted);
-  font-size: 0.625rem;
+  font-size: 0.75rem;
 `;
 
 const DetailMetricValue = styled.div`
   overflow: hidden;
   color: var(--service-text);
   font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1582,12 +1658,10 @@ const DetailMetricValue = styled.div`
 const TokenDetailGrid = styled.div`
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  overflow: hidden;
-  border: 1px solid var(--service-border);
-  border-radius: 0.5rem;
 
   > div + div {
     border-left: 1px solid var(--service-border);
+    padding-left: 0.625rem;
   }
 
   @container (max-width: 36rem) {
@@ -1595,10 +1669,14 @@ const TokenDetailGrid = styled.div`
 
     > div:nth-child(4) {
       border-left: 0;
+      padding-left: 0;
+      border-top: 1px solid var(--service-border);
+      padding-top: 0.5rem;
     }
 
     > div:nth-child(n + 4) {
       border-top: 1px solid var(--service-border);
+      padding-top: 0.5rem;
     }
   }
 
@@ -1607,40 +1685,49 @@ const TokenDetailGrid = styled.div`
 
     > div:nth-child(3) {
       border-left: 0;
+      padding-left: 0;
     }
 
-    > div:nth-child(4) {
-      border-left: 1px solid var(--service-border);
+    > div:nth-child(even) {
+      border-left: 0;
+      padding-left: 0;
     }
 
     > div:nth-child(odd) {
-      border-left: 0;
+      border-left: 1px solid var(--service-border);
+      padding-left: 0.625rem;
     }
 
-    > div:nth-child(n + 3) {
-      border-top: 1px solid var(--service-border);
+    > div:first-child {
+      border-left: 0;
+      padding-left: 0;
     }
   }
 `;
 
-const DetailSection = styled.section`
-  display: grid;
+const DetailSection = styled.section<{ $grow?: boolean }>`
+  display: flex;
+  flex-direction: column;
+  flex: ${(props) => (props.$grow ? "1 1 auto" : "0 0 auto")};
+  min-height: 0;
   gap: 0.5rem;
 `;
 
 const DetailSectionTitle = styled.h4`
   margin: 0;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 500;
 `;
 
 const ClientList = styled.div<{ $standalone: boolean }>`
   display: grid;
-  max-height: ${(props) => (props.$standalone ? "none" : "25rem")};
+  flex: ${(props) => (props.$standalone ? "0 0 auto" : "1 1 auto")};
+  min-height: 0;
+  align-content: start;
+  max-height: ${(props) => (props.$standalone ? "none" : "none")};
   overflow: ${(props) => (props.$standalone ? "visible" : "auto")};
-  border: 1px solid var(--service-border);
-  border-radius: 0.625rem;
+  border-top: 1px solid var(--service-border);
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
@@ -1655,7 +1742,7 @@ const ClientList = styled.div<{ $standalone: boolean }>`
 
 const ClientSection = styled.section`
   min-width: 0;
-  padding: 0.75rem;
+  padding: 0.625rem 0;
 
   & + & {
     border-top: 1px solid var(--service-border);
@@ -1681,14 +1768,13 @@ const ClientDot = styled.span<{ $color: string }>`
   width: 0.5rem;
   height: 0.5rem;
   background: ${(props) => props.$color};
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 999px;
+  border-radius: 1px;
 `;
 
 const ClientName = styled.strong`
   overflow: hidden;
   color: var(--service-text);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1697,14 +1783,14 @@ const ClientName = styled.strong`
 const ClientTotal = styled.span`
   flex: 0 0 auto;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 `;
 
 const ModelList = styled.div`
   display: grid;
   gap: 0.375rem;
-  margin-top: 0.625rem;
+  margin-top: 0.5rem;
   padding-left: 1rem;
 `;
 
@@ -1720,28 +1806,28 @@ const ModelRow = styled.div`
 const ModelName = styled.span`
   overflow: hidden;
   color: var(--service-text);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
 
 const ModelValue = styled.span`
   color: var(--service-text);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 `;
 
 const ModelMeta = styled.span`
   grid-column: 1 / -1;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   line-height: 1.45;
 `;
 
 const NoDayActivity = styled.p`
   margin: 0;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 `;
 
 function formatFullDay(date: string): string {
@@ -1863,6 +1949,8 @@ function ContributionDayBreakdown({
   const headingId = `${id}-heading`;
   const clients = createContributionClientDetails(day);
   const messageCount = getContributionDayMessageCount(day, clients);
+  const hasActivity =
+    day.totals.tokens > 0 || day.totals.cost > 0 || clients.length > 0;
 
   return (
     <DetailPanel
@@ -1872,10 +1960,7 @@ function ContributionDayBreakdown({
       $standalone={standalone}
     >
       <DetailHeader>
-        <div>
-          <DetailEyebrow as="div">Day Breakdown</DetailEyebrow>
-          <DetailTitle id={headingId}>{formatFullDay(day.date)}</DetailTitle>
-        </div>
+        <DetailTitle id={headingId}>{formatFullDay(day.date)}</DetailTitle>
         {onClose && (
           <DetailClose
             type="button"
@@ -1899,27 +1984,9 @@ function ContributionDayBreakdown({
           </DetailClose>
         )}
       </DetailHeader>
-      <DetailBody>
-        <DetailSummary>
-          <DetailMetric>
-            <DetailMetricLabel>Total tokens</DetailMetricLabel>
-            <DetailMetricValue>
-              {formatTokenCount(day.totals.tokens)}
-            </DetailMetricValue>
-          </DetailMetric>
-          <DetailMetric>
-            <DetailMetricLabel>Cost</DetailMetricLabel>
-            <DetailMetricValue>
-              {formatCurrency(day.totals.cost)}
-            </DetailMetricValue>
-          </DetailMetric>
-          <DetailMetric>
-            <DetailMetricLabel>Messages</DetailMetricLabel>
-            <DetailMetricValue>
-              {messageCount.toLocaleString("en-US")}
-            </DetailMetricValue>
-          </DetailMetric>
-        </DetailSummary>
+      <DetailBody $standalone={standalone}>
+        {hasActivity ? (
+          <>
 
         <DetailSection>
           <DetailSectionTitle>Token categories</DetailSectionTitle>
@@ -1935,7 +2002,7 @@ function ContributionDayBreakdown({
           </TokenDetailGrid>
         </DetailSection>
 
-        <DetailSection>
+        <DetailSection $grow={!standalone}>
           <DetailSectionTitle>Clients and models</DetailSectionTitle>
           {clients.length > 0 ? (
             <ClientList
@@ -1994,6 +2061,30 @@ function ContributionDayBreakdown({
             </NoDayActivity>
           )}
         </DetailSection>
+        <DetailSummary>
+          <DetailMetric>
+            <DetailMetricLabel>Total tokens</DetailMetricLabel>
+            <DetailMetricValue>
+              {formatTokenCount(day.totals.tokens)}
+            </DetailMetricValue>
+          </DetailMetric>
+          <DetailMetric>
+            <DetailMetricLabel>Cost</DetailMetricLabel>
+            <DetailMetricValue>
+              {formatCurrency(day.totals.cost)}
+            </DetailMetricValue>
+          </DetailMetric>
+          <DetailMetric>
+            <DetailMetricLabel>Messages</DetailMetricLabel>
+            <DetailMetricValue>
+              {messageCount.toLocaleString("en-US")}
+            </DetailMetricValue>
+          </DetailMetric>
+        </DetailSummary>
+          </>
+        ) : (
+          <NoDayActivity>No usage was recorded on this day.</NoDayActivity>
+        )}
       </DetailBody>
     </DetailPanel>
   );
@@ -2065,6 +2156,7 @@ export function ProfileContributionGraph({
   const calendarId = useId();
   const calendarInstructionsId = useId();
   const calendarScrollRef = useRef<HTMLDivElement>(null);
+  const [calendarBodyWidth, setCalendarBodyWidth] = useState(0);
   const cellRefs = useRef(new Map<string, Element & { focus: () => void }>());
   const [tooltip, setTooltip] = useState<ContributionTooltipState | null>(null);
   const [keyboardDate, setKeyboardDate] = useState<string | null>(null);
@@ -2128,6 +2220,29 @@ export function ProfileContributionGraph({
     () => createContributionIsometricGeometry(calendar),
     [calendar],
   );
+  const cellSize = fitContributionCellSize(
+    calendarBodyWidth,
+    calendar.weekCount,
+  );
+  const tile = tileForCell(cellSize);
+  const calendarWidth = Math.max(
+    0,
+    (calendar.weekCount * (tile + 1) - 1) * DITHER_PIXEL + MONTH_LABEL_GUTTER,
+  );
+
+  useEffect(() => {
+    const node = calendarScrollRef.current;
+    if (!node) return;
+    const measure = () =>
+      setCalendarBodyWidth((current) =>
+        current === node.clientWidth ? current : node.clientWidth,
+      );
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [calendar.weekCount, view]);
 
   useEffect(() => {
     const scrollContainer = calendarScrollRef.current;
@@ -2366,20 +2481,10 @@ export function ProfileContributionGraph({
           <Description id={descriptionId}>{description}</Description>
         </HeadingGroup>
         <HeaderAside>
-          <ViewToggle role="group" aria-label="Contribution graph view">
-            {(["2d", "3d"] as const).map((option) => (
-              <ViewButton
-                key={option}
-                type="button"
-                $active={view === option}
-                aria-controls={calendarId}
-                aria-pressed={view === option}
-                onClick={() => commitView(option)}
-              >
-                <span>{option.toUpperCase()}</span>
-              </ViewButton>
-            ))}
-          </ViewToggle>
+          <ViewControl
+            view={view}
+            onViewChange={commitView}
+          />
           <Summary aria-live="polite">
             <ActiveDays>{activeDayLabel}</ActiveDays>
             <Range>{formatRange(calendar.startDate, calendar.endDate)}</Range>
@@ -2392,81 +2497,96 @@ export function ProfileContributionGraph({
         <>
           {view === "2d" ? (
             <CalendarBody id={calendarId} ref={calendarScrollRef}>
-              <MonthRow $weeks={calendar.weekCount} aria-hidden="true">
-                {calendar.monthMarkers.map((marker) => (
-                  <Month
-                    key={`${marker.weekIndex}-${marker.label}`}
-                    $compactVisible={marker.compactVisible}
-                    $week={marker.weekIndex}
-                  >
-                    {marker.label}
-                  </Month>
-                ))}
-              </MonthRow>
-              <CalendarRow>
-                <DayLabels aria-hidden="true">
-                  <DayLabel $row={2}>Mon</DayLabel>
-                  <DayLabel $row={4}>Wed</DayLabel>
-                  <DayLabel $row={6}>Fri</DayLabel>
-                </DayLabels>
-                <Grid
-                  $weeks={calendar.weekCount}
-                  role="group"
-                  aria-label="Daily token contributions"
-                  aria-describedby={calendarInstructionsId}
-                  data-contribution-hit-surface="2d"
-                  onClick={selectNearestCell}
-                >
-                  {calendar.cells.map((cell) => (
-                    <Cell
-                      key={cell.date}
-                      type="button"
-                      ref={(node) => {
-                        if (node && cell.selectable)
-                          cellRefs.current.set(cell.date, node);
-                        else cellRefs.current.delete(cell.date);
-                      }}
-                      disabled={!cell.inRange || !cell.selectable}
-                      tabIndex={
-                        cell.selectable && cell.date === tabbableDate ? 0 : -1
-                      }
-                      aria-hidden={cell.inRange ? undefined : true}
-                      aria-label={cell.inRange ? cellTitle(cell) : undefined}
-                      aria-current={
-                        cell.selectable && cell.date === selectedDate
-                          ? "date"
-                          : undefined
-                      }
-                      aria-pressed={
-                        cell.selectable ? cell.date === selectedDate : undefined
-                      }
-                      aria-controls={
-                        cell.selectable && cell.date === selectedDate
-                          ? breakdownId
-                          : undefined
-                      }
-                      aria-describedby={
-                        tooltip?.cell.date === cell.date ? tooltipId : undefined
-                      }
-                      data-contribution-date={
-                        cell.inRange ? cell.date : undefined
-                      }
-                      $active={tooltip?.cell.date === cell.date}
-                      $color={getContributionColor(palette, cell.intensity)}
-                      $inRange={cell.inRange}
-                      $selected={cell.date === selectedDate}
-                      onClick={() => selectCell(cell)}
-                      onPointerEnter={(event) =>
-                        handleCellPointerEnter(cell, event)
-                      }
-                      onPointerLeave={handleCellPointerLeave}
-                      onFocus={(event) => handleCellFocus(cell, event)}
-                      onBlur={() => setTooltip(null)}
-                      onKeyDown={(event) => handleCellKeyDown(cell, event)}
-                    />
+              <CalendarInner $width={calendarWidth}>
+                <MonthRow $cell={cellSize} $weeks={calendar.weekCount} aria-hidden="true">
+                  {calendar.monthMarkers.map((marker) => (
+                    <Month
+                      key={`${marker.weekIndex}-${marker.label}`}
+                      $compactVisible={marker.compactVisible}
+                      $week={marker.weekIndex}
+                    >
+                      {marker.label}
+                    </Month>
                   ))}
-                </Grid>
-              </CalendarRow>
+                </MonthRow>
+                <CalendarRow>
+                  <DayLabels $cell={cellSize} aria-hidden="true">
+                    <DayLabel $row={2}>M</DayLabel>
+                    <DayLabel $row={4}>W</DayLabel>
+                    <DayLabel $row={6}>F</DayLabel>
+                  </DayLabels>
+                  <div style={{ position: "relative" }}>
+                    <ContributionCanvas
+                      calendar={calendar}
+                      palette={palette}
+                      cellSize={cellSize}
+                    />
+                    <GridOverlay
+                      $weeks={calendar.weekCount}
+                      $cell={cellSize}
+                      role="group"
+                      aria-label="Daily token contributions"
+                      aria-describedby={calendarInstructionsId}
+                      data-contribution-hit-surface="2d"
+                      onClick={selectNearestCell}
+                    >
+                      {calendar.cells.map((cell) => (
+                        <Cell
+                          key={cell.date}
+                          type="button"
+                          ref={(node) => {
+                            if (node && cell.selectable)
+                              cellRefs.current.set(cell.date, node);
+                            else cellRefs.current.delete(cell.date);
+                          }}
+                          disabled={!cell.inRange || !cell.selectable}
+                          tabIndex={
+                            cell.selectable && cell.date === tabbableDate
+                              ? 0
+                              : -1
+                          }
+                          aria-hidden={cell.inRange ? undefined : true}
+                          aria-label={cell.inRange ? cellTitle(cell) : undefined}
+                          aria-current={
+                            cell.selectable && cell.date === selectedDate
+                              ? "date"
+                              : undefined
+                          }
+                          aria-pressed={
+                            cell.selectable
+                              ? cell.date === selectedDate
+                              : undefined
+                          }
+                          aria-controls={
+                            cell.selectable && cell.date === selectedDate
+                              ? breakdownId
+                              : undefined
+                          }
+                          aria-describedby={
+                            tooltip?.cell.date === cell.date
+                              ? tooltipId
+                              : undefined
+                          }
+                          data-contribution-date={
+                            cell.inRange ? cell.date : undefined
+                          }
+                          $active={tooltip?.cell.date === cell.date}
+                          $inRange={cell.inRange}
+                          $selected={cell.date === selectedDate}
+                          onClick={() => selectCell(cell)}
+                          onPointerEnter={(event) =>
+                            handleCellPointerEnter(cell, event)
+                          }
+                          onPointerLeave={handleCellPointerLeave}
+                          onFocus={(event) => handleCellFocus(cell, event)}
+                          onBlur={() => setTooltip(null)}
+                          onKeyDown={(event) => handleCellKeyDown(cell, event)}
+                        />
+                      ))}
+                    </GridOverlay>
+                  </div>
+                </CalendarRow>
+              </CalendarInner>
             </CalendarBody>
           ) : (
             <IsometricBody id={calendarId}>
@@ -2482,7 +2602,7 @@ export function ProfileContributionGraph({
                 {isometricGeometry.cells.map((geometry) => {
                   const { cell } = geometry;
                   const faces = contributionCubeFaces(geometry);
-                  const color = getContributionColor(palette, cell.intensity);
+                  const color = contributionPaintColor(palette, cell.intensity);
                   const active = tooltip?.cell.date === cell.date;
                   const selected = selectedDate === cell.date;
                   const interactive = cell.selectable;
@@ -2566,9 +2686,12 @@ export function ProfileContributionGraph({
               <span>Color</span>
               <PalettePreview aria-hidden="true">
                 {([1, 2, 3, 4] as const).map((level) => (
-                  <PalettePreviewSwatch
+                  <DitherSwatch
                     key={level}
-                    $color={getContributionColor(palette, level)}
+                    level={level}
+                    max={4}
+                    color={contributionPaintColor(palette, level)}
+                    emptyColor={CONTRIBUTION_EMPTY_COLOR}
                   />
                 ))}
               </PalettePreview>
@@ -2583,16 +2706,19 @@ export function ProfileContributionGraph({
                 onChange={(next) => commitPalette(next as ColorPaletteName)}
               />
             </PaletteControl>
-            <Legend aria-label="Contribution intensity, low to high">
+            <Legend role="group" aria-label="Contribution intensity, low to high">
               <span>Low</span>
               <LegendSwatches>
                 {[0, 1, 2, 3, 4].map((level) => (
-                  <LegendSwatch
+                  <DitherSwatch
                     key={level}
-                    $color={getContributionColor(
+                    level={level as ContributionCell["intensity"]}
+                    max={4}
+                    color={contributionPaintColor(
                       palette,
                       level as ContributionCell["intensity"],
                     )}
+                    emptyColor={CONTRIBUTION_EMPTY_COLOR}
                   />
                 ))}
               </LegendSwatches>
@@ -2603,7 +2729,7 @@ export function ProfileContributionGraph({
             <ContributionDayBreakdown
               day={selectedDay}
               id={breakdownId}
-              onClose={closeSelectedDay}
+              onClose={persistentSelection ? undefined : closeSelectedDay}
               palette={palette}
             />
           )}
@@ -2617,5 +2743,25 @@ export function ProfileContributionGraph({
         and Escape to close the floating tooltip.
       </VisuallyHidden>
     </Figure>
+  );
+}
+
+function ViewControl({
+  view,
+  onViewChange,
+}: {
+  view: ProfileContributionView;
+  onViewChange: (view: ProfileContributionView) => void;
+}) {
+  return (
+    <DitherSelectionGroup
+      label="Contribution graph view"
+      value={view}
+      options={[
+        { value: "2d", label: "2D" },
+        { value: "3d", label: "3D" },
+      ]}
+      onChange={(next) => onViewChange(next as ProfileContributionView)}
+    />
   );
 }

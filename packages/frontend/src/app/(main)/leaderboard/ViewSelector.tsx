@@ -2,8 +2,7 @@
 
 import { useSearchParams } from "next/navigation";
 import styled from "styled-components";
-import { SegmentedGroup } from "@/components/leaderboard/RankingUI";
-import { DISPLAY_FONT, TouchSegment } from "@/components/explore/ExploreUI";
+import { SegmentedGroup, SegmentButton } from "@/components/leaderboard/RankingUI";
 import Link from "next/link";
 import {
   LEADERBOARD_VIEWS,
@@ -12,27 +11,48 @@ import {
   type LeaderboardSearchParams,
   type LeaderboardView,
 } from "./views";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 
-// Top-of-page segmented control that swaps between the Humans, Models, Agents
-// and Groups views. Pure-link nav (no client state), so SSR + back/forward
-// behave naturally and the URL is shareable.
+// Title row (the view's name, one sentence, the view's one action), then the
+// view tabs as links on a full-width rule: the URL is authoritative, so SSR
+// and back/forward behave naturally and the link is shareable.
 //
 // Uses aria-current="page" rather than role="tablist": these are full-page
 // navigations, not in-page tab panels, so the link semantics are the honest
-// thing and keep ArrowLeft/Right doing whatever the browser would normally do
-// for in-page focus.
+// thing.
 
 export { buildLeaderboardViewHref };
 export type { LeaderboardSearchParams, LeaderboardView };
 
-/* Eyebrow, then the view tabs right under it, then the view's title and description. */
 const Header = styled.header`
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
   margin-bottom: 24px;
+
+  @media (max-width: 640px) {
+    margin-bottom: 16px;
+  }
+`;
+
+/* The view tabs sit on a full-width rule; the active tab's accent line is
+ * exactly as wide as its label and replaces its slice of the rule. */
+const ViewTabs = styled(SegmentedGroup)`
+  display: flex;
+  width: 100%;
+  border-bottom: 2px solid var(--service-border);
+`;
+
+/* Title row: h1 + sentence on the left, the view's one action on the right. */
+const TitleRow = styled.div`
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+
+  @media (max-width: 640px) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
 `;
 
 const HeadingGroup = styled.div`
@@ -42,15 +62,14 @@ const HeadingGroup = styled.div`
 const Title = styled.h1`
   margin: 0;
   color: var(--service-text);
-  font-family: ${DISPLAY_FONT};
-  font-size: 2rem;
+  font-size: 1.75rem;
   font-weight: 500;
   letter-spacing: -0.02em;
   line-height: 1.15;
   text-wrap: balance;
 
   @media (max-width: 640px) {
-    font-size: 1.75rem;
+    font-size: 1.5rem;
   }
 `;
 
@@ -61,10 +80,18 @@ const Description = styled.p`
   font-size: 0.875rem;
   line-height: 1.5;
   text-wrap: pretty;
+`;
 
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
+const Action = styled.div`
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+`;
+
+/* A view tab is a link with the segment's selection mark: the accent line
+ * sits on the tab row's own bottom rule. */
+const ViewTab = styled(SegmentButton).attrs({ as: Link })`
+  --segment-pad-x: 2px;
 `;
 
 const VIEW_DESCRIPTIONS: Record<LeaderboardView, string> = {
@@ -84,9 +111,11 @@ const VIEW_TITLES: Record<LeaderboardView, string> = {
 interface ViewSelectorProps {
   current: LeaderboardView;
   searchParams: LeaderboardSearchParams;
+  /** The view's one primary action, rendered right of the title. */
+  action?: React.ReactNode;
 }
 
-export default function ViewSelector({ current, searchParams }: ViewSelectorProps) {
+export default function ViewSelector({ current, searchParams, action }: ViewSelectorProps) {
   const liveSearchParams = useSearchParams();
   const liveSearchParamsRecord: LeaderboardSearchParams = {};
 
@@ -107,24 +136,25 @@ export default function ViewSelector({ current, searchParams }: ViewSelectorProp
 
   return (
     <Header>
-      <Eyebrow>Leaderboards</Eyebrow>
-      <SegmentedGroup as="nav" aria-label="Leaderboard view">
+      <TitleRow>
+        <HeadingGroup>
+          <Title>{VIEW_TITLES[current]}</Title>
+          <Description>{VIEW_DESCRIPTIONS[current]}</Description>
+        </HeadingGroup>
+        {action && <Action>{action}</Action>}
+      </TitleRow>
+      <ViewTabs as="nav" aria-label="Leaderboard view">
         {LEADERBOARD_VIEWS.map((view) => (
-          <TouchSegment
+          <ViewTab
             key={view}
-            as={Link}
             href={buildLeaderboardViewHref(activeSearchParams, view)}
             $active={current === view}
             aria-current={current === view ? "page" : undefined}
           >
             {LEADERBOARD_VIEW_LABELS[view]}
-          </TouchSegment>
+          </ViewTab>
         ))}
-      </SegmentedGroup>
-      <HeadingGroup>
-        <Title>{VIEW_TITLES[current]}</Title>
-        <Description>{VIEW_DESCRIPTIONS[current]}</Description>
-      </HeadingGroup>
+      </ViewTabs>
     </Header>
   );
 }

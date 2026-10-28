@@ -147,17 +147,17 @@ const Options = styled.div`
     gap: 2px;
     min-height: 52px;
     padding: 8px 12px;
-    border: 1px solid var(--v2-rule);
-    border-radius: 8px;
+    border-radius: var(--radius, 2px);
+    background: var(--v2-surface);
     cursor: pointer;
   }
 
   label:hover {
-    border-color: var(--v2-rule-strong);
+    background: var(--v2-surface-raised);
   }
 
   label[data-active] {
-    border-color: var(--v2-accent);
+    background: var(--v2-surface-raised);
     background: var(--v2-accent-soft);
   }
 
@@ -245,12 +245,8 @@ const PreviewFrame = styled.div`
   justify-content: center;
   min-height: 360px;
   padding: 40px;
-  border: 1px solid var(--v2-rule);
-  border-radius: 12px;
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px) 0 0 / 24px 24px,
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px) 0 0 / 24px 24px,
-    #05070a;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
 
   img {
     display: block;

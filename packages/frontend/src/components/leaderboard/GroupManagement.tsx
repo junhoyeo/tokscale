@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import styled from "styled-components";
+import { DitherAvatar } from "dither-kit/DitherAvatar";
 import { CompactBadge, SecondaryButton } from "./RankingUI";
-import { getGroupMonogram } from "./presentation";
 import { Select } from "@/components/ui/Select";
 import { canManageGroupRole } from "@/lib/groups/roles";
 import type { GroupRole } from "@/lib/db/schema";
@@ -24,62 +24,89 @@ interface GroupManagementProps {
   onChanged: () => Promise<void>;
 }
 
-const Panel = styled.section`
+/* Settings row: the label column (title + count + one sentence) beside the
+ * member table. */
+const Section = styled.section`
   display: grid;
   gap: 16px;
-  margin-top: 24px;
-  padding: 20px;
-  border: 1px solid var(--service-border);
-  border-radius: 12px;
-  background: var(--service-surface);
-  h2, p { margin: 0; }
-  h2 { font-size: 0.9375rem; font-weight: 600; }
-  p { color: var(--service-text-muted); font-size: 0.875rem; line-height: 1.6; }
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--service-border);
+
+  @media (min-width: 900px) {
+    grid-template-columns: 320px minmax(0, 1fr);
+    gap: 40px;
+  }
+`;
+
+const LabelColumn = styled.div`
+  min-width: 0;
+`;
+
+const SectionTitleRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`;
+
+const SectionTitle = styled.h2`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 500;
+`;
+
+const SectionNote = styled.p`
+  margin: 6px 0 0;
+  max-width: 46ch;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+`;
+
+const Panel = styled.div`
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 12px;
 `;
 
 const Controls = styled.div`
   display: flex;
   max-width: 100%;
   flex-wrap: wrap;
-  align-items: end;
-  gap: 12px;
-  button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-`;
-
-const MemberHeading = styled.div`
-  display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: 16px;
+  button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 `;
 
 const MemberColumns = styled.div`
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px 44px;
+  grid-template-columns: minmax(0, 1fr) 128px 40px;
   gap: 16px;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--service-border);
+  border-bottom: 1px solid var(--service-border-strong);
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 
   @media (max-width: 520px) {
-    grid-template-columns: minmax(0, 1fr) 88px 36px;
+    grid-template-columns: minmax(0, 1fr) 96px 40px;
     gap: 8px;
   }
 `;
 
 const MemberRow = styled.li`
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px 44px;
+  grid-template-columns: minmax(0, 1fr) 128px 40px;
   align-items: center;
   gap: 16px;
-  min-height: 72px;
-  padding: 12px 0;
+  min-height: 56px;
+  padding: 8px 0;
   border-bottom: 1px solid var(--service-border);
   &:last-child { border-bottom: 0; }
 
   @media (max-width: 520px) {
-    grid-template-columns: minmax(0, 1fr) 88px 36px;
+    grid-template-columns: minmax(0, 1fr) 96px 40px;
     gap: 8px;
   }
 `;
@@ -92,20 +119,19 @@ const MemberIdentity = styled.div`
   > div { min-width: 0; }
   strong, small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   strong { color: var(--service-text); font-size: 0.875rem; font-weight: 500; }
-  small { margin-top: 4px; color: var(--service-text-muted); font-size: 0.75rem; }
+  small { margin-top: 2px; color: var(--service-text-muted); font-size: 0.8125rem; }
 
   @media (max-width: 520px) { gap: 8px; }
 `;
 
 const MemberAvatar = styled.span`
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   place-items: center;
   overflow: hidden;
-  border: 1px solid var(--service-border);
-  border-radius: 50%;
+  border-radius: var(--radius, 2px);
   background: var(--service-surface-muted);
   color: var(--service-text-muted);
   font-size: 0.6875rem;
@@ -117,8 +143,11 @@ const MemberAvatar = styled.span`
 
 const RoleBadge = styled(CompactBadge)`
   justify-self: start;
-  text-transform: capitalize;
 `;
+
+function roleLabel(role: string): string {
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
 
 const ROLE_OPTIONS = [
   { value: "member", label: "Member" },
@@ -127,71 +156,85 @@ const ROLE_OPTIONS = [
 
 const RoleSelect = styled(Select)`
   --select-width: 100%;
-  --select-height: 36px;
+  --select-height: 32px;
   --select-padding-x: 8px;
   --select-font-size: 0.8125rem;
-  --select-radius: 6px;
-  --select-background: var(--service-surface);
+  --select-radius: 2px;
+  --select-background: transparent;
   --select-border-color: var(--service-border);
+
+  @media (pointer: coarse) {
+    --select-height: 44px;
+  }
 `;
 
 const MemberMenuButton = styled.button`
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   justify-self: end;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius, 2px);
   background: transparent;
   color: var(--service-text-muted);
   cursor: pointer;
   &:hover { border-color: var(--service-border); background: var(--service-surface-muted); color: var(--service-text); }
-  &:focus-visible { outline: 2px solid var(--service-focus); outline-offset: 2px; }
+  &:focus-visible { outline: 2px solid var(--service-focus); outline-offset: -2px; }
   &:disabled { cursor: default; opacity: 0.5; }
-  @media (pointer: coarse) { height: 44px; }
+  @media (pointer: coarse) { width: 44px; height: 44px; }
 `;
 
+/* The row menu floats above the page (app-screens §13 allows the two
+ * floating kinds, a menu and a dialog, the one soft edge on this screen). */
 const MemberActions = styled.div`
   position: fixed;
   inset: auto;
   width: 224px;
   max-width: calc(100vw - 32px);
   margin: 0;
-  padding: 6px;
+  padding: 4px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  background: var(--service-surface);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface-raised);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2); /* taste-skill-ignore: floating menu */
 `;
 
 const MemberAction = styled.button<{ $danger?: boolean }>`
   display: block;
   width: 100%;
-  min-height: 44px;
+  min-height: 40px;
   padding: 10px 12px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius, 2px);
   background: transparent;
-  color: ${({ $danger }) => $danger ? "#f85149" : "var(--service-text)"};
-  font-size: 0.8125rem;
+  color: ${({ $danger }) => $danger ? "var(--negative, #e5566f)" : "var(--service-text)"};
+  font-size: 0.875rem;
   text-align: left;
   cursor: pointer;
   &:hover, &:focus-visible { background: var(--service-surface-muted); }
   &:focus-visible { outline: 2px solid var(--service-focus); outline-offset: -2px; }
 `;
 
+/* A dialog floats too; the backdrop dims the page behind it. */
 const Confirmation = styled.dialog`
-  max-width: min(480px, calc(100vw - 32px));
+  max-width: min(440px, calc(100vw - 32px));
   padding: 24px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 12px;
-  background: var(--service-surface);
+  border-radius: var(--radius, 2px);
+  background: var(--service-surface-raised);
   color: var(--service-text);
-  &::backdrop { background: rgba(0, 0, 0, 0.65); }
-  h3 { margin-top: 0; }
-  p { margin-bottom: 20px; }
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32); /* taste-skill-ignore: dialog */
+  &::backdrop { background: rgba(0, 0, 0, 0.7); }
+  h3 { margin: 0 0 8px; font-size: 1rem; font-weight: 500; }
+  p { margin: 0 0 20px; color: var(--service-text-muted); font-size: 0.875rem; line-height: 1.5; }
+`;
+
+const Notice = styled.div`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.875rem;
 `;
 
 export function GroupManagement({ slug, userId, role, onChanged }: GroupManagementProps) {
@@ -289,78 +332,174 @@ export function GroupManagement({ slug, userId, role, onChanged }: GroupManageme
   }
 
   return (
-    <Panel ref={panelRef} aria-label="Group management">
-      <div>
-        <MemberHeading>
-          <h2>Members</h2>
+    <Section ref={panelRef} aria-label="Group management">
+      <LabelColumn>
+        <SectionTitleRow>
+          <SectionTitle>Members</SectionTitle>
           {!loading && !loadError && <CompactBadge>{members.length}</CompactBadge>}
-        </MemberHeading>
-        {loading && <p role="status">Loading members...</p>}
-        {loadError && <div role="alert">{loadError} <SecondaryButton type="button" disabled={pending} onClick={() => { setLoading(true); setReload((value) => value + 1); }}>Retry</SecondaryButton></div>}
-        {!loading && !loadError && <>
-          <MemberColumns aria-hidden="true"><span>Member</span><span>Role</span><span /></MemberColumns>
-          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {members.map((member) => {
-              const canManage = member.userId !== userId && canManageGroupRole(role, member.role);
-              const menuId = `member-actions-${member.userId}`;
-              return <MemberRow key={member.userId}>
-                <MemberIdentity>
-                  <MemberAvatar aria-hidden="true">
-                    {member.avatarUrl ? <Image src={member.avatarUrl} alt="" width={36} height={36} /> : getGroupMonogram(member.displayName || member.username)}
-                  </MemberAvatar>
-                  <div>
-                    <strong title={member.displayName || member.username}>{member.displayName || member.username}</strong>
-                    <small title={`@${member.username}`}>@{member.username}{member.userId === userId ? " · You" : ""}</small>
-                  </div>
-                </MemberIdentity>
-                {canManage && role === "owner"
-                  ? <RoleSelect aria-label={`Role for @${member.username}`} value={member.role} disabled={pending} options={ROLE_OPTIONS} onChange={(nextRole) => {
-                      void mutate(`/members/${encodeURIComponent(member.userId)}/role`, "PATCH", { role: nextRole });
-                    }} />
-                  : <RoleBadge>{member.role}</RoleBadge>}
-                {canManage ? <>
-                  <MemberMenuButton type="button" aria-label={`Manage @${member.username}`} popoverTarget={menuId} disabled={pending} onClick={(event) => {
-                    const menu = document.getElementById(menuId);
-                    if (!menu) return;
-                    const bounds = event.currentTarget.getBoundingClientRect();
-                    menuScrollPosition.current = { x: window.scrollX, y: window.scrollY };
-                    const menuHeight = (role === "owner" ? 2 : 1) * 44 + 14;
-                    menu.style.left = `${Math.max(16, Math.min(bounds.right - 224, window.innerWidth - 240))}px`;
-                    menu.style.top = `${bounds.bottom + menuHeight + 8 <= window.innerHeight ? bounds.bottom + 6 : Math.max(8, bounds.top - menuHeight - 6)}px`;
-                  }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.75" /><circle cx="12" cy="12" r="1.75" /><circle cx="19" cy="12" r="1.75" /></svg>
-                  </MemberMenuButton>
-                  <MemberActions id={menuId} popover="auto" role="group" aria-label={`Actions for @${member.username}`} onToggle={(event) => {
-                    if (event.newState === "open") event.currentTarget.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
-                  }}>
-                    {role === "owner" && <MemberAction type="button" disabled={pending} aria-label={`Transfer ownership to @${member.username}`} onClick={(event) => {
-                      event.currentTarget.closest<HTMLElement>("[popover]")?.hidePopover();
-                      setError(null); setConfirmation({ member, action: "transfer" });
-                    }}>Transfer ownership</MemberAction>}
-                    <MemberAction type="button" $danger disabled={pending} aria-label={`Remove @${member.username}`} onClick={(event) => {
-                      event.currentTarget.closest<HTMLElement>("[popover]")?.hidePopover();
-                      setError(null); setConfirmation({ member, action: "remove" });
-                    }}>Remove member</MemberAction>
-                  </MemberActions>
-                </> : <span />}
-              </MemberRow>;
-            })}
-          </ul>
-        </>}
-      </div>
-      {notice && <p role="status">{notice}</p>}
-      {error && <p role="alert">{error}</p>}
-      {confirmation && <Confirmation ref={dialogRef} aria-labelledby="group-confirm-title" aria-describedby="group-confirm-description" onCancel={(event) => { if (pending) event.preventDefault(); else closeConfirmation(); }} onClose={() => setConfirmation(null)}>
-        <h3 id="group-confirm-title">{confirmation.action === "remove" ? "Remove member" : "Transfer ownership"}</h3>
-        <p id="group-confirm-description">{confirmation.action === "remove"
-          ? `Remove @${confirmation.member.username} from this group? Their personal usage remains, but historical group totals can change.`
-          : `Transfer ownership to @${confirmation.member.username}? Your role will become admin.`}</p>
-        {error && <p role="alert">{error}</p>}
-        <Controls>
-          <SecondaryButton type="button" disabled={pending} autoFocus onClick={closeConfirmation}>Cancel</SecondaryButton>
-          <SecondaryButton type="button" disabled={pending} onClick={() => void confirmAction()}>{pending ? "Saving..." : "Confirm"}</SecondaryButton>
-        </Controls>
-      </Confirmation>}
-    </Panel>
+        </SectionTitleRow>
+        <SectionNote>
+          The people in this group, and the role each one holds. Owners can promote a member or transfer ownership.
+        </SectionNote>
+      </LabelColumn>
+      <Panel>
+        {loading && <Notice role="status">Loading members…</Notice>}
+        {loadError && (
+          <Notice role="alert">
+            {loadError}{" "}
+            <SecondaryButton
+              type="button"
+              disabled={pending}
+              onClick={() => {
+                setLoading(true);
+                setReload((value) => value + 1);
+              }}
+            >
+              Retry
+            </SecondaryButton>
+          </Notice>
+        )}
+        {!loading && !loadError && (
+          <>
+            <MemberColumns aria-hidden="true">
+              <span>Member</span>
+              <span>Role</span>
+              <span />
+            </MemberColumns>
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {members.map((member) => {
+                const canManage = member.userId !== userId && canManageGroupRole(role, member.role);
+                const menuId = `member-actions-${member.userId}`;
+                return (
+                  <MemberRow key={member.userId}>
+                    <MemberIdentity>
+                      <MemberAvatar aria-hidden="true">
+                        {member.avatarUrl ? (
+                          <Image src={member.avatarUrl} alt="" width={32} height={32} />
+                        ) : (
+                          <DitherAvatar
+                            name={member.displayName || member.username}
+                            color="blue"
+                            size={32}
+                            grid={6}
+                            cellPx={5}
+                            density={-0.12}
+                            animate={false}
+                            bloom="off"
+                          />
+                        )}
+                      </MemberAvatar>
+                      <div>
+                        <strong title={member.displayName || member.username}>{member.displayName || member.username}</strong>
+                        <small title={`@${member.username}`}>@{member.username}{member.userId === userId ? " · You" : ""}</small>
+                      </div>
+                    </MemberIdentity>
+                    {canManage && role === "owner" ? (
+                      <RoleSelect
+                        aria-label={`Role for @${member.username}`}
+                        value={member.role}
+                        disabled={pending}
+                        options={ROLE_OPTIONS}
+                        onChange={(nextRole) => {
+                          void mutate(`/members/${encodeURIComponent(member.userId)}/role`, "PATCH", { role: nextRole });
+                        }}
+                      />
+                    ) : (
+                      <RoleBadge>{roleLabel(member.role)}</RoleBadge>
+                    )}
+                    {canManage ? (
+                      <>
+                        <MemberMenuButton
+                          type="button"
+                          aria-label={`Manage @${member.username}`}
+                          popoverTarget={menuId}
+                          disabled={pending}
+                          onClick={(event) => {
+                            const menu = document.getElementById(menuId);
+                            if (!menu) return;
+                            const bounds = event.currentTarget.getBoundingClientRect();
+                            menuScrollPosition.current = { x: window.scrollX, y: window.scrollY };
+                            const menuHeight = (role === "owner" ? 2 : 1) * 44 + 14;
+                            menu.style.left = `${Math.max(16, Math.min(bounds.right - 224, window.innerWidth - 240))}px`;
+                            menu.style.top = `${bounds.bottom + menuHeight + 8 <= window.innerHeight ? bounds.bottom + 6 : Math.max(8, bounds.top - menuHeight - 6)}px`;
+                          }}
+                        >
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.75" /><circle cx="12" cy="12" r="1.75" /><circle cx="19" cy="12" r="1.75" /></svg>
+                        </MemberMenuButton>
+                        <MemberActions
+                          id={menuId}
+                          popover="auto"
+                          role="group"
+                          aria-label={`Actions for @${member.username}`}
+                          onToggle={(event) => {
+                            if (event.newState === "open") event.currentTarget.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+                          }}
+                        >
+                          {role === "owner" && (
+                            <MemberAction
+                              type="button"
+                              disabled={pending}
+                              aria-label={`Transfer ownership to @${member.username}`}
+                              onClick={(event) => {
+                                event.currentTarget.closest<HTMLElement>("[popover]")?.hidePopover();
+                                setError(null);
+                                setConfirmation({ member, action: "transfer" });
+                              }}
+                            >
+                              Transfer ownership
+                            </MemberAction>
+                          )}
+                          <MemberAction
+                            type="button"
+                            $danger
+                            disabled={pending}
+                            aria-label={`Remove @${member.username}`}
+                            onClick={(event) => {
+                              event.currentTarget.closest<HTMLElement>("[popover]")?.hidePopover();
+                              setError(null);
+                              setConfirmation({ member, action: "remove" });
+                            }}
+                          >
+                            Remove member
+                          </MemberAction>
+                        </MemberActions>
+                      </>
+                    ) : (
+                      <span />
+                    )}
+                  </MemberRow>
+                );
+              })}
+            </ul>
+          </>
+        )}
+        {notice && <Notice role="status">{notice}</Notice>}
+        {error && <Notice role="alert">{error}</Notice>}
+      </Panel>
+      {confirmation && (
+        <Confirmation
+          ref={dialogRef}
+          aria-labelledby="group-confirm-title"
+          aria-describedby="group-confirm-description"
+          onCancel={(event) => {
+            if (pending) event.preventDefault();
+            else closeConfirmation();
+          }}
+          onClose={() => setConfirmation(null)}
+        >
+          <h3 id="group-confirm-title">{confirmation.action === "remove" ? "Remove member" : "Transfer ownership"}</h3>
+          <p id="group-confirm-description">
+            {confirmation.action === "remove"
+              ? `Remove @${confirmation.member.username} from this group? Their personal usage remains, but historical group totals can change.`
+              : `Transfer ownership to @${confirmation.member.username}? Your role will become admin.`}
+          </p>
+          {error && <p role="alert">{error}</p>}
+          <Controls>
+            <SecondaryButton type="button" disabled={pending} autoFocus onClick={closeConfirmation}>Cancel</SecondaryButton>
+            <SecondaryButton type="button" disabled={pending} onClick={() => void confirmAction()}>{pending ? "Saving…" : "Confirm"}</SecondaryButton>
+          </Controls>
+        </Confirmation>
+      )}
+    </Section>
   );
 }

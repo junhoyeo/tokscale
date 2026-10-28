@@ -3,7 +3,6 @@
 import Link from "next/link";
 import styled, { css } from "styled-components";
 import type { CommunitySnapshot as Snapshot, HumanRow, ModelUsageRow } from "@/lib/explore";
-import { AgentMark } from "@/components/explore/ExploreUI";
 import { ModelMark } from "@/components/explore/ModelMark";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import { Arrow, focusRing, VisuallyHidden } from "./primitives";
@@ -13,84 +12,82 @@ interface CommunitySnapshotProps {
   snapshot: Snapshot | null;
 }
 
+/**
+ * The live leaderboard, as one cropped fragment of the product (data-ui):
+ * builders by tokens and models by active users, from the last 30 days of
+ * submitted usage. Rows sit on a tone step, never on rules.
+ */
 export function CommunitySnapshot({ snapshot }: CommunitySnapshotProps) {
   const humans = snapshot?.humans.slice(0, 5) ?? [];
   const models = snapshot?.models.slice(0, 5) ?? [];
 
   return (
-    <Panel aria-label="Community snapshot">
-      <Columns>
-        <Column aria-labelledby="snapshot-humans-title">
-          <ColumnHead>
-            <ColumnTitle id="snapshot-humans-title">Humans</ColumnTitle>
-            <ColumnLink href="/leaderboard">
-              All humans <Arrow />
-            </ColumnLink>
-          </ColumnHead>
-          <HeaderRow $kind="humans" aria-hidden="true">
-            <span>#</span>
-            <span>Builder</span>
-            <HideNarrow>Top model and agent</HideNarrow>
-            <Right>Tokens</Right>
-            <Right>Est. cost</Right>
-          </HeaderRow>
-          {humans.length > 0 ? (
-            <List>
-              {humans.map((human) => (
-                <HumanItem key={human.username} human={human} />
-              ))}
-            </List>
-          ) : (
-            <Empty>No public usage in this period yet.</Empty>
-          )}
-        </Column>
+    <Board data-ui aria-label="Community snapshot">
+      <Group aria-labelledby="snapshot-humans-title">
+        <GroupHead>
+          <GroupTitle id="snapshot-humans-title">Builders</GroupTitle>
+          <GroupLink href="/leaderboard">
+            All <Arrow />
+          </GroupLink>
+        </GroupHead>
+        <HeadRow $kind="humans" aria-hidden="true">
+          <span />
+          <span>Builder</span>
+          <Right>Tokens</Right>
+          <Right $cost>Est. cost</Right>
+        </HeadRow>
+        {humans.length > 0 ? (
+          <List>
+            {humans.map((human) => (
+              <HumanItem key={human.username} human={human} />
+            ))}
+          </List>
+        ) : (
+          <Empty>No public usage in this period yet.</Empty>
+        )}
+      </Group>
 
-        <Column aria-labelledby="snapshot-models-title">
-          <ColumnHead>
-            <ColumnTitle id="snapshot-models-title">Models</ColumnTitle>
-            <ColumnLink href="/models">
-              All models <Arrow />
-            </ColumnLink>
-          </ColumnHead>
-          <HeaderRow $kind="models" aria-hidden="true">
-            <span>#</span>
-            <span>Model</span>
-            <Right>Users</Right>
-            <Right>vs prev.</Right>
-            <Right>Est. cost</Right>
-          </HeaderRow>
-          {models.length > 0 ? (
-            <List>
-              {models.map((model) => (
-                <ModelItem key={model.key} model={model} />
-              ))}
-            </List>
-          ) : (
-            <Empty>No model usage in this period yet.</Empty>
-          )}
-        </Column>
-      </Columns>
-    </Panel>
+      <Group aria-labelledby="snapshot-models-title">
+        <GroupHead>
+          <GroupTitle id="snapshot-models-title">Models</GroupTitle>
+          <GroupLink href="/models">
+            All <Arrow />
+          </GroupLink>
+        </GroupHead>
+        <HeadRow $kind="models" aria-hidden="true">
+          <span />
+          <span>Model</span>
+          <Right>Users</Right>
+          <Right>vs prev.</Right>
+        </HeadRow>
+        {models.length > 0 ? (
+          <List>
+            {models.map((model) => (
+              <ModelItem key={model.key} model={model} />
+            ))}
+          </List>
+        ) : (
+          <Empty>No model usage in this period yet.</Empty>
+        )}
+      </Group>
+    </Board>
   );
 }
 
 function HumanItem({ human }: { human: HumanRow }) {
   const name = human.displayName || human.username;
-  const topModel = human.topModels[0];
-  const topAgent = human.topAgents[0];
   return (
     <li>
-      <RowLink href={`/u/${encodeURIComponent(human.username)}`} $kind="humans">
+      <Row href={`/u/${encodeURIComponent(human.username)}`} $kind="humans">
         <Rank>{human.rank}</Rank>
         <Identity>
-          <AvatarImg
+          <Avatar
             src={human.avatarUrl || `https://github.com/${encodeURIComponent(human.username)}.png?size=48`}
             alt=""
             width={22}
             height={22}
             loading="lazy"
           />
-          {/* The handle is in the tooltip when the row shows a display name. */}
           <Name content={name !== human.username ? `@${human.username}` : null} describe={false}>
             {name}
           </Name>
@@ -98,32 +95,15 @@ function HumanItem({ human }: { human: HumanRow }) {
             <VisuallyHidden> (@{human.username})</VisuallyHidden>
           ) : null}
         </Identity>
-        <Stack>
-          <VisuallyHidden>Top model and agent: </VisuallyHidden>
-          {topModel ? (
-            <>
-              <ModelMark model={topModel} size={18} />
-              <StackText>{topModel.name}</StackText>
-            </>
-          ) : (
-            <StackText>—</StackText>
-          )}
-          {topAgent ? (
-            <AgentChip content={topAgent.name} describe={false}>
-              <AgentMark agent={topAgent} size={16} />
-              <VisuallyHidden>, {topAgent.name}</VisuallyHidden>
-            </AgentChip>
-          ) : null}
-        </Stack>
         <Value>
           <VisuallyHidden>Tokens: </VisuallyHidden>
           {compactNumber(human.tokens)}
         </Value>
-        <Cost>
+        <Cost $cost>
           <VisuallyHidden>Estimated cost: </VisuallyHidden>
           {compactCost(human.estimatedCost, human.tokens)}
         </Cost>
-      </RowLink>
+      </Row>
     </li>
   );
 }
@@ -132,11 +112,10 @@ function ModelItem({ model }: { model: ModelUsageRow }) {
   const change = userChange(model);
   return (
     <li>
-      <RowLink href={`/models/${encodeURIComponent(model.key)}`} $kind="models">
+      <Row href={`/models/${encodeURIComponent(model.key)}`} $kind="models">
         <Rank>{model.rank}</Rank>
         <Identity>
-          <ModelMark model={model} size={22} />
-          {/* The lab is in the tooltip. */}
+          <ModelMark model={model} size={20} />
           <Name content={model.lab} describe={false}>
             {model.name}
           </Name>
@@ -150,76 +129,48 @@ function ModelItem({ model }: { model: ModelUsageRow }) {
           <VisuallyHidden>Change in active users against the previous period: </VisuallyHidden>
           {change.kind === "new" ? <NewBadge>New</NewBadge> : change.label}
         </Change>
-        <Cost>
-          <VisuallyHidden>Estimated cost: </VisuallyHidden>
-          {compactCost(model.estimatedCost, model.tokens)}
-        </Cost>
-      </RowLink>
+      </Row>
     </li>
   );
 }
 
-const Panel = styled.section`
-  position: relative;
-  border: 1px solid var(--v2-rule-strong);
-  border-radius: 12px;
-  background: rgba(4, 5, 8, 0.86);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+/* The boards stack: builders, then models, inside the hero card's column. */
+const Board = styled.section`
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface);
 `;
 
-const Columns = styled.div`
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-
-  @media (max-width: 960px) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-`;
-
-const Column = styled.section`
+const Group = styled.div`
   min-width: 0;
-  padding: 4px 0 8px;
-
-  & + & {
-    border-left: 1px solid var(--v2-rule);
-  }
-
-  @media (max-width: 960px) {
-    & + & {
-      border-top: 1px solid var(--v2-rule);
-      border-left: 0;
-    }
-  }
+  padding: 8px 6px 10px;
 `;
 
-const ColumnHead = styled.div`
+const GroupHead = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 20px 2px;
-
-  @media (max-width: 520px) {
-    padding: 8px 16px 2px;
-  }
+  gap: 10px;
+  padding: 0 8px 4px;
 `;
 
-const ColumnTitle = styled.h3`
+const GroupTitle = styled.h3`
   margin: 0;
   color: var(--v2-text);
-  font-family: var(--v2-font-display);
-  font-size: 20px;
-  font-weight: 400;
-  line-height: 1.2;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
 `;
 
-const ColumnLink = styled(Link)`
+const GroupLink = styled(Link)`
   display: inline-flex;
-  gap: 6px;
   align-items: center;
-  min-height: 32px;
-  border-radius: 4px;
+  gap: 5px;
+  min-height: 28px;
+  border-radius: 2px;
   color: var(--v2-text-muted);
   font-size: 13px;
   font-weight: 500;
@@ -235,49 +186,35 @@ const ColumnLink = styled(Link)`
   }
 `;
 
-/* One line per row: rank, identity, (stack), and right-aligned numbers. */
-const narrowHumans = "(max-width: 1100px) and (min-width: 961px), (max-width: 600px)";
-
 const humansGrid = css`
-  grid-template-columns: 16px minmax(0, 1fr) minmax(0, 1fr) 52px 56px;
+  grid-template-columns: 14px minmax(0, 1fr) 52px 56px;
 
-  @media ${narrowHumans} {
-    grid-template-columns: 16px minmax(0, 1fr) 52px 56px;
+  @media (max-width: 560px) {
+    grid-template-columns: 14px minmax(0, 1fr) 52px;
   }
 `;
 
 const modelsGrid = css`
-  grid-template-columns: 16px minmax(0, 1fr) 48px 52px 56px;
-
-  @media (max-width: 400px) {
-    grid-template-columns: 14px minmax(0, 1fr) 34px 40px 58px;
-  }
+  grid-template-columns: 14px minmax(0, 1fr) 44px 48px;
 `;
 
-const HeaderRow = styled.div<{ $kind: "humans" | "models" }>`
+const HeadRow = styled.div<{ $kind: "humans" | "models" }>`
   display: grid;
   ${({ $kind }) => ($kind === "humans" ? humansGrid : modelsGrid)}
-  gap: 10px;
-  padding: 4px 20px;
+  gap: 8px;
+  padding: 2px 8px 4px;
   color: var(--v2-text-subtle);
   font-size: 12px;
   font-weight: 500;
-
-  @media (max-width: 520px) {
-    gap: 8px;
-    padding: 4px 16px;
-  }
 `;
 
-const HideNarrow = styled.span`
-  @media ${narrowHumans} {
-    display: none;
-  }
-`;
-
-const Right = styled.span`
+const Right = styled.span<{ $cost?: boolean }>`
   text-align: right;
   white-space: nowrap;
+
+  @media (max-width: 560px) {
+    display: ${({ $cost }) => ($cost ? "none" : "inline")};
+  }
 `;
 
 const List = styled.ol`
@@ -285,37 +222,32 @@ const List = styled.ol`
   padding: 0;
   list-style: none;
 
-  li + li a {
-    border-top: 1px solid var(--v2-rule);
+  li + li {
+    margin-top: 2px;
   }
 `;
 
-const RowLink = styled(Link)<{ $kind: "humans" | "models" }>`
+const Row = styled(Link)<{ $kind: "humans" | "models" }>`
   display: grid;
   ${({ $kind }) => ($kind === "humans" ? humansGrid : modelsGrid)}
-  gap: 10px;
+  gap: 8px;
   align-items: center;
-  min-height: 44px;
-  margin: 0 10px;
-  padding: 6px 10px;
-  border-radius: 6px;
+  min-height: 32px;
+  padding: 3px 8px;
+  border-radius: var(--radius, 2px);
   color: inherit;
   text-decoration: none;
-  transition: background-color 120ms ease;
+  transition: background-color 140ms ease;
 
-  &:hover {
-    background: rgba(255, 255, 255, 0.04);
+  @media (hover: hover) {
+    &:hover {
+      background: var(--v2-row-hover);
+    }
   }
 
   &:focus-visible {
     outline: 2px solid var(--v2-focus);
     outline-offset: -2px;
-  }
-
-  @media (max-width: 520px) {
-    gap: 8px;
-    margin: 0 4px;
-    padding: 6px 12px;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -325,7 +257,7 @@ const RowLink = styled(Link)<{ $kind: "humans" | "models" }>`
 
 const Rank = styled.span`
   color: var(--v2-text-subtle);
-  font-size: 12px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 `;
 
@@ -336,13 +268,14 @@ const Identity = styled.span`
   min-width: 0;
 `;
 
-const AvatarImg = styled.img`
+/* Real GitHub avatars stay; square, like everything else on the page. */
+const Avatar = styled.img`
   flex-shrink: 0;
   width: 22px;
   height: 22px;
-  border-radius: 50%;
+  border-radius: var(--radius, 2px);
   background: var(--v2-surface-raised);
-  box-shadow: 0 0 0 1px var(--v2-rule-strong);
+  object-fit: cover;
 `;
 
 const ellipsis = css`
@@ -355,52 +288,30 @@ const Name = styled(InstantTooltip)`
   ${ellipsis}
   min-width: 0;
   color: var(--v2-text);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
-`;
-
-const Stack = styled.span`
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  color: var(--v2-text-muted);
-  font-size: 13px;
-
-  @media ${narrowHumans} {
-    display: none;
-  }
-`;
-
-const StackText = styled.span`
-  ${ellipsis}
-  min-width: 0;
-`;
-
-const AgentChip = styled(InstantTooltip)`
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  margin-left: 2px;
 `;
 
 const Value = styled.span`
   color: var(--v2-text);
-  font-size: 14px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-`;
-
-const Cost = styled.span`
-  color: var(--v2-text-muted);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   text-align: right;
 `;
 
+const Cost = styled.span<{ $cost?: boolean }>`
+  color: var(--v2-text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+
+  @media (max-width: 560px) {
+    display: none;
+  }
+`;
+
 const Change = styled.span<{ $kind: string }>`
-  color: ${({ $kind }) => ($kind === "up" ? "var(--v2-numeric)" : "var(--v2-text-muted)")};
+  color: ${({ $kind }) => ($kind === "up" ? "var(--v2-text)" : "var(--v2-text-muted)")};
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -410,18 +321,17 @@ const NewBadge = styled.span`
   display: inline-flex;
   align-items: center;
   height: 20px;
-  padding: 0 7px;
-  border: 1px solid rgba(0, 115, 255, 0.55);
-  border-radius: 999px;
+  padding: 0 6px;
+  border-radius: var(--radius, 2px);
   background: var(--v2-accent-soft);
   color: #8cc2ff;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 `;
 
 const Empty = styled.p`
   margin: 0;
-  padding: 20px;
+  padding: 12px 8px;
   color: var(--v2-text-muted);
-  font-size: 14px;
+  font-size: 15px;
 `;

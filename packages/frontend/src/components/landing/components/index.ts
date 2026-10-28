@@ -1,1 +1,0 @@
-export { SquircleBorder } from "./SquircleBorder";

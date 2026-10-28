@@ -1,22 +1,29 @@
-/* Capital research section (v2 language).
-   CSS Modules rather than styled-components: these pages are server components,
-   so the prose and tables ship in the HTML with no client JS. */
+/* Capital research section.
+   One typeface (Figtree), one data hue, square 2px corners, numbers in ink and
+   tabular. CSS Modules rather than styled-components: these pages are server
+   components, so the prose and tables ship in the HTML with no client JS. */
 
 .page {
   --cap-text: var(--service-text, #f4f7fb);
   --cap-muted: var(--service-text-muted, #a8b3c5);
-  --cap-faint: rgba(244, 247, 251, 0.5);
+  --cap-faint: var(--v2-text-subtle, #848d9c);
   --cap-rule: var(--service-border, rgba(255, 255, 255, 0.09));
   --cap-rule-strong: var(--service-border-strong, rgba(255, 255, 255, 0.16));
-  --cap-accent: #0073ff;
-  --cap-accent-text: #5aa5ff;
-  --cap-cyan: #53d1f3;
-  --cap-display: var(--font-display, inherit);
+  /* The one data hue: dithered marks, the selection line, the one action. */
+  --cap-accent: var(--v2-accent, #0073ff);
+  --cap-accent-text: #7db2ff;
+  --cap-display: var(--v2-font-ui, var(--font-display, inherit));
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
 
+  /* The shell (.service-main) already sets the one pair of outer margins; the
+     section fills them and every reading block carries its own measure, so the
+     sub-nav, the tables and the prose all start on the same left edge. */
   width: 100%;
-  max-width: 1120px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   color: var(--cap-text);
+  font-family: var(--v2-font-ui, inherit);
   font-variant-numeric: tabular-nums;
 }
 
@@ -33,10 +40,10 @@
 /* ---------- type ---------- */
 
 .display {
-  font-family: var(--cap-display) !important;
+  font-family: var(--cap-display);
   font-weight: 500;
   letter-spacing: -0.02em;
-  line-height: 1.08;
+  line-height: 1.12;
   text-wrap: balance;
 }
 
@@ -49,50 +56,453 @@
   white-space: nowrap;
 }
 
-.cyan {
-  color: var(--cap-cyan);
+/* Inline link: ink text, a quiet rule under it, full ink on hover and focus. */
+.link {
+  color: var(--cap-text) !important;
+  text-decoration: underline;
+  text-decoration-color: var(--cap-rule-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 160ms ease;
 }
 
-.link {
-  color: var(--cap-accent-text) !important;
+.link:hover,
+.link:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+/* ---------- breadcrumbs ---------- */
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+}
+
+.crumbs li + li::before {
+  content: "/";
+  margin-right: 6px;
+  color: var(--cap-rule-strong);
+}
+
+.crumbs a {
   text-decoration: none;
 }
 
-.link:hover {
-  color: var(--cap-text) !important;
+.crumbs a:hover {
+  color: var(--cap-text);
 }
 
-/* ---------- hero ---------- */
-
-.hero {
-  max-width: 760px;
-  margin: 24px auto 72px;
-  text-align: center;
+.crumbs li:last-child {
+  color: var(--cap-text);
 }
 
-.heroTitle {
-  margin: 14px 0 18px;
-  font-size: clamp(2.25rem, 6vw, 4rem);
+/* ---------- sub-navigation ---------- */
+
+.subnav {
+  margin: 0 0 28px;
 }
 
-.heroLede {
-  margin: 0 auto;
-  max-width: 600px;
+.subnavList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subnavList a {
+  position: relative;
+  display: inline-block;
+  padding: 6px 0;
   color: var(--cap-muted);
-  font-size: 1.0625rem;
+  font-size: 1rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 150ms ease;
+}
+
+.subnavList a::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: transparent;
+  content: "";
+}
+
+.subnavList a:hover {
+  color: var(--cap-text);
+}
+
+.subnavList a[aria-current="page"] {
+  color: var(--cap-text);
+}
+
+/* The one selection mark: a 1px accent line exactly as wide as the label. */
+.subnavList a[aria-current="page"]::after {
+  background: var(--cap-accent-text);
+}
+
+@media (pointer: coarse) {
+  .subnavList {
+    gap: 2px 18px;
+  }
+
+  .subnavList a {
+    padding: 10px 0;
+  }
+}
+
+/* ---------- page heads (app screens) ---------- */
+
+.pageHead {
+  max-width: 68ch;
+  margin: 0 0 24px;
+}
+
+.pageTitle {
+  margin: 0 0 10px;
+  font-size: 1.75rem;
+}
+
+.lede {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--cap-muted);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.metaLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 0;
+  margin: 12px 0 0;
+  color: var(--cap-faint);
+  font-size: 0.8125rem;
   line-height: 1.6;
 }
 
+.metaLine > span {
+  white-space: nowrap;
+}
+
+.metaLine > span + span::before {
+  content: "\00B7";
+  margin: 0 8px;
+  color: var(--cap-rule-strong);
+}
+
+@media (max-width: 640px) {
+  .pageTitle,
+  .profileTitle {
+    font-size: 1.5rem;
+  }
+
+  .lede {
+    font-size: 1rem;
+  }
+}
+
+/* ---------- the landing page (page rules, not app rules) ---------- */
+
+.landing {
+  padding-bottom: 16px;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  margin: 0 0 96px;
+}
+
+.heroTitle {
+  max-width: 20ch;
+  margin: 0;
+  font-size: clamp(2.25rem, 4.2vw, 3.25rem);
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.04;
+}
+
+.heroLede {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--cap-text);
+  font-size: 1.125rem;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.heroFoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px 32px;
+  max-width: 1120px;
+}
+
+.heroAction {
+  flex: none;
+}
+
+/* The one primary action: solid fill (a label sits on it), 44px on every screen. */
+.heroCta {
+  min-height: 44px;
+  padding: 0 20px;
+  border-radius: 2px;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
 .heroMeta {
-  margin: 20px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 0;
+  margin: 0;
   color: var(--cap-faint);
   font-size: 0.8125rem;
 }
 
-/* ---------- sections and grid ---------- */
+.heroMeta span {
+  white-space: nowrap;
+}
+
+.heroMeta > span + span::before {
+  content: "\00B7";
+  margin: 0 8px;
+  color: var(--cap-rule-strong);
+}
+
+/* The hero field: the year's equity figure printed beside the dithered fill
+   that measures it against a stated ceiling. */
+.heroField {
+  display: grid;
+  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.14fr);
+  gap: 24px 32px;
+  align-items: stretch;
+  margin: 4px 0 0;
+}
+
+.fieldCopy {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fieldValue {
+  margin: 0;
+  font-size: clamp(2.5rem, 4.6vw, 3.5rem);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.fieldNote {
+  max-width: 40ch;
+  margin: 0;
+  color: var(--cap-muted);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.fieldCanvas {
+  position: relative;
+  min-width: 0;
+  height: 280px;
+  overflow: clip;
+}
+
+.fieldCanvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+@media (max-width: 860px) {
+  .heroField {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fieldCopy {
+    align-content: start;
+  }
+
+  .fieldCanvas {
+    height: 220px;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero {
+    gap: 20px;
+  }
+
+  .heroTitle {
+    font-size: 2rem;
+  }
+
+  .heroLede {
+    font-size: 1rem;
+  }
+
+  .fieldCanvas {
+    height: 150px;
+  }
+
+  /* The one action sits above the meta line, in the first phone screen. */
+  .heroFoot {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+}
+
+/* Money types: four figures, four sentences, no boxes. */
+.moneyStrip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 32px 28px;
+  margin: 0;
+}
+
+.moneyCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 216px;
+}
+
+.moneyCard p {
+  margin: 0;
+}
+
+.moneyLabel {
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.moneyValue {
+  font-size: 2rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+
+.moneyText {
+  color: var(--cap-muted);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.moneyCard .more {
+  margin-top: auto;
+  padding-top: 4px;
+  font-size: 0.875rem;
+}
+
+.moneyNote {
+  margin: 24px 0 0;
+  color: var(--cap-muted);
+  max-width: 68ch;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .moneyStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .moneyStrip {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .moneyCard {
+    min-height: 0;
+  }
+}
+
+/* Landing sections: space, never rules. */
+.landing .section {
+  margin: 0 0 96px;
+  padding: 0;
+  border-top: 0;
+}
+
+.landing .chips {
+  font-size: 1rem;
+}
+
+/* A page names its sections in one column: the note reads under the heading
+   instead of being pushed to the far right of the canvas. */
+.landing .sectionHead {
+  display: grid;
+  justify-content: start;
+  gap: 4px;
+  margin-bottom: 20px;
+}
+
+.landing .heroFoot {
+  max-width: 1120px;
+}
+
+/* A page keeps no hairline rows: the columns and the pitch hold the ledger together. */
+.landing .feedRow {
+  border-bottom: 0;
+  padding: 14px 0;
+}
+
+/* Three charts a row on the page: a 170px chart is a sparkline, a 360px one is a picture. */
+.landing .multiples {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 28px 24px;
+}
+
+@media (max-width: 900px) {
+  .landing .multiples {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .landing .multiples {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.landing .note,
+.landing .empty {
+  max-width: 68ch;
+}
+
+/* ---------- sections and grids (app screens) ---------- */
 
 .section {
-  padding: 40px 0;
+  padding: 28px 0;
   border-top: 1px solid var(--cap-rule);
 }
 
@@ -100,13 +510,23 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: 8px 20px;
+  margin-bottom: 16px;
 }
 
 .sectionTitle {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.sectionNote {
+  margin: 0;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 @media (max-width: 640px) {
@@ -115,47 +535,13 @@
     align-items: flex-start;
     gap: 6px;
   }
-}
 
-.sectionNote {
-  margin: 0;
-  color: var(--cap-muted);
-  font-size: 0.875rem;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: 0;
-}
-
-.grid > * + * {
-  border-left: 1px solid var(--cap-rule);
-  padding-left: 32px;
-}
-
-.grid > *:first-child {
-  padding-right: 32px;
-}
-
-@media (max-width: 860px) {
-  .grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .grid > * + * {
-    border-left: 0;
-    border-top: 1px solid var(--cap-rule);
-    padding: 32px 0 0;
-    margin-top: 32px;
-  }
-
-  .grid > *:first-child {
-    padding-right: 0;
+  .sectionNote {
+    font-size: 0.875rem;
   }
 }
 
-/* ---------- stats ---------- */
+/* ---------- stats strip ---------- */
 
 .stats {
   display: grid;
@@ -166,7 +552,7 @@
 }
 
 .stat {
-  padding: 16px 20px 18px 0;
+  padding: 14px 20px 16px 0;
   min-width: 0;
 }
 
@@ -178,15 +564,15 @@
 .statLabel {
   margin: 0 0 6px;
   color: var(--cap-muted);
-  font-size: 0.75rem;
-  letter-spacing: 0.02em;
+  font-size: 0.8125rem;
+  line-height: 1.4;
 }
 
 .statValue {
   margin: 0;
-  font-size: 1.625rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 1.5rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
 }
@@ -194,8 +580,8 @@
 .statSub {
   margin: 6px 0 0;
   color: var(--cap-faint);
-  font-size: 0.75rem;
-  line-height: 1.4;
+  font-size: 0.8125rem;
+  line-height: 1.45;
   font-variant-numeric: tabular-nums;
 }
 
@@ -223,7 +609,7 @@
   }
 }
 
-/* ---------- lists of filings / rows ---------- */
+/* ---------- rows ---------- */
 
 .rows {
   margin: 0;
@@ -233,7 +619,7 @@
 
 .row {
   display: block;
-  padding: 14px 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--cap-rule);
 }
 
@@ -244,8 +630,8 @@
 
 .rowTitle {
   margin: 0 0 4px;
-  font-size: 0.9375rem;
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 500;
 }
 
 .rowMeta {
@@ -261,11 +647,11 @@
 .chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: 6px 20px;
   margin: 0;
   padding: 0;
   list-style: none;
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 }
 
 .chips a {
@@ -274,47 +660,21 @@
 }
 
 .chips a:hover {
-  color: var(--cap-accent-text);
-}
-
-/* ---------- breadcrumbs ---------- */
-
-.crumbs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 28px;
-  padding: 0;
-  list-style: none;
-  color: var(--cap-muted);
-  font-size: 0.8125rem;
-}
-
-.crumbs li + li::before {
-  content: "/";
-  margin-right: 6px;
-  color: var(--cap-faint);
-}
-
-.crumbs a {
-  text-decoration: none;
-}
-
-.crumbs a:hover {
-  color: var(--cap-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 /* ---------- prose ---------- */
 
 .prose {
-  max-width: 680px;
+  max-width: 68ch;
 }
 
 .prose h2 {
-  margin: 36px 0 12px;
-  font-family: var(--cap-display) !important;
-  font-size: 1.375rem;
-  font-weight: 500;
+  margin: 32px 0 10px;
+  font-family: var(--cap-display);
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -324,20 +684,20 @@
 
 .prose p {
   margin: 0 0 16px;
-  color: rgba(244, 247, 251, 0.86);
-  font-size: 1.0625rem;
-  line-height: 1.7;
+  color: var(--cap-text);
+  font-size: 0.9375rem;
+  line-height: 1.65;
 }
 
 .prose a {
   color: var(--cap-text);
   text-decoration: underline;
-  text-decoration-color: rgba(90, 165, 255, 0.6);
+  text-decoration-color: var(--cap-rule-strong);
   text-underline-offset: 3px;
 }
 
 .prose a:hover {
-  color: var(--cap-accent-text);
+  text-decoration-color: currentColor;
 }
 
 .prose ul {
@@ -347,32 +707,29 @@
 
 .prose .note {
   margin: 16px 0 0;
-  color: var(--cap-muted);
-  font-size: 0.8125rem;
-  line-height: 1.6;
 }
 
 .prose li {
   margin: 0 0 8px;
   color: var(--cap-muted);
-  font-size: 0.9375rem;
-  line-height: 1.65;
+  font-size: 0.875rem;
+  line-height: 1.6;
 }
 
 /* ---------- notes and callouts ---------- */
 
 .note {
   margin: 16px 0 0;
+  max-width: 84ch;
   color: var(--cap-muted);
   font-size: 0.8125rem;
   line-height: 1.6;
 }
 
 .callout {
-  margin: 0 0 24px;
-  padding: 14px 16px;
-  border-left: 2px solid var(--cap-accent);
-  background: rgba(0, 115, 255, 0.06);
+  margin: 0 0 20px;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--cap-accent-text);
   color: var(--cap-muted);
   font-size: 0.875rem;
   line-height: 1.6;
@@ -399,86 +756,6 @@
   overflow-wrap: anywhere;
 }
 
-
-/* =====================================================================
-   Capital v2: sub-navigation, marks, dense tables, feeds, cards, charts
-   ===================================================================== */
-
-/* ---------- sub-navigation ---------- */
-
-.subnav {
-  margin: 0 0 32px;
-  border-bottom: 1px solid var(--cap-rule);
-}
-
-.subnavList {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 4px;
-  margin: 0;
-  padding: 0 0 10px;
-  list-style: none;
-}
-
-.subnavList a {
-  display: inline-block;
-  padding: 6px 10px;
-  border-radius: 6px;
-  color: var(--cap-muted);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.subnavList a:hover {
-  color: var(--cap-text);
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.subnavList a[aria-current="page"] {
-  color: var(--cap-text);
-  background: rgba(255, 255, 255, 0.08);
-}
-
-@media (pointer: coarse) {
-  .subnavList a {
-    padding: 10px 12px;
-  }
-}
-
-/* ---------- page heads ---------- */
-
-.pageHead {
-  max-width: 860px;
-  margin: 0 0 28px;
-}
-
-.pageTitle {
-  margin: 10px 0 12px;
-  font-size: clamp(2rem, 4.6vw, 3rem);
-}
-
-.lede {
-  margin: 0;
-  max-width: 720px;
-  color: var(--cap-muted);
-  font-size: 1rem;
-  line-height: 1.6;
-}
-
-.metaLine {
-  margin: 14px 0 0;
-  color: var(--cap-faint);
-  font-size: 0.8125rem;
-  line-height: 1.6;
-}
-
-.metaLine > span + span::before {
-  content: "\00B7";
-  margin: 0 8px;
-}
-
 /* ---------- marks (monogram or vendored lab mark) ---------- */
 
 .mark {
@@ -488,20 +765,17 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--cap-rule-strong);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
   color: var(--cap-muted);
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
 }
 
 .markLarge {
-  width: 48px;
-  height: 48px;
-  border-radius: 10px;
-  font-size: 1rem;
+  width: 44px;
+  height: 44px;
+  font-size: 1.125rem;
 }
 
 .mark img {
@@ -510,10 +784,10 @@
   object-fit: contain;
 }
 
-/* The company's own square picture fills the tile; the tile border stays as its edge. */
+/* A real square picture fills the slot, square corners at the 2px radius. */
 .markAvatar {
   overflow: hidden;
-  background: transparent;
+  border-radius: 2px;
 }
 
 .mark.markAvatar img {
@@ -538,35 +812,30 @@
 .ledgerTable {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 }
 
 .ledgerTable caption {
-  padding: 0 0 10px;
+  padding: 0 0 8px;
   color: var(--cap-muted);
   font-size: 0.8125rem;
   text-align: left;
 }
 
 .ledgerTable thead th {
-  position: sticky;
-  top: 0;
-  /* Above row links and the links raised over them (globals.css). */
-  z-index: 3;
-  padding: 8px 10px;
+  padding: 0 10px 8px;
   border-bottom: 1px solid var(--cap-rule-strong);
-  background: var(--service-canvas, #000);
   color: var(--cap-muted);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  letter-spacing: 0;
   text-align: left;
-  text-transform: uppercase;
+  text-transform: none;
   white-space: nowrap;
 }
 
 .ledgerTable td {
-  height: 40px;
+  height: 44px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--cap-rule);
   vertical-align: middle;
@@ -584,6 +853,37 @@
 
 .ledgerTable .right {
   text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The column that carries a figure and its source caption never squeezes to a
+   three-line wrap. In an auto table layout a cell's width is the column's
+   minimum, which min-width is not. */
+.ledgerTable .amountCell {
+  width: 168px;
+}
+
+/* The identity column gets a third of the table, so a long list in a later
+   column can never leave the name of the row with the least room. */
+.ledgerTable td.full {
+  width: 30%;
+}
+
+/* A short trailing column (a source, a status) shrinks to its content instead
+   of swallowing the slack the identity column left. */
+.ledgerTable .tightCol {
+  width: 1px;
+  white-space: nowrap;
+}
+
+/* Four or five columns read as one block: a table that narrow does not need the
+   whole canvas, and stretched it would leave a void between a name and its figure. */
+.ledgerTable.narrowTable {
+  max-width: 900px;
+}
+
+.ledgerTable th.right {
+  text-align: right;
 }
 
 .ledgerTable a {
@@ -591,12 +891,13 @@
 }
 
 .ledgerTable a:hover {
-  color: var(--cap-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .cellMain {
   display: block;
-  font-weight: 600;
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 
@@ -604,8 +905,8 @@
   display: block;
   margin-top: 2px;
   color: var(--cap-muted);
-  font-size: 0.75rem;
-  line-height: 1.4;
+  font-size: 0.8125rem;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
@@ -625,18 +926,13 @@
   height: auto;
   padding-top: 0;
   color: var(--cap-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 }
 
-/* Just above the stacked layout a wide table can run past the page: let its headers wrap. */
+/* Below a tablet's width a seven-column ledger stops fitting: the table becomes stacked
+   rows, first cell full width, the rest labelled. A key figure keeps its right edge
+   (tabular digits), so amounts still line up and no name breaks mid-word. */
 @media (max-width: 900px) {
-  .ledgerTable thead th {
-    white-space: normal;
-  }
-}
-
-/* On phones the ledger table becomes stacked rows: first cell full width, the rest labelled. */
-@media (max-width: 760px) {
   .ledgerStack thead {
     position: absolute;
     width: 1px;
@@ -648,25 +944,28 @@
   .ledgerStack tr {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px 14px;
-    padding: 12px 0;
+    gap: 10px 16px;
+    padding: 14px 0;
     border-bottom: 1px solid var(--cap-rule);
   }
 
   .ledgerStack td {
     display: block;
     height: auto;
-    padding: 0 !important;
+    padding: 0;
     border: 0;
-    text-align: left !important;
+    text-align: left;
   }
 
   .ledgerStack td[data-label]::before {
-    content: attr(data-label);
-    display: block;
-    margin-bottom: 2px;
+    content: attr(data-label) " ";
     color: var(--cap-faint);
-    font-size: 0.6875rem;
+    font-size: 0.8125rem;
+  }
+
+  .ledgerStack td.right {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
   .ledgerStack td.full {
@@ -679,11 +978,12 @@
     padding-top: 0;
   }
 
-  .hideMd {
-    display: none !important;
+  /* Cells the identity's sub-line repeats are dropped here; the desktop table keeps them. */
+  .ledgerStack .hideMd {
+    display: none;
   }
 
-  /* A stacked row drops cells that only hold "—"; the desktop table keeps them for alignment. */
+  /* A stacked row drops cells that only hold an em dash; the desktop table keeps them for alignment. */
   .ledgerStack td.emptyStacked {
     display: none;
   }
@@ -695,32 +995,46 @@
   display: inline-block;
   min-width: 64px;
   color: var(--cap-muted);
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .statusText {
   color: var(--cap-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
 
 .reported {
-  color: #ffb27a;
+  color: var(--cap-muted);
 }
 
 .srcLink {
-  color: var(--cap-accent-text) !important;
-  font-size: 0.75rem;
+  color: var(--cap-muted) !important;
+  font-size: 0.8125rem;
   white-space: nowrap;
   text-decoration: none;
 }
 
 .srcLink:hover {
   color: var(--cap-text) !important;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
+
+/* The dithered magnitude under an amount: decorative, the digits carry the value. */
+.amountBar {
+  display: block;
+  width: 96px;
+  max-width: 100%;
+  margin: 7px 0 0 auto;
+  opacity: 1;
+  pointer-events: none;
+}
+
 
 /* ---------- feed ---------- */
 
@@ -732,10 +1046,10 @@
 
 .feedRow {
   display: grid;
-  grid-template-columns: 92px 84px minmax(0, 1fr) minmax(120px, auto) 92px;
+  grid-template-columns: 92px 84px minmax(0, 1fr) minmax(120px, auto) 92px 76px;
   align-items: baseline;
   gap: 12px;
-  padding: 11px 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--cap-rule);
   font-size: 0.875rem;
 }
@@ -751,16 +1065,18 @@
 }
 
 .feedTitle a {
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
 }
 
 .feedTitle a:hover {
-  color: var(--cap-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .feedValue {
   text-align: right;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -768,8 +1084,48 @@
   text-align: right;
 }
 
-@media (max-width: 760px) {
-  .feedRow {
+.feedSource {
+  text-align: right;
+}
+
+/* The landing ledger: the page's own size (16px), a header row, no fills. */
+.feedHead {
+  display: grid;
+  grid-template-columns: 96px 88px minmax(0, 1fr) minmax(120px, auto) 92px 76px;
+  gap: 12px;
+  padding: 0 0 8px;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+}
+
+.feedHead span:nth-child(4),
+.feedHead span:nth-child(5),
+.feedHead span:nth-child(6) {
+  text-align: right;
+}
+
+.feedLedger .feedRow {
+  padding: 14px 0;
+  font-size: 1rem;
+}
+
+.feedLedger .feedDate,
+.feedLedger .tag,
+.feedLedger .feedStatus .statusText {
+  font-size: 0.9375rem;
+}
+
+.feedLedger .cellSub {
+  font-size: 0.875rem;
+}
+
+@media (max-width: 900px) {
+  .feedHead {
+    display: none;
+  }
+
+  .feedRow,
+  .feedLedger .feedRow {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 2px 12px;
   }
@@ -793,90 +1149,18 @@
   .feedValue {
     grid-column: 1;
     order: 4;
-    text-align: left;
+    text-align: right;
   }
 
   .feedStatus {
     grid-column: 2;
     order: 5;
   }
-}
 
-/* ---------- money-type cards ---------- */
-
-.moneyCards {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--cap-rule);
-  border-bottom: 1px solid var(--cap-rule);
-}
-
-.moneyCard {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  padding: 18px 20px 20px 0;
-}
-
-.moneyCard + .moneyCard {
-  padding-left: 20px;
-  border-left: 1px solid var(--cap-rule);
-}
-
-.moneyValue {
-  margin: 0;
-  color: var(--cap-cyan);
-  font-size: 1.75rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.1;
-  font-variant-numeric: tabular-nums;
-}
-
-.moneyCard p {
-  margin: 0;
-}
-
-.moneyCard .more {
-  margin-top: auto;
-  padding-top: 6px;
-}
-
-.moneyNote {
-  margin: 10px 0 0;
-  color: var(--cap-faint);
-  font-size: 0.75rem;
-}
-
-@media (max-width: 900px) {
-  .moneyCards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .moneyCard:nth-child(odd) {
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .moneyCard:nth-child(n + 3) {
-    border-top: 1px solid var(--cap-rule);
-  }
-}
-
-@media (max-width: 480px) {
-  .moneyCards {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .moneyCard,
-  .moneyCard + .moneyCard {
-    padding: 16px 0;
-    border-left: 0;
-  }
-
-  .moneyCard + .moneyCard {
-    border-top: 1px solid var(--cap-rule);
+  .feedSource {
+    grid-column: 1 / -1;
+    order: 6;
+    text-align: left;
   }
 }
 
@@ -886,15 +1170,16 @@
   margin: 0;
   padding: 0;
   list-style: none;
+  display: grid;
+  gap: 14px;
 }
 
 .stack2 li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--cap-rule);
-  font-size: 0.875rem;
+  align-items: baseline;
+  font-size: 1rem;
 }
 
 .flowArrow {
@@ -906,7 +1191,7 @@
 .multiples {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 18px 24px;
+  gap: 20px 24px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -916,23 +1201,10 @@
   min-width: 0;
 }
 
-/* Two small charts per row inside a half-width column (overview). */
-.multiplesTight {
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 16px 20px;
-}
-
 @media (max-width: 560px) {
   .multiples {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px 16px;
-  }
-}
-
-/* Overview: the stack and the capex charts share the row evenly. */
-@media (min-width: 861px) {
-  .gridEven {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
   }
 }
 
@@ -940,7 +1212,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 14px;
+  gap: 6px 16px;
 }
 
 .legendRow .legendKey {
@@ -953,16 +1225,18 @@
   justify-content: space-between;
   gap: 8px;
   margin: 0 0 6px;
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .multipleHead a {
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
 }
 
 .multipleHead a:hover {
-  color: var(--cap-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .bars {
@@ -971,12 +1245,13 @@
   height: 56px;
 }
 
+/* Reported quarter: the accent fill. Derived quarter: a 1px outline in the same hue. */
 .barFill {
   fill: var(--cap-accent);
 }
 
 .barDerived {
-  fill: rgba(0, 115, 255, 0.28);
+  fill: none;
   stroke: var(--cap-accent);
   stroke-width: 1;
 }
@@ -986,9 +1261,9 @@
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 0 8px;
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   color: var(--cap-faint);
-  font-size: 0.6875rem;
+  font-size: 0.8125rem;
 }
 
 .multipleFoot > span {
@@ -1000,6 +1275,8 @@
   align-items: center;
   gap: 6px;
   margin-right: 14px;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
 }
 
 .keySolid,
@@ -1015,7 +1292,6 @@
 
 .keyHollow {
   border: 1px solid var(--cap-accent);
-  background: rgba(0, 115, 255, 0.28);
 }
 
 /* ---------- filters ---------- */
@@ -1025,7 +1301,7 @@
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 10px 12px;
-  margin: 0 0 16px;
+  margin: 0 0 14px;
 }
 
 .field {
@@ -1034,22 +1310,24 @@
   gap: 4px;
   min-width: 0;
   color: var(--cap-muted);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .input {
+  width: 240px;
+  max-width: 100%;
   height: 34px;
   padding: 0 10px;
   border: 1px solid var(--cap-rule-strong);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 2px;
+  background: transparent;
   color: var(--cap-text);
   font: inherit;
-  font-size: 0.8125rem;
-  font-weight: 500;
+  font-size: 0.875rem;
+  font-weight: 400;
   letter-spacing: normal;
   text-transform: none;
 }
@@ -1057,15 +1335,10 @@
 /* The filter selects are the shared Select component; these set its size and colours. */
 .select {
   --select-height: 34px;
-  --select-font-size: 0.8125rem;
+  --select-font-size: 0.875rem;
   --select-padding-x: 10px;
-  --select-background: rgba(255, 255, 255, 0.03);
+  --select-background: transparent;
   --select-border-color: var(--cap-rule-strong);
-}
-
-.input {
-  width: 240px;
-  max-width: 100%;
 }
 
 .check {
@@ -1074,50 +1347,67 @@
   gap: 6px;
   height: 34px;
   color: var(--cap-muted);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 }
 
 .button {
   height: 34px;
   padding: 0 14px;
   border: 1px solid var(--cap-rule-strong);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  background: transparent;
   color: var(--cap-text);
   font: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 500;
   cursor: pointer;
+  transition: border-color 150ms ease;
 }
 
 .button:hover {
-  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--cap-text);
 }
 
+/* Filter rows are links; the selected one is marked by a 1px accent line under
+   its label exactly as wide as the label. */
 .views {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin: 0 0 16px;
+  gap: 4px 18px;
+  margin: 0 0 14px;
   padding: 0;
   list-style: none;
 }
 
 .views a {
+  position: relative;
   display: inline-block;
-  padding: 5px 10px;
-  border: 1px solid var(--cap-rule);
-  border-radius: 999px;
+  padding: 6px 0;
   color: var(--cap-muted);
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 500;
   text-decoration: none;
+  white-space: nowrap;
+  transition: color 150ms ease;
 }
 
-.views a[aria-current="true"] {
-  border-color: var(--cap-rule-strong);
-  background: rgba(255, 255, 255, 0.08);
+.views a::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: transparent;
+  content: "";
+}
+
+.views a:hover,
+.views a[aria-current] {
   color: var(--cap-text);
+}
+
+.views a[aria-current]::after {
+  background: var(--cap-accent-text);
 }
 
 @media (max-width: 640px) {
@@ -1137,6 +1427,10 @@
   .select {
     --select-height: 44px;
   }
+
+  .views a {
+    padding: 10px 0;
+  }
 }
 
 /* ---------- profile ---------- */
@@ -1144,20 +1438,20 @@
 .profileHead {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 16px 18px;
+  gap: 14px 18px;
   align-items: start;
-  margin: 0 0 24px;
+  margin: 0 0 20px;
 }
 
 .profileTitle {
-  margin: 6px 0 8px;
-  font-size: clamp(2rem, 4.4vw, 2.75rem);
+  margin: 0 0 8px;
+  font-size: 1.75rem;
 }
 
 .idLinks {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
+  gap: 4px 16px;
   margin: 10px 0 0;
   padding: 0;
   list-style: none;
@@ -1165,23 +1459,24 @@
 }
 
 .idLinks a {
-  color: var(--cap-accent-text);
+  color: var(--cap-muted);
   text-decoration: none;
 }
 
 .idLinks a:hover {
   color: var(--cap-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .sectionNav {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 16px;
-  margin: 24px 0 0;
-  padding: 0 0 12px;
+  gap: 2px 18px;
+  margin: 20px 0 0;
+  padding: 0;
   list-style: none;
-  border-bottom: 1px solid var(--cap-rule);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 }
 
 .sectionNav a {
@@ -1194,8 +1489,10 @@
 }
 
 .factSub a {
-  color: var(--cap-accent-text);
-  text-decoration: none;
+  color: var(--cap-text);
+  text-decoration: underline;
+  text-decoration-color: var(--cap-rule-strong);
+  text-underline-offset: 3px;
 }
 
 .quoteBlock {
@@ -1213,7 +1510,7 @@
 }
 
 .chipsInline > * + *::before {
-  content: "·";
+  content: "\00B7";
   margin: 0 7px;
   color: var(--cap-faint);
 }
@@ -1227,11 +1524,17 @@
 @media (max-width: 860px) {
   .twoCol {
     grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .profileHead {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 .sourcesOl {
   margin: 0;
+  max-width: 88ch;
   padding-left: 20px;
   color: var(--cap-muted);
   font-size: 0.8125rem;
@@ -1275,7 +1578,7 @@
   display: none;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .mobileOnly {
     display: inline;
   }
@@ -1287,4 +1590,66 @@
 
 .notesCol {
   max-width: 360px;
+}
+
+/* ---------- motion (landing page only) ----------
+   Transform and opacity only. Every hidden state sits inside
+   `prefers-reduced-motion: no-preference`, so the content is complete without
+   the animation, without JavaScript and for a reader who asked for less motion. */
+
+@keyframes capRise {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes capFieldIn {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .landing [data-enter] {
+    animation: capRise 620ms var(--ease-out) both;
+    animation-delay: calc(var(--i, 0) * 80ms);
+  }
+
+  .landing .heroField {
+    animation: capFieldIn 760ms var(--ease-expo) both;
+    animation-delay: 160ms;
+  }
+
+  /* One-way: Reveal.tsx adds the attribute, marks what is already on screen, and
+     never removes it. The parts rise into place and stay in the full ink the whole
+     time — no text is ever held at zero opacity, so a page read without the script
+     (or with frames frozen) still shows everything. */
+  html[data-reveal="on"] .landing [data-reveal] {
+    transform: translateY(18px);
+    transition: transform 760ms var(--ease-expo);
+  }
+
+  html[data-reveal="on"] .landing [data-reveal][data-reveal-in] {
+    transform: none;
+  }
+
+  html[data-reveal="on"] .landing .sectionHead > [data-reveal]:nth-child(2) {
+    transition-delay: 70ms;
+  }
+
+  html[data-reveal="on"] .landing .section > [data-reveal] {
+    transition-delay: 140ms;
+  }
 }

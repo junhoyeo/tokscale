@@ -1,8 +1,9 @@
 "use client";
 
-import { useId, type CSSProperties } from "react";
+import { useId } from "react";
 import styled from "styled-components";
 import { formatNumber } from "@/lib/utils";
+import { DitherSegmentBar } from "./ditherControls";
 import type { ProfileStatsData } from "./types";
 
 export interface TokenBreakdownProps {
@@ -21,13 +22,14 @@ const TOKEN_MIX_COLORS = {
 const BreakdownPanel = styled.section`
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--service-surface);
   color: var(--service-text);
+  container-type: inline-size;
 `;
 
 const BreakdownHeader = styled.header`
-  padding: 0.875rem 1rem;
+  padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--service-border);
 `;
 
@@ -51,33 +53,29 @@ const BreakdownBody = styled.div`
   padding: 0.875rem 1rem 1rem;
 `;
 
-const SegmentedBar = styled.div`
-  display: flex;
+const BarFrame = styled.div`
+  position: relative;
+  display: block;
   width: 100%;
-  height: 10px;
-  overflow: hidden;
-  border: 1px solid var(--service-border);
-  border-radius: 4px;
-  background: var(--service-surface-muted);
-`;
-
-const Segment = styled.span<{ $color: string; $weight: number }>`
-  min-width: ${(props) => (props.$weight > 0 ? "3px" : 0)};
-  flex: ${(props) => props.$weight} 1 0;
-  background: ${(props) => props.$color};
 `;
 
 const BreakdownList = styled.dl`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
-  gap: 0.75rem;
+  gap: 0.75rem 1rem;
   margin: 0.875rem 0 0;
+
+  @container (max-width: 34rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    > div:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
+    }
+  }
 `;
 
 const BreakdownItem = styled.div`
   min-width: 0;
-  border-left: 2px solid var(--segment-color);
-  padding-left: 0.5rem;
 `;
 
 const LabelRow = styled.div`
@@ -92,8 +90,7 @@ const Marker = styled.span<{ $color: string }>`
   width: 0.5rem;
   height: 0.5rem;
   background: ${(props) => props.$color};
-  border-radius: 2px;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
+  border-radius: 1px;
 `;
 
 const Label = styled.dt`
@@ -109,7 +106,7 @@ const ValueRow = styled.dd`
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.25rem;
+  gap: 0.375rem;
   margin: 0.25rem 0 0;
   color: var(--service-text);
   font-size: 0.9375rem;
@@ -120,8 +117,8 @@ const ValueRow = styled.dd`
 
 const Percentage = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-weight: 500;
+  font-size: 0.75rem;
+  font-weight: 400;
 `;
 
 function finiteNonnegative(value: number | undefined): number {
@@ -179,27 +176,20 @@ export function TokenBreakdown({ stats, className }: TokenBreakdownProps) {
       <BreakdownHeader>
         <BreakdownHeading id={headingId}>Token mix</BreakdownHeading>
         <BreakdownDescription id={descriptionId}>
-          Distribution across input, output, cache, and reasoning tokens.
+          Share of input, output, cache, and reasoning tokens.
         </BreakdownDescription>
       </BreakdownHeader>
 
       <BreakdownBody>
-        <SegmentedBar
-          role="img"
-          aria-label={`Token distribution: ${describedBreakdown}`}
-        >
-          {tokenTypes
-            .filter((type) => type.value > 0)
-            .map((type) => (
-              <Segment
-                key={type.label}
-                $color={type.color}
-                $weight={type.value}
-                aria-hidden="true"
-                title={`${type.label}: ${formatNumber(type.value)}`}
-              />
-            ))}
-        </SegmentedBar>
+        <BarFrame role="img" aria-label={`Token distribution: ${describedBreakdown}`}>
+          <DitherSegmentBar
+            height={12}
+            segments={tokenTypes.map((type) => ({
+              weight: type.value,
+              color: type.color,
+            }))}
+          />
+        </BarFrame>
 
         <BreakdownList>
           {tokenTypes.map((type) => {
@@ -211,10 +201,7 @@ export function TokenBreakdown({ stats, className }: TokenBreakdownProps) {
                 : 0;
 
             return (
-              <BreakdownItem
-                key={type.label}
-                style={{ "--segment-color": type.color } as CSSProperties}
-              >
+              <BreakdownItem key={type.label}>
                 <LabelRow>
                   <Marker $color={type.color} aria-hidden="true" />
                   <Label>{type.label}</Label>

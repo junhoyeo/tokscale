@@ -4,7 +4,7 @@ import { TOKSCALE_X_HANDLE } from "@/lib/community";
 import { capitalPath, methodologyPath, spendingUrl } from "@/lib/capital";
 import { formatMoney, formatPartialDate, formatTotal, ledger } from "@/lib/capital/ledger";
 import { calendarSpanLabel, fiscalLabel } from "@/lib/capital/ledger/capex";
-import { Missing } from "../_components/Amount";
+import { AmountBar, Missing, maxByCurrency } from "../_components/Amount";
 import { Breadcrumbs } from "../_components/Breadcrumbs";
 import { CapexBars } from "../_components/CapexBars";
 import { CapexSources } from "../_components/CapexSources";
@@ -12,7 +12,6 @@ import { CapitalShell } from "../_components/CapitalShell";
 import { JsonLd } from "../_components/JsonLd";
 import { OrgMark } from "../_components/OrgMark";
 import styles from "../_components/capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 
 const TITLE = "AI Capex Tracker: Cash Spending by Microsoft, Amazon, Alphabet, Meta and Oracle | Tokscale";
 const DESCRIPTION =
@@ -31,6 +30,13 @@ export default function SpendingPage() {
   const quarter = ledger.capexCalendarQuarter();
   const retrieved = ledger.capexRetrievedAt.slice(0, 10);
   const years = rows.flatMap((r) => r.view.quarters.map((q) => q.start.slice(0, 4))).sort();
+  // Bars are scaled inside one currency; nothing on this page is converted.
+  const scale = maxByCurrency(
+    rows.map(({ view }) => {
+      const last = view.quarters.at(-1) ?? null;
+      return { value: last?.value ?? null, currency: last?.currency ?? "" };
+    })
+  );
   const inSum = new Set(quarter ? quarter.entries.map((e) => e.org.id) : []);
   const leftOut = quarter ? rows.filter((r) => !inSum.has(r.org.id)) : [];
 
@@ -52,7 +58,6 @@ export default function SpendingPage() {
       />
       <Breadcrumbs items={[{ label: "Capital", href: capitalPath() }, { label: "Spending" }]} />
       <header className={styles.pageHead}>
-        <Eyebrow>Spending</Eyebrow>
         <h1 className={`${styles.display} ${styles.pageTitle}`}>Cash paid for property and equipment</h1>
         <p className={styles.lede}>
           How much the companies that build AI capacity spend on servers, buildings and power equipment, quarter by quarter,
@@ -73,7 +78,7 @@ export default function SpendingPage() {
                 {quarter.label}, {quarter.entries.length} companies
               </dt>
               <dd className={styles.statValue}>
-                <span className={styles.cyan}>{formatTotal(quarter.total)}</span>
+                <span className={styles.num}>{formatTotal(quarter.total)}</span>
               </dd>
               <dd className={styles.statSub}>
                 {calendarSpanLabel(quarter.entries[0].quarter.start, quarter.entries[0].quarter.end)}, only companies whose fiscal
@@ -149,7 +154,7 @@ export default function SpendingPage() {
             <tr>
               <th scope="col">Company</th>
               <th scope="col">Latest quarter</th>
-              <th scope="col" className={styles.right}>
+              <th scope="col" className={`${styles.right} ${styles.amountCell}`}>
                 Cash paid
               </th>
               <th scope="col" className={styles.right}>
@@ -199,13 +204,14 @@ export default function SpendingPage() {
                       <Missing reason="No quarterly figure: the company files full years only, or quarters cannot be derived" />
                     )}
                   </td>
-                  <td className={styles.right} data-label="Cash paid">
+                  <td className={`${styles.right} ${styles.amountCell}`} data-label="Cash paid">
                     {last ? (
                       <>
                         <span className={styles.num}>{formatMoney(last.value, last.currency)}</span>
                         <span className={styles.cellSub}>
                           <CapexSources sources={last.sources} compact />
                         </span>
+                        <AmountBar value={last.value} max={scale.get(last.currency) ?? 0} />
                       </>
                     ) : (
                       <Missing />

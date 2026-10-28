@@ -1,15 +1,13 @@
 "use client";
 
 import { useId, useMemo, useState } from "react";
-import Link from "next/link";
 import styled from "styled-components";
+import { DitherTabPanel } from "dither-kit/DitherTabPanel";
 import { Navigation } from "@/components/layout/Navigation";
-import { PublicFooter } from "@/components/layout/PublicFooter";
+import { ServiceFooter } from "@/components/layout/ServiceFooter";
 import {
   createContributionRangeOptions,
-  getContributionDayForDate,
   getDefaultContributionDate,
-  ProfileContributionBreakdown,
   ProfileContributionGraph,
   ProfileDevices,
   ProfileModels,
@@ -32,7 +30,7 @@ import { useSettings } from "@/lib/useSettings";
 import { resolveEffectiveTimeZone } from "@/lib/timezone";
 import type { ModerationNotice } from "@/lib/moderation/notice";
 
-import { PROFILE_PERIODS, PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
+import { PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
 
 export interface ProfileData {
   user: {
@@ -112,15 +110,18 @@ const EARLY_ADOPTERS = ["code-yeongyu", "gtg7784", "qodot"];
 const ModerationNoticeBanner = styled.div<{ $tone: ModerationNotice["tone"] }>`
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 20px;
-  padding: 16px 18px;
+  gap: 0.375rem;
+  padding: 0.875rem 1rem;
   border: 1px solid
     ${({ $tone }) =>
-      $tone === "our-fault" ? "rgba(47, 143, 255, 0.4)" : "rgba(217, 119, 6, 0.45)"};
-  border-radius: 10px;
+      $tone === "our-fault"
+        ? "color-mix(in srgb, var(--service-accent) 40%, transparent)"
+        : "color-mix(in srgb, #f4b740 45%, transparent)"};
+  border-radius: var(--radius);
   background: ${({ $tone }) =>
-    $tone === "our-fault" ? "rgba(47, 143, 255, 0.09)" : "rgba(217, 119, 6, 0.09)"};
+    $tone === "our-fault"
+      ? "var(--service-accent-soft)"
+      : "color-mix(in srgb, #f4b740 9%, transparent)"};
 
   strong {
     color: var(--service-text);
@@ -131,7 +132,7 @@ const ModerationNoticeBanner = styled.div<{ $tone: ModerationNotice["tone"] }>`
   span {
     color: var(--service-text-muted);
     font-size: 0.875rem;
-    line-height: 1.6;
+    line-height: 1.55;
   }
 `;
 
@@ -226,12 +227,6 @@ export default function ProfilePageClient({
     contributionRangeIdentity,
     defaultContributionDate,
   );
-  const selectedContributionDay = useMemo(
-    () =>
-      getContributionDayForDate(data.contributions, selectedContributionDate),
-    [data.contributions, selectedContributionDate],
-  );
-
   const user: ProfileUser = useMemo(
     () => ({
       username: data.user.username,
@@ -271,16 +266,21 @@ export default function ProfilePageClient({
     );
   }, [data.modelUsage]);
 
+  const modelsCount = useMemo(
+    () => data.models.filter((model) => model !== "<synthetic>").length,
+    [data.models],
+  );
+
   const showResubmitBanner =
     EARLY_ADOPTERS.includes(data.user.username) &&
     data.stats.submissionCount === 1;
 
   return (
-    <PageContainer>
+    <div className="service-page-shell">
       <Navigation />
 
-      <MainContent id="main-content">
-        <ContentWrapper>
+      <main className="service-main" id="main-content">
+        <Stack>
           {moderationNotice && (
             <ModerationNoticeBanner role="status" $tone={moderationNotice.tone}>
               <strong>{moderationNotice.title}</strong>
@@ -308,27 +308,14 @@ export default function ProfilePageClient({
               role="note"
               title="Totals include usage imported from a third-party export via `tokscale import`, not only locally-scanned CLI sessions."
             >
-              includes imported history
+              Includes imported history
             </BackfillBadge>
           )}
 
-          <ViewControls aria-label="Profile data views">
-            <TabsScroller>
-              <ProfileTabBar activeTab={activeTab} onTabChange={setActiveTab} />
-            </TabsScroller>
-            <ProfilePeriodSelector username={username} current={period} />
-          </ViewControls>
-
-          {activeTab === "activity" && (
-            <TabPanel
-              role="tabpanel"
-              id="tabpanel-activity"
-              aria-labelledby="tab-activity"
-            >
+          <ProfileTabBar activeTab={activeTab} onTabChange={setActiveTab}>
+            <DitherTabPanel value="activity">
               {data.contributions.length > 0 ? (
-                <ActivityDashboardGrid>
-                  <ContributionColumn>
-                    <ContributionArea>
+                <ActivityLayout>
                       <ProfileContributionGraph
                         breakdownId={contributionBreakdownId}
                         contributions={data.contributions}
@@ -351,7 +338,6 @@ export default function ProfilePageClient({
                         rangeValue={selectedContributionRange?.value}
                         selectableRangeEnd={contributionSelectionEnd}
                         selectedDate={selectedContributionDate}
-                        showBreakdown={false}
                         view={contributionView}
                         description={
                           period === "all"
@@ -365,19 +351,10 @@ export default function ProfilePageClient({
                                 : `Daily contribution density for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC).`
                         }
                       />
-                    </ContributionArea>
-                    {selectedContributionDay && (
-                      <BreakdownArea>
-                        <ProfileContributionBreakdown
-                          day={selectedContributionDay}
-                          id={contributionBreakdownId}
-                          paletteName={contributionPalette}
-                        />
-                      </BreakdownArea>
-                    )}
-                  </ContributionColumn>
+
+
                   <UsageColumn>
-                    <UsageArea>
+                    <PanelBand>
                       <ProfileUsageChart
                         contributions={data.contributions}
                         averageWindowDays={period === "all" ? 30 : 7}
@@ -393,53 +370,51 @@ export default function ProfilePageClient({
                                 : `Model activity for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC), grouped by provider.`
                         }
                       />
-                    </UsageArea>
-                    <DetailsArea>
+
+                    </PanelBand>
+                    <PanelBand>
                       <ProfileInsights
                         stats={stats}
                         favoriteModel={favoriteModel}
                         clients={data.clients}
-                        models={data.models}
                         mcpServers={data.mcpServers ?? []}
+                        modelsCount={modelsCount}
                         period={period}
                       />
-                    </DetailsArea>
-                    <TokenArea>
+                    </PanelBand>
+                    <PanelBand>
                       <TokenBreakdown stats={stats} />
-                    </TokenArea>
+                    </PanelBand>
                   </UsageColumn>
-                </ActivityDashboardGrid>
+                </ActivityLayout>
               ) : (
                 <EmptyState>
-                  <EmptyTitle>No usage history yet</EmptyTitle>
+                  <EmptyTitle>No usage data in this range</EmptyTitle>
                   <EmptyCopy>
-                    Daily activity will appear after the next Tokscale
-                    submission.
+                    Daily activity appears after the next Tokscale submission.
+                    Run <code>bunx tokscale submit</code> from the machine you
+                    build on.
                   </EmptyCopy>
                 </EmptyState>
               )}
-            </TabPanel>
-          )}
+            </DitherTabPanel>
 
-          {activeTab === "models" && (
-            <TabPanel
-              role="tabpanel"
-              id="tabpanel-models"
-              aria-labelledby="tab-models"
-            >
-              <ProfileModels
-                models={data.models}
-                modelUsage={data.modelUsage}
-              />
-            </TabPanel>
-          )}
+            <DitherTabPanel value="models">
+              <ModelsPanel>
+                <ProfileModels
+                  models={data.models}
+                  modelUsage={data.modelUsage}
+                />
+              </ModelsPanel>
+            </DitherTabPanel>
+          </ProfileTabBar>
 
           <ProfileDevices devices={initialDevices ?? []} />
-        </ContentWrapper>
-      </MainContent>
+        </Stack>
+      </main>
 
-      <PublicFooter />
-    </PageContainer>
+      <ServiceFooter />
+    </div>
   );
 }
 
@@ -447,15 +422,15 @@ function ProfileInsights({
   stats,
   favoriteModel,
   clients,
-  models,
   mcpServers,
+  modelsCount,
   period,
 }: {
   stats: ProfileStatsData;
   favoriteModel: string | null;
   clients: string[];
-  models: string[];
   mcpServers: string[];
+  modelsCount: number;
   period: ProfilePeriod;
 }) {
   const rangeLabel =
@@ -474,13 +449,16 @@ function ProfileInsights({
         }
       : {
           label: "Selected range",
-          value: period === "month" ? "Last 30 days" : period === "week" ? "Last 7 days" : `${rangeLabel} (UTC)`,
+          value:
+            period === "month"
+              ? "Last 30 days"
+              : period === "week"
+                ? "Last 7 days"
+                : `${rangeLabel} (UTC)`,
         },
     {
       label: period === "all" ? "Models (latest)" : `Models (${rangeLabel})`,
-      value: models
-        .filter((model) => model !== "<synthetic>")
-        .length.toLocaleString("en-US"),
+      value: modelsCount.toLocaleString("en-US"),
     },
   ];
 
@@ -488,7 +466,6 @@ function ProfileInsights({
     <InsightsPanel aria-labelledby="profile-insights-title">
       <InsightsHeader>
         <InsightsTitle id="profile-insights-title">Usage details</InsightsTitle>
-        <InsightsDescription>Scope is shown for each fact.</InsightsDescription>
       </InsightsHeader>
 
       <InsightsGrid>
@@ -532,255 +509,101 @@ function MetadataList({ label, items }: { label: string; items: string[] }) {
   );
 }
 
-const PERIOD_OPTIONS = PROFILE_PERIODS.map((value) => ({ value, label: PROFILE_PERIOD_LABELS[value] }));
-
-function buildProfilePeriodHref(
-  username: string,
-  period: ProfilePeriod,
-): string {
-  const basePath = `/u/${encodeURIComponent(username)}`;
-  return period === "all" ? basePath : `${basePath}?period=${period}`;
-}
-
-function ProfilePeriodSelector({
-  username,
-  current,
-}: {
-  username: string;
-  current: ProfilePeriod;
-}) {
-  return (
-    <PeriodSelectorContainer aria-label="Usage range">
-      {PERIOD_OPTIONS.map((option) => {
-        const isActive = current === option.value;
-        return (
-          <PeriodLink
-            key={option.value}
-            href={buildProfilePeriodHref(username, option.value)}
-            $active={isActive}
-            aria-current={isActive ? "page" : undefined}
-          >
-            {option.label}
-          </PeriodLink>
-        );
-      })}
-    </PeriodSelectorContainer>
-  );
-}
-
-const PageContainer = styled.div`
-  isolation: isolate;
-  color-scheme: dark;
-  min-height: 100dvh;
+const Stack = styled.div`
   display: flex;
   flex-direction: column;
-  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
-  color: var(--service-text);
-`;
-
-const MainContent = styled.main`
-  width: 100%;
-  max-width: 1500px;
-  flex: 1;
-  margin: 0 auto;
-  padding: 96px 32px 40px;
-
-  @media (max-width: 520px) {
-    padding-right: 16px;
-    padding-left: 16px;
-    padding-top: 88px;
-    padding-bottom: 40px;
-  }
-`;
-
-const ContentWrapper = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+  gap: 1.25rem;
 `;
 
 const UpdateNotice = styled.p`
   margin: 0;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, #f4b740 28%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, #f4b740 9%, transparent);
+  padding: 0.625rem 0.875rem;
+  border: 1px solid color-mix(in srgb, #f4b740 30%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, #f4b740 8%, transparent);
   color: #f4d38a;
-  font-size: 16px;
-  line-height: 24px;
+  font-size: 0.875rem;
+  line-height: 1.5;
 
   code {
-    padding: 2px 5px;
-    border-radius: 4px;
-    background: color-mix(in srgb, #f4b740 12%, transparent);
+    padding: 1px 5px;
+    border: 1px solid color-mix(in srgb, #f4b740 22%, transparent);
+    border-radius: 2px;
     color: inherit;
     font-size: 0.8125rem;
-  }
-
-  @media (min-width: 640px) {
-    font-size: 14px;
-    line-height: 20px;
   }
 `;
 
 const BackfillBadge = styled.span`
   align-self: flex-start;
-  padding: 3px 10px;
-  border: 1px solid color-mix(in srgb, var(--service-text) 18%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--service-text) 6%, transparent);
-  color: color-mix(in srgb, var(--service-text) 72%, transparent);
-  font-size: 12px;
-  line-height: 18px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
 `;
 
-const ViewControls = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-
-  @media (max-width: 560px) {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-`;
-
-const TabsScroller = styled.div`
-  max-width: 100%;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
-`;
-
-const PeriodSelectorContainer = styled.nav`
-  display: inline-flex;
-  max-width: 100%;
-  flex-wrap: wrap;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--service-border);
-  border-radius: 10px;
-  background: var(--service-surface-muted);
-`;
-
-const PeriodLink = styled(Link)<{ $active: boolean }>`
-  position: relative;
-  display: inline-flex;
-  min-width: 44px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 10px;
-  border-radius: 7px;
-  background: ${({ $active }) =>
-    $active ? "var(--service-surface)" : "transparent"};
-  color: ${({ $active }) =>
-    $active ? "var(--service-text)" : "var(--service-text-muted)"};
-  font-size: 13px;
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-
-  &:hover {
-    color: var(--service-text);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (pointer: coarse) {
-    &::after {
-      position: absolute;
-      inset: 50% auto auto 50%;
-      width: max(100%, 48px);
-      height: max(100%, 48px);
-      content: "";
-      transform: translate(-50%, -50%);
-    }
-  }
-`;
-
-const TabPanel = styled.section`
-  min-width: 0;
-`;
-
-const ActivityDashboardGrid = styled.div`
+const ActivityLayout = styled.div`
   display: grid;
   min-width: 0;
-  gap: 14px;
+  gap: 0.875rem;
+  padding-top: 1.25rem;
+  align-items: stretch;
 
   @media (min-width: 1360px) {
-    grid-template-columns: minmax(650px, 1fr) minmax(0, 1.2fr);
-    align-items: start;
+    grid-template-columns: minmax(620px, 1fr) minmax(0, 1.12fr);
   }
 `;
 
-const DashboardArea = styled.div`
+const PanelBand = styled.div`
   min-width: 0;
 `;
 
-const DashboardColumn = styled.div`
+const UsageColumn = styled.div`
   display: grid;
   min-width: 0;
-  gap: 14px;
+  gap: 0.875rem;
   align-content: start;
 `;
 
-const ContributionColumn = styled(DashboardColumn)``;
-
-const UsageColumn = styled(DashboardColumn)``;
-
-const UsageArea = styled(DashboardArea)``;
-
-const ContributionArea = styled(DashboardArea)``;
-
-const BreakdownArea = styled(DashboardArea)``;
-
-const DetailsArea = styled(DashboardArea)``;
-
-const TokenArea = styled(DashboardArea)``;
+const ModelsPanel = styled.div`
+  min-width: 0;
+  padding-top: 1.25rem;
+`;
 
 const EmptyState = styled.div`
-  padding: 40px 24px;
+  margin-top: 1.25rem;
+  padding: 1.75rem 1.25rem;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
-  text-align: center;
+  border-radius: var(--radius);
 `;
 
 const EmptyTitle = styled.h2`
   margin: 0;
   color: var(--service-text);
-  font-size: 18px;
-  font-weight: 500;
+  font-size: 1.0625rem;
+  font-weight: 600;
 `;
 
 const EmptyCopy = styled.p`
-  max-width: 42ch;
-  margin: 8px auto 0;
+  max-width: 52ch;
+  margin: 0.5rem 0 0;
   color: var(--service-text-muted);
-  font-size: 16px;
-  line-height: 24px;
+  font-size: 0.9375rem;
+  line-height: 1.55;
 
-  @media (min-width: 640px) {
-    font-size: 14px;
-    line-height: 20px;
+  code {
+    padding: 1px 5px;
+    border: 1px solid var(--service-border);
+    border-radius: 2px;
+    background: var(--service-surface-muted);
+    color: var(--service-text);
+    font-size: 0.875rem;
   }
 `;
 
 const InsightsPanel = styled.section`
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--service-surface);
   container-type: inline-size;
 `;
@@ -789,44 +612,33 @@ const InsightsHeader = styled.div`
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--service-border);
-
-  @container (max-width: 28rem) {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
-  }
 `;
 
 const InsightsTitle = styled.h2`
   margin: 0;
   color: var(--service-text);
-  font-size: 16px;
-  font-weight: 500;
-`;
-
-const InsightsDescription = styled.p`
-  margin: 0;
-  color: var(--service-text-muted);
-  font-size: 13px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 `;
 
 const InsightsGrid = styled.dl`
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
-  padding: 0 16px;
+  padding: 0 1rem;
 
   @container (min-width: 42rem) {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 `;
 
 const InsightItem = styled.div`
   min-width: 0;
-  padding: 14px 0;
+  padding: 0.75rem 0;
   border-top: 1px solid var(--service-border);
 
   &:nth-child(-n + 2) {
@@ -834,89 +646,88 @@ const InsightItem = styled.div`
   }
 
   &:nth-child(odd) {
-    padding-right: 14px;
+    padding-right: 0.875rem;
   }
 
   &:nth-child(even) {
-    padding-left: 14px;
+    padding-left: 0.875rem;
     border-left: 1px solid var(--service-border);
   }
 
   @container (min-width: 42rem) {
-    padding: 14px;
-    border-top: 0;
-    border-left: 1px solid var(--service-border);
+    padding: 0.75rem 0.875rem;
 
     &:first-child {
       padding-left: 0;
-      border-left: 0;
     }
 
-    &:last-child {
-      padding-right: 0;
+    &:nth-child(n + 1) {
+      border-top: 0;
+    }
+
+    &:nth-child(n + 2) {
+      border-left: 1px solid var(--service-border);
+    }
+  }
+
+  @container (max-width: 28rem) {
+    &:nth-child(n + 3) {
+      border-top: 1px solid var(--service-border);
     }
   }
 `;
 
 const InsightLabel = styled.dt`
   overflow: hidden;
-  color: var(--service-text);
-  font-size: 13px;
-  font-weight: 500;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
 
 const InsightValue = styled.dd`
   overflow: hidden;
-  margin: 4px 0 0;
-  color: var(--service-text-muted);
-  font-size: 16px;
+  margin: 0.25rem 0 0;
+  color: var(--service-text);
+  font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
-
-  @media (min-width: 640px) {
-    font-size: 14px;
-  }
 `;
 
 const MetadataRow = styled.div`
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 0.75rem;
   align-items: start;
-  padding: 10px 16px;
+  padding: 0.625rem 1rem;
   border-top: 1px solid var(--service-border);
 
   @container (max-width: 28rem) {
     grid-template-columns: 1fr;
-    gap: 8px;
+    gap: 0.375rem;
   }
 `;
 
 const MetadataLabel = styled.span`
-  padding-top: 4px;
-  color: var(--service-text);
-  font-size: 13px;
-  font-weight: 500;
+  padding-top: 2px;
+  color: var(--service-text-muted);
+  font-size: 0.75rem;
 `;
 
 const MetadataItems = styled.div`
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 0.375rem 0.75rem;
 `;
 
 const MetadataChip = styled.span`
-  max-width: 180px;
+  max-width: 14rem;
   overflow: hidden;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--service-surface-muted);
-  color: var(--service-text-muted);
-  font-size: 13px;
+  color: var(--service-text);
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;

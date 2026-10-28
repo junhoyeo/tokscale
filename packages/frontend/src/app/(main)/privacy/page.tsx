@@ -4,7 +4,7 @@ import { LegalPageShell } from "@/components/layout/LegalPageShell";
 import { legalUrl } from "@/lib/seo/urls";
 
 const DESCRIPTION =
-  "What Tokscale collects, what it never collects, and how to delete your data. Tokscale records token counts and costs only — never prompts, responses, or source code.";
+  "What Tokscale collects, what it never collects, and how to delete your data. Tokscale records token counts and costs only, never prompts, responses or source code.";
 
 export const metadata: Metadata = {
   title: "Privacy Policy | Tokscale",
@@ -21,7 +21,11 @@ export const metadata: Metadata = {
 
 export default function PrivacyPage() {
   return (
-    <LegalPageShell title="Privacy Policy" lastUpdated="July 30, 2026">
+    <LegalPageShell
+      title="Privacy Policy"
+      lede="What Tokscale collects when you sign in or submit usage, why it keeps it, and how to have it removed."
+      lastUpdated="July 30, 2026"
+    >
       <p>
         Tokscale is an open-source tool and public leaderboard for tracking AI
         coding assistant token usage. It is operated by Junho Yeo. The full
@@ -36,7 +40,7 @@ export default function PrivacyPage() {
         .
       </p>
 
-      <h2>What Tokscale never collects</h2>
+      <h2 id="what-tokscale-never-collects">What Tokscale never collects</h2>
       <p>
         The Tokscale CLI reads your local AI assistant session files to count
         tokens. It does not transmit their contents. Specifically, Tokscale
@@ -58,7 +62,7 @@ export default function PrivacyPage() {
         inspect exactly what would be sent before submitting anything.
       </p>
 
-      <h2>Information from your GitHub account</h2>
+      <h2 id="information-from-your-github-account">Information from your GitHub account</h2>
       <p>
         Signing in uses GitHub OAuth with the <code>read:user</code> and{" "}
         <code>user:email</code> scopes. Tokscale stores your GitHub numeric ID,
@@ -66,7 +70,7 @@ export default function PrivacyPage() {
         requests access to your repositories.
       </p>
 
-      <h2>Usage data you submit</h2>
+      <h2 id="usage-data-you-submit">Usage data you submit</h2>
       <p>When you run a submission, the CLI sends:</p>
       <ul>
         <li>
@@ -79,7 +83,7 @@ export default function PrivacyPage() {
           Identifiers of the AI clients used (for example Claude Code, Cursor,
           Codex) and of the models used
         </li>
-        <li>Message counts — how many messages, never their content</li>
+        <li>Message counts: how many messages, never their content</li>
         <li>
           Session timing metrics: total active time, longest continuous session,
           maximum concurrent sessions, and session count
@@ -92,7 +96,7 @@ export default function PrivacyPage() {
         device key and the device label reported by the CLI.
       </p>
 
-      <h2>What is public</h2>
+      <h2 id="what-is-public">What is public</h2>
       <p>
         Tokscale is a public leaderboard, so once you submit, your profile page
         and leaderboard entry are visible to anyone, including people who are
@@ -106,41 +110,41 @@ export default function PrivacyPage() {
         your submitted data or your account using the options below.
       </p>
 
-      <h2>Cookies</h2>
+      <h2 id="cookies">Cookies</h2>
       <ul>
         <li>
-          <strong>Session cookie</strong> — keeps you signed in after GitHub
+          <strong>Session cookie</strong>: keeps you signed in after GitHub
           authentication
         </li>
         <li>
-          <strong>OAuth state cookie</strong> — short-lived, protects the
+          <strong>OAuth state cookie</strong>: short-lived, protects the
           sign-in flow against cross-site request forgery
         </li>
         <li>
           <strong>
             <code>leaderboard-sort-by</code>
           </strong>{" "}
-          — remembers whether you sort the leaderboard by tokens or cost
+          : remembers whether you sort the leaderboard by tokens or cost
         </li>
       </ul>
 
-      <h2>Analytics and service providers</h2>
+      <h2 id="analytics-and-service-providers">Analytics and service providers</h2>
       <p>Tokscale relies on these third parties:</p>
       <ul>
         <li>
-          <strong>GitHub</strong> — authentication
+          <strong>GitHub</strong>: authentication
         </li>
         <li>
-          <strong>Vercel</strong> — hosting, and Vercel Analytics for aggregate
+          <strong>Vercel</strong>: hosting, and Vercel Analytics for aggregate
           page view statistics
         </li>
         <li>
-          <strong>Neon</strong> — the PostgreSQL database where the data above
+          <strong>Neon</strong>: the PostgreSQL database where the data above
           is stored
         </li>
       </ul>
 
-      <h2>Advertising</h2>
+      <h2 id="advertising">Advertising</h2>
       <p>
         Tokscale does not currently display advertising and sets no advertising
         cookies. If advertising is introduced, this policy will be updated
@@ -149,18 +153,18 @@ export default function PrivacyPage() {
         on prior visits to a site.
       </p>
 
-      <h2>Deleting your data</h2>
+      <h2 id="deleting-your-data">Deleting your data</h2>
       <p>
         Both options are available from{" "}
         <Link href="/settings">your settings page</Link>:
       </p>
       <ul>
         <li>
-          <strong>Delete submitted data</strong> — permanently removes your
+          <strong>Delete submitted data</strong>: permanently removes your
           submissions and device records while keeping your account
         </li>
         <li>
-          <strong>Delete account</strong> — permanently removes your account and
+          <strong>Delete account</strong>: permanently removes your account and
           every record associated with it, including submissions, devices, API
           tokens, and group memberships
         </li>
@@ -170,14 +174,14 @@ export default function PrivacyPage() {
         Tokscale&apos;s access from your GitHub account settings at any time.
       </p>
 
-      <h2>Changes to this policy</h2>
+      <h2 id="changes-to-this-policy">Changes to this policy</h2>
       <p>
         Material changes will be reflected in the &ldquo;last updated&rdquo; date
         at the top of this page. Because Tokscale is open source, the full
         history of this document is visible in the repository.
       </p>
 
-      <h2>Contact</h2>
+      <h2 id="contact">Contact</h2>
       <p>
         Questions about this policy can go to{" "}
         <a href="mailto:i@junho.io">i@junho.io</a> or the{" "}

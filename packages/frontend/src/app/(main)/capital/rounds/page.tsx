@@ -3,14 +3,13 @@ import Link from "next/link";
 import { TOKSCALE_X_HANDLE } from "@/lib/community";
 import { capitalPath, methodologyPath, roundsPath, roundsUrl } from "@/lib/capital";
 import { EQUITY_MEASURES, financingAmount, formatPartialDate, ledger, type EventView, type Measure } from "@/lib/capital/ledger";
-import { Amount, Missing } from "../_components/Amount";
+import { Amount, AmountBar, Missing, maxByCurrency } from "../_components/Amount";
 import { Breadcrumbs } from "../_components/Breadcrumbs";
 import { CapitalShell } from "../_components/CapitalShell";
 import { EventFeed } from "../_components/EventFeed";
 import { JsonLd } from "../_components/JsonLd";
 import { SourceLink } from "../_components/SourceLink";
 import styles from "../_components/capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 
 const TITLE = "AI Funding Rounds, Debt and IPOs | Tokscale";
 const DESCRIPTION =
@@ -43,6 +42,13 @@ export default async function RoundsPage({ searchParams }: PageProps) {
   const all = ledger.getFinancings();
   const rows = all.filter(filter.match);
   const acquisitions = ledger.getDeals().filter((e) => e.event.kind === "acquisition");
+  // Bars are scaled inside one currency, so a euro figure never sits against a dollar one.
+  const scale = maxByCurrency(
+    rows.map((e) => {
+      const main = financingAmount(e, filter.measures);
+      return { value: main?.amount.value ?? null, currency: main?.amount.currency ?? "" };
+    })
+  );
 
   return (
     <CapitalShell section="rounds">
@@ -58,7 +64,6 @@ export default async function RoundsPage({ searchParams }: PageProps) {
       />
       <Breadcrumbs items={[{ label: "Capital", href: capitalPath() }, { label: "Rounds" }]} />
       <header className={styles.pageHead}>
-        <Eyebrow>Rounds</Eyebrow>
         <h1 className={`${styles.display} ${styles.pageTitle}`}>Funding rounds, debt and IPOs</h1>
         <p className={styles.lede}>
           How AI companies raise money. Each event has one page with its amounts, investors and the sentence each number comes
@@ -84,7 +89,7 @@ export default async function RoundsPage({ searchParams }: PageProps) {
             <th scope="col">Date</th>
             <th scope="col">Event</th>
             <th scope="col">Type</th>
-            <th scope="col" className={styles.right}>
+            <th scope="col" className={`${styles.right} ${styles.amountCell}`}>
               Amount
             </th>
             <th scope="col" className={styles.right}>
@@ -111,12 +116,13 @@ export default async function RoundsPage({ searchParams }: PageProps) {
                   <span className={styles.cellSub}>{e.issuer?.name ?? e.partiesText}</span>
                 </td>
                 <td data-label="Type">{e.typeLabels.join(", ")}</td>
-                <td className={`${styles.right} ${main ? "" : styles.emptyStacked}`} data-label="Amount">
+                <td className={`${styles.right} ${styles.amountCell} ${main ? "" : styles.emptyStacked}`} data-label="Amount">
                   {main ? (
                     <>
                       <Amount view={main} />
                       <span className={styles.cellSub}>{main.amount.label ?? ""}</span>
                       {main.skipped === "included_in" ? <span className={styles.cellSub}>counted in a later event</span> : null}
+                      <AmountBar value={main.amount.value} max={scale.get(main.amount.currency) ?? 0} />
                     </>
                   ) : (
                     <Missing reason="No amount stated in the source" />

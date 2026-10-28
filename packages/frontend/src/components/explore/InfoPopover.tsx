@@ -5,6 +5,10 @@
  * API: the panel renders in the top layer (never clipped by a scrolling
  * table), closes on Escape and outside click, and follows its trigger in the
  * DOM so Tab moves from the button into the panel's links.
+ *
+ * Presentational rules: 2px corners, 13px body in ink, one floating shadow
+ * (only what floats carries one) taste-skill-ignore, accent only on the
+ * source link's hover.
  */
 import { useCallback, useEffect, useId, useRef, type ReactNode } from "react";
 import styled from "styled-components";
@@ -15,18 +19,15 @@ const forwardDomProps = { shouldForwardProp: (prop: string) => !prop.startsWith(
 
 const Trigger = styled.button.withConfig(forwardDomProps)`
   display: inline-grid;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   flex: 0 0 auto;
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  line-height: 1;
 
   &:hover {
     border-color: var(--service-border-strong);
@@ -53,11 +54,12 @@ const Panel = styled.div.withConfig(forwardDomProps)`
   overflow: auto;
   padding: 12px 14px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 10px;
-  background: var(--service-surface);
+  border-radius: 2px;
+  background: var(--service-surface-muted);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); /* taste-skill-ignore: popover floats */
   color: var(--service-text);
   font-size: 0.8125rem;
-  line-height: 1.5;
+  line-height: 1.55;
   text-align: left;
   white-space: normal;
 
@@ -139,15 +141,20 @@ export function InfoPopover({ label, children }: { label: string; children: Reac
 }
 
 export const PopoverTitle = styled.p`
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   color: var(--service-text);
+  font-size: 0.8125rem;
   font-weight: 600;
+
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
+  }
 `;
 
 export const PopoverFacts = styled.dl`
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 2px 12px;
+  gap: 3px 12px;
   margin: 0 0 8px;
   font-variant-numeric: tabular-nums;
 
@@ -166,16 +173,19 @@ export const PopoverNote = styled.p`
   color: var(--service-text-muted);
 `;
 
+/** Ink link; the one accent on the panel appears on hover. */
 export const PopoverLink = styled.a`
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   text-decoration: none;
 
   &:hover {
-    text-decoration: underline !important;
+    color: var(--service-accent-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }

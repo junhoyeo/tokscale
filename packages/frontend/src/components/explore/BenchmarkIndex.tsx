@@ -1,9 +1,12 @@
 "use client";
 
 /**
- * /benchmarks: every tracked benchmark, grouped by category. Each row says
- * what the benchmark measures, who publishes it, its unit, how many models
- * it covers, when it was last updated and its license. Thin rules, no cards.
+ * /benchmarks: every tracked benchmark, grouped by category. Each group is a
+ * real table: the benchmark on the left, then its source, matched models,
+ * last update, unit and license on the right, numbers right-aligned in
+ * tabular figures. Thin rules, no cards, 13px grey sentence-case headers.
+ * Below 900px each row stacks: name and measures, then the same facts as
+ * labelled pairs.
  */
 import Link from "next/link";
 import styled from "styled-components";
@@ -13,11 +16,14 @@ import { formatIsoDay } from "@/lib/benchmarks/format";
 import { VisuallyHidden } from "./ExploreUI";
 import { SourcesFooter } from "./SourcesFooter";
 
+/** Below this width each row stacks; above it the group is a six-column table. */
+const STACK_BELOW = "899px";
+
 const SummaryLine = styled.p`
   display: flex;
   flex-wrap: wrap;
   gap: 2px 0;
-  margin: 0 0 32px;
+  margin: 0 0 16px;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   line-height: 1.5;
@@ -36,7 +42,14 @@ const SummaryLine = styled.p`
 
 const Groups = styled.div`
   display: grid;
-  gap: 40px;
+  gap: 28px;
+`;
+
+const Group = styled.section`
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
 `;
 
 const GroupHead = styled.div`
@@ -44,9 +57,7 @@ const GroupHead = styled.div`
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 4px 16px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--service-border-strong);
+  gap: 2px 16px;
 `;
 
 const GroupTitle = styled.h2`
@@ -57,35 +68,148 @@ const GroupTitle = styled.h2`
   letter-spacing: -0.01em;
 `;
 
-const GroupCount = styled.span`
+const GroupCount = styled.p`
+  margin: 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   font-variant-numeric: tabular-nums;
-`;
 
-const List = styled.ul`
-  margin: 0;
-  padding: 0;
-  list-style: none;
-`;
-
-const Item = styled.li`
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px 40px;
-  padding: 18px 0 20px;
-  border-bottom: 1px solid var(--service-border);
-
-  @media (min-width: 1100px) {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 620px);
-    align-items: start;
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
   }
 `;
 
-const Main = styled.div`
+const Table = styled.table`
+  width: 100%;
+  margin-top: 2px;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+
+  thead tr {
+    border-bottom: 1px solid var(--service-border-strong);
+  }
+
+  th,
+  td {
+    padding: 8px 20px 10px 0;
+    border-bottom: 1px solid var(--service-border);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th:last-child,
+  td:last-child {
+    padding-right: 0;
+  }
+
+  thead th {
+    padding-top: 4px;
+    padding-bottom: 6px;
+    border-bottom: 0;
+    color: var(--service-text-muted);
+    font-size: 0.8125rem;
+    font-weight: 400;
+    vertical-align: bottom;
+    white-space: nowrap;
+  }
+
+  th[data-col="source"],
+  th[data-col="models"],
+  th[data-col="update"],
+  td[data-col="source"],
+  td[data-col="models"],
+  td[data-col="update"] {
+    text-align: right;
+  }
+
+  th[data-col="benchmark"] {
+    width: 46%;
+  }
+
+  /* The fact columns hold short values; nowrap gives each its min-content
+     width and the benchmark column absorbs the rest. */
+  td[data-col="source"],
+  td[data-col="models"],
+  td[data-col="update"],
+  td[data-col="unit"],
+  td[data-col="license"] {
+    white-space: nowrap;
+  }
+
+  @media (max-width: ${STACK_BELOW}) {
+    display: block;
+
+    thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    tbody {
+      display: block;
+    }
+
+    tbody tr {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 20px;
+      padding: 14px 0 16px;
+      border-bottom: 1px solid var(--service-border);
+    }
+
+    th,
+    td {
+      display: block;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      text-align: left;
+      white-space: normal;
+    }
+
+    th[data-col="benchmark"] {
+      grid-column: 1 / -1;
+      width: auto;
+    }
+
+    td[data-col="source"],
+    td[data-col="models"],
+    td[data-col="update"] {
+      text-align: left;
+    }
+  }
+
+  @media (max-width: 640px) {
+    font-size: 0.9375rem;
+
+    tbody tr {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+`;
+
+/** The stacked layout's own label: the header row is hidden there. */
+const CellLabel = styled.span`
+  display: none;
+
+  @media (max-width: ${STACK_BELOW}) {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--service-text-muted);
+    font-size: 0.8125rem;
+    font-weight: 400;
+  }
+`;
+
+const Identity = styled.div`
   display: grid;
   align-content: start;
-  gap: 6px;
+  gap: 3px;
   min-width: 0;
 `;
 
@@ -98,14 +222,9 @@ const NameRow = styled.div`
 
 const nameStyles = `
   color: var(--service-text);
-  font-size: 1rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 0.9375rem;
+  font-weight: 500;
   overflow-wrap: anywhere;
-
-  @media (max-width: 640px) {
-    font-size: 1.0625rem;
-  }
 `;
 
 const NameLink = styled(Link)`
@@ -113,11 +232,12 @@ const NameLink = styled(Link)`
   text-decoration: none;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -136,33 +256,25 @@ const NameText = styled.span`
 const StatusTag = styled.span`
   display: inline-flex;
   min-height: 20px;
+  flex: none;
   align-items: center;
-  padding: 0 8px;
+  padding: 0 6px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 999px;
+  border-radius: 2px;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-weight: 500;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.2;
   white-space: nowrap;
 `;
 
 const Measures = styled.p`
-  max-width: 72ch;
-  margin: 0;
-  color: var(--service-text-muted);
-  font-size: 0.9375rem;
-  line-height: 1.55;
-  text-wrap: pretty;
-
-  @media (max-width: 640px) {
-    font-size: 1rem;
-  }
-`;
-
-const Byline = styled.p`
+  max-width: 64ch;
   margin: 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
+  line-height: 1.5;
+  text-wrap: pretty;
 
   @media (max-width: 640px) {
     font-size: 0.875rem;
@@ -170,10 +282,8 @@ const Byline = styled.p`
 `;
 
 const Note = styled.p`
-  max-width: 72ch;
-  margin: 4px 0 0;
-  padding-left: 10px;
-  border-left: 2px solid var(--service-border-strong);
+  max-width: 64ch;
+  margin: 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   line-height: 1.5;
@@ -183,18 +293,21 @@ const Note = styled.p`
   }
 `;
 
+/** The row's one action for link-only benchmarks: ink text, underline on hover. */
 const ExternalLink = styled.a`
   justify-self: start;
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   font-size: 0.875rem;
+  font-weight: 500;
   text-decoration: none;
 
   &:hover {
-    text-decoration: underline !important;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -206,75 +319,37 @@ const ExternalLink = styled.a`
   }
 `;
 
-const Facts = styled.dl`
+const CellStack = styled.span`
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 20px;
-  margin: 0;
-
-  @media (min-width: 720px) {
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.9fr) minmax(0, 1.1fr) minmax(0, 1.2fr);
-  }
-`;
-
-const Fact = styled.div`
-  display: grid;
-  align-content: start;
   gap: 2px;
   min-width: 0;
-
-  dt {
-    color: var(--service-text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
-  }
-
-  dd {
-    margin: 0;
-    color: var(--service-text);
-    font-size: 0.875rem;
-    font-variant-numeric: tabular-nums;
-    overflow-wrap: anywhere;
-  }
-
-  @media (max-width: 640px) {
-    dt {
-      font-size: 0.8125rem;
-    }
-
-    dd {
-      font-size: 0.9375rem;
-    }
-  }
 `;
 
-const FactSub = styled.span`
+const CellSub = styled.span`
   display: block;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
-
-  @media (max-width: 640px) {
-    font-size: 0.8125rem;
-  }
+  font-size: 0.8125rem;
+  line-height: 1.45;
 `;
 
 const LicenseLink = styled.a`
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   text-decoration: none;
 
   &:hover {
-    text-decoration: underline !important;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
 `;
 
 const Footer = styled.div`
-  margin-top: 48px;
+  margin-top: 40px;
 `;
 
 const DATE_KIND_TEXT: Record<DateKind, string> = {
@@ -290,6 +365,10 @@ function retrievalText(summary: BenchmarkIndexSummary): string | null {
   return `Retrieved ${formatIsoDay(retrievedFrom)} to ${formatIsoDay(retrievedTo)}`;
 }
 
+function countText(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 function NewTab() {
   return <VisuallyHidden> (opens in a new tab)</VisuallyHidden>;
 }
@@ -297,84 +376,85 @@ function NewTab() {
 function BenchmarkRow({ item }: { item: BenchmarkIndexItem }) {
   const linkOnly = item.status === "link-only";
   return (
-    <Item data-row-link={item.href ? "" : undefined}>
-      <Main>
-        <NameRow>
-          {item.href ? (
-            <NameLink href={item.href} data-row-primary="">
-              {item.name}
-            </NameLink>
-          ) : (
-            <NameText>{item.name}</NameText>
-          )}
-          {item.status === "history" ? <StatusTag>History</StatusTag> : null}
-          {linkOnly ? <StatusTag>Link only</StatusTag> : null}
-        </NameRow>
-        <Measures>{item.measures}</Measures>
-        <Byline>
-          By {item.publisher}
-          {item.collectedBy ? ` \u00b7 collected by ${item.collectedBy}` : null}
-        </Byline>
-        {item.notes.map((note) => (
-          <Note key={note}>{note}</Note>
-        ))}
-        {linkOnly ? (
-          <ExternalLink href={item.url} target="_blank" rel="noopener noreferrer">
-            Open the {item.name} leaderboard
-            <span aria-hidden="true"> {"\u2197"}</span>
-            <NewTab />
-          </ExternalLink>
-        ) : null}
-      </Main>
-      <Facts>
-        <Fact>
-          <dt>Unit</dt>
-          <dd>{item.unitLabel}</dd>
-        </Fact>
-        <Fact>
-          <dt>Models</dt>
-          {linkOnly ? (
-            <dd>
-              Not republished
-              <FactSub>Results stay on the source site</FactSub>
-            </dd>
-          ) : (
-            <dd>
-              {item.modelCount} matched
-              <FactSub>{item.externalModelCount} in the source</FactSub>
-            </dd>
-          )}
-        </Fact>
-        <Fact>
-          <dt>Last update</dt>
-          {item.lastUpdate ? (
-            <dd>
-              {formatIsoDay(item.lastUpdate.date)}
-              <FactSub>{DATE_KIND_TEXT[item.lastUpdate.kind]}</FactSub>
-              {item.retrievedAt ? <FactSub>Retrieved {formatIsoDay(item.retrievedAt)}</FactSub> : null}
-            </dd>
-          ) : (
-            <dd>
-              {"\u2014"}
-              <FactSub>{linkOnly ? "See the leaderboard" : "No dated results"}</FactSub>
-            </dd>
-          )}
-        </Fact>
-        <Fact>
-          <dt>License</dt>
-          <dd>
-            {item.licenseUrl ? (
-              <LicenseLink href={item.licenseUrl} target="_blank" rel="noopener noreferrer">
-                {item.licenseName}
-                <NewTab />
-              </LicenseLink>
+    <tr data-row-link={item.href ? "" : undefined}>
+      <th scope="row" data-col="benchmark">
+        <Identity>
+          <NameRow>
+            {item.href ? (
+              <NameLink href={item.href} data-row-primary="">
+                {item.name}
+              </NameLink>
             ) : (
-              item.licenseName
+              <NameText>{item.name}</NameText>
             )}
-          </dd>
-        </Fact>
-      </Facts>
-    </Item>
+            {item.status === "history" ? <StatusTag>History</StatusTag> : null}
+            {linkOnly ? <StatusTag>Link only</StatusTag> : null}
+          </NameRow>
+          <Measures>{item.measures}</Measures>
+          {item.notes.map((note) => (
+            <Note key={note}>{note}</Note>
+          ))}
+          {linkOnly ? (
+            <ExternalLink href={item.url} target="_blank" rel="noopener noreferrer">
+              Open the {item.name} leaderboard
+              <span aria-hidden="true"> {"\u2197"}</span>
+              <NewTab />
+            </ExternalLink>
+          ) : null}
+        </Identity>
+      </th>
+      <td data-col="source">
+        <CellLabel aria-hidden="true">Source</CellLabel>
+        <CellStack>
+          By {item.publisher}
+          {item.collectedBy ? <CellSub>Collected by {item.collectedBy}</CellSub> : null}
+        </CellStack>
+      </td>
+      <td data-col="models">
+        <CellLabel aria-hidden="true">Models</CellLabel>
+        {linkOnly ? (
+          <CellStack>
+            Not republished
+            <CellSub>Results stay on the source site</CellSub>
+          </CellStack>
+        ) : (
+          <CellStack>
+            {item.modelCount} matched
+            <CellSub>{item.externalModelCount} in the source</CellSub>
+          </CellStack>
+        )}
+      </td>
+      <td data-col="update">
+        <CellLabel aria-hidden="true">Last update</CellLabel>
+        {item.lastUpdate ? (
+          <CellStack>
+            {formatIsoDay(item.lastUpdate.date)}
+            <CellSub>{DATE_KIND_TEXT[item.lastUpdate.kind]}</CellSub>
+            {item.retrievedAt ? <CellSub>Retrieved {formatIsoDay(item.retrievedAt)}</CellSub> : null}
+          </CellStack>
+        ) : (
+          <CellStack>
+            {"\u2014"}
+            <CellSub>{linkOnly ? "See the leaderboard" : "No dated results"}</CellSub>
+          </CellStack>
+        )}
+      </td>
+      <td data-col="unit">
+        <CellLabel aria-hidden="true">Unit</CellLabel>
+        {item.unitLabel}
+      </td>
+      <td data-col="license">
+        <CellLabel aria-hidden="true">License</CellLabel>
+        {item.licenseUrl ? (
+          <LicenseLink href={item.licenseUrl} target="_blank" rel="noopener noreferrer">
+            {item.licenseName}
+            <NewTab />
+          </LicenseLink>
+        ) : (
+          item.licenseName
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -402,19 +482,47 @@ export function BenchmarkIndex({
         {groups.map((group) => {
           const titleId = `benchmarks-${group.category}`;
           return (
-            <section key={group.category} aria-labelledby={titleId}>
+            <Group key={group.category} aria-labelledby={titleId}>
               <GroupHead>
                 <GroupTitle id={titleId}>{group.label}</GroupTitle>
-                <GroupCount>
-                  {group.items.length} {group.items.length === 1 ? "benchmark" : "benchmarks"}
-                </GroupCount>
+                <GroupCount>{countText(group.items.length, "benchmark", "benchmarks")}</GroupCount>
               </GroupHead>
-              <List>
-                {group.items.map((item) => (
-                  <BenchmarkRow key={item.slug} item={item} />
-                ))}
-              </List>
-            </section>
+              <Table>
+                <caption>
+                  <VisuallyHidden>
+                    {group.label}: {countText(group.items.length, "benchmark", "benchmarks")}, with their source, matched
+                    models, last update, unit and license
+                  </VisuallyHidden>
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col" data-col="benchmark">
+                      Benchmark
+                    </th>
+                    <th scope="col" data-col="source">
+                      Source
+                    </th>
+                    <th scope="col" data-col="models">
+                      Models
+                    </th>
+                    <th scope="col" data-col="update">
+                      Last update
+                    </th>
+                    <th scope="col" data-col="unit">
+                      Unit
+                    </th>
+                    <th scope="col" data-col="license">
+                      License
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.items.map((item) => (
+                    <BenchmarkRow key={item.slug} item={item} />
+                  ))}
+                </tbody>
+              </Table>
+            </Group>
           );
         })}
       </Groups>

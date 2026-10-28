@@ -4,7 +4,7 @@ import { LegalPageShell } from "@/components/layout/LegalPageShell";
 import { legalUrl } from "@/lib/seo/urls";
 
 const DESCRIPTION =
-  "How to reach the maintainer of Tokscale — bug reports, client support requests, incorrect leaderboard data, and privacy questions.";
+  "How to reach the maintainer of Tokscale: bug reports, client support requests, incorrect leaderboard data, and privacy questions.";
 
 export const metadata: Metadata = {
   title: "Contact | Tokscale",
@@ -21,13 +21,33 @@ export const metadata: Metadata = {
 
 export default function ContactPage() {
   return (
-    <LegalPageShell title="Contact" lastUpdated="July 30, 2026">
+    <LegalPageShell
+      title="Contact"
+      lede="Two ways to reach the maintainer, Junho Yeo: a public GitHub issue for anything about the software, or email for privacy, security and anything you would rather not post publicly."
+      lastUpdated="July 30, 2026"
+    >
+      {/* The one action this page exists for. An inline style keeps it out of
+          .legal-prose's link rule without shipping any client JavaScript. */}
       <p>
-        Tokscale is built and maintained by Junho Yeo. There are two ways to get
-        in touch, and which one is better depends on what you need.
+        <a
+          href="mailto:i@junho.io?subject=Tokscale"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            height: 44,
+            padding: "0 18px",
+            border: "1px solid var(--service-border-strong)",
+            borderRadius: 2,
+            color: "var(--service-text)",
+            textDecoration: "none",
+            fontSize: "1.0625rem",
+          }}
+        >
+          Email i@junho.io
+        </a>
       </p>
 
-      <h2>GitHub — bugs, features, and client support</h2>
+      <h2>GitHub: bugs, features, and client support</h2>
       <p>
         For anything about the software itself, open an issue at{" "}
         <a
@@ -50,14 +70,14 @@ export default function ContactPage() {
         anything else you would not want published.
       </p>
 
-      <h2>Email — privacy, data, and everything else</h2>
+      <h2>Email: privacy, data, and everything else</h2>
       <p>
         Write to <a href="mailto:i@junho.io">i@junho.io</a> for anything that
         does not belong in a public issue:
       </p>
       <ul>
         <li>
-          Privacy questions, or requests about data held about you — see the{" "}
+          Privacy questions, or requests about data held about you, see the{" "}
           <Link href="/privacy">privacy policy</Link> for what is collected
         </li>
         <li>Security reports, including anything you would rather not disclose publicly</li>

@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import Image from "next/image";
 import { usePathname } from "next/navigation";
-import styled, { css, keyframes } from "styled-components";
+import styled, { css } from "styled-components";
+import { DitherAvatar } from "dither-kit/DitherAvatar";
 import { GearIcon, PersonIcon, SignOutIcon } from "@/components/ui/Icons";
+import { TokscaleMark, TokscaleWordmark } from "@/components/layout/TokscaleMark";
+import { DitherUnderline } from "@/components/ui/DitherUnderline";
 
 interface User {
   id: string;
@@ -37,11 +39,6 @@ export function isNavItemActive(item: NavItem, pathname: string | null): boolean
 const COLLAPSE_BELOW = "720px";
 export const NAV_HEIGHT = 56;
 
-const pulse = keyframes`
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-`;
-
 const focusRing = css`
   &:focus-visible {
     outline: 2px solid var(--v2-focus, #75b6ff);
@@ -49,17 +46,23 @@ const focusRing = css`
   }
 `;
 
+/* A plain bar on the page ground: no chrome, no blur, no pill. */
 const Bar = styled.nav`
   position: fixed;
   top: 0;
   right: 0;
   left: 0;
   z-index: 50;
-  border-bottom: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
-  background: rgba(0, 0, 0, 0.78);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--v2-canvas);
 `;
+
+/* One baseline across the bar. The wordmark has no descenders, so its bottom
+   edge is its baseline; the mark and the wordmark share that bottom
+   (`align-items: flex-end`), and the 14px labels move down by
+   LABEL_BASELINE_SHIFT so their baseline lands on the same y (36px of the
+   56px bar). Measured in the browser: re-measure if the mark, the wordmark
+   height or the label size changes. */
+const LABEL_BASELINE_SHIFT = "4.5px";
 
 const BarInner = styled.div`
   display: flex;
@@ -80,9 +83,9 @@ const BarInner = styled.div`
 const LogoLink = styled(Link)`
   display: flex;
   flex-shrink: 0;
-  align-items: center;
-  height: 40px;
-  border-radius: 6px;
+  align-items: flex-end;
+  gap: 9px;
+  transform: translateY(-3px);
   ${focusRing}
 `;
 
@@ -90,7 +93,7 @@ const Links = styled.ul`
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -101,33 +104,50 @@ const Links = styled.ul`
   }
 `;
 
-const linkBase = css`
+/* Selection is the dithered accent line under the label, as wide as the label. */
+const NavLink = styled(Link)<{ $active: boolean }>`
   display: flex;
   align-items: center;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 6px;
+  height: 36px;
+  padding: 0 8px;
+  line-height: 1.2;
+  color: ${({ $active }) => ($active ? "var(--v2-text)" : "var(--v2-text-muted)")};
   font-size: 14px;
   font-weight: 500;
   letter-spacing: -0.005em;
   white-space: nowrap;
   text-decoration: none;
-  transition: color 120ms ease, background-color 120ms ease;
   ${focusRing}
 
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
+  &:hover {
+    color: var(--v2-text);
   }
 `;
 
-const NavLink = styled(Link)<{ $active: boolean }>`
-  ${linkBase}
-  color: ${({ $active }) => ($active ? "var(--v2-text, #f4f7fb)" : "var(--v2-text-muted, #a3adbd)")};
-  background: ${({ $active }) => ($active ? "rgba(255, 255, 255, 0.08)" : "transparent")};
+const NavLinkLabel = styled.span<{ $active: boolean }>`
+  position: relative;
+  display: inline-flex;
+  line-height: 1.2;
+  transform: translateY(${LABEL_BASELINE_SHIFT});
+  color: inherit;
+  font-weight: ${({ $active }) => ($active ? 600 : 500)};
+`;
 
-  &:hover {
-    color: var(--v2-text, #f4f7fb);
-    background: rgba(255, 255, 255, 0.06);
+/* Absolutely placed 4px under the baseline, so the line never moves the label
+   off the shared baseline; the canvas never feeds its own width back into the
+   label. */
+const NavLinkUnderline = styled.span`
+  position: absolute;
+  bottom: -5px;
+  left: 0;
+  display: block;
+  width: 100%;
+  height: 2px;
+  pointer-events: none;
+
+  canvas {
+    display: block;
+    image-rendering: pixelated;
   }
 `;
 
@@ -139,47 +159,25 @@ const Right = styled.div`
   margin-left: auto;
 `;
 
-const DesktopOnly = styled.div`
-  display: flex;
-  align-items: center;
-
-  @media (max-width: ${COLLAPSE_BELOW}) {
-    display: none;
-  }
-`;
-
-const SignInLink = styled.a`
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 12px 0 10px;
-  border: 1px solid var(--v2-rule-strong, rgba(255, 255, 255, 0.18));
-  border-radius: 8px;
-  color: var(--v2-text, #f4f7fb);
-  font-size: 14px;
-  font-weight: 500;
-  white-space: nowrap;
-  text-decoration: none;
-  transition: background-color 120ms ease, border-color 120ms ease;
-  ${focusRing}
-
-  &:hover {
-    border-color: rgba(255, 255, 255, 0.32);
-    background: rgba(255, 255, 255, 0.06);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
+const pulse = css`
+  @keyframes nav-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
   }
 `;
 
 const LoadingSkeleton = styled.div`
+  ${pulse}
   width: 32px;
   height: 32px;
-  border-radius: 999px;
-  background-color: rgba(255, 255, 255, 0.1);
-  animation: ${pulse} 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  border-radius: 2px;
+  background-color: var(--v2-surface-raised);
+  animation: nav-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 
   @media (prefers-reduced-motion: reduce) {
     animation: none;
@@ -198,19 +196,20 @@ const AvatarButton = styled.button`
   height: 32px;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--v2-rule-strong, rgba(255, 255, 255, 0.18));
-  border-radius: 999px;
-  background: var(--v2-surface-raised, #0d1016);
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface-raised);
   ${focusRing}
 `;
 
 const Avatar = styled.img`
+  display: block;
   width: 100%;
   height: 100%;
-  border-radius: 50%;
+  border-radius: var(--radius, 2px);
   object-fit: cover;
 `;
 
+/* A floating menu: one of the few things allowed to lift off the page. */
 const UserMenuPanel = styled.div`
   position: absolute;
   top: calc(100% + 10px);
@@ -218,19 +217,18 @@ const UserMenuPanel = styled.div`
   z-index: 100;
   width: 224px;
   overflow: hidden;
-  border: 1px solid var(--v2-rule-strong, rgba(255, 255, 255, 0.18));
-  border-radius: 12px;
-  background: #0b0d12;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface-raised);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55); /* taste-skill-ignore: floating account menu */
 `;
 
 const UserInfo = styled.div`
   padding: 12px;
-  border-bottom: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
 `;
 
 const UserName = styled.p`
   overflow: hidden;
-  color: var(--v2-text, #f4f7fb);
+  color: var(--v2-text);
   font-size: 14px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -239,8 +237,8 @@ const UserName = styled.p`
 
 const UserHandle = styled.p`
   overflow: hidden;
-  color: var(--v2-text-muted, #a3adbd);
-  font-size: 12px;
+  color: var(--v2-text-muted);
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
@@ -254,22 +252,24 @@ const menuItem = css<{ $danger?: boolean }>`
   padding: 8px 12px;
   border: 0;
   background: transparent;
-  color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text, #f4f7fb)")};
+  color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text)")};
   font-size: 14px;
   text-align: left;
   text-decoration: none;
 
   svg {
     flex-shrink: 0;
-    color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text-muted, #a3adbd)")};
+    color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text-muted)")};
   }
 
   &:hover {
-    background: ${({ $danger }) => ($danger ? "rgba(255, 123, 114, 0.1)" : "rgba(255, 255, 255, 0.06)")};
+    color: ${({ $danger }) => ($danger ? "#ff7b72" : "var(--v2-text)")};
+    text-decoration: underline;
+    text-decoration-color: currentColor;
   }
 
   &:focus-visible {
-    outline: 2px solid var(--v2-focus, #75b6ff);
+    outline: 2px solid var(--v2-focus);
     outline-offset: -2px;
   }
 `;
@@ -283,10 +283,10 @@ const MenuButton = styled.button<{ $danger?: boolean }>`
 `;
 
 const MenuGroup = styled.div`
-  padding: 4px 0;
+  padding: 6px 0;
 
   & + & {
-    border-top: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
+    padding-top: 10px;
   }
 `;
 
@@ -300,9 +300,8 @@ const MenuToggle = styled.button`
   margin-right: -8px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
   background: transparent;
-  color: var(--v2-text, #f4f7fb);
+  color: var(--v2-text);
   ${focusRing}
 
   @media (max-width: ${COLLAPSE_BELOW}) {
@@ -322,8 +321,7 @@ const MobilePanel = styled.div<{ $open: boolean }>`
     display: ${({ $open }) => ($open ? "block" : "none")};
     max-height: calc(100dvh - ${NAV_HEIGHT}px);
     overflow-y: auto;
-    border-top: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
-    background: #000;
+    background: var(--v2-canvas);
   }
 `;
 
@@ -338,8 +336,7 @@ const MobileNavLink = styled(Link)<{ $active: boolean }>`
   align-items: center;
   min-height: 48px;
   padding: 0 4px;
-  border-bottom: 1px solid var(--v2-rule, rgba(255, 255, 255, 0.1));
-  color: ${({ $active }) => ($active ? "var(--v2-text, #f4f7fb)" : "var(--v2-text-muted, #a3adbd)")};
+  color: ${({ $active }) => ($active ? "var(--v2-text)" : "var(--v2-text-muted)")};
   font-size: 17px;
   font-weight: ${({ $active }) => ($active ? 600 : 500)};
   text-decoration: none;
@@ -358,42 +355,27 @@ const MobileUserRow = styled.div`
   align-items: center;
   gap: 10px;
   padding: 8px 4px;
-
 `;
 
-const MobileAvatar = styled.img`
+const MobileAvatarFrame = styled.span`
+  display: block;
   width: 32px;
   height: 32px;
-  border-radius: 50%;
+  overflow: hidden;
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface-raised);
 `;
 
 const MobileAction = styled(Link)<{ $danger?: boolean }>`
   ${menuItem}
   min-height: 44px;
   padding: 0 4px;
-  border-radius: 6px;
 `;
 
 const MobileActionButton = styled.button<{ $danger?: boolean }>`
   ${menuItem}
   min-height: 44px;
   padding: 0 4px;
-  border-radius: 6px;
-`;
-
-const MobileSignIn = styled.a`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 44px;
-  border-radius: 8px;
-  background: var(--v2-accent-strong, #0066e6);
-  color: #fff;
-  font-size: 15px;
-  font-weight: 600;
-  text-decoration: none;
-  ${focusRing}
 `;
 
 function GitHubMark({ size = 16 }: { size?: number }) {
@@ -428,8 +410,27 @@ async function signOut() {
   window.location.href = "/leaderboard";
 }
 
-function avatarSrc(user: User): string {
-  return user.avatarUrl || `https://github.com/${user.username}.png`;
+/**
+ * A real GitHub avatar when the account has one; the seeded dither avatar
+ * otherwise, or when the picture fails to load (a dev seed account has no
+ * picture, and asking github.com for one 404s).
+ */
+function UserAvatar({ user, size = 32 }: { user: User; size?: number }) {
+  const [failed, setFailed] = useState(false);
+  if (!user.avatarUrl || failed) {
+    return (
+      <DitherAvatar
+        name={user.username}
+        color="blue"
+        size={size}
+        grid={8}
+        cellPx={4}
+        animate={false}
+        bloom="off"
+      />
+    );
+  }
+  return <Avatar src={user.avatarUrl} alt="" width={size} height={size} onError={() => setFailed(true)} />;
 }
 
 function UserMenu({ user }: { user: User }) {
@@ -467,7 +468,7 @@ function UserMenu({ user }: { user: User }) {
         aria-controls="account-menu"
         onClick={() => setOpen((value) => !value)}
       >
-        <Avatar src={avatarSrc(user)} alt="" width={32} height={32} />
+        <UserAvatar user={user} />
       </AvatarButton>
       {open && (
         <UserMenuPanel id="account-menu">
@@ -501,7 +502,11 @@ export function Navigation() {
   const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  // The fold is open only while it was opened on the current path, so a
+  // navigation closes it without syncing state from an effect.
+  const [mobileOpenAt, setMobileOpenAt] = useState<string | null>(null);
+  const mobileOpen = mobileOpenAt === pathname;
+  const setMobileOpen = (open: boolean) => setMobileOpenAt(open ? pathname : null);
   const toggleRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -525,7 +530,7 @@ export function Navigation() {
     if (!mobileOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setMobileOpen(false);
+        setMobileOpenAt(null);
         toggleRef.current?.focus();
       }
     };
@@ -539,7 +544,8 @@ export function Navigation() {
     <Bar aria-label="Main navigation">
       <BarInner>
         <LogoLink href="/" aria-label="Tokscale home">
-          <Image src="/assets/hero-logo.svg" alt="" width={147} height={28} priority />
+          <TokscaleMark height={22} />
+          <TokscaleWordmark height={17} />
         </LogoLink>
 
         <Links>
@@ -548,7 +554,10 @@ export function Navigation() {
             return (
               <li key={item.href}>
                 <NavLink href={item.href} $active={active} aria-current={active ? "page" : undefined}>
-                  {item.label}
+                  <NavLinkLabel $active={active}>
+                    {item.label}
+                    <NavLinkUnderline>{active ? <DitherUnderline /> : null}</NavLinkUnderline>
+                  </NavLinkLabel>
                 </NavLink>
               </li>
             );
@@ -556,25 +565,28 @@ export function Navigation() {
         </Links>
 
         <Right>
-          <DesktopOnly>
-            {isLoading ? (
-              <LoadingSkeleton aria-hidden="true" />
-            ) : user ? (
-              <UserMenu user={user} />
-            ) : (
-              <SignInLink href="/api/auth/github">
-                <GitHubMark />
+          {isLoading ? (
+            <LoadingSkeleton aria-hidden="true" />
+          ) : user ? (
+            <UserMenu user={user} />
+          ) : (
+            <SignInLink href="/api/auth/github">
+              <SignInLabel>
+                <GitHubMark size={14} />
                 Sign in
-              </SignInLink>
-            )}
-          </DesktopOnly>
+                <SignInUnderline>
+                  <DitherUnderline />
+                </SignInUnderline>
+              </SignInLabel>
+            </SignInLink>
+          )}
           <MenuToggle
             ref={toggleRef}
             type="button"
             aria-label={mobileOpen ? "Close menu" : "Open menu"}
             aria-controls="mobile-navigation-menu"
             aria-expanded={mobileOpen}
-            onClick={() => setMobileOpen((value) => !value)}
+            onClick={() => setMobileOpen(!mobileOpen)}
           >
             <MenuIcon open={mobileOpen} />
           </MenuToggle>
@@ -603,7 +615,9 @@ export function Navigation() {
           {isLoading ? null : user ? (
             <>
               <MobileUserRow>
-                <MobileAvatar src={avatarSrc(user)} alt="" width={32} height={32} />
+                <MobileAvatarFrame>
+                  <UserAvatar user={user} />
+                </MobileAvatarFrame>
                 <div>
                   <UserName>{user.displayName || user.username}</UserName>
                   <UserHandle>@{user.username}</UserHandle>
@@ -622,14 +636,72 @@ export function Navigation() {
                 Sign out
               </MobileActionButton>
             </>
-          ) : (
-            <MobileSignIn href="/api/auth/github">
-              <GitHubMark size={18} />
-              Sign in with GitHub
-            </MobileSignIn>
-          )}
+          ) : null}
         </MobileAuth>
       </MobilePanel>
     </Bar>
   );
 }
+
+/* The nav's action is quiet: it must never out-shout the screen's own primary
+   action. Same size as the links, the dithered accent line on hover/focus. */
+const SignInLink = styled.a`
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 8px;
+  color: var(--v2-text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-decoration: none;
+  ${focusRing}
+
+  &:hover,
+  &:focus-visible {
+    color: var(--v2-text);
+  }
+
+  /* The dithered line appears under the label; its canvas paints once. */
+  &:hover > span > span:last-child,
+  &:focus-visible > span > span:last-child {
+    opacity: 1;
+  }
+`;
+
+const SignInLabel = styled.span`
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.2;
+  transform: translateY(${LABEL_BASELINE_SHIFT});
+
+  svg {
+    color: currentColor;
+  }
+`;
+
+const SignInUnderline = styled.span`
+  position: absolute;
+  bottom: -5px;
+  left: 0;
+  display: block;
+  width: 100%;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+`;
+
+

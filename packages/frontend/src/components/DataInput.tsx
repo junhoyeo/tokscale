@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState, type DragEvent } from "react";
-import styled, { keyframes } from "styled-components";
+import styled from "styled-components";
+import { DitherButton } from "dither-kit/DitherButton";
+import { DitherTextarea } from "dither-kit/DitherTextarea";
 import type { TokenContributionData } from "@/lib/types";
 import { isValidContributionData, normalizeContributionData } from "@/lib/utils";
 import { SecondaryButton } from "@/components/leaderboard/RankingUI";
@@ -159,13 +161,15 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
 
         <CardBody>
           <FieldLabel htmlFor={textareaId}>Export JSON</FieldLabel>
-          <Textarea
+          <JsonTextarea
             id={textareaId}
+            aria-describedby={error ? `${tipId} ${errorId}` : tipId}
+            invalid={!!error}
             value={rawJson}
-            onChange={(e) => {
+            onChange={(value) => {
               loadGenerationRef.current += 1;
               setIsLoading(false);
-              setRawJson(e.target.value);
+              setRawJson(value);
               setError(null);
             }}
             onKeyDown={(e) => {
@@ -176,9 +180,6 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
             }}
             placeholder='{"meta": {...}, "summary": {...}, "contributions": [...]}'
             spellCheck={false}
-            aria-invalid={error ? true : undefined}
-            aria-describedby={error ? `${tipId} ${errorId}` : tipId}
-            $hasError={!!error}
           />
           <Tip id={tipId}>Tip: Press Ctrl+Enter (Cmd+Enter on Mac) to parse. You can also drop a .json file on this card.</Tip>
 
@@ -189,9 +190,15 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
           )}
 
           <Actions>
-            <PrimaryButton type="button" onClick={parseJson} disabled={isLoading || !rawJson.trim()}>
+            <ParseButton
+              type="button"
+              color="blue"
+              variant="solid"
+              onClick={parseJson}
+              disabled={isLoading || !rawJson.trim()}
+            >
               Parse JSON
-            </PrimaryButton>
+            </ParseButton>
 
             <SecondaryButton type="button" onClick={() => fileInputRef.current?.click()} disabled={isLoading}>
               Choose file
@@ -210,17 +217,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
             />
 
             <SecondaryButton type="button" onClick={loadSampleData} disabled={isLoading}>
-              {isLoading ? (
-                <LoadingWrapper>
-                  <SpinnerSvg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                    <SpinnerCircle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <SpinnerPath fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </SpinnerSvg>
-                  Loading...
-                </LoadingWrapper>
-              ) : (
-                "Load sample data"
-              )}
+              {isLoading ? "Loading..." : "Load sample data"}
             </SecondaryButton>
           </Actions>
         </CardBody>
@@ -252,21 +249,18 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
 const Layout = styled.div`
   display: grid;
   max-width: 1120px;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+  gap: 24px;
   align-items: start;
-  gap: 16px;
-
-  @media (max-width: 900px) {
-    grid-template-columns: minmax(0, 1fr);
-  }
 `;
 
+/* The drop target is the card itself, so a border that answers the drag is the
+   one place a rule carries meaning. */
 const InputCard = styled.section<{ $dragging: boolean }>`
   position: relative;
   min-width: 0;
   overflow: hidden;
   border: 1px solid ${({ $dragging }) => ($dragging ? "var(--service-focus)" : "var(--service-border)")};
-  border-radius: 12px;
+  border-radius: 2px;
   background: var(--service-surface);
 `;
 
@@ -276,11 +270,11 @@ const DropHint = styled.div`
   display: grid;
   place-items: center;
   border: 2px dashed var(--service-focus);
-  border-radius: 12px;
-  background: rgba(7, 9, 13, 0.92);
+  border-radius: 2px;
+  background: rgba(7, 9, 13, 0.94);
   color: var(--service-text);
   font-size: 1rem;
-  font-weight: 600;
+  font-weight: 500;
   pointer-events: none;
 `;
 
@@ -298,7 +292,6 @@ const CardTitle = styled.h2`
   color: var(--service-text);
   font-size: 1rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
 `;
 
 const CardLead = styled.p`
@@ -309,10 +302,6 @@ const CardLead = styled.p`
 `;
 
 const InlineCode = styled.code`
-  padding: 1px 6px;
-  border: 1px solid var(--service-border);
-  border-radius: 4px;
-  background: var(--service-surface-muted);
   color: var(--service-text);
   font-size: 0.8125rem;
   white-space: nowrap;
@@ -330,36 +319,22 @@ const CardBody = styled.div`
 
 const FieldLabel = styled.label`
   color: var(--service-text);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
   font-weight: 500;
 `;
 
-const Textarea = styled.textarea<{ $hasError?: boolean }>`
-  width: 100%;
+/* The export is literal JSON, so this field is the one place monospace is
+   correct: real code, set in a form control rather than a <pre>. */
+const JsonTextarea = styled(DitherTextarea)`
   min-height: 240px;
   height: 18rem;
-  padding: 12px;
-  border: 1px solid ${({ $hasError }) => ($hasError ? "rgba(248, 81, 73, 0.7)" : "var(--service-border-strong)")};
-  border-radius: 8px;
-  background: var(--service-canvas);
-  color: var(--service-text);
+  resize: vertical;
   font-family: var(--v2-font-mono);
   font-size: 0.8125rem;
   line-height: 1.55;
-  resize: vertical;
 
   &::placeholder {
     color: var(--v2-text-subtle);
-  }
-
-  &:hover {
-    border-color: ${({ $hasError }) => ($hasError ? "rgba(248, 81, 73, 0.85)" : "rgba(255, 255, 255, 0.3)")};
-  }
-
-  &:focus-visible {
-    border-color: ${({ $hasError }) => ($hasError ? "rgba(248, 81, 73, 0.9)" : "var(--service-focus)")};
-    outline: 2px solid ${({ $hasError }) => ($hasError ? "rgba(248, 81, 73, 0.9)" : "var(--service-focus)")};
-    outline-offset: -1px;
   }
 
   @media (max-width: 640px) {
@@ -377,10 +352,10 @@ const Tip = styled.p`
 const ErrorBox = styled.p`
   margin: 4px 0 0;
   padding: 10px 12px;
-  border: 1px solid rgba(248, 81, 73, 0.4);
-  border-radius: 8px;
-  background: rgba(248, 81, 73, 0.08);
-  color: #ff8c85;
+  border: 1px solid rgba(255, 107, 107, 0.45);
+  border-radius: 2px;
+  background: rgba(255, 107, 107, 0.08);
+  color: #ff9b9b;
   font-size: 0.875rem;
   font-weight: 500;
   line-height: 1.5;
@@ -390,91 +365,28 @@ const ErrorBox = styled.p`
 const Actions = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 8px 16px;
   margin-top: 8px;
 `;
 
-/* Filled v2 action. White on --v2-accent-strong is 5.2:1. */
-const PrimaryButton = styled.button`
-  display: inline-flex;
-  min-height: 36px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 14px;
-  border: 1px solid var(--v2-accent-strong);
-  border-radius: 8px;
-  background: var(--v2-accent-strong);
-  color: #fff;
-  font-size: 0.875rem;
-  font-weight: 600;
-  white-space: nowrap;
-  transition:
-    background-color 120ms ease,
-    border-color 120ms ease;
+const ParseButton = styled(DitherButton)`
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 2px;
+  font-size: 0.8125rem;
 
-  &:hover:not(:disabled) {
-    border-color: var(--v2-accent);
-    background: var(--v2-accent);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
-
-  @media (max-width: 640px) {
+  @media (pointer: coarse) {
     min-height: 44px;
-    font-size: 1rem;
   }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
-`;
-
-const spin = keyframes`
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-`;
-
-const LoadingWrapper = styled.span`
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-`;
-
-const SpinnerSvg = styled.svg`
-  width: 1rem;
-  height: 1rem;
-  animation: ${spin} 1s linear infinite;
-
-  @media (prefers-reduced-motion: reduce) {
-    animation-duration: 3s;
-  }
-`;
-
-const SpinnerCircle = styled.circle`
-  opacity: 0.25;
-`;
-
-const SpinnerPath = styled.path`
-  opacity: 0.75;
 `;
 
 const Steps = styled.section`
   min-width: 0;
   padding: 16px 20px 20px;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: 2px;
+  background: var(--service-surface);
 
   @media (max-width: 520px) {
     padding: 14px 16px 16px;
@@ -488,41 +400,27 @@ const StepsTitle = styled.h2`
   font-weight: 600;
 `;
 
+/* A real ordered list: the order matters, so the numbers are the list's own. */
 const StepList = styled.ol`
   display: grid;
-  gap: 14px;
+  gap: 16px 32px;
   margin: 0;
-  padding: 0;
-  counter-reset: local-step;
-  list-style: none;
+  padding: 0 0 0 20px;
 
   li {
-    position: relative;
-    display: grid;
-    gap: 6px;
     min-width: 0;
-    padding-left: 30px;
     color: var(--service-text-muted);
     font-size: 0.875rem;
     line-height: 1.5;
-    counter-increment: local-step;
   }
 
-  li::before {
-    position: absolute;
-    top: 1px;
-    left: 0;
-    display: inline-grid;
-    width: 20px;
-    height: 20px;
-    place-items: center;
-    border: 1px solid var(--service-border-strong);
-    border-radius: 999px;
-    color: var(--service-text);
-    content: counter(local-step);
-    font-size: 0.6875rem;
-    font-weight: 600;
+  li::marker {
+    color: var(--service-text-muted);
     font-variant-numeric: tabular-nums;
+  }
+
+  @media (min-width: 820px) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 `;
 
@@ -531,10 +429,7 @@ const Command = styled.code`
   width: fit-content;
   max-width: 100%;
   overflow-x: auto;
-  padding: 6px 10px;
-  border: 1px solid var(--service-border);
-  border-radius: 6px;
-  background: var(--service-surface-muted);
+  margin-top: 6px;
   color: var(--service-text);
   font-size: 0.8125rem;
   white-space: normal;

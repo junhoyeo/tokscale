@@ -16,7 +16,7 @@ interface SourceLogoProps {
 }
 
 const StyledImg = styled.img<{ $height: number }>`
-  border-radius: 2px;
+  border-radius: var(--radius, 2px);
   object-fit: contain;
   height: ${props => props.$height}px;
   width: auto;

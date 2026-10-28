@@ -17,14 +17,15 @@ import { ModelPricing } from "./ModelPricing";
 import { ModelSpecs } from "./ModelSpecs";
 import { SourcesFooter } from "./SourcesFooter";
 
+/* A tone step from the ground, not a box: the one note this page has to make. */
 const Notice = styled.div`
   display: grid;
   max-width: 72ch;
   gap: 4px;
-  margin: 0 0 28px;
+  margin: 20px 0 28px;
   padding: 12px 14px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
+  border-radius: 2px;
+  background: var(--service-surface-muted);
   color: var(--service-text-muted);
   font-size: 0.875rem;
   line-height: 1.55;

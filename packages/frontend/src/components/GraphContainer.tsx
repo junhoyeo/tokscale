@@ -40,7 +40,7 @@ const GraphCard = styled.section`
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: 2px;
   background: var(--service-surface);
 `;
 

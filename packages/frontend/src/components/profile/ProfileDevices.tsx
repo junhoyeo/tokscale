@@ -3,6 +3,7 @@
 import styled from "styled-components";
 import { formatRelativeTime } from "@/lib/format";
 import { formatCurrency, formatNumber } from "@/lib/utils";
+import { DitherMiniBar } from "./ditherControls";
 import {
   ListBody,
   ListCaption,
@@ -46,9 +47,17 @@ const DevicesSection = styled.section`
 const SectionHeading = styled.h2`
   margin: 0;
   color: var(--service-text);
-  font-size: 1rem;
-  font-weight: 500;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.25;
+`;
+
+const SectionNote = styled.p`
+  margin: 0 0 0.25rem;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
 `;
 
 const DeviceName = styled.span`
@@ -64,6 +73,11 @@ const DeviceName = styled.span`
   }
 `;
 
+const DeviceShare = styled.span`
+  display: block;
+  margin-top: 0.375rem;
+`;
+
 const LastSubmitted = styled.span`
   display: block;
   margin-top: 0.2rem;
@@ -76,6 +90,10 @@ const LastSubmitted = styled.span`
 /** Compact per-device usage for public profiles. */
 export function ProfileDevices({ devices, className }: ProfileDevicesProps) {
   if (devices.length === 0) return null;
+  const maxTokens = devices.reduce(
+    (max, device) => Math.max(max, device.totalTokens),
+    0,
+  );
 
   return (
     <DevicesSection
@@ -83,8 +101,9 @@ export function ProfileDevices({ devices, className }: ProfileDevicesProps) {
       aria-labelledby="profile-devices-heading"
     >
       <SectionHeading id="profile-devices-heading">
-        Devices · all-time
+        Devices
       </SectionHeading>
+      <SectionNote>All-time usage from each machine that submitted.</SectionNote>
 
       <ListCard>
         <ListTable>
@@ -108,6 +127,16 @@ export function ProfileDevices({ devices, className }: ProfileDevicesProps) {
               <ListRow key={device.id}>
                 <ListPrimaryCell scope="row">
                   <DeviceName>{device.displayName}</DeviceName>
+                  {devices.length > 1 ? (
+                    <DeviceShare>
+                      <DitherMiniBar
+                        ratio={
+                          maxTokens > 0 ? device.totalTokens / maxTokens : 0
+                        }
+                        color={device === devices[0] ? "#f4f7fb" : "#8a8c92"}
+                      />
+                    </DeviceShare>
+                  ) : null}
                   <LastSubmitted>
                     Last submitted{" "}
                     <time

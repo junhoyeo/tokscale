@@ -5,8 +5,10 @@
  * estimates and specs. Column groups and sorting live in the URL
  * (?cols=, ?sort=) through history.replaceState; the period is a link.
  *
- * Wide screens get a real table that scrolls inside its own box when the
- * selected groups do not fit; narrow screens get one card per model.
+ * The table is the screen's biggest block: a real table that scrolls inside
+ * its own box when the selected groups do not fit, a sticky model column and
+ * one dithered "Adoption" bar so the share is read as a field of dither, not
+ * only as a number. Narrow screens get one card per model.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
@@ -27,6 +29,7 @@ import { mixShares, type MixCounts } from "@/lib/benchmarks/price";
 import type { Coverage, ExplorePeriod } from "@/lib/explore";
 import { modelPath } from "@/lib/seo/explore";
 import {
+  AdoptionCell,
   CacheReadCell,
   ContextCell,
   DateCell,
@@ -51,6 +54,8 @@ interface Column {
   /** Short explanation for the header tooltip and the card label. */
   title: string;
   sortable: boolean;
+  /** Left-align the cell: identity columns read from the same edge. */
+  align?: "start";
   width: number;
   render: (row: DashboardRow, align: "start" | "end") => ReactNode;
 }
@@ -70,17 +75,18 @@ export interface ModelsDashboardProps {
   topEci: number;
 }
 
+/* One control row: period, column groups and (on phones) the sort select. */
 const Controls = styled(ControlBar)`
-  align-items: flex-start;
-  margin-bottom: 12px;
+  align-items: center;
+  gap: 8px 24px;
+  margin-bottom: 10px;
 `;
 
-const ChipRow = styled.div`
+const ChipGroup = styled.div`
   display: flex;
-  flex-wrap: wrap;
+  min-width: 0;
   align-items: center;
-  gap: 8px 12px;
-  margin-bottom: 12px;
+  gap: 8px;
 `;
 
 const ChipLabel = styled.span`
@@ -90,8 +96,9 @@ const ChipLabel = styled.span`
 `;
 
 const Chips = styled(SegmentedGroup)`
-  flex-wrap: wrap;
   height: auto;
+  flex-wrap: wrap;
+  row-gap: 2px;
 `;
 
 const Meta = styled.div`
@@ -100,9 +107,10 @@ const Meta = styled.div`
   align-items: baseline;
   justify-content: space-between;
   gap: 4px 16px;
-  margin: 12px 0 8px;
+  margin: 8px 0 6px;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
 
   @media (max-width: 640px) {
     font-size: 0.875rem;
@@ -135,26 +143,35 @@ const Scroller = styled.div`
   }
 `;
 
-/* Above the row covers and the controls raised over them, like the sticky model column. */
-const Fade = styled.div<{ $visible: boolean }>`
+/*
+ * The edge of the scroller while columns continue past it: one flat 1px rule
+ * instead of a gradient fade. Above the row covers and the sticky column.
+ */
+const Edge = styled.div<{ $visible: boolean }>`
   position: absolute;
-  z-index: 3;
+  z-index: 4;
   top: 0;
   right: 0;
   bottom: 0;
-  width: 48px;
-  background: linear-gradient(to right, transparent, var(--service-canvas));
+  width: 1px;
+  background: var(--service-border-strong);
   opacity: ${({ $visible }) => ($visible ? 1 : 0)};
   pointer-events: none;
 `;
 
 const ScrollHint = styled.p`
-  margin: 6px 0;
+  margin: 6px 0 0;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   text-align: right;
 `;
 
+/*
+ * A flat table: 13px grey sentence-case headers in a 36px header row, rows on
+ * a 48px pitch, one whisper rule per row, no fills, numbers right-aligned in
+ * tabular figures. Group headers are one quiet 13px label row plus a 24px
+ * gutter at the group's first column, so no vertical rules are needed.
+ */
 const Table = styled.table`
   width: 100%;
   min-width: max-content;
@@ -165,7 +182,8 @@ const Table = styled.table`
 
   th,
   td {
-    padding: 10px 12px;
+    padding: 5px 12px;
+    border: 0;
     border-bottom: 1px solid var(--service-border);
     text-align: right;
     vertical-align: middle;
@@ -173,24 +191,43 @@ const Table = styled.table`
   }
 
   thead th {
+    height: 36px;
+    padding: 6px 12px;
     color: var(--service-text-muted);
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 500;
   }
 
-  thead tr.groups th {
-    padding-top: 12px;
-    padding-bottom: 4px;
-    border-bottom: 0;
-    color: var(--service-text);
-    font-size: 0.75rem;
-    font-weight: 600;
+  thead th[data-align="start"],
+  tbody td[data-align="start"],
+  .model {
     text-align: left;
   }
 
+  thead tr.groups th {
+    height: 28px;
+    padding: 12px 12px 2px;
+    border-bottom: 0;
+    color: var(--service-text-muted);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    text-align: left;
+  }
+
+  /* The band's label sits on its group's first column, which is inset by the gutter. */
+  thead tr.groups th[data-group-start="true"] {
+    padding-left: 24px;
+  }
+
+  /* A gutter, not a rule, marks where one column group ends. */
   th[data-group-start="true"],
   td[data-group-start="true"] {
-    border-left: 1px solid var(--service-border);
+    padding-left: 24px;
+  }
+
+  tbody th,
+  tbody td {
+    height: 48px;
   }
 
   /*
@@ -204,40 +241,50 @@ const Table = styled.table`
     position: sticky;
     left: 0;
     z-index: 3;
-    min-width: 220px;
-    max-width: 280px;
+    min-width: 236px;
+    max-width: 300px;
     background: var(--service-canvas);
-    text-align: left;
+    border-right: 1px solid var(--service-border);
   }
 
-  tbody tr:hover .model,
-  tbody tr:has([data-row-primary]:focus-visible) .model {
-    background: linear-gradient(var(--v2-row-hover), var(--v2-row-hover)), var(--service-canvas);
+  /* The hover tone sits between the sticky cell's background and its text. */
+  .model::before {
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    background: transparent;
+    content: "";
   }
 
-  /* The focus ring is drawn on the cells, so the sticky cell cannot hide part of it. */
+  tbody tr:hover .model::before,
+  tbody tr:has([data-row-primary]:focus-visible) .model::before {
+    background: var(--v2-row-hover);
+  }
+
+  /*
+   * The focus ring is drawn on the cells, so the sticky cell cannot hide part
+   * of it and every segment stays visible while the table is scrolled. Only
+   * borders change; the padding is compensated so the row never moves.
+   */
   tbody tr [data-row-primary]:focus-visible::after {
     outline: none;
   }
 
   tbody tr:has([data-row-primary]:focus-visible) > * {
-    box-shadow:
-      inset 0 2px 0 var(--v2-focus),
-      inset 0 -2px 0 var(--v2-focus);
+    border-top: 2px solid var(--v2-focus);
+    border-bottom: 2px solid var(--v2-focus);
+    padding-top: 4px;
+    padding-bottom: 3px;
   }
 
   tbody tr:has([data-row-primary]:focus-visible) > :first-child {
-    box-shadow:
-      inset 2px 0 0 var(--v2-focus),
-      inset 0 2px 0 var(--v2-focus),
-      inset 0 -2px 0 var(--v2-focus);
+    border-left: 1px solid var(--v2-focus);
+    padding-left: 11px;
   }
 
   tbody tr:has([data-row-primary]:focus-visible) > :last-child {
-    box-shadow:
-      inset -2px 0 0 var(--v2-focus),
-      inset 0 2px 0 var(--v2-focus),
-      inset 0 -2px 0 var(--v2-focus);
+    border-right: 1px solid var(--v2-focus);
+    padding-right: 11px;
   }
 `;
 
@@ -258,7 +305,7 @@ const SortButton = styled.button<{ $active: boolean }>`
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -267,7 +314,7 @@ const SortButton = styled.button<{ $active: boolean }>`
 /* A column header without sorting. It takes focus, so keyboard users can open its explanation. */
 const HeaderTip = styled(InstantTooltip)`
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -295,11 +342,11 @@ const ModelLink = styled(Link)`
   text-overflow: ellipsis;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -308,7 +355,7 @@ const ModelLink = styled(Link)`
 const LabText = styled.span`
   overflow: hidden;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
 `;
 
@@ -325,14 +372,14 @@ const Cards = styled.ol`
 
 const Card = styled.li`
   display: grid;
-  gap: 10px;
-  padding: 14px 0;
+  gap: 8px;
+  padding: 10px 0;
   border-bottom: 1px solid var(--service-border);
 `;
 
 const CardHead = styled.div`
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0 10px;
 
@@ -360,10 +407,18 @@ const CardName = styled.div`
   }
 `;
 
+const CardKey = styled.div`
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+`;
+
 const CardFacts = styled.dl`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
-  gap: 10px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr));
+  gap: 8px 16px;
   margin: 0;
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
@@ -378,7 +433,7 @@ const CardFacts = styled.dl`
   dt {
     overflow: hidden;
     color: var(--service-text-muted);
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -395,14 +450,18 @@ const ROW_LIMIT = 60;
 
 const TableMore = styled.button`
   display: none;
-  min-height: 36px;
+  min-height: 32px;
   margin-top: 12px;
-  padding: 0 14px;
+  padding: 0 12px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text);
   font-size: 0.875rem;
+
+  &:hover {
+    border-color: var(--service-text-muted);
+  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
@@ -420,7 +479,7 @@ const MoreButton = styled.button`
   min-height: 44px;
   margin-top: 12px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text);
   font-size: 1rem;
@@ -460,7 +519,7 @@ const SortSelect = styled.div`
 `;
 
 const Footnote = styled.p`
-  max-width: 90ch;
+  max-width: 72ch;
   margin: 12px 0 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
@@ -499,12 +558,23 @@ function buildColumns(
     width: 104,
     render: (row, align) => <UsersCell row={row} period={period} align={align} />,
   };
+  const adoption: Column = {
+    id: "adoption",
+    group: "usage",
+    label: "Adoption",
+    title:
+      "Share of the accounts active in the period that used the model, drawn as the site's dithered bar. Its length compares down the column.",
+    sortable: false,
+    width: 148,
+    render: (row) => <AdoptionCell row={row} />,
+  };
   const agent: Column = {
     id: "agent",
     group: "usage",
     label: "Top agent",
     title: "The agent that carried most of the model's tokens in the period, and its share.",
     sortable: false,
+    align: "start",
     width: 150,
     render: (row) => <TopAgentCell row={row} />,
   };
@@ -527,6 +597,7 @@ function buildColumns(
   if (groups.length === 0) {
     return [
       { ...users, group: "overview" },
+      { ...adoption, group: "overview" },
       { ...agent, group: "overview" },
       ...score("epoch-capabilities-index", "overview"),
       ...score("terminal-bench-4", "overview"),
@@ -538,15 +609,20 @@ function buildColumns(
   const columns: Column[] = [];
   for (const group of groups) {
     if (group === "usage") {
-      columns.push(users, {
-        id: "tokens",
-        group,
-        label: "Tokens",
-        title: "Tokens on the model in the period, cache included.",
-        sortable: true,
-        width: 88,
-        render: (row) => <TokensCell row={row} />,
-      }, agent);
+      columns.push(
+        users,
+        {
+          id: "tokens",
+          group,
+          label: "Tokens",
+          title: "Tokens on the model in the period, cache included.",
+          sortable: true,
+          width: 88,
+          render: (row) => <TokensCell row={row} />,
+        },
+        adoption,
+        agent,
+      );
     } else if (group === "capability" || group === "coding" || group === "webdev") {
       for (const slug of GROUP_BENCHMARKS[group]) columns.push(...score(slug, group));
     } else if (group === "price") {
@@ -671,30 +747,32 @@ export function ModelsDashboard({
   const withUsers = rows.filter((r) => (r.usage?.activeUsers ?? 0) >= minUsers).length;
   const fromEci = rows.length - withUsers;
   const usersInfo = `the ${formatCount(withUsers)} with ${minUsers}+ active users in this period${fromEci > 0 ? `, and ${formatCount(fromEci)} more from the top ${topEci} by Epoch Capabilities Index` : ""}`;
+  const keyColumn = columns[0];
+  const restColumns = columns.slice(1);
 
   return (
     <>
       <Controls>
         <LinkSegments label="Period" visibleLabel="Period" options={periodOptions} />
-      </Controls>
-      <ChipRow>
-        <ChipLabel id="column-groups-label">Columns</ChipLabel>
-        <Chips role="group" aria-labelledby="column-groups-label">
-          <TouchSegment type="button" $active={groups.length === 0} aria-pressed={groups.length === 0} onClick={() => setGroups([])}>
-            Overview
-          </TouchSegment>
-          {COLUMN_GROUPS.map((group) => (
-            <TouchSegment
-              key={group}
-              type="button"
-              $active={groups.includes(group)}
-              aria-pressed={groups.includes(group)}
-              onClick={() => setGroups((current) => toggleColumnGroup(current, group))}
-            >
-              {COLUMN_GROUP_LABELS[group]}
+        <ChipGroup>
+          <ChipLabel id="column-groups-label">Columns</ChipLabel>
+          <Chips role="group" aria-labelledby="column-groups-label">
+            <TouchSegment type="button" $active={groups.length === 0} aria-pressed={groups.length === 0} onClick={() => setGroups([])}>
+              Overview
             </TouchSegment>
-          ))}
-        </Chips>
+            {COLUMN_GROUPS.map((group) => (
+              <TouchSegment
+                key={group}
+                type="button"
+                $active={groups.includes(group)}
+                aria-pressed={groups.includes(group)}
+                onClick={() => setGroups((current) => toggleColumnGroup(current, group))}
+              >
+                {COLUMN_GROUP_LABELS[group]}
+              </TouchSegment>
+            ))}
+          </Chips>
+        </ChipGroup>
         <SortSelect>
           <label htmlFor="models-sort" id="models-sort-label">
             Sort by
@@ -707,7 +785,7 @@ export function ModelsDashboard({
             onChange={setSortChoice}
           />
         </SortSelect>
-      </ChipRow>
+      </Controls>
 
       <CoverageLine coverage={coverage} />
       <Meta>
@@ -754,6 +832,7 @@ export function ModelsDashboard({
                   <th
                     key={column.id}
                     scope="col"
+                    data-align={column.align}
                     data-group-start={groupStart.has(column.id) ? "true" : undefined}
                     aria-sort={column.id === sort ? (sortAscending(sort) ? "ascending" : "descending") : undefined}
                     style={{ minWidth: column.width }}
@@ -794,7 +873,11 @@ export function ModelsDashboard({
                     </ModelCell>
                   </th>
                   {columns.map((column, columnIndex) => (
-                    <td key={column.id} data-group-start={groupStart.has(column.id) ? "true" : undefined}>
+                    <td
+                      key={column.id}
+                      data-align={column.align}
+                      data-group-start={groupStart.has(column.id) ? "true" : undefined}
+                    >
                       {columnIndex === 0 ? (
                         <RowCover href={modelPath(row.key)} prefetch={false} tabIndex={-1} aria-hidden="true" data-row-cover="" />
                       ) : null}
@@ -806,7 +889,7 @@ export function ModelsDashboard({
             </tbody>
           </Table>
         </Scroller>
-        <Fade $visible={overflow && !atEnd} aria-hidden="true" />
+        <Edge $visible={overflow && !atEnd} aria-hidden="true" />
         </ScrollArea>
         {!showAll && sorted.length > ROW_LIMIT ? (
           <TableMore type="button" onClick={() => setShowAll(true)}>
@@ -820,16 +903,17 @@ export function ModelsDashboard({
           <Card key={row.key} data-row-link="">
             <CardHead>
               <span>{index + 1}</span>
-              <ModelMark model={row} size={28} />
+              <ModelMark model={row} size={24} />
               <CardName>
                 <ModelLink href={modelPath(row.key)} data-row-primary="">
                   {row.name}
                 </ModelLink>
                 <LabText>{row.lab ?? "Lab unknown"}</LabText>
               </CardName>
+              {keyColumn ? <CardKey>{keyColumn.render(row, "end")}</CardKey> : null}
             </CardHead>
             <CardFacts>
-              {columns.map((column) => (
+              {restColumns.map((column) => (
                 <div key={column.id}>
                   <InstantTooltip as="dt" content={column.title} describe={false}>
                     {column.label}

@@ -44,8 +44,9 @@ export function CopyCommand({ command, label = "Copy command", prompt = true, wr
           <code>{command}</code>
         )}
       </Code>
-      <CopyButton type="button" onClick={() => void copy()} aria-label={copied ? "Copied" : label}>
+      <CopyButton type="button" onClick={() => void copy()} aria-label={copied ? "Copied" : label} $copied={copied}>
         {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
+        <span aria-hidden="true">{copied ? "Copied" : "Copy"}</span>
       </CopyButton>
       <Status role="status" aria-live="polite">
         {copied ? "Copied to clipboard" : ""}
@@ -61,11 +62,10 @@ const Box = styled.div<{ $wrap: boolean }>`
   gap: 8px;
   width: 100%;
   max-width: ${({ $wrap }) => ($wrap ? "none" : "420px")};
-  min-height: 48px;
+  min-height: 52px;
   padding: 4px 4px 4px 16px;
-  border: 1px solid var(--v2-rule-strong);
-  border-radius: 8px;
-  background: var(--v2-surface);
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface-raised);
 `;
 
 const Code = styled.span<{ $wrap: boolean }>`
@@ -125,38 +125,54 @@ const TypedCode = styled.code`
 
 const Prompt = styled.span`
   color: var(--v2-text-subtle);
-  font-family: var(--v2-font-mono);
   font-size: 15px;
   user-select: none;
 `;
 
-const CopyButton = styled.button`
-  display: flex;
+/* The section's one control, filled, with its verb written on it. */
+const CopyButton = styled.button<{ $copied: boolean }>`
+  display: inline-flex;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
   border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--v2-text-muted);
+  border-radius: var(--radius, 2px);
+  background: ${({ $copied }) => ($copied ? "var(--v2-surface)" : "var(--v2-accent-strong)")};
+  color: ${({ $copied }) => ($copied ? "var(--v2-text)" : "#fff")};
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 160ms ease;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: var(--v2-text);
+    background: ${({ $copied }) => ($copied ? "var(--v2-surface-raised)" : "var(--v2-accent)")};
+  }
+
+  &:active {
+    transform: scale(0.97);
   }
 
   &:focus-visible {
     outline: 2px solid var(--v2-focus);
-    outline-offset: -2px;
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+
+    &:active {
+      transform: none;
+    }
   }
 `;
 
 const Status = styled.span`
   position: absolute;
   width: 1px;
-  height: 1px;
+  height: 1px; /* taste-skill-ignore: screen-reader-only announcement */
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;

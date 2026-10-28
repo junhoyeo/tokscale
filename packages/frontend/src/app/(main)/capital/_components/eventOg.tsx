@@ -4,8 +4,6 @@ import { MEASURE_LABELS, QUANTITY_UNITS, formatPartialDate, sortForDisplay, type
 import { loadOgFonts } from "@/lib/og/fonts";
 import { titleCase } from "@/lib/text/titleCase";
 
-const ACCENT = "#53d1f3";
-
 /** The values a card shows: up to two amounts, then one quantity, at most three, each with its source. */
 function cardStats(e: EventView) {
   const amounts = sortForDisplay(
@@ -14,9 +12,9 @@ function cardStats(e: EventView) {
   );
   const quantity = e.quantities.find((q) => q.quantity.measure !== "shares" && q.quantity.measure !== "investors") ?? e.quantities[0];
   return [
-    ...amounts.slice(0, 2).map((a) => ({ label: (a.amount.label ?? MEASURE_LABELS[a.amount.measure]).toUpperCase(), value: a.short, source: a.source })),
+    ...amounts.slice(0, 2).map((a) => ({ label: a.amount.label ?? MEASURE_LABELS[a.amount.measure], value: a.short, source: a.source })),
     ...(quantity
-      ? [{ label: (quantity.quantity.label ?? QUANTITY_UNITS[quantity.quantity.measure].label).toUpperCase(), value: quantity.short, source: quantity.source }]
+      ? [{ label: quantity.quantity.label ?? QUANTITY_UNITS[quantity.quantity.measure].label, value: quantity.short, source: quantity.source }]
       : []),
   ].slice(0, 3);
 }
@@ -58,16 +56,16 @@ export async function eventOgImage(e: EventView): Promise<Response> {
           <div style={{ display: "flex", gap: 40 }}>
             {stats.map((s) => (
               <div key={s.label} style={{ display: "flex", flexDirection: "column", flexShrink: 0 }}>
-                <div style={{ display: "flex", flexShrink: 0, fontSize: s.value.length > 10 ? 38 : 44, fontWeight: 700, color: ACCENT, whiteSpace: "nowrap" }}>
+                <div style={{ display: "flex", flexShrink: 0, fontSize: s.value.length > 10 ? 38 : 44, fontWeight: 600, color: OG_TEXT, whiteSpace: "nowrap" }}>
                   {s.value}
                 </div>
-                <div style={{ display: "flex", maxWidth: 330, marginTop: 4, fontSize: 16, color: OG_TEXT_MUTED, letterSpacing: 2, lineHeight: 1.35 }}>
+                <div style={{ display: "flex", maxWidth: 330, marginTop: 4, fontSize: 17, color: OG_TEXT_MUTED, lineHeight: 1.35 }}>
                   {s.label}
                 </div>
               </div>
             ))}
           </div>
-          <div style={{ display: "flex", fontSize: 16, color: OG_TEXT_MUTED, letterSpacing: 2 }}>{source}</div>
+          <div style={{ display: "flex", fontSize: 16, color: OG_TEXT_MUTED }}>{source}</div>
         </div>
       </OgCardShell>
     ),

@@ -360,15 +360,15 @@ const Tip = styled.div`
   width: max-content;
   max-width: min(320px, calc(100vw - ${VIEWPORT_MARGIN * 2}px));
   margin: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--v2-rule-strong);
-  border-radius: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--v2-rule); /* taste-skill-ignore: floating tooltip */
+  border-radius: var(--radius, 2px);
   background: var(--v2-surface-raised);
-  /* Small, so it does not dim the trigger right under it. */
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  /* It floats above the page, so it may lift off it. */
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5); /* taste-skill-ignore: floating tooltip */
   color: var(--v2-text);
   font-family: var(--v2-font-ui);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   font-style: normal;
   font-weight: 500;
   font-variant-numeric: tabular-nums;

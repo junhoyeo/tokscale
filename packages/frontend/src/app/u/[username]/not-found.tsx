@@ -2,73 +2,70 @@
 
 import Link from "next/link";
 import styled from "styled-components";
+import { DitherButton } from "dither-kit/DitherButton";
 import { Navigation } from "@/components/layout/Navigation";
-import { Footer } from "@/components/layout/Footer";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 
-const Container = styled.div`
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  background-color: #10121C;
-`;
-
-const Main = styled.main`
-  flex: 1;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 40px 24px;
-  width: 100%;
-`;
-
-const ContentWrapper = styled.div`
-  text-align: center;
-  padding-top: 80px;
-  padding-bottom: 80px;
+const Wrap = styled.div`
+  max-width: 46rem;
+  padding: clamp(2rem, 8vh, 5rem) 0;
 `;
 
 const Title = styled.h1`
-  font-size: 24px;
-  font-weight: bold;
-  color: white;
-  margin-bottom: 8px;
+  margin: 0;
+  color: var(--service-text);
+  font-size: clamp(1.625rem, 3.4vw, 2rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
 `;
 
-const Description = styled.p`
-  margin-bottom: 24px;
-  color: #4B6486;
+const Copy = styled.p`
+  max-width: 46ch;
+  margin: 0.875rem 0 1.5rem;
+  color: var(--service-text-muted);
+  font-size: 1rem;
+  line-height: 1.55;
 `;
 
-const BackButton = styled(Link)`
-  display: inline-flex;
+const Actions = styled.div`
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  padding: 8px 16px;
-  color: white;
-  font-weight: 500;
-  border-radius: 8px;
-  background: #0073FF;
-  transition: opacity 0.2s;
+  gap: 1.25rem;
 
-  &:hover {
-    opacity: 0.9;
+  button.profile-not-found-action {
+    padding-right: 1.125rem;
+    padding-left: 1.125rem;
+    font-size: 0.875rem;
   }
 `;
 
 export default function ProfileNotFound() {
   return (
-    <Container>
+    <div className="service-page-shell">
       <Navigation />
-      <Main>
-        <ContentWrapper>
-          <Title>User Not Found</Title>
-          <Description>
-            This user doesn&apos;t exist or hasn&apos;t submitted any data yet.
-          </Description>
-          <BackButton href="/leaderboard">
-            Back to Leaderboard
-          </BackButton>
-        </ContentWrapper>
-      </Main>
-      <Footer />
-    </Container>
+      <main className="service-main" id="main-content">
+        <Wrap>
+          <Title>Profile not found</Title>
+          <Copy>
+            This account does not exist, or it has not submitted any usage yet.
+          </Copy>
+          <Actions>
+            <DitherButton
+              nativeButton={false}
+              role="link"
+              render={<Link href="/leaderboard" />}
+              color="blue"
+              variant="solid"
+              className="profile-not-found-action"
+            >
+              Browse the leaderboard
+            </DitherButton>
+          </Actions>
+        </Wrap>
+      </main>
+      <PublicFooter />
+    </div>
   );
 }

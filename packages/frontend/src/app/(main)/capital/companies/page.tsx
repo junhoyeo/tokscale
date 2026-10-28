@@ -32,7 +32,6 @@ import { JsonLd } from "../_components/JsonLd";
 import { CapacityTotal } from "../_components/CapacityTotal";
 import { OrgCell } from "../_components/OrgMark";
 import styles from "../_components/capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 
 const TITLE = "AI Companies: Funding, Valuations, Compute Deals and Capex | Tokscale";
 const DESCRIPTION =
@@ -117,7 +116,6 @@ export default async function CompaniesPage({ searchParams }: PageProps) {
       />
       <Breadcrumbs items={[{ label: "Capital", href: "/capital" }, { label: "Companies" }]} />
       <header className={styles.pageHead}>
-        <Eyebrow>Companies</Eyebrow>
         <h1 className={`${styles.display} ${styles.pageTitle}`}>The companies behind AI</h1>
         <p className={styles.lede}>
           AI labs, clouds, chips, data centers and power. {rows.length} companies, each number with its source and date.
@@ -355,7 +353,7 @@ export default async function CompaniesPage({ searchParams }: PageProps) {
                         <Missing />
                       )}
                     </td>
-                    <td className={`${styles.right} ${styles.num} ${styles.hideMd}`} data-label="Compute deals">
+                    <td className={`${styles.right} ${styles.num}`} data-label="Compute deals">
                       {row.dealsCount > 0 ? row.dealsCount : <Missing />}
                     </td>
                   </>

@@ -1,6 +1,7 @@
 "use client";
 
-import styled, { css } from "styled-components";
+import styled from "styled-components";
+import { DitherUnderline } from "@/components/ui/DitherUnderline";
 
 export interface TabItem<T extends string> {
   id: T;
@@ -13,71 +14,19 @@ export interface TabBarProps<T extends string> {
   onTabChange: (tab: T) => void;
 }
 
-const TabBarContainer = styled.div`
-  display: inline-flex;
-  flex-direction: row;
-  align-items: center;
-  border-radius: 25px;
-  border: 1px solid;
-  padding: 6px;
-`;
-
-const TabButton = styled.button<{ $active?: boolean }>`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 25px;
-  padding-left: 1.25rem;
-  padding-right: 1.25rem;
-  padding-top: 10px;
-  padding-bottom: 10px;
-  transition: color 150ms, background-color 150ms;
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--background, #10121C), 0 0 0 4px #3b82f6;
-  }
-
-  ${(props) =>
-    props.$active
-      ? css`
-          background-color: var(--color-bg-active);
-        `
-      : css`
-          background-color: transparent;
-        `}
-`;
-
-const TabLabel = styled.span<{ $active?: boolean }>`
-  font-size: 1.125rem;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-
-  ${(props) =>
-    props.$active
-      ? css`
-          color: var(--color-fg-default);
-        `
-      : css`
-          color: var(--color-fg-muted);
-        `}
-`;
-
-export function TabBar<T extends string>({
-  tabs,
-  activeTab,
-  onTabChange,
-}: TabBarProps<T>) {
+/**
+ * Plain tabs: the only mark of the selected tab is the dithered accent line
+ * under its label, as wide as the label. Arrow keys, Home and End move the
+ * selection, and the selected tab is the one tab stop.
+ */
+export function TabBar<T extends string>({ tabs, activeTab, onTabChange }: TabBarProps<T>) {
   const handleKeyDown = (e: React.KeyboardEvent, currentIndex: number) => {
     if (e.key === "ArrowRight" || e.key === "ArrowDown") {
       e.preventDefault();
-      const nextIndex = (currentIndex + 1) % tabs.length;
-      onTabChange(tabs[nextIndex].id);
+      onTabChange(tabs[(currentIndex + 1) % tabs.length].id);
     } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
       e.preventDefault();
-      const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-      onTabChange(tabs[prevIndex].id);
+      onTabChange(tabs[(currentIndex - 1 + tabs.length) % tabs.length].id);
     } else if (e.key === "Home") {
       e.preventDefault();
       onTabChange(tabs[0].id);
@@ -88,15 +37,7 @@ export function TabBar<T extends string>({
   };
 
   return (
-    <TabBarContainer
-      role="tablist"
-      aria-label="Content tabs"
-      style={{
-        width: "fit-content",
-        backgroundColor: "var(--color-bg-elevated)",
-        borderColor: "var(--color-border-default)",
-      }}
-    >
+    <TabList role="tablist" aria-label="Content tabs">
       {tabs.map((tab, index) => {
         const isActive = activeTab === tab.id;
         return (
@@ -107,14 +48,65 @@ export function TabBar<T extends string>({
             tabIndex={isActive ? 0 : -1}
             onClick={() => onTabChange(tab.id)}
             onKeyDown={(e) => handleKeyDown(e, index)}
-            $active={isActive}
           >
             <TabLabel $active={isActive}>
               {tab.label}
+              {isActive ? <DitherUnderline /> : null}
             </TabLabel>
           </TabButton>
         );
       })}
-    </TabBarContainer>
+    </TabList>
   );
 }
+
+const TabList = styled.div`
+  display: inline-flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 24px;
+`;
+
+const TabButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0 10px;
+  background: transparent;
+
+  &:focus-visible {
+    outline: 2px solid var(--v2-focus);
+    outline-offset: 2px;
+  }
+`;
+
+const TabLabel = styled.span<{ $active?: boolean }>`
+  position: relative;
+  display: inline-flex;
+  padding-bottom: 8px;
+  color: ${({ $active }) => ($active ? "var(--v2-text)" : "var(--v2-text-muted)")};
+  font-size: 15px;
+  font-weight: ${({ $active }) => ($active ? 600 : 400)};
+  line-height: 1.2;
+  white-space: nowrap;
+
+  &:hover {
+    color: var(--v2-text);
+  }
+
+  /* Absolutely placed: the canvas never feeds its own width back into the tab. */
+  > span {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    display: block;
+    width: 100%;
+    height: 2px;
+    pointer-events: none;
+  }
+
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+  }
+`;

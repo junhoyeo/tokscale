@@ -10,6 +10,10 @@
  * collapses the rest behind a "Show N more" button. A search or a single lab
  * lists every match. Those top models are server-rendered for crawlers; a
  * ?lab= URL server-renders a whole lab.
+ *
+ * Presentation follows the app-screen rules: 13px grey sentence-case column
+ * labels, rules instead of fills, one 48px row pitch, right-aligned tabular
+ * numbers, and one 16px heading per lab.
  */
 import { useEffect, useId, useMemo, useState, type MouseEvent } from "react";
 import Link from "next/link";
@@ -36,14 +40,27 @@ import {
   LinkSegments,
   SectionTitle,
   ModelMark,
+  ShareMeter,
   VisuallyHidden,
   type LinkOption,
 } from "./ExploreUI";
 
+/**
+ * One grid for the column labels and the rows, so the rules land on one edge.
+ * Four figures and an identity column: the sheet is capped (below) so a name
+ * never trails 400px of empty ground to its first number.
+ */
+const GRID = "minmax(0, 1fr) 110px 140px 100px 100px";
+
+/** A five-column table of this data reads at about 980px; past that the name column drifts. */
+const Sheet = styled.div`
+  max-width: 980px;
+`;
+
 const SearchField = styled.label`
   position: relative;
   display: flex;
-  width: min(100%, 320px);
+  width: min(100%, 300px);
   align-items: center;
 `;
 
@@ -57,10 +74,10 @@ const SearchGlyph = styled.span`
 
 const SearchInput = styled.input`
   width: 100%;
-  min-height: 36px;
+  min-height: 34px;
   padding: 0 36px 0 34px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
+  border-radius: 2px;
   background: var(--service-surface);
   color: var(--service-text);
   font-size: 0.875rem;
@@ -87,13 +104,13 @@ const SearchInput = styled.input`
 
 const ClearButton = styled.button`
   position: absolute;
-  right: 2px;
+  right: 1px;
   display: inline-grid;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   border: 0;
-  border-radius: 6px;
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text-muted);
 
@@ -117,13 +134,17 @@ const LabFilter = styled.div`
 `;
 
 const CoverageRow = styled(CoverageLine)`
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 `;
 
 const ResultCount = styled.p`
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
+
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
+  }
 `;
 
 const ColumnHead = styled.div`
@@ -131,12 +152,12 @@ const ColumnHead = styled.div`
 
   @media (min-width: 720px) {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 120px 170px 100px 100px;
+    grid-template-columns: ${GRID};
     gap: 16px;
-    padding: 8px 0;
+    padding: 6px 0;
     border-bottom: 1px solid var(--service-border);
     color: var(--service-text-muted);
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 500;
 
     > span:not(:first-child) {
@@ -151,7 +172,7 @@ const ColumnHead = styled.div`
 
 const LabGroup = styled.section`
   &:not(:first-of-type) {
-    margin-top: 28px;
+    margin-top: 32px;
   }
 `;
 
@@ -161,7 +182,7 @@ const LabHeading = styled.div`
   align-items: baseline;
   justify-content: space-between;
   gap: 4px 16px;
-  padding: 10px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--service-border);
 `;
 
@@ -169,6 +190,7 @@ const LabMeta = styled.span`
   color: var(--service-text-muted);
   font-size: 0.8125rem;
   font-weight: 400;
+  font-variant-numeric: tabular-nums;
 `;
 
 const List = styled.ul`
@@ -190,9 +212,10 @@ const Item = styled.li`
   }
 
   @media (min-width: 720px) {
-    grid-template-columns: minmax(0, 1fr) 120px 170px 100px 100px;
+    grid-template-columns: ${GRID};
     gap: 16px;
-    min-height: 56px;
+    min-height: 48px;
+    padding: 6px 0;
   }
 `;
 
@@ -212,14 +235,14 @@ const NameBlock = styled.div`
 const NameLink = styled(Link)`
   overflow: hidden;
   color: var(--service-text);
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   font-weight: 600;
   text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
   }
 
   @media (max-width: 640px) {
@@ -230,7 +253,7 @@ const NameLink = styled(Link)`
 const Key = styled.code`
   overflow: hidden;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
@@ -257,7 +280,7 @@ const MobilePrimary = styled.span`
 
   > span {
     color: var(--service-text-muted);
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 400;
   }
 
@@ -282,6 +305,7 @@ const CompanyLink = styled(InlineLink)`
 `;
 
 const Footnote = styled.p`
+  max-width: 72ch;
   margin: 20px 0 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
@@ -294,19 +318,19 @@ const Footnote = styled.p`
 
 const MoreButton = styled.button`
   display: inline-flex;
-  min-height: 36px;
+  min-height: 32px;
   align-items: center;
-  margin-top: 8px;
+  margin-top: 10px;
   padding: 0 12px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
   font-weight: 500;
 
   &:hover {
-    background: var(--service-surface-muted);
+    border-color: var(--service-text-muted);
   }
 
   &:focus-visible {
@@ -322,13 +346,17 @@ const MoreButton = styled.button`
 
 const ClearAll = styled.button`
   margin-top: 12px;
-  min-height: 36px;
+  min-height: 32px;
   padding: 0 12px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
+  border-radius: 2px;
   background: transparent;
   color: var(--service-text);
   font-size: 0.875rem;
+
+  &:hover {
+    border-color: var(--service-text-muted);
+  }
 
   &:focus-visible {
     outline: 2px solid var(--service-focus);
@@ -484,7 +512,7 @@ export function ModelCatalog({
           ) : null}
         </EmptyNote>
       ) : (
-        <>
+        <Sheet>
           <ColumnHead aria-hidden="true">
             <span>Model</span>
             <span aria-sort={usersSorted ? "descending" : undefined}>Active users</span>
@@ -506,7 +534,7 @@ export function ModelCatalog({
                 {preview.shown.map((model) => (
                   <Item key={model.key} data-row-link="">
                     <NameBlock>
-                      <ModelMark model={model} size={28} />
+                      <ModelMark model={model} size={24} />
                       <NameLink href={modelPath(model.key)} data-row-primary="">
                         {model.name}
                       </NameLink>
@@ -525,8 +553,7 @@ export function ModelCatalog({
                       <VisuallyHidden> active users</VisuallyHidden>
                     </Value>
                     <Value>
-                      {formatShare(model.adoption)}
-                      <VisuallyHidden> adoption</VisuallyHidden>
+                      <ShareMeter share={model.adoption} label="of accounts active in the period" />
                     </Value>
                     <Value>
                       {formatTokens(model.tokens)}
@@ -553,7 +580,7 @@ export function ModelCatalog({
               ) : null}
             </LabGroup>
           ))}
-        </>
+        </Sheet>
       )}
 
       <Footnote>

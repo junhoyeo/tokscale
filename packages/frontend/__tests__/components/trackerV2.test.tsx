@@ -60,8 +60,8 @@ describe("tracker page", () => {
     expect(html).toMatch(/<b>298<\/b> people on the leaderboard/);
     expect(html).toMatch(/<b>22\.4T<\/b> tokens, all time/);
     expect(html).toMatch(/<b>59<\/b> agents supported/);
-    expect(html).toContain("/assets/v2/ledger-blue.webp");
-    expect(html).toContain("/assets/v2/recorder-blue.webp");
+    expect(html).toContain("/assets/v2/tui/tui-overview.webp");
+    expect(html).toContain("Counts leave your machine");
   });
 
   it("drops the leaderboard numbers when they are unavailable", () => {

@@ -49,7 +49,7 @@ export default async function Image({
               width={132}
               height={132}
               alt=""
-              style={{ borderRadius: 66, border: `1px solid ${OG_BORDER}` }}
+              style={{ borderRadius: 2, border: `1px solid ${OG_BORDER}` }}
             />
           ) : null}
 

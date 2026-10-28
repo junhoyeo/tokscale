@@ -1,21 +1,38 @@
 "use client";
 
 /**
- * Daily usage trend for one model. Plain SVG, no chart dependency.
+ * Daily usage trend for one model: a dither-kit area chart in the site's one
+ * data hue, with dates on the x axis and a compact count scale.
  *
- * Accessibility: the chart is a focusable group. Arrow keys (and pointer
- * hover) move a readout that is announced politely, and the full series is
- * available as a table under "Show daily values".
+ * Accessibility: the chart frame is a focusable group. Arrow keys move the day
+ * (Shift moves a week, Home and End jump to the ends) and drive the kit's
+ * crosshair through `markerIndex`; pointer hover moves the same day through
+ * `onHoverChange`. A polite readout above the chart announces the day, and the
+ * full series is a table under "Show daily values". The canvas is decorative.
  */
-import { useId, useMemo, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useId, useMemo, useState, type KeyboardEvent } from "react";
 import styled from "styled-components";
+import { AreaChart } from "dither-kit/area-chart";
+import { Area } from "dither-kit/Area";
+import { Grid } from "dither-kit/Grid";
+import { Tooltip } from "dither-kit/Tooltip";
+import { XAxis } from "dither-kit/XAxis";
+import { YAxis } from "dither-kit/YAxis";
+import { CHART_PROPS, ChartBox, chartFrame, compactCount } from "./ExploreCharts";
 import { ButtonSegments, SectionNote, SectionTitle, VisuallyHidden } from "./ExploreUI";
-import { buildTrendGeometry, formatCount, formatDay, formatTokens } from "./format";
+import { formatCount, formatDay, formatTokens } from "./format";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 
 type Metric = "activeUsers" | "tokens";
 
-const VIEW_W = 1000;
-const VIEW_H = 200;
+/** Room for the y scale on the left and the dates underneath the plot. */
+const CHART_MARGINS = { top: 12, right: 16, bottom: 28, left: 44 };
+
+/** One series per metric, drawn in the site's data hue. */
+const METRIC_CONFIG: Record<Metric, Record<string, { label: string; color: string }>> = {
+  activeUsers: { activeUsers: { label: "Active users", color: "blue" } },
+  tokens: { tokens: { label: "Tokens", color: "blue" } },
+};
 
 const Head = styled.div`
   display: flex;
@@ -27,7 +44,7 @@ const Head = styled.div`
 
 const Readout = styled.p`
   min-height: 1.5em;
-  margin: 12px 0 16px;
+  margin: 12px 0;
   color: var(--service-text);
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
@@ -37,81 +54,27 @@ const Readout = styled.p`
   }
 `;
 
+/* The focusable group the keys drive; the kit root inside it tracks the pointer. */
 const Frame = styled.div`
   position: relative;
-  height: 220px;
-  margin-left: 52px;
-  border-bottom: 1px solid var(--service-border-strong);
   cursor: crosshair;
   touch-action: pan-y;
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 4px;
   }
+`;
 
+const Plot = styled(ChartBox)`
   @media (max-width: 640px) {
     height: 180px;
-    margin-left: 44px;
   }
 `;
 
-const Svg = styled.svg`
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-`;
-
-const YLabel = styled.span`
-  position: absolute;
-  left: -52px;
-  width: 44px;
-  color: var(--service-text-muted);
-  font-size: 0.6875rem;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  transform: translateY(-50%);
-
-  @media (max-width: 640px) {
-    left: -44px;
-    width: 38px;
-  }
-`;
-
-const XLabels = styled.div`
-  display: flex;
-  justify-content: space-between;
-  margin: 6px 0 0 52px;
-  color: var(--service-text-muted);
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-
-  @media (max-width: 640px) {
-    margin-left: 44px;
-  }
-`;
-
-const Cursor = styled.span`
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: rgba(255, 255, 255, 0.28);
-  pointer-events: none;
-`;
-
-const Dot = styled.span`
-  position: absolute;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--service-canvas);
-  border-radius: 50%;
-  background: var(--service-accent-hover);
-  pointer-events: none;
-  transform: translate(-50%, -50%);
+const PlotFrame = styled.div`
+  ${chartFrame}
 `;
 
 const DataDetails = styled.details`
@@ -121,7 +84,7 @@ const DataDetails = styled.details`
     display: inline-flex;
     min-height: 32px;
     align-items: center;
-    color: var(--service-accent-hover);
+    color: var(--service-text);
     font-size: 0.8125rem;
     cursor: pointer;
 
@@ -131,8 +94,12 @@ const DataDetails = styled.details`
     }
   }
 
+  > summary:hover {
+    text-decoration: underline;
+  }
+
   > summary:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -152,19 +119,28 @@ const DataTable = styled.table`
 
   th,
   td {
-    padding: 6px 8px 6px 0;
+    height: 32px;
+    padding: 0 0 0 16px;
     border-bottom: 1px solid var(--service-border);
     text-align: right;
   }
 
   th:first-child,
   td:first-child {
+    padding-left: 0;
     text-align: left;
   }
 
   th {
+    position: sticky;
+    top: 0;
+    background: var(--service-canvas);
     color: var(--service-text-muted);
-    font-weight: 500;
+    font-weight: 400;
+  }
+
+  td {
+    color: var(--service-text);
   }
 `;
 
@@ -179,21 +155,36 @@ const METRIC_OPTIONS = [
   { value: "tokens" as const, label: "Tokens" },
 ];
 
-function formatMetric(metric: Metric, value: number): string {
-  return metric === "tokens" ? `${formatTokens(value)} tokens` : `${formatCount(value)} active users`;
+/** The readout, peak and tooltip format: exact users, compact tokens. */
+function metricValue(metric: Metric, value: number): string {
+  return metric === "tokens" ? formatTokens(value) : formatCount(value);
 }
 
-function axisValue(metric: Metric, value: number): string {
-  return metric === "tokens" ? formatTokens(value) : formatCount(value);
+/** Narrower plots: the all-time ticks show the year, so they get fewer of them. */
+const NARROW_PLOT = 520;
+
+/** At least this many days: the tick carries its year, or dates from two years read out of order. */
+const LONG_SPAN_DAYS = 330;
+
+/**
+ * "Mon D" for a window inside one year, "Mon 2025" where an all-time axis has
+ * no room for the day, and "Mon D, YYYY" everywhere else.
+ */
+function dateTick(date: unknown, longSpan: boolean, narrow: boolean): string {
+  const day = formatDay(String(date));
+  if (!longSpan) return day.replace(/, \d{4}$/, "");
+  return narrow ? day.replace(/^(\w+) \d+, /, "$1 ") : day;
 }
 
 export function TrendChart({ trend, modelName }: { trend: TrendPoint[]; modelName: string }) {
   const [metric, setMetric] = useState<Metric>("activeUsers");
   const [index, setIndex] = useState<number | null>(null);
   const titleId = useId();
+  const helpId = `${titleId}-help`;
+  const narrow = useMediaQuery(`(max-width: ${NARROW_PLOT}px)`);
 
-  const values = useMemo(() => trend.map((point) => point[metric]), [trend, metric]);
-  const geometry = useMemo(() => buildTrendGeometry(values, VIEW_W, VIEW_H), [values]);
+  // Each row carries both metrics; the config picks the one series to draw. `day` heads the tooltip.
+  const data = useMemo(() => trend.map((point) => ({ ...point, day: formatDay(point.date) })), [trend]);
 
   if (trend.length === 0) {
     return (
@@ -205,16 +196,17 @@ export function TrendChart({ trend, modelName }: { trend: TrendPoint[]; modelNam
   }
 
   const last = trend.length - 1;
-  const active = index ?? last;
-  const point = geometry.points[active];
+  // Clamped: a period switch can shorten the series under a kept index.
+  const active = index === null ? last : Math.min(index, last);
   const activeDay = trend[active];
-
-  const onPointer = (event: PointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    setIndex(Math.round(ratio * last));
-  };
+  const peak = trend.reduce((max, point) => Math.max(max, point[metric]), 0);
+  const longSpan = trend.length > LONG_SPAN_DAYS;
+  /*
+   * Whole-number ticks: a count at most the peak keeps the tick step at 1, so a
+   * series of 3 users reads 0/1/2/3 and never 0.2/0.4. Every real series asks
+   * for the full four; a tiny one asks for fewer rather than fractions.
+   */
+  const tickCount = Math.min(4, Math.max(1, Math.ceil(peak)));
 
   const onKey = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 7 : 1;
@@ -227,7 +219,6 @@ export function TrendChart({ trend, modelName }: { trend: TrendPoint[]; modelNam
   };
 
   const metricLabel = metric === "tokens" ? "tokens" : "active users";
-  const midDate = trend[Math.floor(last / 2)]?.date;
 
   return (
     <div>
@@ -244,60 +235,36 @@ export function TrendChart({ trend, modelName }: { trend: TrendPoint[]; modelNam
       </Head>
 
       <Readout aria-live="polite">
-        {formatMetric(metric, activeDay[metric])} <span>on {formatDay(activeDay.date)}</span>
+        {`${metricValue(metric, activeDay[metric])} ${metricLabel}`} <span>on {formatDay(activeDay.date)}</span>
       </Readout>
 
-      <Frame
-        role="group"
-        tabIndex={0}
-        aria-labelledby={titleId}
-        aria-describedby={`${titleId}-help`}
-        onPointerMove={onPointer}
-        onPointerDown={onPointer}
-        onPointerLeave={() => setIndex(null)}
-        onKeyDown={onKey}
-      >
-        <VisuallyHidden id={`${titleId}-help`}>
-          {`Daily ${metricLabel} for ${modelName}, ${formatDay(trend[0].date)} to ${formatDay(trend[last].date)}. Peak ${axisValue(metric, Math.max(...values))}. Use the left and right arrow keys to read each day.`}
+      <Frame role="group" tabIndex={0} aria-labelledby={titleId} aria-describedby={helpId} onKeyDown={onKey}>
+        <VisuallyHidden id={helpId}>
+          {`Daily ${metricLabel} for ${modelName}, ${formatDay(trend[0].date)} to ${formatDay(trend[last].date)}. Peak ${metricValue(metric, peak)}. Use the left and right arrow keys to read each day.`}
         </VisuallyHidden>
-        <Svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} preserveAspectRatio="none" aria-hidden="true" focusable="false">
-          {[0, 0.5].map((fraction) => (
-            <line
-              key={fraction}
-              x1={0}
-              x2={VIEW_W}
-              y1={VIEW_H * fraction}
-              y2={VIEW_H * fraction}
-              stroke="rgba(255,255,255,0.08)"
-              strokeWidth={1}
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
-          <path d={geometry.area} fill="rgba(47, 143, 255, 0.12)" />
-          <path
-            d={geometry.line}
-            fill="none"
-            stroke="var(--service-accent-hover)"
-            strokeWidth={2}
-            strokeLinejoin="round"
-            vectorEffect="non-scaling-stroke"
-          />
-        </Svg>
-        <YLabel style={{ top: 0 }}>{axisValue(metric, geometry.max)}</YLabel>
-        <YLabel style={{ top: "50%" }}>{axisValue(metric, geometry.max / 2)}</YLabel>
-        <YLabel style={{ top: "100%" }}>0</YLabel>
-        {point ? (
-          <>
-            <Cursor style={{ left: `${(point.x / VIEW_W) * 100}%` }} />
-            <Dot style={{ left: `${(point.x / VIEW_W) * 100}%`, top: `${(point.y / VIEW_H) * 100}%` }} />
-          </>
-        ) : null}
+        <Plot $height={220} aria-hidden="true">
+          <PlotFrame>
+            <AreaChart
+              {...CHART_PROPS}
+              data={data}
+              config={METRIC_CONFIG[metric]}
+              margins={CHART_MARGINS}
+              markerIndex={active}
+              onHoverChange={setIndex}
+            >
+              <Grid horizontal tickCount={tickCount} />
+              <XAxis
+                dataKey="date"
+                maxTicks={longSpan && narrow ? 4 : 5}
+                tickFormatter={(date) => dateTick(date, longSpan, narrow)}
+              />
+              <YAxis tickCount={tickCount} tickFormatter={compactCount} />
+              <Area dataKey={metric} />
+              <Tooltip labelKey="day" valueFormatter={(value) => metricValue(metric, value)} />
+            </AreaChart>
+          </PlotFrame>
+        </Plot>
       </Frame>
-      <XLabels aria-hidden="true">
-        <span>{formatDay(trend[0].date)}</span>
-        {midDate && trend.length > 2 ? <span>{formatDay(midDate)}</span> : null}
-        <span>{formatDay(trend[last].date)}</span>
-      </XLabels>
 
       <DataDetails>
         <summary>Show daily values</summary>

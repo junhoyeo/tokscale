@@ -29,6 +29,7 @@ export function CapexBars({ quarters, label }: { quarters: CapexQuarter[]; label
             y={height - h}
             width={barWidth}
             height={h}
+            vectorEffect={q.derived ? "non-scaling-stroke" : undefined}
             content={`${fiscalLabel(q)} (${calendarSpanLabel(q.start, q.end)}): ${formatMoney(q.value, q.currency)}${q.derived ? " (derived)" : ""}`}
             describe={false}
           />

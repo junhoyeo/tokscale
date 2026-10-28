@@ -29,7 +29,7 @@ const Part = styled.div`
 const SubTitle = styled.h3`
   margin: 0;
   color: var(--service-text);
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   font-weight: 600;
 `;
 
@@ -53,12 +53,12 @@ const Item = styled(MetricItem)`
 const Sub = styled.dd`
   margin: 2px 0 0;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   line-height: 1.4;
   white-space: normal;
 
   @media (max-width: 640px) {
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
   }
 `;
 
@@ -110,6 +110,7 @@ const Assumptions = styled.ul`
   }
 `;
 
+/* Sentence-case labels flush with their columns: every price and the context on the right edge. */
 const ColumnHead = styled.div`
   display: none;
 
@@ -120,8 +121,8 @@ const ColumnHead = styled.div`
     padding: 8px 0;
     border-bottom: 1px solid var(--service-border);
     color: var(--service-text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: 0.8125rem;
+    font-weight: 400;
 
     > span:nth-child(n + 3) {
       text-align: right;
@@ -162,19 +163,21 @@ const Provider = styled.span`
   align-items: center;
   gap: 4px 8px;
   color: var(--service-text);
-  font-weight: 600;
+  font-weight: 500;
 `;
 
 const ReferenceTag = styled.span`
   display: inline-flex;
-  min-height: 18px;
+  min-height: 20px;
+  flex: none;
   align-items: center;
   padding: 0 6px;
   border: 1px solid var(--service-border-strong);
-  border-radius: 999px;
+  border-radius: 2px;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.8125rem;
   font-weight: 500;
+  white-space: nowrap;
 `;
 
 const ModelId = styled.code`
@@ -230,7 +233,7 @@ const MoreProviders = styled.details`
     display: inline-flex;
     min-height: 36px;
     align-items: center;
-    color: var(--service-accent-hover);
+    color: var(--service-text);
     font-size: 0.8125rem;
     cursor: pointer;
 
@@ -240,8 +243,12 @@ const MoreProviders = styled.details`
     }
   }
 
+  > summary:hover {
+    text-decoration: underline;
+  }
+
   > summary:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }

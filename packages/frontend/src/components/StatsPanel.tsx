@@ -24,7 +24,7 @@ const Container = styled.section`
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 12px;
+  border-radius: 2px;
   background: var(--service-surface);
 `;
 
@@ -93,14 +93,14 @@ const StatItemValue = styled.dd<{ $highlight?: boolean }>`
   min-width: 0;
   margin: 0;
   color: ${({ $highlight }) => ($highlight ? "var(--v2-numeric)" : "var(--service-text)")};
-  font-size: ${({ $highlight }) => ($highlight ? "1.25rem" : "1.125rem")};
+  font-size: ${({ $highlight }) => ($highlight ? "1.25rem" : "1rem")};
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
   overflow-wrap: anywhere;
 
   @media (max-width: 400px) {
-    font-size: ${({ $highlight }) => ($highlight ? "1.125rem" : "1rem")};
+    font-size: ${({ $highlight }) => ($highlight ? "1.125rem" : "0.9375rem")};
   }
 `;
 

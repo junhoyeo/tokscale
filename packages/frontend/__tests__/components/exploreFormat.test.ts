@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   adoptionNote,
   adoptionShare,
-  buildTrendGeometry,
   clampShare,
   describeCoverage,
   describeUsersChange,
@@ -14,7 +13,6 @@ import {
   formatShare,
   formatTokens,
   formatUpdatedAt,
-  niceCeiling,
   periodLabel,
   resolveExplorePeriod,
   resolveExploreSort,
@@ -191,33 +189,5 @@ describe("tokenMixParts", () => {
   it("returns zero shares for an empty mix", () => {
     const parts = tokenMixParts({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
     expect(parts.every((part) => part.share === 0)).toBe(true);
-  });
-});
-
-describe("trend geometry", () => {
-  it("rounds the scale up to a readable value", () => {
-    expect(niceCeiling(0)).toBe(0);
-    expect(niceCeiling(7)).toBe(8);
-    expect(niceCeiling(342)).toBe(400);
-    expect(niceCeiling(1234)).toBe(1500);
-    expect(niceCeiling(9100)).toBe(10000);
-  });
-
-  it("maps values into the box with y growing down", () => {
-    const geometry = buildTrendGeometry([0, 50, 100], 200, 100);
-    expect(geometry.max).toBe(100);
-    expect(geometry.points.map((p) => [p.x, p.y])).toEqual([
-      [0, 100],
-      [100, 50],
-      [200, 0],
-    ]);
-    expect(geometry.line).toBe("M0 100 L100 50 L200 0");
-    expect(geometry.area.endsWith("L200 100 L0 100 Z")).toBe(true);
-  });
-
-  it("handles empty, single and all-zero series", () => {
-    expect(buildTrendGeometry([], 100, 50).line).toBe("");
-    expect(buildTrendGeometry([5], 100, 50).points[0].x).toBe(50);
-    expect(buildTrendGeometry([0, 0], 100, 50).points.every((p) => p.y === 50)).toBe(true);
   });
 });

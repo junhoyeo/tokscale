@@ -4,14 +4,13 @@ import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import { TOKSCALE_X_HANDLE } from "@/lib/community";
 import { capitalPath, computePath, computeUrl, methodologyPath } from "@/lib/capital";
 import { QUANTITY_UNITS, formatPartialDate, ledger, tryQuantityTotal, type EventView, type QuantityMeasure } from "@/lib/capital/ledger";
-import { Amount, Missing } from "../_components/Amount";
+import { Amount, AmountBar, Missing, maxByCurrency } from "../_components/Amount";
 import { Breadcrumbs } from "../_components/Breadcrumbs";
 import { CapacityTotal } from "../_components/CapacityTotal";
 import { CapitalShell } from "../_components/CapitalShell";
 import { JsonLd } from "../_components/JsonLd";
 import { SourceLink } from "../_components/SourceLink";
 import styles from "../_components/capital.module.css";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 
 const TITLE = "AI Compute Deals: Cloud Contracts, Data-Center Leases and Chips | Tokscale";
 const DESCRIPTION =
@@ -49,6 +48,15 @@ export default async function ComputePage({ searchParams }: PageProps) {
   const filter = FILTERS.find((f) => f.key === key) ?? FILTERS[0];
   const all = ledger.getComputeDeals();
   const rows = all.filter(filter.match);
+  // Bars are scaled inside one currency; contract values keep their stated basis.
+  const scale = maxByCurrency(
+    rows.map((e) => {
+      const value = e.amounts.find(
+        (a) => a.skipped === null && ["contract_value", "compute_commitment", "purchase_price"].includes(a.amount.measure)
+      );
+      return { value: value?.amount.value ?? null, currency: value?.amount.currency ?? "" };
+    })
+  );
 
   // Per buyer: count and largest stated value. Capacity is summed only inside one measure.
   const buyers = new Map<string, { name: string; href: string | null; deals: EventView[] }>();
@@ -79,7 +87,6 @@ export default async function ComputePage({ searchParams }: PageProps) {
       />
       <Breadcrumbs items={[{ label: "Capital", href: capitalPath() }, { label: "Compute" }]} />
       <header className={styles.pageHead}>
-        <Eyebrow>Compute</Eyebrow>
         <h1 className={`${styles.display} ${styles.pageTitle}`}>Compute and infrastructure deals</h1>
         <p className={styles.lede}>
           Contracts for cloud capacity, data-center leases, chips and power among companies Tokscale tracks. Contract values
@@ -106,7 +113,7 @@ export default async function ComputePage({ searchParams }: PageProps) {
             <th scope="col">Deal</th>
             <th scope="col">Buyer or tenant</th>
             <th scope="col">Provider</th>
-            <th scope="col" className={styles.right}>
+            <th scope="col" className={`${styles.right} ${styles.amountCell}`}>
               Value (basis)
             </th>
             <th scope="col" className={styles.right}>
@@ -139,12 +146,13 @@ export default async function ComputePage({ searchParams }: PageProps) {
                 </td>
                 <td data-label="Buyer or tenant">{b.map((p) => p.org.displayName).join(", ") || <Missing />}</td>
                 <td data-label="Provider">{pr.map((p) => p.org.displayName).join(", ") || <Missing />}</td>
-                <td className={`${styles.right} ${value ? "" : styles.emptyStacked}`} data-label="Value">
+                <td className={`${styles.right} ${styles.amountCell} ${value ? "" : styles.emptyStacked}`} data-label="Value">
                   {value ? (
                     <>
                       <Amount view={value} />
                       {value.term ? <span className={styles.cellSub}>{value.term}</span> : null}
                       {alternative ? <span className={styles.cellSub}>{alternative.short} with options</span> : null}
+                      <AmountBar value={value.amount.value} max={scale.get(value.amount.currency) ?? 0} />
                     </>
                   ) : (
                     <Missing reason="No dollar value stated in the source" />

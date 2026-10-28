@@ -8,7 +8,7 @@
 import Link from "next/link";
 import { useEffect, useId, useRef, useState } from "react";
 import styled from "styled-components";
-import { PrimaryActionLink } from "@/components/leaderboard/RankingUI";
+import { PrimaryActionLink, SecondaryButton } from "@/components/leaderboard/RankingUI";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import type { SourceNote } from "@/lib/benchmarks/attribution";
 import type { BenchmarkPageInfo, DateKind, MappingSummary, ResultColumns, ResultRow, TimelineData } from "@/lib/benchmarks/detail";
@@ -34,9 +34,9 @@ const Breadcrumb = styled.nav`
     gap: 4px;
     margin: 0;
     padding: 0;
-    list-style: none;
     color: var(--service-text-muted);
     font-size: 0.8125rem;
+    list-style: none;
   }
 
   li:not(:last-child)::after {
@@ -58,10 +58,12 @@ const CrumbLink = styled(Link)`
 
   &:hover {
     color: var(--service-text);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -76,7 +78,6 @@ const CrumbLink = styled(Link)`
 const Identity = styled.header`
   display: grid;
   gap: 10px;
-  margin-bottom: 24px;
 `;
 
 const Byline = styled.p`
@@ -86,21 +87,26 @@ const Byline = styled.p`
   gap: 4px 0;
   margin: 0;
   color: var(--service-text-muted);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 
   > span:not(:last-child)::after {
     content: "·";
     margin: 0 8px;
     color: var(--service-border-strong);
   }
+
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
+  }
 `;
 
+/** The header facts: 13px grey labels over tabular values, rules only. */
 const Facts = styled.dl`
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
-  gap: 16px 24px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 12px 24px;
   margin: 0 0 16px;
-  padding: 14px 0;
+  padding: 12px 0;
   border-top: 1px solid var(--service-border);
   border-bottom: 1px solid var(--service-border);
 `;
@@ -113,25 +119,21 @@ const Fact = styled.div`
 
   dt {
     color: var(--service-text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: 0.8125rem;
+    font-weight: 400;
   }
 
   dd {
     margin: 0;
     color: var(--service-text);
-    font-size: 0.9375rem;
+    font-size: 0.875rem;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }
 
   @media (max-width: 640px) {
-    dt {
-      font-size: 0.8125rem;
-    }
-
     dd {
-      font-size: 1rem;
+      font-size: 0.9375rem;
     }
   }
 `;
@@ -139,11 +141,14 @@ const Fact = styled.div`
 const FactSub = styled.span`
   display: block;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+`;
 
-  @media (max-width: 640px) {
-    font-size: 0.8125rem;
-  }
+const ProseBlock = styled.div`
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
 `;
 
 const Prose = styled.p`
@@ -151,7 +156,7 @@ const Prose = styled.p`
   margin: 0;
   color: var(--service-text-muted);
   font-size: 0.875rem;
-  line-height: 1.55;
+  line-height: 1.6;
 
   strong {
     color: var(--service-text);
@@ -166,27 +171,30 @@ const Prose = styled.p`
 const Note = styled.p`
   max-width: 80ch;
   margin: 0;
-  padding-left: 10px;
-  border-left: 2px solid var(--service-border-strong);
   color: var(--service-text-muted);
   font-size: 0.875rem;
-  line-height: 1.5;
+  line-height: 1.55;
+  padding-left: 12px;
+  border-left: 1px solid var(--service-border-strong);
 
   @media (max-width: 640px) {
     font-size: 1rem;
   }
 `;
 
+/** Secondary link: ink text, underline on hover and focus. */
 const ExternalLink = styled.a`
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   text-decoration: none;
+  overflow-wrap: anywhere;
 
   &:hover {
-    text-decoration: underline !important;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -194,7 +202,7 @@ const ExternalLink = styled.a`
 
 const Sections = styled.div`
   display: grid;
-  gap: 48px;
+  gap: 40px;
   margin-top: 32px;
 `;
 
@@ -208,8 +216,8 @@ const ResultsHead = styled.div`
 
 const HeadText = styled.div`
   display: grid;
+  max-width: 82ch;
   gap: 4px;
-  max-width: 80ch;
 `;
 
 const Table = styled.table`
@@ -218,9 +226,13 @@ const Table = styled.table`
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
 
+  thead tr {
+    border-bottom: 1px solid var(--service-border-strong);
+  }
+
   th,
   td {
-    padding: 12px 16px 12px 0;
+    padding: 10px 16px 10px 0;
     border-bottom: 1px solid var(--service-border);
     text-align: left;
     vertical-align: top;
@@ -232,29 +244,47 @@ const Table = styled.table`
   }
 
   thead th {
-    padding-top: 8px;
-    padding-bottom: 8px;
-    border-bottom-color: var(--service-border-strong);
+    padding-top: 6px;
+    padding-bottom: 6px;
+    border-bottom: 0;
     color: var(--service-text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: 0.8125rem;
+    font-weight: 400;
     vertical-align: bottom;
     white-space: nowrap;
   }
 
-  td[data-col="rank"] {
-    width: 2.5em;
-    color: var(--service-text-muted);
-  }
-
+  td[data-col="rank"],
+  thead th[data-col="rank"],
   td[data-col="score"],
   thead th[data-col="score"],
+  td[data-col="cost"],
+  thead th[data-col="cost"],
+  td[data-col="date"],
+  thead th[data-col="date"],
   td[data-col="usage"],
-  thead th[data-col="usage"] {
+  thead th[data-col="usage"],
+  thead th[data-col="source"] {
     text-align: right;
   }
 
+  td[data-col="rank"] {
+    width: 2.75em;
+    color: var(--service-text-muted);
+  }
+
   td[data-col="score"] {
+    white-space: nowrap;
+  }
+
+  td[data-col="cond"] {
+    color: var(--service-text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  td[data-col="cost"],
+  td[data-col="date"] {
+    color: var(--service-text-muted);
     white-space: nowrap;
   }
 
@@ -280,10 +310,10 @@ const Table = styled.table`
       grid-template-columns: 2em minmax(0, 1fr) auto;
       grid-template-areas:
         "rank model score"
-        ". cond cond"
-        ". cost cost"
-        ". date date"
-        ". usage source";
+        "cond cond cond"
+        "cost cost cost"
+        "date date source"
+        "usage usage usage";
       gap: 4px 12px;
       padding: 14px 0;
       border-bottom: 1px solid var(--service-border);
@@ -295,6 +325,8 @@ const Table = styled.table`
       min-width: 0;
       padding: 0;
       border: 0;
+      text-align: left;
+      white-space: normal;
     }
 
     td[data-col="rank"] {
@@ -309,6 +341,7 @@ const Table = styled.table`
 
     td[data-col="score"] {
       grid-area: score;
+      text-align: right;
     }
 
     td[data-col="cond"] {
@@ -325,7 +358,6 @@ const Table = styled.table`
 
     td[data-col="usage"] {
       grid-area: usage;
-      text-align: left;
     }
 
     td[data-col="source"] {
@@ -364,15 +396,16 @@ const ModelText = styled.span`
 
 const ModelLink = styled(Link)`
   color: var(--service-text);
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
 
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -380,7 +413,7 @@ const ModelLink = styled(Link)`
 
 const ModelName = styled.span`
   color: var(--service-text);
-  font-weight: 600;
+  font-weight: 500;
 `;
 
 const UnmatchedMark = styled.span`
@@ -388,7 +421,7 @@ const UnmatchedMark = styled.span`
   height: 20px;
   flex: 0 0 auto;
   border: 1px dashed var(--service-border-strong);
-  border-radius: 4px;
+  border-radius: 2px;
 `;
 
 const RowHead = styled.th`
@@ -405,19 +438,15 @@ const RowHead = styled.th`
 const Sub = styled.span`
   display: block;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   font-weight: 400;
   line-height: 1.45;
-
-  @media (max-width: 640px) {
-    font-size: 0.8125rem;
-  }
 `;
 
 const ScoreText = styled.span`
   color: var(--service-text);
-  font-size: 0.9375rem;
-  font-weight: 600;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 `;
 
 const MutedText = styled.span`
@@ -458,20 +487,22 @@ const WideOnly = styled(InstantTooltip)`
   }
 `;
 
+/** Secondary link inside a row: ink at rest, underlined on hover and focus. */
 const SourceLink = styled.a`
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   text-decoration: none;
   white-space: nowrap;
 
   &:hover {
-    text-decoration: underline !important;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -485,7 +516,7 @@ const TableFoot = styled.div`
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
+  gap: 4px 16px;
   margin-top: 4px;
 `;
 
@@ -500,39 +531,14 @@ const Status = styled.p`
   }
 `;
 
-const ShowAll = styled.button`
-  min-height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--service-text);
-  font-size: 0.8125rem;
-  cursor: pointer;
-
-  &:hover {
-    border-color: var(--service-text-muted);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (max-width: 640px), (pointer: coarse) {
-    min-height: 44px;
-    font-size: 0.9375rem;
-  }
-`;
-
 const NotesGrid = styled.div`
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 32px;
+  gap: 24px;
 
   @media (min-width: 1024px) {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 32px 48px;
+    gap: 24px 40px;
   }
 `;
 
@@ -637,71 +643,71 @@ function Header({ info }: { info: BenchmarkPageInfo }) {
           <span>{info.categoryLabel}</span>
           {info.status === "history" ? <span>Kept as history</span> : null}
         </Byline>
-      </Identity>
 
-      <Facts>
-        <Fact>
-          <dt>Unit</dt>
-          <dd>{info.unitLabel}</dd>
-        </Fact>
-        <Fact>
-          <dt>Results</dt>
-          <dd>
-            {plural(info.resultCount, "result", "results")}
-            <FactSub>
-              {plural(info.modelCount, "Tokscale model", "Tokscale models")} matched, {formatCount(info.externalModelCount)} in the source
-            </FactSub>
-          </dd>
-        </Fact>
-        <Fact>
-          <dt>Last update</dt>
-          <dd>
-            {info.lastUpdate ? formatIsoDay(info.lastUpdate.date) : "\u2014"}
-            {info.lastUpdate ? <FactSub>{LAST_UPDATE_TEXT[info.lastUpdate.kind]}</FactSub> : null}
-          </dd>
-        </Fact>
-        <Fact>
-          <dt>Retrieved</dt>
-          <dd>
-            {info.retrievedAt ? formatIsoDay(info.retrievedAt) : "\u2014"}
-            {info.dataDate ? <FactSub>Source data through {formatIsoDay(info.dataDate)}</FactSub> : null}
-          </dd>
-        </Fact>
-        <Fact>
-          <dt>License</dt>
-          <dd>
-            {info.licenseUrl ? (
-              <ExternalLink href={info.licenseUrl} target="_blank" rel="noopener noreferrer">
-                {info.licenseName}
+        <Facts>
+          <Fact>
+            <dt>Unit</dt>
+            <dd>{info.unitLabel}</dd>
+          </Fact>
+          <Fact>
+            <dt>Results</dt>
+            <dd>
+              {plural(info.resultCount, "result", "results")}
+              <FactSub>
+                {plural(info.modelCount, "Tokscale model", "Tokscale models")} matched, {formatCount(info.externalModelCount)} in the source
+              </FactSub>
+            </dd>
+          </Fact>
+          <Fact>
+            <dt>Last update</dt>
+            <dd>
+              {info.lastUpdate ? formatIsoDay(info.lastUpdate.date) : "\u2014"}
+              {info.lastUpdate ? <FactSub>{LAST_UPDATE_TEXT[info.lastUpdate.kind]}</FactSub> : null}
+            </dd>
+          </Fact>
+          <Fact>
+            <dt>Retrieved</dt>
+            <dd>
+              {info.retrievedAt ? formatIsoDay(info.retrievedAt) : "\u2014"}
+              {info.dataDate ? <FactSub>Source data through {formatIsoDay(info.dataDate)}</FactSub> : null}
+            </dd>
+          </Fact>
+          <Fact>
+            <dt>License</dt>
+            <dd>
+              {info.licenseUrl ? (
+                <ExternalLink href={info.licenseUrl} target="_blank" rel="noopener noreferrer">
+                  {info.licenseName}
+                  <NewTab />
+                </ExternalLink>
+              ) : (
+                info.licenseName
+              )}
+            </dd>
+          </Fact>
+          <Fact>
+            <dt>Source</dt>
+            <dd>
+              <ExternalLink href={info.url} target="_blank" rel="noopener noreferrer">
+                <WrappingUrl url={info.url} />
+                <span aria-hidden="true"> {"\u2197"}</span>
                 <NewTab />
               </ExternalLink>
-            ) : (
-              info.licenseName
-            )}
-          </dd>
-        </Fact>
-        <Fact>
-          <dt>Source</dt>
-          <dd>
-            <ExternalLink href={info.url} target="_blank" rel="noopener noreferrer">
-              <WrappingUrl url={info.url} />
-              <span aria-hidden="true"> {"\u2197"}</span>
-              <NewTab />
-            </ExternalLink>
-          </dd>
-        </Fact>
-      </Facts>
+            </dd>
+          </Fact>
+        </Facts>
 
-      <Identity as="div">
-        <Prose>
-          <strong>Conditions.</strong> {info.conditions}
-        </Prose>
-        <Prose>
-          <strong>Attribution.</strong> {info.attribution}
-        </Prose>
-        {info.notes.map((note) => (
-          <Note key={note}>{note}</Note>
-        ))}
+        <ProseBlock>
+          <Prose>
+            <strong>Conditions.</strong> {info.conditions}
+          </Prose>
+          <Prose>
+            <strong>Attribution.</strong> {info.attribution}
+          </Prose>
+          {info.notes.map((note) => (
+            <Note key={note}>{note}</Note>
+          ))}
+        </ProseBlock>
       </Identity>
     </>
   );
@@ -977,9 +983,9 @@ function ResultsSection({
           Showing {formatCount(shown.length)} of {plural(listed.length, noun[0], noun[1])}
         </Status>
         {shown.length < listed.length ? (
-          <ShowAll type="button" onClick={showAll} aria-controls={tableId}>
+          <SecondaryButton type="button" onClick={showAll} aria-controls={tableId}>
             Show all {plural(listed.length, noun[0], noun[1])}
-          </ShowAll>
+          </SecondaryButton>
         ) : null}
       </TableFoot>
     </Section>
@@ -1066,7 +1072,8 @@ export function BenchmarkDetailView({ info, rows, columns, timeline, mapping, us
       <Header info={info} />
       <Sections>
         <ResultsSection info={info} rows={rows} columns={columns} usageWindow={usageWindow} />
-        <Section aria-label="Score by release date">
+        <Section aria-labelledby="score-timeline-title">
+          <SectionTitle id="score-timeline-title">Score by release date</SectionTitle>
           <ScoreTimeline
             timeline={timeline}
             unit={info.unit}

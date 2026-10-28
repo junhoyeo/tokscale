@@ -10,7 +10,7 @@ import { formatContext, formatIsoDay, formatPricePerMillion } from "@/lib/benchm
 import type { EffectivePrice, MixCounts } from "@/lib/benchmarks/price";
 import type { ExplorePeriod } from "@/lib/explore";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
-import { AgentMark, ChangeText, VisuallyHidden } from "./ExploreUI";
+import { AgentMark, ChangeText, ShareMeter, VisuallyHidden } from "./ExploreUI";
 import { describeUsersChange, formatCount, formatShare, formatTokens, TOKEN_MIX_LABELS } from "./format";
 import { InfoPopover, PopoverFacts, PopoverNote, PopoverTitle } from "./InfoPopover";
 
@@ -32,12 +32,14 @@ const Stack = styled.span<{ $align: "start" | "end" }>`
   display: inline-grid;
   justify-items: ${({ $align }) => ($align === "end" ? "end" : "start")};
   min-width: 0;
+  gap: 1px;
   font-variant-numeric: tabular-nums;
 `;
 
 const Sub = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.8125rem;
+  line-height: 1.3;
   white-space: nowrap;
 `;
 
@@ -69,6 +71,16 @@ export function UsersCell({ row, period, align = "end" }: { row: DashboardRow; p
 export function TokensCell({ row }: { row: DashboardRow }) {
   if (!row.usage) return <Missing label="No Tokscale usage in this period" />;
   return <span>{formatTokens(row.usage.tokens)}</span>;
+}
+
+/**
+ * Adoption: the share of accounts active in the period that used the model,
+ * drawn as the site's dithered bar with the percentage in real text beside
+ * it. The bar owns the cell's full width, so lengths compare down the column.
+ */
+export function AdoptionCell({ row }: { row: DashboardRow }) {
+  if (!row.usage) return <Missing label="No Tokscale usage in this period" />;
+  return <ShareMeter share={row.usage.adoption} label="of accounts active in the period" />;
 }
 
 const AgentName = styled.span`

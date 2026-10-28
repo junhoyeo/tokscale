@@ -11,10 +11,12 @@ const Wrap = styled.div`
   padding: 48px 0;
 `;
 
+/* The one primary action, then the secondary text link beside it. */
 const Actions = styled.div`
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 12px 20px;
   margin-top: 8px;
 `;
 

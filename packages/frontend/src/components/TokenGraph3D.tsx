@@ -84,10 +84,8 @@ const StatsBox = styled.div`
   flex-wrap: wrap;
   overflow: hidden;
   border: 1px solid var(--service-border);
-  border-radius: 10px;
-  background: rgba(13, 16, 22, 0.88);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  border-radius: 2px;
+  background: var(--service-surface);
 `;
 
 const StatItem = styled.div`

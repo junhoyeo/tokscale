@@ -21,14 +21,18 @@ export const metadata: Metadata = {
 
 export default function TermsPage() {
   return (
-    <LegalPageShell title="Terms of Service" lastUpdated="October 22, 2026">
+    <LegalPageShell
+      title="Terms of Service"
+      lede="The rules for anyone who signs in to tokscale.ai or submits usage from the CLI, and what Tokscale does and does not promise in return."
+      lastUpdated="October 22, 2026"
+    >
       <p>
         These terms cover your use of the Tokscale website at tokscale.ai and
         the Tokscale CLI. By signing in or submitting usage data, you agree to
         them. If you do not, please do not use the service.
       </p>
 
-      <h2>What Tokscale is</h2>
+      <h2 id="what-tokscale-is">What Tokscale is</h2>
       <p>
         Tokscale is a free, open-source tool that measures how many tokens you
         spend on AI coding assistants, and a public leaderboard that ranks
@@ -46,7 +50,7 @@ export default function TermsPage() {
         hosted service.
       </p>
 
-      <h2>Accounts</h2>
+      <h2 id="accounts">Accounts</h2>
       <p>
         Accounts are created through GitHub. You are responsible for activity
         that happens under your account and for keeping any API tokens you
@@ -54,28 +58,28 @@ export default function TermsPage() {
         <Link href="/settings">your settings page</Link>.
       </p>
 
-      <h2>Your data is public</h2>
+      <h2 id="your-data-is-public">Your data is public</h2>
       <p>
-        Tokscale is a public leaderboard. Data you submit — including your
+        Tokscale is a public leaderboard. Data you submit, including your
         username, avatar, token totals, estimated costs, contribution history,
-        clients and models used, and devices — is visible to anyone and may be
+        clients and models used, and devices, is visible to anyone and may be
         indexed by search engines. Do not submit data you are not willing to
         make public. What is collected is described in full in the{" "}
         <Link href="/privacy">privacy policy</Link>.
       </p>
 
-      <h2>Cost figures are estimates</h2>
+      <h2 id="cost-figures-are-estimates">Cost figures are estimates</h2>
       <p>
         The costs Tokscale reports are calculated from published provider
         pricing applied to observed token counts. They are estimates for
         comparison and curiosity. They are <strong>not</strong> billing
-        records, and they will not match your actual invoices — subscription
+        records, and they will not match your actual invoices: subscription
         plans, free tiers, promotional credits, negotiated rates, and pricing
         changes are not accounted for. Do not rely on them for accounting,
         budgeting, expense reporting, or any financial decision.
       </p>
 
-      <h2>Acceptable use</h2>
+      <h2 id="acceptable-use">Acceptable use</h2>
       <p>You agree not to:</p>
       <ul>
         <li>
@@ -97,7 +101,7 @@ export default function TermsPage() {
         </li>
         <li>
           Use the service to publish unlawful content, or content that harasses
-          or impersonates others — including through usernames, group names, and
+          or impersonates others, including through usernames, group names, and
           device labels
         </li>
       </ul>
@@ -106,16 +110,16 @@ export default function TermsPage() {
         without notice.
       </p>
 
-      <h2>Availability</h2>
+      <h2 id="availability">Availability</h2>
       <p>
         Tokscale is provided free of charge and with no uptime commitment.
         Features may change or be withdrawn, and the service may be interrupted
         or discontinued at any time. Data may be lost. Keep your own copy of
-        anything you would not want to lose — the CLI can export your data
+        anything you would not want to lose: the CLI can export your data
         locally.
       </p>
 
-      <h2>No warranty</h2>
+      <h2 id="no-warranty">No warranty</h2>
       <p>
         The service is provided &ldquo;as is&rdquo; and &ldquo;as
         available,&rdquo; without warranties of any kind, whether express or
@@ -123,7 +127,7 @@ export default function TermsPage() {
         for a particular purpose, and non-infringement.
       </p>
 
-      <h2>Limitation of liability</h2>
+      <h2 id="limitation-of-liability">Limitation of liability</h2>
       <p>
         To the maximum extent permitted by law, the operator of Tokscale is not
         liable for any indirect, incidental, special, consequential, or punitive
@@ -131,14 +135,14 @@ export default function TermsPage() {
         your use of or inability to use the service.
       </p>
 
-      <h2>Ending your use</h2>
+      <h2 id="ending-your-use">Ending your use</h2>
       <p>
         You can delete your submitted data or your entire account at any time
         from <Link href="/settings">your settings page</Link>. Deletion is
         immediate and cannot be undone.
       </p>
 
-      <h2>Changes to these terms</h2>
+      <h2 id="changes-to-these-terms">Changes to these terms</h2>
       <p>
         These terms may be updated. Material changes will be reflected in the
         &ldquo;last updated&rdquo; date above, and the full revision history is
@@ -146,7 +150,7 @@ export default function TermsPage() {
         means you accept the updated terms.
       </p>
 
-      <h2>Contact</h2>
+      <h2 id="contact">Contact</h2>
       <p>
         Questions about these terms can go to{" "}
         <a href="mailto:i@junho.io">i@junho.io</a> or the{" "}

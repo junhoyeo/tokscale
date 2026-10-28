@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import styled from "styled-components";
+import { DitherButton } from "dither-kit/DitherButton";
+import { DitherInput } from "dither-kit/DitherInput";
 
 interface User {
   id: string;
@@ -11,217 +13,199 @@ interface User {
 }
 
 const Container = styled.div`
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-left: 16px;
-  padding-right: 16px;
-  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  padding: 112px 32px 64px;
+  background: var(--service-canvas);
   color: var(--service-text);
+
+  @media (max-width: 640px) {
+    padding: 96px 20px 48px;
+  }
 `;
 
-const LoadingContainer = styled.div`
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
-  color: var(--service-text);
-`;
-
-const LoadingText = styled.div`
-  color: var(--service-text-muted);
-`;
-
-const CardWrapper = styled.div`
-  max-width: 448px;
+/* The task on the left, what the code is and where it comes from on the right:
+   a one-task screen still uses the width it is given. */
+const Layout = styled.div`
+  display: grid;
   width: 100%;
+  max-width: 1000px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  align-items: start;
+  gap: 64px;
+
+  @media (max-width: 900px) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 40px;
+    max-width: 560px;
+  }
 `;
 
-const Card = styled.div`
-  border-radius: 16px;
-  border: 1px solid;
-  border-color: var(--service-border);
-  padding: 32px;
-  background-color: var(--service-surface);
+const Column = styled.div`
+  min-width: 0;
 `;
 
-const Header = styled.div`
-  text-align: center;
-  margin-bottom: 32px;
+const Context = styled.section`
+  min-width: 0;
+  padding: 20px 24px 24px;
+  border: 1px solid var(--service-border);
+  border-radius: 2px;
+  background: var(--service-surface);
 `;
 
-const IconBox = styled.div`
-  width: 64px;
-  height: 64px;
-  margin-left: auto;
-  margin-right: auto;
-  margin-bottom: 16px;
-  border-radius: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--v2-accent-strong);
-  box-shadow: 0 10px 24px -6px rgba(0, 115, 255, 0.35);
+const ContextTitle = styled.h2`
+  margin: 0 0 12px;
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  font-weight: 600;
 `;
 
-const Icon = styled.svg`
-  width: 32px;
-  height: 32px;
-  color: white;
+const ContextList = styled.ol`
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0 0 0 18px;
+
+  li {
+    color: var(--service-text-muted);
+    font-size: 0.875rem;
+    line-height: 1.55;
+  }
+
+  li::marker {
+    color: var(--service-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+`;
+
+const ContextCode = styled.code`
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  margin-top: 6px;
+  color: var(--service-text);
+  font-size: 0.8125rem;
+`;
+
+const ContextNote = styled.p`
+  margin: 16px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+`;
+
+const LoadingText = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.9375rem;
 `;
 
 const Title = styled.h1`
-  font-size: 24px;
-  font-weight: bold;
+  margin: 0;
   color: var(--service-text);
+  font-size: 1.75rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
 `;
 
 const Subtitle = styled.p`
-  margin-top: 8px;
+  margin: 10px 0 32px;
   color: var(--service-text-muted);
+  font-size: 1rem;
+  line-height: 1.6;
 `;
 
-const SignInContainer = styled.div`
-  text-align: center;
+const Block = styled.div`
+  display: grid;
+  gap: 16px;
 `;
 
 const SignInText = styled.p`
-  margin-bottom: 24px;
+  margin: 0;
   color: var(--service-text-muted);
+  font-size: 0.9375rem;
+  line-height: 1.6;
 `;
 
-const SignInButton = styled.a`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 12px 24px;
+const Form = styled.form`
+  display: grid;
+  max-width: 420px;
+  gap: 16px;
+`;
+
+const FieldLabel = styled.label`
+  color: var(--service-text);
+  font-size: 0.875rem;
   font-weight: 500;
-  border-radius: 12px;
-  background-color: var(--service-text);
-  color: var(--v2-canvas);
-  transition: opacity 0.2s;
-  text-decoration: none;
-
-  &:hover {
-    opacity: 0.8;
-  }
 `;
 
-const GitHubIcon = styled.svg`
-  width: 20px;
-  height: 20px;
-`;
-
-const SuccessContainer = styled.div`
+/* The code the terminal shows is an identifier, not prose: set it wide and
+   tracked so it can be read off a laptop screen at arm's length. */
+const CodeInput = styled(DitherInput)`
+  height: 56px;
+  border-radius: 2px;
+  font-size: 1.375rem;
+  font-weight: 500;
+  letter-spacing: 0.24em;
   text-align: center;
-`;
-
-const SuccessIconBox = styled.div`
-  width: 64px;
-  height: 64px;
-  margin-left: auto;
-  margin-right: auto;
-  margin-bottom: 16px;
-  border-radius: 9999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: var(--v2-accent-soft);
-`;
-
-const SuccessIcon = styled.svg`
-  width: 32px;
-  height: 32px;
-  color: var(--v2-focus);
-`;
-
-const SuccessTitle = styled.h2`
-  font-size: 20px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--service-text);
-`;
-
-const SuccessText = styled.p`
-  color: var(--service-text-muted);
-`;
-
-const Form = styled.form``;
-
-const FormGroup = styled.div`
-  margin-bottom: 16px;
-`;
-
-const FormText = styled.p`
-  text-align: center;
-  margin-bottom: 16px;
-  color: var(--service-text-muted);
-`;
-
-const Input = styled.input`
-  width: 100%;
-  padding: 16px;
-  text-align: center;
-  font-size: 24px;
-  letter-spacing: 0.3em;
-  border: 1px solid;
-  border-color: var(--service-border-strong);
-  border-radius: 12px;
-  background-color: var(--service-canvas);
-  color: var(--service-text);
-
-  &:focus {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--v2-focus);
-    border-color: transparent;
-  }
+  text-transform: uppercase;
 
   &::placeholder {
-    opacity: 0.5;
+    letter-spacing: 0.24em;
+    color: var(--v2-text-subtle);
   }
 `;
 
 const ErrorText = styled.p`
-  color: #ef4444;
-  font-size: 14px;
-  text-align: center;
-  margin-bottom: 16px;
+  margin: 0;
+  color: #ff9b9b;
+  font-size: 0.875rem;
+  line-height: 1.5;
 `;
 
-const SubmitButton = styled.button`
+const Submit = styled(DitherButton)`
   width: 100%;
-  padding: 12px 24px;
-  color: white;
-  font-weight: 500;
-  border-radius: 12px;
-  background-color: var(--v2-accent-strong);
-  border: none;
-  cursor: pointer;
-  transition: opacity 0.2s;
-
-  &:hover:not(:disabled) {
-    opacity: 0.9;
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+  min-height: 44px;
+  border-radius: 2px;
+  font-size: 0.875rem;
 `;
 
 const UserInfoText = styled.p`
-  text-align: center;
-  font-size: 14px;
-  margin-top: 16px;
+  margin: 0;
   color: var(--service-text-muted);
+  font-size: 0.8125rem;
 `;
 
 const Username = styled.span`
+  color: var(--service-text);
   font-weight: 500;
+`;
+
+const SuccessTitle = styled.h2`
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+`;
+
+const SuccessText = styled.p`
+  margin: 8px 0 0;
   color: var(--service-text-muted);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+`;
+
+const SignInButton = styled(DitherButton)`
+  justify-self: start;
+  min-height: 44px;
+  padding: 0 20px;
+  border-radius: 2px;
+  font-size: 0.875rem;
 `;
 
 export default function DeviceClient() {
@@ -230,6 +214,9 @@ export default function DeviceClient() {
   const [code, setCode] = useState("");
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [error, setError] = useState("");
+  const codeId = useId();
+  const errorId = useId();
+  const contextId = useId();
 
   useEffect(() => {
     fetch("/api/auth/session")
@@ -243,14 +230,9 @@ export default function DeviceClient() {
       });
   }, []);
 
-  const handleCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
-
-    if (value.length > 4) {
-      value = value.slice(0, 4) + "-" + value.slice(4, 8);
-    }
-
-    setCode(value);
+  const handleCodeChange = (value: string) => {
+    const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    setCode(cleaned.length > 4 ? `${cleaned.slice(0, 4)}-${cleaned.slice(4, 8)}` : cleaned);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -279,103 +261,84 @@ export default function DeviceClient() {
 
   if (isLoading) {
     return (
-      <LoadingContainer>
-        <LoadingText>Loading...</LoadingText>
-      </LoadingContainer>
+      <Container>
+        <LoadingText>Loading…</LoadingText>
+      </Container>
     );
   }
 
   return (
     <Container>
-      <CardWrapper>
-        <Card>
-          <Header>
-            <IconBox>
-              <Icon
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-                />
-              </Icon>
-            </IconBox>
-            <Title>Authorize CLI</Title>
-            <Subtitle>Connect your terminal to Tokscale</Subtitle>
-          </Header>
+      <Layout>
+        <Column>
+          <Title>Authorize the CLI</Title>
+          <Subtitle>Connect your terminal to Tokscale.</Subtitle>
 
           {!user ? (
-            <SignInContainer>
-              <SignInText>
-                Sign in with GitHub to authorize the CLI.
-              </SignInText>
-              <SignInButton href="/api/auth/github?returnTo=/device">
-                <GitHubIcon fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
-                </GitHubIcon>
+            <Block>
+              <SignInText>Sign in with GitHub to authorize the CLI.</SignInText>
+              <SignInButton
+                color="blue"
+                variant="solid"
+                nativeButton={false}
+                role="link"
+                render={<a href="/api/auth/github?returnTo=/device" />}
+              >
                 Sign in with GitHub
               </SignInButton>
-            </SignInContainer>
+            </Block>
           ) : status === "success" ? (
-            <SuccessContainer>
-              <SuccessIconBox>
-                <SuccessIcon
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
-                </SuccessIcon>
-              </SuccessIconBox>
-              <SuccessTitle>Device Authorized!</SuccessTitle>
-              <SuccessText>
-                You can close this window and return to your terminal.
-              </SuccessText>
-            </SuccessContainer>
+            <Block>
+              <SuccessTitle>Device authorized</SuccessTitle>
+              <SuccessText>You can close this window and return to your terminal.</SuccessText>
+            </Block>
           ) : (
             <Form onSubmit={handleSubmit}>
-              <FormGroup>
-                <FormText>
-                  Enter the code shown in your terminal:
-                </FormText>
-                <Input
-                  type="text"
-                  value={code}
-                  onChange={handleCodeChange}
-                  placeholder="XXXX-XXXX"
-                  maxLength={9}
-                  autoFocus
-                />
-              </FormGroup>
+              <FieldLabel htmlFor={codeId}>Device code</FieldLabel>
+              <CodeInput
+                id={codeId}
+                type="text"
+                value={code}
+                onChange={handleCodeChange}
+                placeholder="XXXX-XXXX"
+                maxLength={9}
+                autoFocus
+                autoComplete="one-time-code"
+                aria-invalid={status === "error" || undefined}
+                aria-describedby={status === "error" ? errorId : undefined}
+                invalid={status === "error"}
+              />
 
               {error && (
-                <ErrorText>{error}</ErrorText>
+                <ErrorText id={errorId} role="alert">
+                  {error}
+                </ErrorText>
               )}
 
-              <SubmitButton
-                type="submit"
-                disabled={code.length < 9 || status === "loading"}
-              >
-                {status === "loading" ? "Authorizing..." : "Authorize Device"}
-              </SubmitButton>
+              <Submit type="submit" color="blue" variant="solid" disabled={code.length < 9 || status === "loading"}>
+                {status === "loading" ? "Authorizing…" : "Authorize device"}
+              </Submit>
 
               <UserInfoText>
-                Signed in as{" "}
-                <Username>{user.username}</Username>
+                Signed in as <Username>{user.username}</Username>
               </UserInfoText>
             </Form>
           )}
-        </Card>
-      </CardWrapper>
+        </Column>
+
+        <Context aria-labelledby={contextId}>
+          <ContextTitle id={contextId}>Where the code comes from</ContextTitle>
+          <ContextList>
+            <li>
+              Run the login command in your terminal.
+              <ContextCode>bunx tokscale login</ContextCode>
+            </li>
+            <li>It prints an eight-character code and opens this page.</li>
+            <li>Enter the code here and approve. The terminal signs in when this page confirms.</li>
+          </ContextList>
+          <ContextNote>A code is good for 15 minutes and can be approved once.</ContextNote>
+        </Context>
+      </Layout>
     </Container>
   );
 }

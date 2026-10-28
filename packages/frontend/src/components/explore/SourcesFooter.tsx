@@ -2,26 +2,32 @@
 
 /**
  * "Sources and attribution": every external source used on the page, with
- * its license, retrieval date and credit line.
+ * its license, retrieval date and credit line. A real section: 16px heading,
+ * 13px notes, source and licence names as ink links that underline on hover.
  */
 import styled from "styled-components";
 import type { SourceNote } from "@/lib/benchmarks/attribution";
 import { formatIsoDay } from "@/lib/benchmarks/format";
-import { InlineLink, Section, SectionNote, SectionTitle } from "./ExploreUI";
+import { Section, SectionNote, SectionTitle } from "./ExploreUI";
 
 const List = styled.ul`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 16px 32px;
   margin: 0;
   padding: 0;
   list-style: none;
 `;
 
+/** One sentence at a readable measure, not the full table width. */
+const Note = styled(SectionNote)`
+  max-width: 84ch;
+`;
+
 const Item = styled.li`
   display: grid;
   align-content: start;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
@@ -32,28 +38,59 @@ const Item = styled.li`
   }
 `;
 
-const Name = styled.a`
+const nameStyles = `
   color: var(--service-text);
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
+`;
 
+const sourceLinkStyles = `
   &:hover {
-    color: var(--service-accent-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
 `;
 
+const Name = styled.a`
+  ${nameStyles}
+  ${sourceLinkStyles}
+  justify-self: start;
+`;
+
+const NameText = styled.span`
+  ${nameStyles}
+`;
+
 const License = styled.a`
-  color: var(--service-accent-hover);
+  color: inherit;
   text-decoration: none;
 
   &:hover {
-    text-decoration: underline !important;
+    color: var(--service-text);
+  }
+
+  ${sourceLinkStyles}
+`;
+
+const Methodology = styled.a`
+  color: var(--service-text);
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  &:focus-visible {
+    border-radius: 2px;
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
   }
 `;
 
@@ -62,10 +99,10 @@ export function SourcesFooter({ notes, extra }: { notes: SourceNote[]; extra?: s
     <Section aria-labelledby="sources-title">
       <div>
         <SectionTitle id="sources-title">Sources and attribution</SectionTitle>
-        <SectionNote>
+        <Note>
           Each score keeps its own source, unit and run conditions. Tokscale does not combine benchmarks into one score, and a
           missing score means the model was not evaluated, not that it scored zero.{extra ? ` ${extra}` : ""}
-        </SectionNote>
+        </Note>
       </div>
       <List>
         {notes.map((note) => (
@@ -89,10 +126,10 @@ export function SourcesFooter({ notes, extra }: { notes: SourceNote[]; extra?: s
           </Item>
         ))}
         <Item>
-          <Name as="span">Tokscale</Name>
+          <NameText>Tokscale</NameText>
           <span>Active users, tokens and token mix from public Tokscale submissions. Hidden accounts are excluded.</span>
           <span>
-            <InlineLink href="/methodology">How we count</InlineLink>
+            <Methodology href="/methodology">How we count</Methodology>
           </span>
         </Item>
       </List>

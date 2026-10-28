@@ -98,3 +98,26 @@ describe("ProfileUsageChart", () => {
   });
 });
 
+
+describe("ProfileUsageChart keyboard inspection", () => {
+  it("steps through days with the arrow keys and describes the day", () => {
+    render(
+      <ProfileUsageChart
+        contributions={[
+          contribution("2026-01-01", 10),
+          contribution("2026-01-02", 20),
+        ]}
+      />,
+    );
+
+    const plot = screen.getByRole("group", {
+      name: /Interactive tokens chart/,
+    });
+    fireEvent.keyDown(plot, { key: "ArrowLeft" });
+
+    // The newest day is inspected first; one step left lands on the older day.
+    // Both the tooltip and the pinned panel carry the inspected day.
+    expect(screen.getAllByText("2026-01-01").length).toBeGreaterThan(0);
+    expect(screen.getByRole("status").textContent).toContain("Jan 1, 2026");
+  });
+});

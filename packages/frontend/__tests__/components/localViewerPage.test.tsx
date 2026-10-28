@@ -101,7 +101,7 @@ describe("local viewer page", () => {
     expect(summary.tagName).toBe("DL");
     expect(summary.textContent).toContain("Dec 30, 2025 – Mar 3, 2026");
     expect(summary.textContent).toContain("$56.00");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toContain("tokens used in");
+    expect(screen.getByRole("heading", { level: 2, name: /tokens used in/ }).textContent).toContain("tokens used in");
     expect(screen.getByRole("combobox", { name: "Color palette" })).toBeTruthy();
 
     // The latest active day opens in the breakdown, as before.

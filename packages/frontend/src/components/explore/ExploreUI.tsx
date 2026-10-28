@@ -2,8 +2,9 @@
 
 /**
  * Shared presentation pieces for the Humans / Models / Agents surfaces.
- * Thin 1px rules, tabular numbers, one accent. Page titles use the display
- * face when the v2 tokens define --font-display, and fall back to the UI font.
+ * One type face (Figtree), one data hue (the blue), 1px rules at whisper
+ * contrast, tabular numbers, square 2px corners. Selection is marked by a
+ * 1px accent line (RankingUI's segments), never by a filled pill.
  */
 import Link from "next/link";
 import styled from "styled-components";
@@ -13,10 +14,12 @@ import { SOURCE_LOGOS } from "@/lib/constants";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import type { AgentRef, Coverage } from "@/lib/explore";
 import { clampShare, describeCoverage, formatShare, type UsersChange } from "./format";
+import { DitherBar } from "./DitherViz";
 
 export { ModelMark } from "./ModelMark";
 
-export const DISPLAY_FONT = "var(--font-display, inherit) !important";
+/** One typeface: the display face is the UI face (see globals.css tokens). */
+export const DISPLAY_FONT = "var(--v2-font-ui, inherit) !important";
 
 export const PageHeader = styled.header`
   display: grid;
@@ -28,14 +31,14 @@ export const PageTitle = styled.h1`
   margin: 0;
   color: var(--service-text);
   font-family: ${DISPLAY_FONT};
-  font-size: 2rem;
+  font-size: 1.75rem;
   font-weight: 500;
   letter-spacing: -0.02em;
   line-height: 1.15;
   text-wrap: balance;
 
   @media (max-width: 640px) {
-    font-size: 1.75rem;
+    font-size: 1.5rem;
   }
 `;
 
@@ -113,11 +116,14 @@ const ControlLabel = styled.span`
   }
 `;
 
-/** Segment that meets the 44px touch target on phones and coarse pointers. */
+/**
+ * Segment that meets the 44px touch target on phones and coarse pointers.
+ * RankingUI's SegmentButton already grows to 44px there; the wider hit area
+ * comes from `--segment-pad-x` so the accent line stays exactly label-wide.
+ */
 export const TouchSegment = styled(SegmentButton)`
   @media (max-width: 640px), (pointer: coarse) {
-    min-height: 44px;
-    padding: 0 14px;
+    --segment-pad-x: 14px;
   }
 `;
 
@@ -185,7 +191,7 @@ export function ButtonSegments<T extends string>({
 const CountTag = styled.span`
   margin-left: 6px;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   font-variant-numeric: tabular-nums;
 `;
 
@@ -213,8 +219,9 @@ const CoverageItem = styled.span`
   }
 `;
 
+/** Secondary action: plain ink text, underline on hover and focus. */
 export const InlineLink = styled(Link)`
-  color: var(--service-accent-hover);
+  color: var(--service-text);
   text-decoration: none;
 
   &:hover {
@@ -222,7 +229,7 @@ export const InlineLink = styled(Link)`
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -253,50 +260,47 @@ export function CoverageLine({ coverage, className }: { coverage: Coverage; clas
   );
 }
 
+/** A quiet "New" mark for rows; the change number beside it carries the news. */
 export const NewBadge = styled.span`
   display: inline-flex;
   min-height: 18px;
   align-items: center;
-  padding: 0 6px;
-  border: 1px solid rgba(87, 165, 255, 0.45);
-  border-radius: 999px;
-  color: var(--service-accent-hover);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  padding: 0 5px;
+  border: 1px solid var(--service-border-strong);
+  border-radius: 2px;
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.2;
   white-space: nowrap;
 `;
 
-const ChangeWrap = styled(InstantTooltip)<{ $kind: UsersChange["kind"] }>`
+const ChangeWrap = styled(InstantTooltip)`
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  /* One accent: gains use the accent, losses and no change stay muted. The
-     sign and the screen-reader sentence carry the meaning, not the color. */
-  color: ${({ $kind }) => ($kind === "up" || $kind === "new" ? "var(--service-accent-hover)" : "var(--service-text-muted)")};
-  font-size: 0.75rem;
+  /* Numbers stay white or grey and carry their sign in the text; the
+     screen-reader sentence carries the meaning, not the color. */
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 `;
 
-const ChangePercent = styled.span`
-  color: var(--service-text-muted);
-`;
-
-/** "+42 (+9%)" or "NEW +142". Empty for all-time views. */
+/** "+42 (+9%)" or "New +142". Empty for all-time views. */
 export function ChangeText({ change }: { change: UsersChange }) {
   if (change.kind === "none") return null;
   return (
-    <ChangeWrap $kind={change.kind} content={change.description} describe={false}>
+    <ChangeWrap content={change.description} describe={false}>
       {change.kind === "new" ? <NewBadge>New</NewBadge> : null}
       <span aria-hidden="true">{change.text}</span>
-      {change.percentText ? <ChangePercent aria-hidden="true">({change.percentText})</ChangePercent> : null}
+      {change.percentText ? <span aria-hidden="true">({change.percentText})</span> : null}
       <VisuallyHidden>{change.description}</VisuallyHidden>
     </ChangeWrap>
   );
 }
+
 
 export const VisuallyHidden = styled.span`
   position: absolute !important;
@@ -316,22 +320,9 @@ const MeterRow = styled.span`
   gap: 10px;
 `;
 
-const MeterTrack = styled.span`
-  position: relative;
-  display: block;
+const MeterBar = styled.span`
   flex: 1 1 auto;
   min-width: 48px;
-  height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-`;
-
-const MeterFill = styled.span`
-  position: absolute;
-  inset: 0 auto 0 0;
-  border-radius: 999px;
-  background: var(--service-accent);
 `;
 
 const MeterValue = styled.span`
@@ -343,16 +334,17 @@ const MeterValue = styled.span`
 `;
 
 /**
- * Horizontal share bar. The full track is 100% (for adoption: every account
- * active in the period), so bar lengths compare honestly across rows.
+ * Horizontal share bar in the site's dither. The full track is 100% (for
+ * adoption: every account active in the period), so bar lengths compare
+ * honestly across rows. The value itself is real text beside the bar.
  */
 export function ShareMeter({ share, label }: { share: number; label?: string }) {
   const value = clampShare(share);
   return (
     <MeterRow>
-      <MeterTrack aria-hidden="true">
-        <MeterFill style={{ width: `${(value * 100).toFixed(2)}%` }} />
-      </MeterTrack>
+      <MeterBar>
+        <DitherBar value={value} />
+      </MeterBar>
       <MeterValue>
         {formatShare(value)}
         {label ? <VisuallyHidden> {label}</VisuallyHidden> : null}
@@ -365,22 +357,19 @@ const MarkImage = styled.img<{ $size: number }>`
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   flex: 0 0 auto;
-  border-radius: 4px;
-  object-fit: cover;
-  outline: 1px solid var(--service-border);
-  outline-offset: -1px;
+  border-radius: 2px;
+  object-fit: contain;
 `;
 
+/* No chip: a letter on the ground, at reading size. */
 const MarkMonogram = styled.span<{ $size: number }>`
   display: inline-grid;
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 4px;
   color: var(--service-text-muted);
-  font-size: ${({ $size }) => Math.max(9, Math.round($size * 0.45))}px;
+  font-size: ${({ $size }) => Math.max(11, Math.round($size * 0.5))}px;
   font-weight: 600;
 `;
 

@@ -1,8 +1,9 @@
 "use client";
 
-import styled, { css } from "styled-components";
+import styled from "styled-components";
 import { TOKSCALE_INSTAGRAM_HANDLE, TOKSCALE_INSTAGRAM_URL } from "@/lib/community";
-import { Container, Eyebrow, focusRing, Lead, Section, SectionHeader, SectionTitle, TextLink } from "./primitives";
+import { Container, Lead, Section, SectionTitle, TextLink, focusRing } from "./primitives";
+import { Reveal } from "./Reveal";
 
 export interface InstagramPost {
   href: string;
@@ -28,23 +29,28 @@ export function InstagramSection({ posts = INSTAGRAM_POSTS }: { posts?: Instagra
     <Section aria-labelledby="home-instagram-title">
       <Container>
         <Layout $single={posts.length === 1}>
-          <SectionHeader>
-            <Eyebrow>Instagram</Eyebrow>
-            <SectionTitle id="home-instagram-title">Tokscale data, in your feed.</SectionTitle>
-            <Lead>Cards on how people build with AI, drawn from Tokscale data, and on the money behind AI.</Lead>
-            <TextLink href={TOKSCALE_INSTAGRAM_URL} target="_blank" rel="noopener noreferrer">
-              Follow {TOKSCALE_INSTAGRAM_HANDLE} <span aria-hidden="true">↗</span>
-            </TextLink>
-          </SectionHeader>
+          <Copy>
+            <Reveal>
+              <SectionTitle id="home-instagram-title">Tokscale data, in your feed.</SectionTitle>
+            </Reveal>
+            <Reveal delay={70}>
+              <Lead>Cards on how people build with AI, drawn from Tokscale data, and on the money behind AI.</Lead>
+            </Reveal>
+            <Reveal delay={140}>
+              <TextLink href={TOKSCALE_INSTAGRAM_URL} target="_blank" rel="noopener noreferrer">
+                Follow {TOKSCALE_INSTAGRAM_HANDLE} <span aria-hidden="true">↗</span>
+              </TextLink>
+            </Reveal>
+          </Copy>
           <Posts $single={posts.length === 1}>
-            {posts.map((post) => (
-              <li key={post.href}>
+            {posts.map((post, index) => (
+              <Reveal as="li" key={post.href} delay={80 + Math.min(index, 3) * 60}>
                 <PostLink href={post.href} target="_blank" rel="noopener noreferrer">
                   {/* eslint-disable-next-line @next/next/no-img-element -- small vendored card images */}
                   <img src={post.image} alt={post.alt} width={540} height={720} loading="lazy" decoding="async" />
                   <Caption>{post.caption}</Caption>
                 </PostLink>
-              </li>
+              </Reveal>
             ))}
           </Posts>
         </Layout>
@@ -53,56 +59,54 @@ export function InstagramSection({ posts = INSTAGRAM_POSTS }: { posts?: Instagra
   );
 }
 
-/* One post sits beside the copy, like the featured profile; more posts form a grid under it. */
+/* Copy on the left, the post card on the right — the same split as the hero,
+   with the picture at its own 3:4 crop. */
 const Layout = styled.div<{ $single: boolean }>`
   display: grid;
-  gap: 40px;
+  grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+  gap: 48px;
+  align-items: center;
 
-  ${({ $single }) =>
-    $single &&
-    css`
-      grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
-      align-items: center;
-      gap: 64px;
+  @media (max-width: 960px) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 32px;
+  }
+`;
 
-      @media (max-width: 960px) {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 32px;
-      }
-    `}
+const Copy = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 `;
 
 const Posts = styled.ul<{ $single: boolean }>`
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 20px;
+  gap: 16px;
   margin: 0;
   padding: 0;
   list-style: none;
 
-  @media (max-width: 900px) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-  }
-
   ${({ $single }) =>
     $single &&
-    css`
+    `
       grid-template-columns: minmax(0, 1fr);
-      width: min(100%, 360px);
-      justify-self: center;
-
-      @media (max-width: 900px) {
-        grid-template-columns: minmax(0, 1fr);
-      }
+      width: min(100%, 460px);
+      justify-self: end;
     `}
+
+  @media (max-width: 960px) {
+    justify-self: start;
+    width: min(100%, 460px);
+  }
 `;
 
 const PostLink = styled.a`
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border-radius: 12px;
+  border-radius: var(--radius, 2px);
   color: inherit;
   text-decoration: none;
   ${focusRing}
@@ -113,19 +117,8 @@ const PostLink = styled.a`
     height: auto;
     aspect-ratio: 3 / 4;
     object-fit: cover;
-    border-radius: 12px;
-    box-shadow: 0 0 0 1px var(--v2-rule-strong);
-    transition: transform 160ms ease, box-shadow 160ms ease;
-  }
-
-  &:hover img {
-    box-shadow: 0 0 0 1px var(--v2-accent);
-  }
-
-  @media (prefers-reduced-motion: no-preference) {
-    &:hover img {
-      transform: translateY(-2px);
-    }
+    border-radius: var(--radius, 2px);
+    background: var(--v2-surface);
   }
 `;
 
@@ -134,7 +127,7 @@ const Caption = styled.span`
   display: -webkit-box;
   overflow: hidden;
   color: var(--v2-text-muted);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;

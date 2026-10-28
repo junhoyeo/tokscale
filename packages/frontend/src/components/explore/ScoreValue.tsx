@@ -4,6 +4,9 @@
  * One benchmark score: the value, a small condition tag (effort, agent or
  * harness) and a source popover with the run date, interval and a link to
  * the source. A missing score reads "Not evaluated", never zero.
+ *
+ * The value is ink in tabular figures; the condition tag stays grey at 12px
+ * and never grows into a second line.
  */
 import styled from "styled-components";
 import type { BenchmarkInfo } from "@/lib/benchmarks/attribution";
@@ -37,14 +40,14 @@ const Tag = styled(InstantTooltip)`
   max-width: 14em;
   overflow: hidden;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 `;
 
 const Missing = styled.span`
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   white-space: nowrap;
 `;
 

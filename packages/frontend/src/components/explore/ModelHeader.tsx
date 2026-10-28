@@ -46,10 +46,11 @@ const CrumbLink = styled(Link)`
 
   &:hover {
     color: var(--service-text);
+    text-decoration: underline !important;
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -88,17 +89,18 @@ export function ModelBreadcrumb({ items }: { items: readonly Crumb[] }) {
   );
 }
 
+/* No outer margin: the page that places the identity owns the spacing around it. */
 const Identity = styled.header`
   display: grid;
+  min-width: 0;
   gap: 8px;
-  margin-bottom: 20px;
 `;
 
 const TitleRow = styled.div`
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
 `;
 
 const IdentityMeta = styled.p`

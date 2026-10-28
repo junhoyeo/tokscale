@@ -1,128 +1,233 @@
-/* Plain CSS so the methodology prose ships in the HTML with no client JS. */
-.prose {
-  max-width: 760px;
+/* Plain CSS so the methodology prose ships in the HTML with no client JS.
+   A page, not an app screen: one measure, 17px body, headings as the only
+   structure — no rules between sections, no tints, no ornaments. */
+/* The shell already insets the canvas (32px, 16px on phones); the page uses
+   that one pair of margins so its edges match the footer's. */
+.page {
+  --measure: 70ch;
+  width: 100%;
+  padding: 0 0 72px;
   color: var(--service-text);
+}
+
+/* Layout: running text on the left measure, contents and notes in a rail on
+   the right, so the page fills its frame at every width. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+@media (min-width: 1100px) {
+  .layout {
+    grid-template-columns: 236px minmax(0, 1fr);
+    gap: 64px;
+  }
+}
+
+.rail {
+  min-width: 0;
+}
+
+@media (min-width: 1100px) {
+  .rail {
+    position: sticky;
+    top: 88px;
+    align-self: start;
+    order: -1;
+  }
+}
+
+.railTitle {
+  margin: 0 0 10px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+}
+
+.railNote {
+  margin: 24px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.header {
+  padding: 24px 0 28px;
 }
 
 .title {
-  margin: 0 0 8px;
-  font-family: var(--font-display, inherit) !important;
-  font-size: 2rem;
+  margin: 0 0 12px;
+  font-family: var(--v2-font-ui, inherit);
+  font-size: 2.5rem;
   font-weight: 500;
   letter-spacing: -0.02em;
-  line-height: 1.15;
+  line-height: 1.1;
+  text-wrap: balance;
 }
 
 .updated {
-  margin: 0 0 32px;
+  margin: 0 0 20px;
   color: var(--service-text-muted);
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .lead {
-  margin: 0 0 32px;
-  color: var(--service-text-muted);
-  font-size: 1rem;
-  line-height: 1.65;
-}
-
-.prose h2 {
-  margin: 40px 0 12px;
-  padding-top: 20px;
-  border-top: 1px solid var(--service-border);
+  margin: 0 0 28px;
+  color: var(--service-text);
   font-size: 1.125rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  scroll-margin-top: 96px;
+  line-height: 1.6;
+  text-wrap: pretty;
 }
 
-.prose p,
-.prose li {
-  color: var(--service-text-muted);
-  font-size: 0.9375rem;
-  line-height: 1.7;
-}
-
-.prose p {
-  margin: 0 0 14px;
-}
-
-.prose ul {
-  margin: 0 0 16px;
-  padding-left: 20px;
-  list-style: disc;
-}
-
-.prose li {
-  margin-bottom: 6px;
-}
-
-.prose strong {
-  color: var(--service-text);
-  font-weight: 600;
-}
-
-.prose code {
-  padding: 1px 5px;
-  border: 1px solid var(--service-border);
-  border-radius: 4px;
-  background: var(--service-surface-muted);
-  color: var(--service-text);
-  font-size: 0.8125rem;
-}
-
-.prose a {
-  color: var(--service-accent-hover);
-  text-decoration: none;
-}
-
-.prose a:hover {
-  text-decoration: underline !important;
-}
-
-.prose a:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--service-focus);
-  outline-offset: 3px;
-}
-
-.prose .toc {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 16px;
-  margin: 0 0 8px;
+.toc {
+  display: grid;
+  gap: 2px;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.prose .toc li {
-  margin: 0;
+@media (max-width: 1099px) {
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 20px;
+  }
+
+  .rail {
+    padding-bottom: 20px;
+  }
+
+  .railNote {
+    display: none;
+  }
 }
 
 .toc a {
   display: inline-flex;
-  min-height: 32px;
+  min-height: 36px;
   align-items: center;
+  color: var(--service-text);
+  font-size: 0.875rem;
+  text-decoration: none;
+}
+
+.toc a:hover {
+  text-decoration: underline !important;
+}
+
+.toc a:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--service-focus);
+  outline-offset: 3px;
+}
+
+.body {
+  min-width: 0;
+  max-width: var(--measure);
+}
+
+.body > p,
+.body > h2,
+.body > ul,
+.body > .metrics,
+.body > .split,
+.body > .close {
+  max-width: var(--measure);
+}
+
+.body h2 {
+  margin: 40px 0 12px;
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  scroll-margin-top: 96px;
+}
+
+.body h2:first-child {
+  margin-top: 0;
+}
+
+.body p,
+.body li {
+  color: var(--service-text);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+}
+
+.body p {
+  margin: 0 0 14px;
+}
+
+.body ul {
+  margin: 0 0 20px;
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.body li {
+  margin-bottom: 8px;
+  padding-left: 2px;
+}
+
+.body strong {
+  font-weight: 600;
+}
+
+.body code {
+  padding: 1px 5px;
+  border: 1px solid var(--service-border);
+  border-radius: 2px;
+  background: var(--service-surface);
+  color: var(--service-text);
+  font-family: var(--v2-font-mono);
   font-size: 0.875rem;
 }
 
+.body a {
+  color: var(--service-text);
+  text-decoration: underline;
+  text-decoration-color: var(--service-border-strong);
+  text-underline-offset: 3px;
+}
+
+.body a:hover {
+  text-decoration-color: currentColor;
+}
+
+.body a:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--service-focus);
+  outline-offset: 3px;
+}
+
 .metrics {
-  margin: 0;
-  border-top: 1px solid var(--service-border);
+  display: grid;
+  gap: 28px 48px;
+  margin: 0 0 8px;
+  padding: 24px;
+  border-radius: 2px;
+  background: var(--service-surface-muted);
+}
+
+@media (min-width: 900px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .metric {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  gap: 4px 24px;
-  padding: 16px 0;
-  border-bottom: 1px solid var(--service-border);
+  align-content: start;
+  gap: 6px;
   scroll-margin-top: 96px;
 }
 
 .metric dt {
   color: var(--service-text);
-  font-size: 0.9375rem;
+  font-size: 1rem;
   font-weight: 600;
 }
 
@@ -134,33 +239,296 @@
   margin-bottom: 0;
 }
 
+/* An interface fragment drawn from the page's own subject: one row of the
+   models table, cropped. Its root carries data-ui (real UI conventions). */
+.fragment {
+  margin: 28px 0 8px;
+  padding: 20px 22px;
+  border-radius: 2px;
+  background: var(--service-surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fragmentTitle {
+  margin: 0 0 12px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+}
+
+.fragmentTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.fragmentTable th {
+  padding: 0 12px 8px 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-align: right;
+}
+
+.fragmentTable th:first-child {
+  text-align: left;
+}
+
+.fragmentTable td {
+  padding: 8px 12px 8px 0;
+  border-top: 1px solid var(--service-border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fragmentTable td:first-child {
+  text-align: left;
+}
+
+.fragmentGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  margin: 20px 0 8px;
+}
+
+.fragmentGrid .fragment {
+  margin: 0;
+}
+
+@media (min-width: 900px) {
+  .fragmentGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.shareList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shareList li {
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) minmax(60px, 2fr) 44px auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--service-border); /* taste-skill-ignore: row rules inside a data-ui fragment */
+  font-size: 0.875rem;
+}
+
+.shareList li:first-child {
+  border-top: 0;
+}
+
+.shareName {
+  color: var(--service-text);
+}
+
+.shareBar {
+  min-width: 0;
+}
+
+.shareValue {
+  color: var(--service-text);
+  text-align: right;
+}
+
+.shareMeta {
+  color: var(--service-text-muted);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.scoreFacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+}
+
+.scoreFacts dt {
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+}
+
+.scoreFacts dd {
+  margin: 2px 0 0;
+  color: var(--service-text);
+  font-size: 0.9375rem;
+}
+
+/* A field of its own: the example coverage line as four labelled facts. */
+.field {
+  padding: 22px 24px;
+}
+
+.coverage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px 28px;
+  margin: 0;
+}
+
+.coverage dt {
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+}
+
+.coverage dd {
+  margin: 3px 0 0;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.fullWidth {
+  margin-top: 16px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px 48px;
+  margin-top: 8px;
+}
+
+@media (min-width: 900px) {
+  .split {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.split h2 {
+  margin-top: 40px;
+}
+
+.close {
+  margin-top: 48px;
+  padding: 32px 24px;
+  border-radius: 2px;
+  background: var(--service-surface-muted);
+}
+
+.closeLead {
+  max-width: 60ch;
+  margin: 0 0 20px;
+  color: var(--service-text);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.closeLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.closeLinks a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  text-decoration: none;
+}
+
+.closeLinks a:hover {
+  text-decoration: underline !important;
+}
+
+.closeLinks a:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--service-focus);
+  outline-offset: 3px;
+}
+
+.adoption {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.adoptionBar {
+  width: 72px;
+}
+
+.fragmentNote {
+  margin: 10px 0 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 @media (max-width: 640px) {
   .title {
-    font-size: 1.75rem;
+    font-size: 2rem;
   }
 
-  .metric {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .prose p,
-  .prose li {
+  .body p,
+  .body li,
+  .lead {
     font-size: 1rem;
   }
 
   .toc a {
     min-height: 44px;
   }
+
+  .fragment {
+    overflow-x: auto;
+  }
 }
 
-@media (pointer: coarse) {
-  .toc a,
-  .prose p a {
-    min-height: 44px;
+/* The page's one motion: its parts arrive once, in reading order, and rest.
+   Transform and opacity only; with reduced motion everything is simply there. */
+@keyframes arrive {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
   }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
 
-  .toc a {
-    display: inline-flex;
-    align-items: center;
+.header > *,
+.toc li,
+.body > * {
+  animation: arrive 560ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.header > *:nth-child(2),
+.toc li:nth-child(4),
+.body > *:nth-child(4) {
+  animation-delay: 60ms;
+}
+
+.header > *:nth-child(3),
+.toc li:nth-child(5),
+.body > *:nth-child(5) {
+  animation-delay: 120ms;
+}
+
+.header > *:nth-child(4),
+.toc li:nth-child(6),
+.body > *:nth-child(6) {
+  animation-delay: 180ms;
+}
+
+.toc li:nth-child(7),
+.body > *:nth-child(n + 7) {
+  animation-delay: 240ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header > *,
+  .toc li,
+  .body > * {
+    animation: none;
   }
 }

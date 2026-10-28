@@ -3,7 +3,8 @@
 import { useRef, useEffect, useCallback, useId, useMemo, useState } from "react";
 import styled from "styled-components";
 import type { DailyContribution, GraphColorPalette, TooltipPosition } from "@/lib/types";
-import { getDarkGraphColor } from "@/lib/darkGraphColors";
+import { DARK_GRAPH_EMPTY, getDarkGraphColor } from "@/lib/darkGraphColors";
+import { BAYER4 } from "dither-kit/pixel";
 import { dayHasActivity, formatCurrency, formatTokenCount, groupByWeek } from "@/lib/utils";
 import { CELL_SIZE, FONT_FAMILY, DAY_LABELS_SHORT, MONTH_LABELS_SHORT } from "@/lib/constants";
 import { addDays, format, getMonth, parseISO, startOfWeek, startOfYear } from "date-fns";
@@ -52,6 +53,47 @@ export function moveGraphCell(cell: Cell, key: string, weeks: number): Cell | nu
   }
 }
 
+/* One calendar cell as an ordered-dither tile, the kit's heat-calendar recipe: a Bayer 4×4
+   threshold (values 0–1) decides which dither pixels are lit, density encodes the intensity
+   level, lit pixels take the level's colour and unlit pixels the empty-day grey so the cell
+   keeps its square footprint at every density. */
+const DITHER_PX = 2;
+
+function hexToRgba(hex: string, alpha: number): string {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!match) return hex;
+  const value = Number.parseInt(match[1], 16);
+  return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
+}
+
+function paintDitherCell(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  palette: GraphColorPalette,
+  intensity: number,
+): void {
+  const level = Math.max(0, Math.min(4, Math.round(intensity))) as 0 | 1 | 2 | 3 | 4;
+  const density = level > 0 ? level / 4 : 0.08;
+  // An empty cell keeps the palette's palest grade for its single dither pixel, as the kit
+  // does, so the whole calendar reads in one hue.
+  const litColor = getDarkGraphColor(palette, level > 0 ? level : 1);
+  const litFill = hexToRgba(litColor, 0.35 + 0.6 * density);
+  for (let py = 0; py < size; py += DITHER_PX) {
+    for (let px = 0; px < size; px += DITHER_PX) {
+      // Absolute dither-pixel coordinates keep the Bayer pattern continuous across the
+      // whole calendar instead of restarting inside each cell.
+      const threshold = BAYER4[((y + py) / DITHER_PX) & 3][((x + px) / DITHER_PX) & 3];
+      const lit = density > threshold;
+      ctx.fillStyle = lit ? litFill : DARK_GRAPH_EMPTY;
+      const w = Math.min(DITHER_PX, size - px);
+      const h = Math.min(DITHER_PX, size - py);
+      ctx.fillRect(x + px, y + py, w, h);
+    }
+  }
+}
+
 const Container = styled.div`
   overflow-x: auto;
   overscroll-behavior-inline: contain;
@@ -65,7 +107,7 @@ const Container = styled.div`
 const GraphCanvas = styled.canvas`
   display: block;
   max-width: none;
-  border-radius: 4px;
+  border-radius: 0;
   cursor: pointer;
 
   &:focus {
@@ -114,8 +156,9 @@ export function TokenGraph2D({ contributions, palette, year, hoveredDate = null,
 
   const cellSize = getGraphCellSize(availableWidth, weeksData.length);
   const gap = cellSize < 16 ? 2 : 3;
-  const boxSize = cellSize - gap;
-  const radius = cellSize < 16 ? 2 : 3;
+  /* A whole number of 2px dither pixels per cell, so the Bayer tile is never
+     cut at the cell's edge. */
+  const boxSize = Math.max(4, Math.floor((cellSize - gap) / DITHER_PX) * DITHER_PX);
   const canvasWidth = DAY_LABEL_WIDTH + weeksData.length * cellSize + RIGHT_PADDING;
   const canvasHeight = MONTH_LABEL_HEIGHT + 7 * cellSize + BOTTOM_PADDING;
 
@@ -221,9 +264,7 @@ export function TokenGraph2D({ contributions, palette, year, hoveredDate = null,
         const x = DAY_LABEL_WIDTH + weekIndex * cellSize;
         const y = MONTH_LABEL_HEIGHT + dayIndex * cellSize;
 
-        ctx.fillStyle = getDarkGraphColor(palette, day?.intensity ?? 0);
-        roundRect(ctx, x, y, boxSize, boxSize, radius);
-        ctx.fill();
+        paintDitherCell(ctx, x, y, boxSize, palette, day?.intensity ?? 0);
       }
     }
 
@@ -235,13 +276,13 @@ export function TokenGraph2D({ contributions, palette, year, hoveredDate = null,
       const inset = width / 2 + 0.5;
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
-      roundRect(ctx, x - inset, y - inset, boxSize + inset * 2, boxSize + inset * 2, radius + 1);
-      ctx.stroke();
+      ctx.strokeRect(x - inset, y - inset, boxSize + inset * 2, boxSize + inset * 2);
     };
+
     if (hoveredDate && hoveredDate !== selectedDate) outline(cellIndexByDate.get(hoveredDate), "rgba(244, 247, 251, 0.85)", 1);
     if (selectedDate) outline(cellIndexByDate.get(selectedDate), focusColor, 1.5);
     if (keyboardCell) outline(keyboardCell, "#f4f7fb", 2);
-  }, [palette, weeksData, cellIndexByDate, cellSize, boxSize, radius, canvasWidth, canvasHeight, hoveredDate, selectedDate, keyboardCell, fontsReady]);
+  }, [palette, weeksData, cellIndexByDate, cellSize, boxSize, canvasWidth, canvasHeight, hoveredDate, selectedDate, keyboardCell, fontsReady]);
 
   // Run after sizing the canvas. Reveal the selected/latest active week, not empty December.
   // A width change within the scrolling layout must not undo deliberate horizontal scrolling.
@@ -410,16 +451,3 @@ export function TokenGraph2D({ contributions, palette, year, hoveredDate = null,
   );
 }
 
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.lineTo(x + width - radius, y);
-  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-  ctx.lineTo(x + width, y + height - radius);
-  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-  ctx.lineTo(x + radius, y + height);
-  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-  ctx.lineTo(x, y + radius);
-  ctx.quadraticCurveTo(x, y, x + radius, y);
-  ctx.closePath();
-}

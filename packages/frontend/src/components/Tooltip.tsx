@@ -20,29 +20,24 @@ const TooltipContainer = styled.div`
 
 const TooltipCard = styled.div`
   display: grid;
-  gap: 10px;
+  gap: 12px;
   width: max-content;
   min-width: 220px;
   max-width: min(280px, calc(100vw - 20px));
-  padding: 12px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 10px;
-  background: var(--service-surface-muted);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
-  color: var(--service-text);
+  padding: 14px;
+  border: 1px solid var(--v2-rule); /* taste-skill-ignore: floating hover card */
+  border-radius: var(--radius, 2px);
+  background: var(--v2-surface-raised);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.5); /* taste-skill-ignore: floating hover card */
+  color: var(--v2-text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 `;
 
 const DateText = styled.div`
-  color: var(--service-text);
+  color: var(--v2-text);
   font-size: 13px;
   font-weight: 600;
-`;
-
-const Divider = styled.div`
-  height: 1px;
-  background: var(--service-border);
 `;
 
 const Row = styled.div`
@@ -53,18 +48,18 @@ const Row = styled.div`
 `;
 
 const Label = styled.span`
-  color: var(--service-text-muted);
+  color: var(--v2-text-muted);
 `;
 
 const TotalValue = styled.span`
-  color: var(--v2-numeric);
+  color: var(--v2-text);
   font-size: 18px;
   font-weight: 600;
   letter-spacing: -0.02em;
 `;
 
 const Value = styled.span`
-  color: var(--service-text);
+  color: var(--v2-text);
   font-weight: 600;
 `;
 
@@ -127,8 +122,6 @@ export function Tooltip({ day, position, visible }: TooltipProps) {
           <TotalValue>{formatTokenCount(totals.tokens)}</TotalValue>
         </Row>
 
-        <Divider />
-
         <List>
           <TokenRow label="Input" value={tokenBreakdown.input} />
           <TokenRow label="Output" value={tokenBreakdown.output} />
@@ -136,8 +129,6 @@ export function Tooltip({ day, position, visible }: TooltipProps) {
           <TokenRow label="Cache write" value={tokenBreakdown.cacheWrite} />
           {tokenBreakdown.reasoning > 0 && <TokenRow label="Reasoning" value={tokenBreakdown.reasoning} />}
         </List>
-
-        <Divider />
 
         <List>
           <Row>

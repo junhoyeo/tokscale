@@ -8,8 +8,11 @@
  * - Price vs capability: the estimated $/1M at the community token mix (log
  *   scale) against ECI, with the price frontier.
  *
- * The plots are pictures (role="img" with a text summary); every value is
- * also in a data table under "Show data".
+ * The kit has no scatter, so the plot is SVG drawn the app-screen way: no
+ * axis frame, four faint horizontal gridlines, 12px muted ticks, square 2px
+ * marks and the one hue on the frontier line. The plots are pictures
+ * (role="img" with a text summary); every value is also in a data table under
+ * "Show data".
  */
 import styled from "styled-components";
 import { linearDomain, linearPosition, linearTicks, logDomain, logPosition, logTicks, paretoFrontier } from "@/lib/benchmarks/charts";
@@ -50,12 +53,11 @@ const Figure = styled.figure`
   margin: 0;
 `;
 
+/* No frame: the gridlines and the ticks carry the scale. */
 const Plot = styled.div`
   position: relative;
   height: 320px;
-  margin: 8px 8px 28px 48px;
-  border-bottom: 1px solid var(--service-border-strong);
-  border-left: 1px solid var(--service-border-strong);
+  margin: 24px 8px 44px 48px;
 
   @media (max-width: 640px) {
     height: 260px;
@@ -69,34 +71,40 @@ const Svg = styled.svg`
   width: 100%;
   height: 100%;
   overflow: visible;
+
+  line.grid {
+    stroke: var(--service-border);
+    stroke-width: 1;
+  }
+
+  path.frontier {
+    fill: none;
+    stroke: var(--service-accent);
+    stroke-width: 1;
+  }
 `;
 
 const Mark = styled(InstantTooltip)`
   position: absolute;
   display: inline-flex;
-  border-radius: 7px;
+  border-radius: 2px;
   transform: translate(-50%, -50%);
-
-  &[data-frontier="true"] {
-    outline: 1px solid var(--service-accent-hover);
-    outline-offset: 1px;
-  }
 `;
 
 /* --x is the point's left offset; the label never runs past the plot's edge on narrow screens. */
 const PointLabel = styled.span`
   position: absolute;
-  max-width: min(150px, calc(100% - var(--x, 0%) - 16px));
+  max-width: min(160px, calc(100% - var(--x, 0%) - 18px));
   overflow: hidden;
   color: var(--service-text);
-  font-size: 0.6875rem;
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
   transform: translate(14px, -50%);
   pointer-events: none;
 
   &[data-flip="true"] {
-    max-width: min(150px, calc(var(--x, 100%) - 16px));
+    max-width: min(160px, calc(var(--x, 100%) - 18px));
     transform: translate(calc(-100% - 14px), -50%);
   }
 
@@ -108,10 +116,11 @@ const PointLabel = styled.span`
   }
 `;
 
+/* Axis ticks are the one place 12px is allowed. */
 const Tick = styled.span`
   position: absolute;
   color: var(--service-text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 `;
@@ -119,7 +128,7 @@ const Tick = styled.span`
 const AxisTitle = styled.span`
   position: absolute;
   color: var(--service-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 `;
 
 const Caption = styled.figcaption`
@@ -138,19 +147,28 @@ const Strip = styled.p`
   font-size: 0.8125rem;
   line-height: 1.6;
 
-  a {
-    font-size: inherit;
+  @media (max-width: 640px) {
+    font-size: 0.875rem;
   }
 `;
 
 const DataDetails = styled.details`
   > summary {
-    display: inline-flex;
+    display: list-item;
     min-height: 32px;
-    align-items: center;
-    color: var(--service-accent-hover);
+    margin-left: 16px;
+    padding: 6px 0;
+    color: var(--service-text);
     font-size: 0.8125rem;
     cursor: pointer;
+
+    &::marker {
+      color: var(--service-text-muted);
+    }
+
+    &:hover {
+      text-decoration: underline;
+    }
 
     @media (max-width: 640px), (pointer: coarse) {
       min-height: 44px;
@@ -159,7 +177,7 @@ const DataDetails = styled.details`
   }
 
   > summary:focus-visible {
-    border-radius: 4px;
+    border-radius: 2px;
     outline: 2px solid var(--service-focus);
     outline-offset: 2px;
   }
@@ -174,14 +192,16 @@ const DataWrap = styled.div`
 const DataTable = styled.table`
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
 
   th,
   td {
-    padding: 6px 8px 6px 0;
+    height: 32px;
+    padding: 4px 8px 4px 0;
     border-bottom: 1px solid var(--service-border);
     text-align: right;
+    white-space: nowrap;
   }
 
   th:first-child,
@@ -190,8 +210,15 @@ const DataTable = styled.table`
   }
 
   th {
+    height: 36px;
     color: var(--service-text-muted);
+    font-size: 0.8125rem;
     font-weight: 500;
+    text-align: right;
+  }
+
+  th:first-child {
+    text-align: left;
   }
 `;
 
@@ -214,12 +241,23 @@ interface ScatterProps {
   summary: string;
 }
 
+/** Four round steps cover the y range; gridlines only, never a frame. */
+function fewTicks(min: number, max: number, target = 4): number[] {
+  const all = linearTicks(min, max, 5);
+  if (all.length <= target) return all;
+  const stride = Math.ceil((all.length - 1) / (target - 1));
+  const out: number[] = [];
+  for (let i = 0; i < all.length; i += stride) out.push(all[i]);
+  if (out[out.length - 1] !== all[all.length - 1]) out.push(all[all.length - 1]);
+  return out;
+}
+
 function Scatter({ points, xLabel, yLabel, formatX, frontierKeys, labelKeys, summary }: ScatterProps) {
   const xDomain = logDomain(points.map((p) => p.x));
   const yDomain = linearDomain(points.map((p) => p.y), 5);
   if (!xDomain || !yDomain) return null;
   const xTicks = logTicks(xDomain[0], xDomain[1]);
-  const yTicks = linearTicks(yDomain[0], yDomain[1], 5);
+  const yTicks = fewTicks(yDomain[0], yDomain[1]);
   const px = (x: number) => logPosition(x, xDomain[0], xDomain[1]) * 100;
   const py = (y: number) => 100 - linearPosition(y, yDomain[0], yDomain[1]) * 100;
   const frontier = frontierKeys ? points.filter((p) => frontierKeys.has(p.key)).sort((a, b) => a.x - b.x) : [];
@@ -238,27 +276,41 @@ function Scatter({ points, xLabel, yLabel, formatX, frontierKeys, labelKeys, sum
     <Plot role="img" aria-label={summary}>
       <Svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true" focusable="false">
         {yTicks.map((t) => (
-          <line key={`y${t}`} x1={0} x2={1000} y1={py(t) * 10} y2={py(t) * 10} stroke="rgba(255,255,255,0.07)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+          <line key={`y${t}`} className="grid" x1={0} x2={1000} y1={py(t) * 10} y2={py(t) * 10} vectorEffect="non-scaling-stroke" />
         ))}
-        {xTicks.map((t) => (
-          <line key={`x${t}`} x1={px(t) * 10} x2={px(t) * 10} y1={0} y2={1000} stroke="rgba(255,255,255,0.05)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-        ))}
-        {path ? <path d={path} fill="none" stroke="var(--service-accent-hover)" strokeWidth={1.5} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" /> : null}
+        {path ? <path className="frontier" d={path} vectorEffect="non-scaling-stroke" /> : null}
       </Svg>
-      {yTicks.map((t) => (
-        <Tick key={`yl${t}`} aria-hidden="true" style={{ top: `${py(t)}%`, right: "calc(100% + 8px)", transform: "translateY(-50%)" }}>
+      {yTicks.map((t, i) => (
+        <Tick
+          key={`yl${t}`}
+          aria-hidden="true"
+          style={{
+            top: `${py(t)}%`,
+            right: "calc(100% + 8px)",
+            /* The end ticks are anchored to their own edge, never centred on the plot's. */
+            transform: i === 0 ? "translateY(0)" : i === yTicks.length - 1 ? "translateY(-100%)" : "translateY(-50%)",
+          }}
+        >
           {t}
         </Tick>
       ))}
-      {xTicks.map((t) => (
-        <Tick key={`xl${t}`} aria-hidden="true" style={{ left: `${px(t)}%`, top: "calc(100% + 6px)", transform: "translateX(-50%)" }}>
+      {xTicks.map((t, i) => (
+        <Tick
+          key={`xl${t}`}
+          aria-hidden="true"
+          style={{
+            left: `${px(t)}%`,
+            top: "calc(100% + 8px)",
+            transform: i === xTicks.length - 1 ? "translateX(-100%)" : i === 0 ? "translateX(0)" : "translateX(-50%)",
+          }}
+        >
           {formatX(t)}
         </Tick>
       ))}
-      <AxisTitle aria-hidden="true" style={{ left: 0, top: "-22px" }}>
+      <AxisTitle aria-hidden="true" style={{ left: 0, top: "-24px" }}>
         {yLabel}
       </AxisTitle>
-      <AxisTitle aria-hidden="true" style={{ right: 0, top: "calc(100% + 6px)", transform: "translateY(100%)" }}>
+      <AxisTitle aria-hidden="true" style={{ right: 0, top: "calc(100% + 26px)" }}>
         {xLabel}
       </AxisTitle>
       {points.map((p) => {
@@ -271,7 +323,6 @@ function Scatter({ points, xLabel, yLabel, formatX, frontierKeys, labelKeys, sum
               style={{ left: `${left}%`, top: `${top}%` }}
               content={`${p.name}: ${yLabel} ${p.y.toFixed(1)}, ${xLabel} ${formatX(p.x)}`}
               describe={false}
-              data-frontier={frontierKeys?.has(p.key) ? "true" : undefined}
             >
               <ModelMark model={p} size={20} />
             </Mark>
@@ -297,8 +348,8 @@ function Scatter({ points, xLabel, yLabel, formatX, frontierKeys, labelKeys, sum
  * estimates in percent of a ~560 x 320 px plot.
  */
 function placeLabels(points: ScatterPoint[], priority: string[], px: (x: number) => number, py: (y: number) => number): Map<string, "right" | "left"> {
-  const charWidth = 1.15;
-  const height = 4.2;
+  const charWidth = 1.25;
+  const height = 4.6;
   const markHalf = 2.2;
   const placed: Array<{ x0: number; x1: number; y0: number; y1: number }> = points.map((p) => ({
     x0: px(p.x) - markHalf,
@@ -312,7 +363,7 @@ function placeLabels(points: ScatterPoint[], priority: string[], px: (x: number)
     if (!p) continue;
     const x = px(p.x);
     const y = py(p.y);
-    const width = Math.min(26, p.name.length * charWidth);
+    const width = Math.min(29, p.name.length * charWidth);
     const options: Array<["right" | "left", number, number]> = [
       ["right", x + markHalf + 0.6, x + markHalf + 0.6 + width],
       ["left", x - markHalf - 0.6 - width, x - markHalf - 0.6],
@@ -445,7 +496,7 @@ export function CapabilityCharts({
             <strong>Price vs capability.</strong> Estimated USD per 1M tokens at the community token mix in the{" "}
             {periodLabel.toLowerCase()} (log scale, list prices
             {cacheReadShare !== null ? `; cache reads are ${formatShare(cacheReadShare)} of that mix` : ""}) against ECI. The
-            dashed line is the price frontier: no model is both cheaper and higher on ECI than a model on it.
+            accent line is the price frontier: no model is both cheaper and higher on ECI than a model on it.
           </Caption>
           <DataDetails>
             <summary>Show data</summary>
