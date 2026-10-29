@@ -9,6 +9,7 @@ use super::UnifiedMessage;
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{BufReader, Seek};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,15 @@ pub struct DroidSettingsJson {
     pub provider_lock_timestamp: Option<String>,
     #[serde(rename = "tokenUsage")]
     pub token_usage: Option<DroidTokenUsage>,
+    /// Last model Factory Router actually served when `model` is `auto`.
+    #[serde(rename = "effectiveFactoryRouterModel")]
+    pub effective_factory_router_model: Option<DroidRouterModel>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DroidRouterModel {
+    #[serde(rename = "modelId")]
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +102,86 @@ fn normalize_model_name(model: &str) -> String {
 
 fn get_provider_from_model(model: &str) -> &'static str {
     provider_identity::inferred_provider_from_model(model).unwrap_or("unknown")
+}
+
+fn is_routing_model(model: &str) -> bool {
+    crate::pricing::lookup::is_routing_label(model)
+}
+
+/// Normalized model id, or `None` when the value is empty or a router label.
+/// The second string is the original text, kept for pricing lookup.
+fn concrete_model(raw: &str) -> Option<(String, String)> {
+    let normalized = normalize_model_name(raw);
+    if normalized.is_empty() || is_routing_model(&normalized) {
+        None
+    } else {
+        Some((normalized, raw.to_string()))
+    }
+}
+
+/// Provider for a resolved underlying model. Infer from the model id first so
+/// Factory Router's `providerLock: "factory"` does not hide GLM/Kimi/Claude
+/// as a generic Factory row; the lock is only the unknown-family fallback.
+fn provider_for_resolved_model(model: &str, lock: Option<&str>) -> String {
+    let inferred = get_provider_from_model(model);
+    if inferred != "unknown" {
+        inferred.to_string()
+    } else {
+        lock.filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| inferred.to_string())
+    }
+}
+
+/// Session-level model, whether `settings.model` is a router label, and the
+/// raw string pricing should see.
+///
+/// Auto sessions keep their configured label only as a last resort: the last
+/// routed model (`effectiveFactoryRouterModel`) and the JSONL `Model:` reminder
+/// are both more specific. Per-turn `message.modelId` is applied later and
+/// wins over this fallback for every session, including an explicit
+/// `settings.model`. Droid rewrites that field to whatever is selected *now*,
+/// so it is only the label for calls the transcript never named.
+fn session_model_and_router(settings: &DroidSettingsJson, path: &Path) -> (String, bool, String) {
+    match settings.model.as_deref() {
+        Some(raw) => {
+            let normalized = normalize_model_name(raw);
+            if !is_routing_model(&normalized) {
+                return (normalized, false, raw.to_string());
+            }
+            if let Some((routed, pricing_raw)) = settings
+                .effective_factory_router_model
+                .as_ref()
+                .and_then(|router| router.model_id.as_deref())
+                .and_then(concrete_model)
+            {
+                return (routed, true, pricing_raw);
+            }
+            if let Some((from_jsonl, pricing_raw)) = droid_jsonl_path(path)
+                .as_ref()
+                .and_then(|jsonl| extract_model_from_jsonl(jsonl))
+                .as_deref()
+                .and_then(concrete_model)
+            {
+                return (from_jsonl, true, pricing_raw);
+            }
+            (normalized, true, raw.to_string())
+        }
+        None => {
+            let provider = settings.provider_lock.as_deref().unwrap_or("");
+            let pricing_raw = droid_jsonl_path(path)
+                .as_ref()
+                .and_then(|jsonl| extract_model_from_jsonl(jsonl))
+                .unwrap_or_else(|| {
+                    get_default_model_from_provider(if provider.is_empty() {
+                        "unknown"
+                    } else {
+                        provider
+                    })
+                });
+            (normalize_model_name(&pricing_raw), false, pricing_raw)
+        }
+    }
 }
 
 /// Get default model name based on provider when model field is missing
@@ -209,6 +299,8 @@ struct TranscriptTurn {
     context_weight: u128,
     output_weight: u128,
     replies: i32,
+    /// Concrete `message.modelId` from this assistant reply, when present.
+    model_raw: Option<String>,
 }
 
 /// Ceiling on the transcript bytes read to shape one session's spend.
@@ -220,8 +312,13 @@ struct TranscriptTurn {
 /// session is live, because the growing transcript keeps invalidating the
 /// cached parse (measured on a 104.7 MB transcript: 148 ms per parse in
 /// release, 1.28 s in debug, ~1.4 ms/MB). This ceiling bounds that per-session
-/// work at roughly 45 ms in release.
-const MAX_TRANSCRIPT_BYTES: u64 = 32 * 1024 * 1024;
+/// work at roughly 45 ms in release for the original 32 MB bound.
+///
+/// The bound is 128 MB. A switched session past 32 MB used to skip this
+/// split and stamp the whole cumulative total with `settings.model`, which
+/// is the last model the user selected. 128 MB is about 180 ms at the
+/// measured 1.4 ms/MB, and it still refuses a pathological transcript.
+const MAX_TRANSCRIPT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Ceiling on the records one session contributes.
 ///
@@ -318,6 +415,13 @@ fn transcript_turns_bounded(jsonl: &Path, max_bytes: u64, max_turns: usize) -> V
             continue;
         };
 
+        let model_raw = record
+            .get("message")
+            .and_then(|message| message.get("modelId"))
+            .and_then(|value| value.as_str())
+            .filter(|raw| concrete_model(raw).is_some())
+            .map(str::to_string);
+
         turns.push(TranscriptTurn {
             timestamp,
             // The first reply in a session reads a context of zero bytes but
@@ -325,6 +429,7 @@ fn transcript_turns_bounded(jsonl: &Path, max_bytes: u64, max_turns: usize) -> V
             context_weight: context_read.max(1),
             output_weight: line_bytes.max(1),
             replies: 1,
+            model_raw,
         });
     }
 
@@ -339,6 +444,20 @@ fn transcript_turns_bounded(jsonl: &Path, max_bytes: u64, max_turns: usize) -> V
     // this runs — and only a read that stopped early disqualifies the split.
     if reader.stream_position().unwrap_or(0) < declared_bytes {
         return Vec::new();
+    }
+
+    // A real model call is the assistant record that carries `message.modelId`.
+    // Droid also writes `repl-tool-call:` rows (and other tool echoes) as
+    // assistant messages with no model. Counting those as calls hands them a
+    // share of the cumulative total, and the share falls through to
+    // `settings.model` — the model selected at the end of the session — so a
+    // switch rewrites the earlier spend. When the transcript names any call,
+    // keep only those calls. The dropped rows already advanced `context_bytes`,
+    // so the next real call still reads them. A transcript with no modelId at
+    // all keeps every assistant reply, which is the only shape older sessions
+    // have.
+    if turns.iter().any(|turn| turn.model_raw.is_some()) {
+        turns.retain(|turn| turn.model_raw.is_some());
     }
 
     coalesce_turns(turns, max_turns)
@@ -361,31 +480,46 @@ fn transcript_turns(jsonl: &Path) -> Vec<TranscriptTurn> {
 /// A run also carries the number of replies it folded, so the session's message
 /// count survives coalescing: the resolution of *when* the calls happened
 /// drops, but not *how many* there were.
+fn fold_turn_run(chunk: &[TranscriptTurn]) -> TranscriptTurn {
+    TranscriptTurn {
+        timestamp: chunk
+            .iter()
+            .map(|turn| turn.timestamp)
+            .max()
+            .unwrap_or_default(),
+        context_weight: chunk
+            .iter()
+            .fold(0u128, |sum, turn| sum.saturating_add(turn.context_weight)),
+        output_weight: chunk
+            .iter()
+            .fold(0u128, |sum, turn| sum.saturating_add(turn.output_weight)),
+        replies: chunk
+            .iter()
+            .fold(0i32, |sum, turn| sum.saturating_add(turn.replies)),
+        // A same-model run reports that model. Callers never mix models in
+        // one chunk: the last reply would otherwise relabel the whole run.
+        model_raw: chunk.last().and_then(|turn| turn.model_raw.clone()),
+    }
+}
+
 fn coalesce_turns(turns: Vec<TranscriptTurn>, max_turns: usize) -> Vec<TranscriptTurn> {
     if max_turns == 0 || turns.len() <= max_turns {
         return turns;
     }
 
-    let run = turns.len().div_ceil(max_turns);
-    turns
-        .chunks(run)
-        .map(|chunk| TranscriptTurn {
-            timestamp: chunk
-                .iter()
-                .map(|turn| turn.timestamp)
-                .max()
-                .unwrap_or_default(),
-            context_weight: chunk
-                .iter()
-                .fold(0u128, |sum, turn| sum.saturating_add(turn.context_weight)),
-            output_weight: chunk
-                .iter()
-                .fold(0u128, |sum, turn| sum.saturating_add(turn.output_weight)),
-            replies: chunk
-                .iter()
-                .fold(0i32, |sum, turn| sum.saturating_add(turn.replies)),
-        })
-        .collect()
+    let run = turns.len().div_ceil(max_turns).max(1);
+    let mut folded = Vec::new();
+    let mut start = 0;
+    while start < turns.len() {
+        let model = turns[start].model_raw.as_deref();
+        let mut end = start + 1;
+        while end < turns.len() && turns[end].model_raw.as_deref() == model {
+            end += 1;
+        }
+        folded.extend(turns[start..end].chunks(run).map(fold_turn_run));
+        start = end;
+    }
+    folded
 }
 
 /// Split `total` across `weights` so the parts sum back to exactly `total`.
@@ -428,7 +562,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     // Skip if no token usage data
-    let usage = match settings.token_usage {
+    let usage = match settings.token_usage.as_ref() {
         Some(u) => u,
         None => return Vec::new(),
     };
@@ -452,26 +586,17 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         .to_string()
         .replace(".settings", "");
 
-    // Get model and provider
+    let (session_model, session_is_router, session_pricing_raw) =
+        session_model_and_router(&settings, path);
     let billing_provider = settings.provider_lock.clone();
-    let provider = settings.provider_lock.clone().unwrap_or_else(|| {
-        get_provider_from_model(settings.model.as_deref().unwrap_or("")).to_string()
-    });
-
-    let raw_model = if let Some(m) = settings.model {
-        m
+    let provider_lock = settings.provider_lock.as_deref();
+    let session_provider = if session_is_router {
+        provider_for_resolved_model(&session_model, provider_lock)
     } else {
-        // Try to extract from JSONL file
-        let jsonl_path = droid_jsonl_path(path);
-
-        if let Some(ref jsonl) = jsonl_path {
-            extract_model_from_jsonl(jsonl)
-                .unwrap_or_else(|| get_default_model_from_provider(&provider))
-        } else {
-            get_default_model_from_provider(&provider)
-        }
+        billing_provider
+            .clone()
+            .unwrap_or_else(|| get_provider_from_model(&session_model).to_string())
     };
-    let model = normalize_model_name(&raw_model);
 
     let totals = TokenBreakdown {
         input: usage.input_tokens.unwrap_or(0).max(0),
@@ -505,20 +630,45 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
         let output = apportion(totals.output, &output_weights, total_output);
         let reasoning = apportion(totals.reasoning, &output_weights, total_output);
 
-        // One Droid session made this many API calls, however many records its
-        // spend is spread over.
-        let session_replies = turns
+        let identities: Vec<(String, String, String)> = turns
             .iter()
-            .fold(0i32, |sum, turn| sum.saturating_add(turn.replies.max(1)));
+            .map(|turn| {
+                resolve_turn_identity(
+                    turn,
+                    &session_model,
+                    provider_lock,
+                    &session_provider,
+                    &session_pricing_raw,
+                )
+            })
+            .collect();
+        // One countable record per model. A single total on the first record
+        // would report every request as whichever model ran first, which is
+        // the same bug as stamping the token total with the last model.
+        // Later records of that model stay at zero so a long single-model
+        // session is still one session, not one session per call.
+        let mut reply_on_first = vec![0i32; turns.len()];
+        let mut first_index: HashMap<&str, usize> = HashMap::new();
+        for (index, turn) in turns.iter().enumerate() {
+            let replies = turn.replies.max(1);
+            let model = identities[index].0.as_str();
+            if let Some(&first) = first_index.get(model) {
+                reply_on_first[first] = reply_on_first[first].saturating_add(replies);
+            } else {
+                first_index.insert(model, index);
+                reply_on_first[index] = replies;
+            }
+        }
 
         return turns
             .iter()
             .enumerate()
             .map(|(index, turn)| {
+                let (model, provider, pricing_raw) = identities[index].clone();
                 let mut message = UnifiedMessage::new(
                     "droid",
-                    model.clone(),
-                    provider.clone(),
+                    model,
+                    provider,
                     session_id.clone(),
                     turn.timestamp,
                     TokenBreakdown {
@@ -535,18 +685,11 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
                     billing_provider.as_deref(),
                     super::BillingIdentityOrigin::ExplicitSession,
                 )
-                .with_pricing_model(&raw_model);
-                // These records are attribution fragments of one session, not
-                // separate sessions. `sessionize` opens a new interval whenever
-                // two records sit more than the idle gap apart and counts every
-                // interval that reports messages, so a count on each fragment
-                // would turn one Droid session into one session per apportioned
-                // record. Carry the session's authoritative reply total on
-                // exactly one record and make the rest count-neutral, the same
-                // split `copilot_desktop` applies to its shutdown fragments:
-                // the total number of calls stays exact, the session count
-                // stays one.
-                message.message_count = if index == 0 { session_replies } else { 0 };
+                .with_pricing_model(&pricing_raw);
+                // Count-neutral fragments keep a single-model session as one
+                // session. The first record of each model carries that model's
+                // calls, so a switch does not file them under the first model.
+                message.message_count = reply_on_first[index];
                 message
             })
             .collect();
@@ -560,13 +703,42 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     let timestamp = resolve_usage_timestamp(lock_timestamp, file_modified_timestamp_ms_opt(path));
 
     vec![
-        UnifiedMessage::new("droid", model, provider, session_id, timestamp, totals, 0.0)
-            .with_billing(
-                billing_provider.as_deref(),
-                super::BillingIdentityOrigin::ExplicitSession,
-            )
-            .with_pricing_model(&raw_model),
+        UnifiedMessage::new(
+            "droid",
+            session_model,
+            session_provider,
+            session_id,
+            timestamp,
+            totals,
+            0.0,
+        )
+        .with_billing(
+            billing_provider.as_deref(),
+            super::BillingIdentityOrigin::ExplicitSession,
+        )
+        .with_pricing_model(&session_pricing_raw),
     ]
+}
+
+fn resolve_turn_identity(
+    turn: &TranscriptTurn,
+    session_model: &str,
+    provider_lock: Option<&str>,
+    session_provider: &str,
+    session_pricing_raw: &str,
+) -> (String, String, String) {
+    // The call's own model wins even when `settings.model` is explicit.
+    // That field is the selection at the end of the session, not the model
+    // that served the earlier calls.
+    if let Some((model, pricing_raw)) = turn.model_raw.as_deref().and_then(concrete_model) {
+        let provider = provider_for_resolved_model(&model, provider_lock);
+        return (model, provider, pricing_raw);
+    }
+    (
+        session_model.to_string(),
+        session_provider.to_string(),
+        session_pricing_raw.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -608,6 +780,8 @@ mod tests {
         assert_eq!(get_provider_from_model("o3-mini"), "openai");
         assert_eq!(get_provider_from_model("gemini-pro"), "google");
         assert_eq!(get_provider_from_model("grok-2"), "xai");
+        assert_eq!(get_provider_from_model("glm-5.3"), "zai");
+        assert_eq!(get_provider_from_model("kimi-k3"), "moonshotai");
         assert_eq!(get_provider_from_model("unknown-model"), "unknown");
     }
 
@@ -1225,5 +1399,202 @@ mod tests {
         assert_eq!(usage.cache_creation_tokens, Some(89));
         assert_eq!(usage.cache_read_tokens, Some(12));
         assert_eq!(usage.thinking_tokens, Some(34));
+    }
+
+    fn assistant_with_model(timestamp: &str, filler: usize, model_id: &str) -> String {
+        format!(
+            r#"{{"type":"message","timestamp":"{timestamp}","message":{{"role":"assistant","content":"{}","modelId":"{model_id}"}}}}"#,
+            "x".repeat(filler)
+        )
+    }
+
+    fn write_named_session(
+        dir: &Path,
+        id: &str,
+        settings_json: &str,
+        transcript: &[&str],
+    ) -> PathBuf {
+        let settings = dir.join(format!("{id}.settings.json"));
+        std::fs::write(&settings, settings_json).unwrap();
+        std::fs::write(dir.join(format!("{id}.jsonl")), transcript.join("\n")).unwrap();
+        settings
+    }
+
+    #[test]
+    fn auto_session_uses_per_turn_model_id() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = write_named_session(
+            temp_dir.path(),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"model":"auto","providerLock":"factory","tokenUsage":{"inputTokens":900,"outputTokens":100},"effectiveFactoryRouterModel":{"modelId":"glm-5.3"}}"#,
+            &[
+                r#"{"type":"session_start","id":"s"}"#,
+                &assistant_with_model("2026-10-08T09:00:00Z", 10, "glm-5.3"),
+                &assistant_with_model("2026-10-08T09:01:00Z", 20, "glm-5.3"),
+            ],
+        );
+
+        let messages = parse_droid_file(&settings);
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|m| m.model_id == "glm-5-3"));
+        assert!(messages.iter().all(|m| m.provider_id == "zai"));
+        assert!(messages
+            .iter()
+            .all(|m| m.pricing_model_id.as_deref() == Some("glm-5.3")));
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 900);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn auto_session_splits_when_router_changes_model() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = write_named_session(
+            temp_dir.path(),
+            "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"model":"auto","providerLock":"factory","tokenUsage":{"inputTokens":1000,"outputTokens":100}}"#,
+            &[
+                &assistant_with_model("2026-10-08T09:00:00Z", 10, "glm-5.3"),
+                &assistant_with_model("2026-10-08T09:02:00Z", 10, "claude-opus-5-5"),
+            ],
+        );
+
+        let messages = parse_droid_file(&settings);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id, "glm-5-3");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[1].model_id, "claude-opus-5-5");
+        assert_eq!(messages[1].provider_id, "anthropic");
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
+    }
+
+    #[test]
+    fn auto_session_falls_back_to_effective_router_model() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = write_named_session(
+            temp_dir.path(),
+            "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"model":"auto","providerLock":"factory","tokenUsage":{"inputTokens":400,"outputTokens":50},"effectiveFactoryRouterModel":{"modelId":"glm-5.3"}}"#,
+            &[&assistant("2026-10-08T09:00:00Z", 10)],
+        );
+
+        let messages = parse_droid_file(&settings);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5-3");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].pricing_model_id.as_deref(), Some("glm-5.3"));
+    }
+
+    #[test]
+    fn auto_session_without_served_model_keeps_the_routing_label() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = write_named_session(
+            temp_dir.path(),
+            "dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"model":"auto","providerLock":"factory","tokenUsage":{"inputTokens":400}}"#,
+            &[&assistant("2026-10-08T09:00:00Z", 10)],
+        );
+
+        let messages = parse_droid_file(&settings);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "auto");
+        assert_eq!(messages[0].provider_id, "factory");
+        assert_eq!(messages[0].pricing_model_id, None);
+    }
+
+    #[test]
+    fn call_model_id_overrides_the_final_settings_model() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = write_named_session(
+            temp_dir.path(),
+            "eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"model":"claude-opus-5-5","providerLock":"anthropic","tokenUsage":{"inputTokens":400}}"#,
+            &[&assistant_with_model("2026-10-08T09:00:00Z", 10, "glm-5.3")],
+        );
+
+        let messages = parse_droid_file(&settings);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "glm-5-3");
+        assert_eq!(messages[0].provider_id, "zai");
+        assert_eq!(messages[0].pricing_model_id.as_deref(), Some("glm-5.3"));
+        assert_eq!(messages[0].tokens.input, 400);
+    }
+
+    fn repl_tool_call(timestamp: &str) -> String {
+        format!(
+            r#"{{"type":"message","id":"repl-tool-call:abc","timestamp":"{timestamp}","message":{{"role":"assistant","content":"yyyy","visibility":"user_only"}}}}"#
+        )
+    }
+
+    #[test]
+    fn switched_explicit_models_keep_each_call() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let settings = write_named_session(
+            temp_dir.path(),
+            "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee",
+            r#"{"model":"deepseek-v4.1-flash-1017","providerLock":"factory","tokenUsage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":5000,"cacheCreationTokens":200}}"#,
+            &[
+                &assistant_with_model("2026-10-29T13:04:24Z", 30, "claude-opus-5-5"),
+                &repl_tool_call("2026-10-29T13:04:24Z"),
+                &assistant_with_model("2026-10-29T15:07:31Z", 10, "kimi-k3"),
+                &assistant_with_model("2026-10-29T15:08:44Z", 10, "deepseek-v4.1-flash-1017"),
+            ],
+        );
+
+        let messages = parse_droid_file(&settings);
+        let models: Vec<&str> = messages.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(
+            models,
+            vec![
+                "claude-opus-5-5",
+                "kimi-k3",
+                "deepseek-v4-1-flash-1017",
+            ]
+        );
+        assert_eq!(messages[0].provider_id, "anthropic");
+        assert_eq!(messages[1].provider_id, "moonshotai");
+        assert_eq!(messages[2].provider_id, "deepseek");
+        assert!(messages.iter().all(|m| m.model_id != "deepseek-v4-1-flash-1017" || m.tokens.input < 1000));
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 100);
+        assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 5000);
+        assert_eq!(messages.iter().map(|m| m.tokens.cache_write).sum::<i64>(), 200);
+        assert_eq!(
+            messages.iter().map(|m| m.message_count).collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn coalesce_does_not_merge_across_a_model_switch() {
+        let turns = vec![
+            TranscriptTurn {
+                timestamp: 1,
+                context_weight: 10,
+                output_weight: 1,
+                replies: 1,
+                model_raw: Some("claude-opus-5-5".to_string()),
+            },
+            TranscriptTurn {
+                timestamp: 2,
+                context_weight: 10,
+                output_weight: 1,
+                replies: 1,
+                model_raw: Some("claude-opus-5-5".to_string()),
+            },
+            TranscriptTurn {
+                timestamp: 3,
+                context_weight: 10,
+                output_weight: 1,
+                replies: 1,
+                model_raw: Some("kimi-k3".to_string()),
+            },
+        ];
+        let capped = coalesce_turns(turns, 1);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].model_raw.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(capped[0].replies, 2);
+        assert_eq!(capped[0].context_weight, 20);
+        assert_eq!(capped[1].model_raw.as_deref(), Some("kimi-k3"));
+        assert_eq!(capped[1].replies, 1);
     }
 }
