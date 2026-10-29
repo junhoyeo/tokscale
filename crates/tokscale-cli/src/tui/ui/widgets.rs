@@ -12,7 +12,9 @@ use crate::tui::themes::Theme;
 use crate::ui_glyphs::Glyphs;
 
 pub fn format_tokens_compact(tokens: u64) -> String {
-    if tokens >= 1_000_000_000 {
+    // Switch units where `{:.1}` would round up to "1000.0", so 999_950_000 shows
+    // as "1.0B" rather than "1000.0M".
+    if tokens >= 999_950_000 {
         format!("{:.1}B", tokens as f64 / 1_000_000_000.0)
     } else if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -1032,6 +1034,15 @@ fn capitalize_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_tokens_compact_promotes_to_billions_at_the_rounding_boundary() {
+        assert_eq!(format_tokens_compact(999_949_999), "999.9M");
+        assert_eq!(format_tokens_compact(999_950_000), "1.0B");
+        assert_eq!(format_tokens_compact(999_999_999), "1.0B");
+        assert_eq!(format_tokens_compact(999_999), "999K");
+        assert_eq!(format_tokens_compact(1_000_000), "1.0M");
+    }
 
     #[test]
     fn registered_client_display_names_cover_the_core_registry() {

@@ -1673,9 +1673,10 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
 }
 
 fn format_tokens(tokens: i64) -> String {
-    if tokens >= 1_000_000_000 {
+    // Switch units where the rounded value would reach 1000 ("1000K", "1000.0M").
+    if tokens >= 999_950_000 {
         format!("{:.1}B", tokens as f64 / 1_000_000_000.0)
-    } else if tokens >= 1_000_000 {
+    } else if tokens >= 999_500 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
         format!("{:.0}K", tokens as f64 / 1_000.0)
@@ -1703,6 +1704,15 @@ mod tests {
     use super::*;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown;
+
+    #[test]
+    fn format_tokens_promotes_to_the_next_unit_at_the_rounding_boundary() {
+        assert_eq!(format_tokens(999_499), "999K");
+        assert_eq!(format_tokens(999_500), "1.0M");
+        assert_eq!(format_tokens(999_949_999), "999.9M");
+        assert_eq!(format_tokens(999_950_000), "1.0B");
+        assert_eq!(format_tokens(1_500), "2K");
+    }
 
     fn test_pricing_service() -> PricingService {
         let mut litellm = HashMap::new();

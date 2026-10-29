@@ -5126,7 +5126,8 @@ fn describe_path_for_home(path: &str, exists: bool, home: &Path) -> String {
 }
 
 fn format_number(n: i32) -> String {
-    if n >= 1_000_000 {
+    // Switch to millions where `{:.1}` would round the thousands up to "1000.0K".
+    if n >= 999_950 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1}K", n as f64 / 1_000.0)
@@ -8285,6 +8286,13 @@ mod tests {
         calculate_summary_v2, calculate_years_v2, ClientContributionV2, DailyContributionV2,
         DailyTotalsV2, GraphMeta, GraphResultV2, TokenBreakdown,
     };
+
+    #[test]
+    fn format_number_promotes_to_millions_at_the_rounding_boundary() {
+        assert_eq!(format_number(999_949), "999.9K");
+        assert_eq!(format_number(999_950), "1.0M");
+        assert_eq!(format_number(1_500), "1.5K");
+    }
 
     #[test]
     fn model_token_breakdown_json_preserves_all_buckets_in_camel_case() {
