@@ -507,33 +507,94 @@ fn fold_turn_run<'a>(chunk: impl IntoIterator<Item = &'a TranscriptTurn>) -> Tra
 
 /// Cap a session's turns at `max_turns` records without mixing models.
 ///
-/// The first pass folds each run of consecutive same-model turns into chunks of
-/// `turns.len() / max_turns` (rounded up). That keeps every record inside one
-/// stretch of one model, and it is enough whenever the session switches model
-/// rarely. A session that switches often has many short runs, and a run of one
-/// turn cannot fold at all: a session that alternates models on every reply
-/// would keep one record per reply, with no bound.
+/// A record never folds turns of two models, and it only folds turns of
+/// different runs of one model when nothing else fits. A run is a stretch of
+/// consecutive turns of one model.
 ///
-/// When the first pass is still over the cap, the turns are cut into windows of
-/// consecutive turns instead, and each window emits one record per model it
-/// contains. Same-model turns that are not adjacent then fold together, but
-/// only inside one window, so the session's timeline is kept at window
-/// resolution. The window is the smallest width whose record count fits the
-/// cap. One window that spans the whole session gives one record per distinct
-/// model, so the cap always holds unless the session used more than
-/// `max_turns` distinct models. In that case the output is one record per
-/// model, because two models never share one record.
+/// When the session has at most `max_turns` runs, each run is cut into chunks
+/// of `chunk` consecutive turns, and no record crosses a run boundary.
+/// `chunk` is the smallest size that fits, starting at
+/// `turns.len() / max_turns` (rounded up). A session that already fit at that
+/// starting size keeps exactly the records it had before. The record count
+/// only goes down as `chunk` grows, and one chunk per run always fits, so a
+/// binary search finds the smallest `chunk`.
 ///
-/// Both passes only regroup turns. Each model's summed weights and reply count
-/// are the same before and after, so each model keeps its share of the
+/// A session with more runs than `max_turns` cannot keep runs apart, because
+/// every run needs a record of its own. A session that alternates models on
+/// every reply is this case. Its turns are cut into windows of consecutive
+/// turns, and each window emits one record per model it contains. That record
+/// count does not always go down as the window grows: a wider window can
+/// straddle more model switches. So the width is found by a scan upward from
+/// the smallest width that could fit, and the first width that fits is used.
+/// The scan never passes `ceil(turns.len() / (max_turns / models))`, a width
+/// whose windows are few enough to fit even when each one holds every model.
+/// That bounds the work at O(turns × widths scanned). With two models and a
+/// cap of 1024, that is about `turns.len() / 1024` widths, and each probe
+/// stops as soon as its count passes the cap.
+///
+/// A session that used more distinct models than `max_turns` cannot fit
+/// without mixing models, so it gets one record per model.
+///
+/// Every path only regroups turns. Each model's summed weights and reply count
+/// are the same before and after, so each model keeps its exact share of the
 /// session's tokens and calls.
 fn coalesce_turns(turns: Vec<TranscriptTurn>, max_turns: usize) -> Vec<TranscriptTurn> {
     if max_turns == 0 || turns.len() <= max_turns {
         return turns;
     }
 
-    let run = turns.len().div_ceil(max_turns).max(1);
-    let mut folded = Vec::new();
+    let smallest = turns.len().div_ceil(max_turns).max(1);
+    let runs = model_runs(&turns);
+    if runs.len() <= max_turns {
+        let records = |chunk: usize| -> usize {
+            runs.iter()
+                .map(|run| (run.end - run.start).div_ceil(chunk))
+                .sum()
+        };
+        // One chunk per run is `runs.len()` records, which fits, and the
+        // longest run is at least `smallest` turns long.
+        let mut lo = smallest;
+        let mut hi = runs
+            .iter()
+            .map(|run| run.end - run.start)
+            .max()
+            .unwrap_or(1)
+            .max(smallest);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if records(mid) <= max_turns {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return runs
+            .iter()
+            .flat_map(|run| turns[run.clone()].chunks(hi).map(fold_turn_run))
+            .collect();
+    }
+
+    let models = turns
+        .iter()
+        .map(|turn| turn.model_raw.as_deref())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if models > max_turns {
+        return fold_turn_windows(&turns, turns.len());
+    }
+    // Fewer than `smallest` turns per window means more than `max_turns`
+    // windows, and every window emits at least one record.
+    let fits_anyway = turns.len().div_ceil(max_turns / models);
+    let mut width = smallest;
+    while width < fits_anyway && windowed_record_count(&turns, width, max_turns) > max_turns {
+        width += 1;
+    }
+    fold_turn_windows(&turns, width)
+}
+
+/// The index ranges of each stretch of consecutive same-model turns.
+fn model_runs(turns: &[TranscriptTurn]) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
     let mut start = 0;
     while start < turns.len() {
         let model = turns[start].model_raw.as_deref();
@@ -541,28 +602,10 @@ fn coalesce_turns(turns: Vec<TranscriptTurn>, max_turns: usize) -> Vec<Transcrip
         while end < turns.len() && turns[end].model_raw.as_deref() == model {
             end += 1;
         }
-        folded.extend(turns[start..end].chunks(run).map(fold_turn_run));
+        runs.push(start..end);
         start = end;
     }
-    if folded.len() <= max_turns {
-        return folded;
-    }
-
-    // A window narrower than `run` has more than `max_turns` windows, and
-    // every window emits at least one record, so the search starts at `run`.
-    // `hi` always names a width that fits, or the whole session when nothing
-    // fits (more distinct models than `max_turns`).
-    let mut lo = run;
-    let mut hi = turns.len();
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if windowed_record_count(&turns, mid) <= max_turns {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    fold_turn_windows(&turns, hi)
+    runs
 }
 
 /// Group one window's turns by model, ordered by each model's last reply in
@@ -584,19 +627,30 @@ fn window_model_groups(window: &[TranscriptTurn]) -> Vec<Vec<&TranscriptTurn>> {
     groups.into_iter().map(|(_, turns)| turns).collect()
 }
 
-fn windowed_record_count(turns: &[TranscriptTurn], width: usize) -> usize {
-    turns
-        .chunks(width)
-        .map(|window| {
-            let mut models: Vec<Option<&str>> = window
-                .iter()
-                .map(|turn| turn.model_raw.as_deref())
-                .collect();
-            models.sort_unstable();
-            models.dedup();
-            models.len()
-        })
-        .sum()
+/// Records that windows of `width` turns would emit. Counting stops once it
+/// passes `limit`, since the caller only asks whether the width fits.
+fn windowed_record_count(turns: &[TranscriptTurn], width: usize, limit: usize) -> usize {
+    let mut count = 0;
+    let mut models: Vec<Option<&str>> = Vec::new();
+    for window in turns.chunks(width) {
+        models.clear();
+        let mut previous = None;
+        for turn in window {
+            let model = turn.model_raw.as_deref();
+            // Only a run's first turn can add a model.
+            if previous != Some(model) {
+                models.push(model);
+                previous = Some(model);
+            }
+        }
+        models.sort_unstable();
+        models.dedup();
+        count += models.len();
+        if count > limit {
+            break;
+        }
+    }
+    count
 }
 
 fn fold_turn_windows(turns: &[TranscriptTurn], width: usize) -> Vec<TranscriptTurn> {
@@ -1853,5 +1907,81 @@ mod tests {
                 1000
             );
         }
+    }
+
+    #[test]
+    fn coalesce_keeps_runs_apart_when_the_runs_alone_fit_the_cap() {
+        // 8192 turns that switch model every 9 replies: 911 runs, under the
+        // cap. One record per run fits, so no record may fold turns from two
+        // runs. Windows of 15 turns would straddle switches and emit 1093
+        // records, so a search that assumed the window count only falls as the
+        // width grows skipped width 9 and folded across runs at width 16.
+        let turns: Vec<TranscriptTurn> = (0..8192usize)
+            .map(|i| TranscriptTurn {
+                timestamp: 1_000 + i as i64,
+                context_weight: 10 + (i as u128 % 7),
+                output_weight: 1 + (i as u128 % 3),
+                replies: 1,
+                model_raw: Some(
+                    if (i / 9) % 2 == 0 {
+                        "claude-opus-5-5"
+                    } else {
+                        "kimi-k3"
+                    }
+                    .to_string(),
+                ),
+            })
+            .collect();
+        let expected = per_model_totals(&turns);
+        // Each run reports at its last reply.
+        let run_ends: Vec<i64> = (0..8192i64)
+            .filter(|i| i % 9 == 8 || *i == 8191)
+            .map(|i| 1_000 + i)
+            .collect();
+
+        let capped = coalesce_turns(turns, MAX_TURNS_PER_SESSION);
+
+        assert_eq!(capped.len(), 911);
+        assert_eq!(
+            capped.iter().map(|turn| turn.timestamp).collect::<Vec<_>>(),
+            run_ends
+        );
+        assert_eq!(per_model_totals(&capped), expected);
+    }
+
+    #[test]
+    fn coalesce_uses_the_narrowest_window_that_fits() {
+        // Four runs over a cap of three, so runs must share records. Windows of
+        // 4 fit (aaaa | bbab -> 3 records), but windows of 5 to 7 do not, so a
+        // search that assumed the count only falls as the width grows skipped
+        // width 4 and folded the first four replies into a record at turn 7.
+        let models = ["a-1", "a-1", "a-1", "a-1", "b-1", "b-1", "a-1", "b-1"];
+        let turns: Vec<TranscriptTurn> = models
+            .iter()
+            .enumerate()
+            .map(|(i, model)| TranscriptTurn {
+                timestamp: 1 + i as i64,
+                context_weight: 10,
+                output_weight: 1,
+                replies: 1,
+                model_raw: Some(model.to_string()),
+            })
+            .collect();
+        let expected = per_model_totals(&turns);
+
+        let capped = coalesce_turns(turns, 3);
+
+        assert_eq!(
+            capped
+                .iter()
+                .map(|turn| (turn.timestamp, turn.model_raw.as_deref(), turn.replies))
+                .collect::<Vec<_>>(),
+            vec![
+                (4, Some("a-1"), 4),
+                (7, Some("a-1"), 1),
+                (8, Some("b-1"), 3)
+            ]
+        );
+        assert_eq!(per_model_totals(&capped), expected);
     }
 }
