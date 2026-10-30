@@ -1383,9 +1383,11 @@ fn date_diff_days(date1: &str, date2: &str) -> i64 {
 }
 
 fn format_tokens_short(tokens: i64) -> String {
-    if tokens >= 1_000_000_000 {
+    // Switch units where the rounded value would reach 1000: `{:.2}` turns
+    // 999_995_000 into "1000.00M" and `{:.1}` turns 999_950 into "1000.0K".
+    if tokens >= 999_995_000 {
         format!("{:.2}B", tokens as f64 / 1_000_000_000.0)
-    } else if tokens >= 1_000_000 {
+    } else if tokens >= 999_950 {
         format!("{:.2}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
         format!("{:.1}K", tokens as f64 / 1_000.0)
@@ -1869,14 +1871,24 @@ mod tests {
     fn test_format_tokens_short_millions() {
         assert_eq!(format_tokens_short(234_000_000), "234.00M");
         assert_eq!(format_tokens_short(1_500_000), "1.50M");
-        assert_eq!(format_tokens_short(999_999_999), "1000.00M");
+        assert_eq!(format_tokens_short(999_999_999), "1.00B");
     }
 
     #[test]
     fn test_format_tokens_short_thousands() {
         assert_eq!(format_tokens_short(5_678), "5.7K");
         assert_eq!(format_tokens_short(1_000), "1.0K");
-        assert_eq!(format_tokens_short(999_999), "1000.0K");
+        assert_eq!(format_tokens_short(999_999), "1.00M");
+    }
+
+    #[test]
+    fn test_format_tokens_short_promotes_to_the_next_unit_at_the_rounding_boundary() {
+        assert_eq!(format_tokens_short(999_949), "999.9K");
+        assert_eq!(format_tokens_short(999_950), "1.00M");
+        assert_eq!(format_tokens_short(1_000_000), "1.00M");
+        assert_eq!(format_tokens_short(999_994_999), "999.99M");
+        assert_eq!(format_tokens_short(999_995_000), "1.00B");
+        assert_eq!(format_tokens_short(1_000_000_000), "1.00B");
     }
 
     #[test]
