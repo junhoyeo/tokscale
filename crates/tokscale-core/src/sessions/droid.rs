@@ -702,22 +702,20 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
     let lock_timestamp = parse_lock_timestamp(settings.provider_lock_timestamp.as_deref());
     let timestamp = resolve_usage_timestamp(lock_timestamp, file_modified_timestamp_ms_opt(path));
 
-    vec![
-        UnifiedMessage::new(
-            "droid",
-            session_model,
-            session_provider,
-            session_id,
-            timestamp,
-            totals,
-            0.0,
-        )
-        .with_billing(
-            billing_provider.as_deref(),
-            super::BillingIdentityOrigin::ExplicitSession,
-        )
-        .with_pricing_model(&session_pricing_raw),
-    ]
+    vec![UnifiedMessage::new(
+        "droid",
+        session_model,
+        session_provider,
+        session_id,
+        timestamp,
+        totals,
+        0.0,
+    )
+    .with_billing(
+        billing_provider.as_deref(),
+        super::BillingIdentityOrigin::ExplicitSession,
+    )
+    .with_pricing_model(&session_pricing_raw)]
 }
 
 fn resolve_turn_identity(
@@ -1544,20 +1542,24 @@ mod tests {
         let models: Vec<&str> = messages.iter().map(|m| m.model_id.as_str()).collect();
         assert_eq!(
             models,
-            vec![
-                "claude-opus-5-5",
-                "kimi-k3",
-                "deepseek-v4-1-flash-1017",
-            ]
+            vec!["claude-opus-5-5", "kimi-k3", "deepseek-v4-1-flash-1017",]
         );
         assert_eq!(messages[0].provider_id, "anthropic");
         assert_eq!(messages[1].provider_id, "moonshotai");
         assert_eq!(messages[2].provider_id, "deepseek");
-        assert!(messages.iter().all(|m| m.model_id != "deepseek-v4-1-flash-1017" || m.tokens.input < 1000));
+        assert!(messages
+            .iter()
+            .all(|m| m.model_id != "deepseek-v4-1-flash-1017" || m.tokens.input < 1000));
         assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
         assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 100);
-        assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 5000);
-        assert_eq!(messages.iter().map(|m| m.tokens.cache_write).sum::<i64>(), 200);
+        assert_eq!(
+            messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(),
+            5000
+        );
+        assert_eq!(
+            messages.iter().map(|m| m.tokens.cache_write).sum::<i64>(),
+            200
+        );
         assert_eq!(
             messages.iter().map(|m| m.message_count).collect::<Vec<_>>(),
             vec![1, 1, 1]
