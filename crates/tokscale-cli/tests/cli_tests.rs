@@ -7135,6 +7135,139 @@ fn test_client_filter_gjc_isolation() {
     }
 }
 
+fn create_report_scope_fixture() -> (TempDir, tokscale_core::wiki::WikiDb) {
+    use tokscale_core::wiki::{WikiDb, WikiEntry};
+
+    let tmp = create_empty_fixture_dir();
+    let config = sandbox_config_dir(tmp.path());
+    fs::write(
+        config.join("settings.json"),
+        r#"{"scanner":{"bucketTimezone":"Etc/UTC"}}"#,
+    )
+    .unwrap();
+    let db = WikiDb::open(&config.join("wiki.db")).unwrap();
+    for (id, client, workspace, created_at) in [
+        ("selected", "opencode", "/wanted", 1_718_452_800_000),
+        ("other-client", "claude", "/wanted", 1_718_452_800_000),
+        ("other-workspace", "opencode", "/other", 1_718_452_800_000),
+        ("other-date", "opencode", "/wanted", 1_718_366_400_000),
+    ] {
+        db.upsert_entry(&WikiEntry {
+            session_id: id.to_string(),
+            client: client.to_string(),
+            workspace: Some(workspace.to_string()),
+            workspace_label: None,
+            created_at,
+            last_active: created_at,
+            title: Some(format!("Summary for {id}")),
+            task_category: Some("feature".to_string()),
+            description: Some("Keep this summary".to_string()),
+            complexity: Some("medium".to_string()),
+            task_group: Some("Keep this group".to_string()),
+            total_input_tokens: 123,
+            total_output_tokens: 45,
+            total_cache_read: 0,
+            total_cost: 0.12,
+            models_used: vec!["fixture-model".to_string()],
+            message_count: 1,
+            duration_minutes: 1,
+            summarized_at: Some(1_718_452_800),
+            fm_version: Some("fixture".to_string()),
+        })
+        .unwrap();
+    }
+    (tmp, db)
+}
+
+#[test]
+fn report_filtered_rebuild_preserves_summaries_outside_the_selected_scope() {
+    for (filters, selected) in [
+        (
+            vec!["--workspace", "/wanted"],
+            vec!["selected", "other-client"],
+        ),
+        (
+            vec!["--client", "opencode"],
+            vec!["selected", "other-workspace"],
+        ),
+        (
+            vec!["--workspace", "/wanted", "--client", "opencode"],
+            vec!["selected"],
+        ),
+        (vec!["--workspace", "/missing"], vec![]),
+        (vec![], vec!["selected", "other-client", "other-workspace"]),
+    ] {
+        let (tmp, db) = create_report_scope_fixture();
+        cmd_with_home(tmp.path())
+            .args([
+                "--offline",
+                "--home",
+                tmp.path().to_str().unwrap(),
+                "--no-spinner",
+            ])
+            .args(["report", "--no-summarize", "--json", "--rebuild"])
+            .args(["--since", "2024-06-15", "--until", "2024-06-15"])
+            .args(&filters)
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(format!(
+                "Reset {} session summaries",
+                selected.len()
+            )));
+
+        for id in ["selected", "other-client", "other-workspace", "other-date"] {
+            let entry = db.get_entry(id).unwrap().unwrap();
+            let reset = selected.contains(&id);
+            assert_eq!(entry.title.is_none(), reset, "{filters:?}: {id}");
+            assert_eq!(entry.task_category.is_none(), reset);
+            assert_eq!(entry.description.is_none(), reset);
+            assert_eq!(entry.complexity.is_none(), reset);
+            assert_eq!(entry.task_group.is_none(), reset);
+            assert_eq!(entry.summarized_at.is_none(), reset);
+            assert_eq!(entry.fm_version.is_none(), reset);
+            assert_eq!(entry.total_input_tokens, 123);
+            assert_eq!(entry.total_cost, 0.12);
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_filtered_summarization_only_sends_selected_sessions_to_the_backend() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (tmp, db) = create_report_scope_fixture();
+    db.reset_all_summaries().unwrap();
+    let bin = tmp.path().join(".tokscale-test-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let fake_backend = bin.join("claude");
+    fs::write(
+        &fake_backend,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TOKSCALE_TEST_PROMPT\"\nprintf '[]\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_backend, fs::Permissions::from_mode(0o755)).unwrap();
+    let prompt_path = tmp.path().join("prompt.txt");
+
+    cmd_with_home(tmp.path())
+        .env("TOKSCALE_TEST_PROMPT", &prompt_path)
+        .args(["--home", tmp.path().to_str().unwrap(), "--no-spinner"])
+        .args(["report", "--json", "--summarizer", "claude"])
+        .args(["--workspace", "/wanted", "--client", "opencode"])
+        .args(["--since", "2024-06-15", "--until", "2024-06-15"])
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_path).unwrap();
+    assert!(prompt.contains("selected"));
+    for excluded in ["other-client", "other-workspace", "other-date"] {
+        assert!(
+            !prompt.contains(excluded),
+            "unexpected session {excluded} in prompt: {prompt}"
+        );
+    }
+}
+
 #[test]
 fn report_no_summarize_json_empty_home_emits_valid_json_without_panic() {
     // Smoke test for the non-LLM `report` path: against an empty home it must

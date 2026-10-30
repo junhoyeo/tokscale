@@ -56,7 +56,12 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
 
     if opts.rebuild {
         let count = db
-            .reset_summaries_in_range(since_ts, until_ts)
+            .reset_summaries_in_scope(
+                since_ts,
+                until_ts,
+                opts.workspace.as_deref(),
+                opts.client.as_deref(),
+            )
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         eprintln!("  Reset {} session summaries", count.to_string().cyan());
     }
@@ -64,8 +69,13 @@ pub fn run_report(opts: ReportOptions) -> Result<()> {
     let unsummarized = if opts.no_summarize {
         Vec::new()
     } else {
-        db.get_unsummarized_session_ids_in_range(since_ts, until_ts)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+        db.get_unsummarized_session_ids_in_scope(
+            since_ts,
+            until_ts,
+            opts.workspace.as_deref(),
+            opts.client.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?
     };
 
     if !unsummarized.is_empty() {
