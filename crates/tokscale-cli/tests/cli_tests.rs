@@ -8790,3 +8790,46 @@ fn test_proma_native_display_and_fork_usage_count_once_cold_and_warm() {
         assert_eq!(json["entries"][0]["cacheWrite"].as_i64(), Some(10));
     }
 }
+
+#[test]
+fn report_json_records_session_duration_in_minutes() {
+    let tmp = create_temp_fixture_dir();
+
+    // Exercise both the initial scan and a rescan with populated caches.
+    for _ in 0..2 {
+        let output = cmd_with_home(tmp.path())
+            .args(["--no-spinner", "--home"])
+            .arg(tmp.path())
+            .args([
+                "report",
+                "--no-summarize",
+                "--json",
+                "--since",
+                "2024-06-14",
+                "--until",
+                "2025-01-11",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "report failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = json.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let session = entries
+            .iter()
+            .find(|e| e["session_id"] == "session1")
+            .unwrap();
+        assert_eq!(session["created_at"], 1_718_452_800_000i64);
+        assert_eq!(session["last_active"], 1_718_456_400_000i64);
+        assert_eq!(session["duration_minutes"], 60);
+        let single = entries
+            .iter()
+            .find(|e| e["session_id"] == "session2")
+            .unwrap();
+        assert_eq!(single["duration_minutes"], 0);
+    }
+}

@@ -189,7 +189,7 @@ fn record_new_sessions(
     for (session_id, agg) in &session_map {
         let is_new = !existing.contains(session_id);
         let models_used: Vec<String> = agg.models.keys().cloned().collect();
-        let duration_minutes = (agg.last_active - agg.created_at) / 60;
+        let duration_minutes = (agg.last_active - agg.created_at) / 60_000;
 
         let entry = WikiEntry {
             session_id: session_id.clone(),
@@ -2055,6 +2055,50 @@ mod tests {
             "wiki must keep the provider-reported cost, got {}",
             entry.total_cost
         );
+    }
+
+    #[test]
+    fn wiki_records_elapsed_milliseconds_as_whole_minutes() {
+        let home = tempfile::TempDir::new().unwrap();
+        let db = WikiDb::open(&home.path().join("wiki.db")).unwrap();
+        let start = 1_780_000_000_000;
+
+        for (offsets, expected_minutes) in [
+            (vec![0], 0),
+            (vec![0, 0], 0),
+            (vec![0, 59_999], 0),
+            (vec![0, 60_000], 1),
+            (vec![0, 119_999], 1),
+            (vec![0, 120_000], 2),
+            (vec![120_000, 0, 60_000], 2),
+        ] {
+            let messages: Vec<_> = offsets
+                .iter()
+                .map(|offset| {
+                    let mut message = parsed_message("claude-haiku-4");
+                    message.timestamp = start + offset;
+                    message
+                })
+                .collect();
+            record_new_sessions(&db, &messages, None).unwrap();
+
+            let mut entry = db.get_entry("s1").unwrap().unwrap();
+            assert_eq!(entry.duration_minutes, expected_minutes, "{offsets:?}");
+            assert_eq!(entry.created_at, start);
+            assert_eq!(entry.last_active, start + offsets.iter().max().unwrap());
+
+            // A normal rescan repairs durations stored by older releases
+            // without discarding an existing summary or task group.
+            entry.duration_minutes = 2_000;
+            entry.title = Some("Keep this summary".to_string());
+            entry.task_group = Some("Keep this group".to_string());
+            db.upsert_entry(&entry).unwrap();
+            record_new_sessions(&db, &messages, None).unwrap();
+            let refreshed = db.get_entry("s1").unwrap().unwrap();
+            assert_eq!(refreshed.duration_minutes, expected_minutes, "{offsets:?}");
+            assert_eq!(refreshed.title.as_deref(), Some("Keep this summary"));
+            assert_eq!(refreshed.task_group.as_deref(), Some("Keep this group"));
+        }
     }
 
     #[test]
