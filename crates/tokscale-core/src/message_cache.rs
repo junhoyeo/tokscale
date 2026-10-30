@@ -2136,7 +2136,12 @@ fn parser_version(client: ClientId) -> u32 {
         // tool-echo assistant rows once a real call is named, and parks each
         // model's request count on its first record. Finished sessions never
         // rewrite their fingerprint, so only this bump rebuilds them.
-        ClientId::Droid => 8,
+        // v8->v9: a session past the per-session record cap that switches
+        // model often is now folded under the cap. v8 folded only runs of one
+        // model, so a session that alternated models on every reply kept one
+        // record per reply. v9 folds same-model turns inside windows of the
+        // timeline, so cached v8 entries for those sessions are rebuilt.
+        ClientId::Droid => 9,
         // v1->v2: `compaction/summary` events carry the provider-reported cost
         // of DSH's summarize call and used to fall through unread, so v1
         // entries undercount every session that compacted (#1152). DSH has not
@@ -7210,7 +7215,7 @@ mod tests {
         // A finished Droid session's settings.json is never rewritten again, so
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
-        assert_eq!(parser_version(ClientId::Droid), 8);
+        assert_eq!(parser_version(ClientId::Droid), 9);
     }
 
     #[test]

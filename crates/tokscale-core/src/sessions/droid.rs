@@ -480,28 +480,53 @@ fn transcript_turns(jsonl: &Path) -> Vec<TranscriptTurn> {
 /// A run also carries the number of replies it folded, so the session's message
 /// count survives coalescing: the resolution of *when* the calls happened
 /// drops, but not *how many* there were.
-fn fold_turn_run(chunk: &[TranscriptTurn]) -> TranscriptTurn {
-    TranscriptTurn {
-        timestamp: chunk
-            .iter()
-            .map(|turn| turn.timestamp)
-            .max()
-            .unwrap_or_default(),
-        context_weight: chunk
-            .iter()
-            .fold(0u128, |sum, turn| sum.saturating_add(turn.context_weight)),
-        output_weight: chunk
-            .iter()
-            .fold(0u128, |sum, turn| sum.saturating_add(turn.output_weight)),
-        replies: chunk
-            .iter()
-            .fold(0i32, |sum, turn| sum.saturating_add(turn.replies)),
-        // A same-model run reports that model. Callers never mix models in
-        // one chunk: the last reply would otherwise relabel the whole run.
-        model_raw: chunk.last().and_then(|turn| turn.model_raw.clone()),
+///
+/// Callers never pass turns of more than one model: the last reply would
+/// otherwise relabel the whole run.
+fn fold_turn_run<'a>(chunk: impl IntoIterator<Item = &'a TranscriptTurn>) -> TranscriptTurn {
+    let mut folded = TranscriptTurn {
+        timestamp: 0,
+        context_weight: 0,
+        output_weight: 0,
+        replies: 0,
+        model_raw: None,
+    };
+    let mut timestamp: Option<i64> = None;
+    let mut last: Option<&TranscriptTurn> = None;
+    for turn in chunk {
+        timestamp = Some(timestamp.map_or(turn.timestamp, |ts| ts.max(turn.timestamp)));
+        folded.context_weight = folded.context_weight.saturating_add(turn.context_weight);
+        folded.output_weight = folded.output_weight.saturating_add(turn.output_weight);
+        folded.replies = folded.replies.saturating_add(turn.replies);
+        last = Some(turn);
     }
+    folded.timestamp = timestamp.unwrap_or_default();
+    folded.model_raw = last.and_then(|turn| turn.model_raw.clone());
+    folded
 }
 
+/// Cap a session's turns at `max_turns` records without mixing models.
+///
+/// The first pass folds each run of consecutive same-model turns into chunks of
+/// `turns.len() / max_turns` (rounded up). That keeps every record inside one
+/// stretch of one model, and it is enough whenever the session switches model
+/// rarely. A session that switches often has many short runs, and a run of one
+/// turn cannot fold at all: a session that alternates models on every reply
+/// would keep one record per reply, with no bound.
+///
+/// When the first pass is still over the cap, the turns are cut into windows of
+/// consecutive turns instead, and each window emits one record per model it
+/// contains. Same-model turns that are not adjacent then fold together, but
+/// only inside one window, so the session's timeline is kept at window
+/// resolution. The window is the smallest width whose record count fits the
+/// cap. One window that spans the whole session gives one record per distinct
+/// model, so the cap always holds unless the session used more than
+/// `max_turns` distinct models. In that case the output is one record per
+/// model, because two models never share one record.
+///
+/// Both passes only regroup turns. Each model's summed weights and reply count
+/// are the same before and after, so each model keeps its share of the
+/// session's tokens and calls.
 fn coalesce_turns(turns: Vec<TranscriptTurn>, max_turns: usize) -> Vec<TranscriptTurn> {
     if max_turns == 0 || turns.len() <= max_turns {
         return turns;
@@ -519,7 +544,66 @@ fn coalesce_turns(turns: Vec<TranscriptTurn>, max_turns: usize) -> Vec<Transcrip
         folded.extend(turns[start..end].chunks(run).map(fold_turn_run));
         start = end;
     }
-    folded
+    if folded.len() <= max_turns {
+        return folded;
+    }
+
+    // A window narrower than `run` has more than `max_turns` windows, and
+    // every window emits at least one record, so the search starts at `run`.
+    // `hi` always names a width that fits, or the whole session when nothing
+    // fits (more distinct models than `max_turns`).
+    let mut lo = run;
+    let mut hi = turns.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if windowed_record_count(&turns, mid) <= max_turns {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    fold_turn_windows(&turns, hi)
+}
+
+/// Group one window's turns by model, ordered by each model's last reply in
+/// the window so the folded records stay in timeline order.
+fn window_model_groups(window: &[TranscriptTurn]) -> Vec<Vec<&TranscriptTurn>> {
+    let mut groups: Vec<(usize, Vec<&TranscriptTurn>)> = Vec::new();
+    let mut index_of: HashMap<Option<&str>, usize> = HashMap::new();
+    for (position, turn) in window.iter().enumerate() {
+        let group = *index_of
+            .entry(turn.model_raw.as_deref())
+            .or_insert_with(|| {
+                groups.push((position, Vec::new()));
+                groups.len() - 1
+            });
+        groups[group].0 = position;
+        groups[group].1.push(turn);
+    }
+    groups.sort_by_key(|(last, _)| *last);
+    groups.into_iter().map(|(_, turns)| turns).collect()
+}
+
+fn windowed_record_count(turns: &[TranscriptTurn], width: usize) -> usize {
+    turns
+        .chunks(width)
+        .map(|window| {
+            let mut models: Vec<Option<&str>> = window
+                .iter()
+                .map(|turn| turn.model_raw.as_deref())
+                .collect();
+            models.sort_unstable();
+            models.dedup();
+            models.len()
+        })
+        .sum()
+}
+
+fn fold_turn_windows(turns: &[TranscriptTurn], width: usize) -> Vec<TranscriptTurn> {
+    turns
+        .chunks(width)
+        .flat_map(|window| window_model_groups(window).into_iter().map(fold_turn_run))
+        .collect()
 }
 
 /// Split `total` across `weights` so the parts sum back to exactly `total`.
@@ -1598,5 +1682,176 @@ mod tests {
         assert_eq!(capped[0].context_weight, 20);
         assert_eq!(capped[1].model_raw.as_deref(), Some("kimi-k3"));
         assert_eq!(capped[1].replies, 1);
+    }
+
+    fn alternating_turns(count: usize, models: &[&str]) -> Vec<TranscriptTurn> {
+        (0..count)
+            .map(|i| TranscriptTurn {
+                timestamp: 1_000 + i as i64,
+                context_weight: 100 + (i as u128 * 7) % 13,
+                output_weight: 1 + (i as u128 * 3) % 5,
+                replies: 1,
+                model_raw: Some(models[i % models.len()].to_string()),
+            })
+            .collect()
+    }
+
+    /// (context weight, output weight, replies) summed per model.
+    fn per_model_totals(turns: &[TranscriptTurn]) -> HashMap<Option<String>, (u128, u128, i32)> {
+        let mut totals = HashMap::new();
+        for turn in turns {
+            let entry = totals.entry(turn.model_raw.clone()).or_insert((0, 0, 0));
+            entry.0 += turn.context_weight;
+            entry.1 += turn.output_weight;
+            entry.2 += turn.replies;
+        }
+        totals
+    }
+
+    fn snapshot(turns: &[TranscriptTurn]) -> Vec<(i64, u128, u128, i32, Option<String>)> {
+        turns
+            .iter()
+            .map(|turn| {
+                (
+                    turn.timestamp,
+                    turn.context_weight,
+                    turn.output_weight,
+                    turn.replies,
+                    turn.model_raw.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn coalesce_caps_a_session_that_alternates_models_every_reply() {
+        let turns = alternating_turns(2000, &["claude-opus-5-5", "kimi-k3"]);
+        let expected = per_model_totals(&turns);
+
+        let capped = coalesce_turns(turns, MAX_TURNS_PER_SESSION);
+
+        assert!(
+            capped.len() <= MAX_TURNS_PER_SESSION,
+            "record count not capped: {}",
+            capped.len()
+        );
+        assert_eq!(per_model_totals(&capped), expected);
+        assert!(capped.iter().all(|turn| turn.model_raw.is_some()));
+        assert!(capped.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
+    }
+
+    #[test]
+    fn coalesce_keeps_a_single_model_session_on_same_model_runs() {
+        let turns = alternating_turns(2000, &["claude-opus-5-5"]);
+        let expected = per_model_totals(&turns);
+        // Today's shape: chunks of ceil(2000 / 1024) = 2 consecutive turns.
+        let runs: Vec<_> = snapshot(&turns)
+            .chunks(2)
+            .map(|chunk| {
+                (
+                    chunk.iter().map(|t| t.0).max().unwrap(),
+                    chunk.iter().map(|t| t.1).sum::<u128>(),
+                    chunk.iter().map(|t| t.2).sum::<u128>(),
+                    chunk.iter().map(|t| t.3).sum::<i32>(),
+                    chunk[0].4.clone(),
+                )
+            })
+            .collect();
+
+        let capped = coalesce_turns(turns, MAX_TURNS_PER_SESSION);
+
+        assert_eq!(snapshot(&capped), runs);
+        assert_eq!(per_model_totals(&capped), expected);
+    }
+
+    #[test]
+    fn coalesce_caps_a_mix_of_long_runs_and_alternation() {
+        // A long Opus stretch, then a stretch that alternates three models on
+        // every reply, then a long Kimi stretch.
+        let mut turns = alternating_turns(600, &["claude-opus-5-5"]);
+        turns.extend(alternating_turns(
+            1500,
+            &["claude-opus-5-5", "kimi-k3", "deepseek-v4-1-flash-1017"],
+        ));
+        turns.extend(alternating_turns(400, &["kimi-k3"]));
+        for (i, turn) in turns.iter_mut().enumerate() {
+            turn.timestamp = 1_000 + i as i64;
+        }
+        let expected = per_model_totals(&turns);
+
+        let capped = coalesce_turns(turns, MAX_TURNS_PER_SESSION);
+
+        assert!(
+            capped.len() <= MAX_TURNS_PER_SESSION,
+            "record count not capped: {}",
+            capped.len()
+        );
+        assert_eq!(per_model_totals(&capped), expected);
+        assert!(capped.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
+    }
+
+    #[test]
+    fn coalesce_leaves_a_short_alternating_session_alone() {
+        let turns = alternating_turns(300, &["claude-opus-5-5", "kimi-k3"]);
+        let before = snapshot(&turns);
+        assert_eq!(
+            snapshot(&coalesce_turns(turns, MAX_TURNS_PER_SESSION)),
+            before
+        );
+    }
+
+    #[test]
+    fn coalesce_keeps_one_record_per_model_when_models_outnumber_the_cap() {
+        let turns = alternating_turns(30, &["a-1", "b-1", "c-1"]);
+        let expected = per_model_totals(&turns);
+
+        let capped = coalesce_turns(turns, 2);
+
+        // Three models cannot share two records without mixing, so the floor
+        // is one record per model.
+        assert_eq!(capped.len(), 3);
+        assert_eq!(per_model_totals(&capped), expected);
+    }
+
+    #[test]
+    fn test_alternating_session_records_are_capped_with_exact_totals() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let replies = 2000;
+        let models = ["claude-opus-5-5", "glm-5.3"];
+        let transcript: Vec<String> = (0..replies)
+            .map(|i| {
+                assistant_with_model(
+                    &format!("2026-08-07T12:{:02}:{:02}Z", (i / 60) % 60, i % 60),
+                    10,
+                    models[i % 2],
+                )
+            })
+            .collect();
+        let settings = write_session(
+            temp_dir.path(),
+            "aaaaaaaa-9999-9999-9999-999999999999",
+            r#"{"inputTokens":100000,"outputTokens":7000}"#,
+            &transcript.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+
+        let messages = parse_droid_file(&settings);
+
+        assert!(
+            messages.len() <= MAX_TURNS_PER_SESSION,
+            "record count not capped: {}",
+            messages.len()
+        );
+        assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 100000);
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 7000);
+        for model in ["claude-opus-5-5", "glm-5-3"] {
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|m| m.model_id == model)
+                    .map(|m| m.message_count)
+                    .sum::<i32>(),
+                1000
+            );
+        }
     }
 }
