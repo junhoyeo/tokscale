@@ -524,13 +524,8 @@ fn fold_turn_run<'a>(chunk: impl IntoIterator<Item = &'a TranscriptTurn>) -> Tra
 /// every reply is this case. Its turns are cut into windows of consecutive
 /// turns, and each window emits one record per model it contains. That record
 /// count does not always go down as the window grows: a wider window can
-/// straddle more model switches. So the width is found by a scan upward from
-/// the smallest width that could fit, and the first width that fits is used.
-/// The scan never passes `ceil(turns.len() / (max_turns / models))`, a width
-/// whose windows are few enough to fit even when each one holds every model.
-/// That bounds the work at O(turns × widths scanned). With two models and a
-/// cap of 1024, that is about `turns.len() / 1024` widths, and each probe
-/// stops as soon as its count passes the cap.
+/// straddle more model switches. `fitting_window_width` picks a width that
+/// fits with a bounded number of probes; see there.
 ///
 /// A session that used more distinct models than `max_turns` cannot fit
 /// without mixing models, so it gets one record per model.
@@ -582,14 +577,66 @@ fn coalesce_turns(turns: Vec<TranscriptTurn>, max_turns: usize) -> Vec<Transcrip
     if models > max_turns {
         return fold_turn_windows(&turns, turns.len());
     }
+    let (width, _probes) = fitting_window_width(&turns, max_turns, models);
+    fold_turn_windows(&turns, width)
+}
+
+/// Extra widths probed below the first ladder step that fits, to find a
+/// narrower width that also fits.
+const WINDOW_REFINE_PROBES: usize = 8;
+
+/// A window width that fits `max_turns` records, and how many widths were
+/// counted to find it.
+///
+/// The window record count is not monotonic in the width, so the narrowest
+/// fitting width cannot be found by bisection, and trying every width costs
+/// O(turns²/`max_turns`). Instead the widths form a doubling ladder from
+/// `smallest` up to `fits_anyway`. A window of `2w` turns is exactly two
+/// windows of `w`, so its count is never higher, and the first ladder step
+/// that fits is the narrowest ladder step that fits. `fits_anyway` is a width
+/// whose windows are few enough to fit even if every window holds every
+/// model, so the ladder always ends in a fit. Then up to
+/// `WINDOW_REFINE_PROBES` widths spread evenly between `smallest` and that
+/// step are tried, and the narrowest of them that fits wins. When the gap is
+/// at most `WINDOW_REFINE_PROBES` widths, every width in it is tried, so a
+/// short session still gets its narrowest fitting width.
+///
+/// This is not always the narrowest width that fits, but it always fits, and
+/// the work is bounded: at most `log2(fits_anyway / smallest) + 2` ladder
+/// probes plus `WINDOW_REFINE_PROBES`, each one pass over the turns that stops
+/// once its count passes the cap.
+fn fitting_window_width(
+    turns: &[TranscriptTurn],
+    max_turns: usize,
+    models: usize,
+) -> (usize, usize) {
     // Fewer than `smallest` turns per window means more than `max_turns`
     // windows, and every window emits at least one record.
-    let fits_anyway = turns.len().div_ceil(max_turns / models);
+    let smallest = turns.len().div_ceil(max_turns).max(1);
+    let fits_anyway = turns.len().div_ceil(max_turns / models).max(smallest);
+    let mut probes = 0;
+    let mut fits = |width: usize| {
+        probes += 1;
+        windowed_record_count(turns, width, max_turns) <= max_turns
+    };
+
     let mut width = smallest;
-    while width < fits_anyway && windowed_record_count(&turns, width, max_turns) > max_turns {
-        width += 1;
+    while width < fits_anyway && !fits(width) {
+        width = width.saturating_mul(2).min(fits_anyway);
     }
-    fold_turn_windows(&turns, width)
+    if width == smallest {
+        return (width, probes);
+    }
+    // Every width strictly between `smallest` and the fitting step is a
+    // candidate. Counts are not monotonic, so a width below a step that did
+    // not fit may still fit; spread the probes over the whole gap.
+    let gap = width - smallest - 1;
+    let step = gap.div_ceil(WINDOW_REFINE_PROBES).max(1);
+    let narrower = (1..=gap.min(WINDOW_REFINE_PROBES))
+        .map(|k| smallest + k * step)
+        .take_while(|&candidate| candidate < width)
+        .find(|&candidate| fits(candidate));
+    (narrower.unwrap_or(width), probes)
 }
 
 /// The index ranges of each stretch of consecutive same-model turns.
@@ -1982,6 +2029,32 @@ mod tests {
                 (8, Some("b-1"), 3)
             ]
         );
+        assert_eq!(per_model_totals(&capped), expected);
+    }
+
+    #[test]
+    fn window_search_probes_a_bounded_number_of_widths() {
+        // 400,000 replies alternating two models. Trying every width from the
+        // smallest upward counted about 400,000 / 1024 widths, each a pass over
+        // the turns, which took seconds on a transcript well under the byte
+        // ceiling.
+        let turns = alternating_turns(400_000, &["claude-opus-5-5", "kimi-k3"]);
+        let smallest = turns.len().div_ceil(MAX_TURNS_PER_SESSION);
+        let fits_anyway = turns.len().div_ceil(MAX_TURNS_PER_SESSION / 2);
+        let ladder = (fits_anyway as f64 / smallest as f64).log2().ceil() as usize + 1;
+
+        let (width, probes) = fitting_window_width(&turns, MAX_TURNS_PER_SESSION, 2);
+
+        assert!(
+            probes <= ladder + WINDOW_REFINE_PROBES,
+            "{probes} probes for {} turns",
+            turns.len()
+        );
+        assert!(windowed_record_count(&turns, width, usize::MAX) <= MAX_TURNS_PER_SESSION);
+        assert!(width <= fits_anyway);
+        let expected = per_model_totals(&turns);
+        let capped = coalesce_turns(turns, MAX_TURNS_PER_SESSION);
+        assert!(capped.len() <= MAX_TURNS_PER_SESSION);
         assert_eq!(per_model_totals(&capped), expected);
     }
 }
