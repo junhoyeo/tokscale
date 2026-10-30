@@ -105,6 +105,21 @@ vi.mock("@/lib/db", () => ({
     inputTokens: "dailyBreakdown.inputTokens",
     outputTokens: "dailyBreakdown.outputTokens",
   },
+  users: {
+    id: "users.id",
+    leaderboardHidden: "users.leaderboardHidden",
+    updatedAt: "users.updatedAt",
+  },
+  moderationActions: {
+    id: "moderationActions.id",
+    targetUserId: "moderationActions.targetUserId",
+    targetUsername: "moderationActions.targetUsername",
+    actorUserId: "moderationActions.actorUserId",
+    actorUsername: "moderationActions.actorUsername",
+    action: "moderationActions.action",
+    reason: "moderationActions.reason",
+    createdAt: "moderationActions.createdAt",
+  },
 }));
 
 vi.mock("@/lib/validation/submission", () => ({
@@ -154,6 +169,7 @@ function makeAwaitableBuilder(result: unknown) {
     where: vi.fn(() => builder),
     for: vi.fn(() => builder),
     limit: vi.fn(() => builder),
+    orderBy: vi.fn(() => builder),
     then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(result)),
   };
   return builder;

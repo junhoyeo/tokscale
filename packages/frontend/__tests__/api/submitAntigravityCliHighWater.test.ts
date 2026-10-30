@@ -110,6 +110,21 @@ vi.mock("@/lib/db", () => ({
     inputTokens: "dailyBreakdown.inputTokens",
     outputTokens: "dailyBreakdown.outputTokens",
   },
+  users: {
+    id: "users.id",
+    leaderboardHidden: "users.leaderboardHidden",
+    updatedAt: "users.updatedAt",
+  },
+  moderationActions: {
+    id: "moderationActions.id",
+    targetUserId: "moderationActions.targetUserId",
+    targetUsername: "moderationActions.targetUsername",
+    actorUserId: "moderationActions.actorUserId",
+    actorUsername: "moderationActions.actorUsername",
+    action: "moderationActions.action",
+    reason: "moderationActions.reason",
+    createdAt: "moderationActions.createdAt",
+  },
 }));
 
 vi.mock("@/lib/validation/submission", () => ({
@@ -261,6 +276,8 @@ function selectResult(columns: Record<string, unknown>, store: Store) {
   if (keys.has("totalTokens")) return [aggregatesRow(store)];
   if (keys.has("id") && keys.has("sessionCount")) return existingSubmissionRow();
   if (keys.has("sessionCount") && keys.has("totalActiveTimeMs")) return [{}];
+  if (keys.has("leaderboardHidden")) return [{ leaderboardHidden: false }];
+  if (keys.has("action") && keys.has("actorUsername")) return [];
   throw new Error(`unexpected SELECT shape: ${[...keys].join(",")}`);
 }
 
@@ -270,6 +287,7 @@ function makeAwaitableBuilder(result: unknown) {
     where: vi.fn(() => builder),
     for: vi.fn(() => builder),
     limit: vi.fn(() => builder),
+    orderBy: vi.fn(() => builder),
     then: (resolve: (value: unknown) => unknown) =>
       Promise.resolve(resolve(result)),
   };
@@ -355,7 +373,10 @@ function installTx(store: Store) {
           }
           return builder;
         }),
-        where: vi.fn(() => Promise.resolve()),
+        where: vi.fn(() => ({
+          returning: vi.fn(() => Promise.resolve([])),
+          then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(undefined)),
+        })),
       };
       return builder;
     }),
