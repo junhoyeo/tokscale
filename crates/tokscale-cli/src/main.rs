@@ -1529,12 +1529,33 @@ pub struct DateRangeFlags {
         conflicts_with_all = ["since", "until", "year"]
     )]
     pub month: bool,
-    #[arg(long, help = "Start date (YYYY-MM-DD)")]
+    #[arg(long, value_parser = parse_date_filter, help = "Start date (YYYY-MM-DD)")]
     pub since: Option<String>,
-    #[arg(long, help = "End date (YYYY-MM-DD)")]
+    #[arg(long, value_parser = parse_date_filter, help = "End date (YYYY-MM-DD)")]
     pub until: Option<String>,
-    #[arg(long, help = "Filter by year (YYYY)")]
+    #[arg(long, value_parser = parse_year_filter, help = "Filter by year (YYYY)")]
     pub year: Option<String>,
+}
+
+fn parse_date_filter(value: &str) -> std::result::Result<String, String> {
+    // Core reports compare date keys lexically, so accepting a non-padded
+    // date would silently select a different range from the one requested.
+    let valid = value.len() == 10
+        && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == value);
+    if valid {
+        Ok(value.to_string())
+    } else {
+        Err("expected a valid calendar date in YYYY-MM-DD format".to_string())
+    }
+}
+
+fn parse_year_filter(value: &str) -> std::result::Result<String, String> {
+    if value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(value.to_string())
+    } else {
+        Err("expected a four-digit year in YYYY format".to_string())
+    }
 }
 
 /// Builds the client filter list passed to `tokscale_core`.
@@ -9302,6 +9323,70 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Failed (401 Unauthorized): Not authenticated"));
+    }
+
+    #[test]
+    fn date_flags_reject_invalid_values_across_commands() {
+        for command in [
+            None,
+            Some("models"),
+            Some("monthly"),
+            Some("hourly"),
+            Some("graph"),
+            Some("tui"),
+            Some("submit"),
+            Some("time-metrics"),
+            Some("report"),
+        ] {
+            for (flag, invalid) in [
+                ("--since", "2024-6-01"),
+                ("--until", "2024-06-1"),
+                ("--since", "2023-02-29"),
+                ("--until", "2024-04-31"),
+                ("--since", "2024-13-01"),
+                ("--until", "2024-01-00"),
+                ("--since", "2024-06-01T00:00:00Z"),
+                ("--until", ""),
+                ("--year", "202"),
+                ("--year", "20240"),
+                ("--year", "year"),
+                ("--year", "２０２４"),
+            ] {
+                let mut args = vec!["tokscale"];
+                args.extend(command);
+                args.extend([flag, invalid]);
+                let error = Cli::try_parse_from(&args).err().unwrap_or_else(|| {
+                    panic!("invalid date accepted: {args:?}");
+                });
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "{args:?}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn date_flags_preserve_valid_calendar_dates_and_years() {
+        for date in ["2024-02-29", "2000-02-29", "2024-01-01", "2024-12-31"] {
+            for flag in ["--since", "--until"] {
+                let cli = Cli::try_parse_from(["tokscale", flag, date]).unwrap();
+                let parsed = if flag == "--since" {
+                    cli.date.since
+                } else {
+                    cli.date.until
+                };
+                assert_eq!(parsed.as_deref(), Some(date));
+            }
+        }
+        for year in ["2000", "2024", "9999"] {
+            let cli = Cli::try_parse_from(["tokscale", "--year", year]).unwrap();
+            assert_eq!(cli.date.year.as_deref(), Some(year));
+        }
+        // Other command-local flags with the same name have different contracts.
+        assert!(Cli::try_parse_from(["tokscale", "trae", "sync", "--since", "30"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "wrapped", "--year", "2024"]).is_ok());
     }
 
     /// `--home` points at another device's profile, and every date-filtered
