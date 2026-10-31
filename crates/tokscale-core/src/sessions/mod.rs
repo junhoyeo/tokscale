@@ -39,6 +39,7 @@ pub mod kimchi;
 pub mod kimi;
 pub mod kiro;
 pub mod lmstudio;
+pub(crate) mod magpie;
 pub mod mcode;
 pub mod micode;
 pub mod muse;

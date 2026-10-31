@@ -3469,8 +3469,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
     // Correlate successful Responses-only OpenCodex combo attempts with
     // physical models. This changes attribution, never token-counted rows.
-    if sessions::opencodex::attribute_codex_messages(home_dir, use_env_roots, &mut all_messages) > 0
-    {
+    let (opencodex_attributed, opencodex_claims) =
+        sessions::opencodex::attribute_codex_messages_with_claims(
+            home_dir,
+            use_env_roots,
+            &mut all_messages,
+        );
+    let magpie_attributed = sessions::magpie::attribute_codex_responses(
+        home_dir,
+        use_env_roots,
+        &mut all_messages,
+        &opencodex_claims,
+    );
+    if opencodex_attributed + magpie_attributed > 0 {
         apply_pricing_to_messages(&mut all_messages, pricing);
     }
 
@@ -19185,6 +19196,107 @@ mod tests {
                 .sum();
             assert_eq!(grouped_tokens, original_tokens);
         }
+    }
+
+    #[test]
+    #[serial]
+    fn magpie_attributes_codex_compaction_without_changing_token_totals() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+        let sessions = home.join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("rollout.jsonl"), concat!(
+            r#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"id":"fixture-session","source":"vscode","model_provider":"openai"}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"group/auto"}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:02Z","type":"token_usage_record","payload":{"thread_id":"fixture-session","turn_id":"turn-1","response_id":"resp-compaction","usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":540}}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:03Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}"#, "\n"
+        )).unwrap();
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(ledger.join("usage.jsonl"), concat!(
+            r#"{"agent":"codex","response_id":"resp-compaction","provider":"openai","served":"gpt-fixture","req":"group/auto","in":300,"out":40,"cache_read":200,"reasoning":10,"status":200}"#, "\n"
+        )).unwrap();
+        let clients = ["codex".to_string()];
+        let pricing = pricing::PricingService::new(
+            HashMap::from([(
+                "gpt-fixture".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.01),
+                    output_cost_per_token: Some(0.01),
+                    cache_read_input_token_cost: Some(0.01),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        for _ in 0..2 {
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 540);
+            assert_eq!(messages[0].model_id, "gpt-fixture");
+            assert!((messages[0].cost - 5.4).abs() < 1e-9);
+        }
+
+        let row = serde_json::json!({
+            "agent": "codex", "response_id": "resp-compaction", "provider": "openai",
+            "served": "gpt-fixture", "req": "group/auto", "in": 300, "out": 40,
+            "cache_read": 200, "reasoning": 10, "status": 200
+        });
+        for (field, value) in [
+            ("err", serde_json::json!("stream failed")),
+            ("status", serde_json::json!(500)),
+            ("agent", serde_json::json!("claude")),
+            ("served", serde_json::json!("group/auto-example")),
+            ("served", serde_json::json!("group/auto")),
+            ("in", serde_json::json!(301)),
+            ("reasoning", serde_json::json!(9)),
+            ("source", serde_json::json!("reported")),
+            ("computer", serde_json::json!("remote-machine")),
+            ("via", serde_json::json!("remote-machine")),
+            ("handed_on", serde_json::json!(true)),
+        ] {
+            let mut invalid = row.clone();
+            invalid[field] = value;
+            std::fs::write(ledger.join("usage.jsonl"), format!("{invalid}\n")).unwrap();
+            let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+            assert_eq!(messages[0].tokens.total(), 540, "{field}");
+            assert_eq!(messages[0].model_id, "group/auto", "{field}");
+        }
+        std::fs::write(ledger.join("usage.jsonl"), format!("{row}\n{row}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(messages[0].model_id, "group/auto", "duplicate response ID");
+
+        std::fs::write(ledger.join("usage.jsonl"), format!("{row}\n")).unwrap();
+        let opencodex = home.join(".opencodex");
+        std::fs::create_dir_all(&opencodex).unwrap();
+        let mut other = serde_json::json!({
+            "provider":"combo", "requestedModel":"group/auto", "servedModel":"other-model",
+            "inboundProtocol":"responses", "timestamp":1790812802000_i64,
+            "durationMs":0, "status":200,
+            "attempts":[{"ordinal":1,"provider":"other-provider","model":"other-model",
+                "adapter":"fixture","status":200,"durationMs":0,"sendCount":1,
+                "usageStatus":"reported","usage":{"inputTokens":500,"outputTokens":40,
+                "totalTokens":540,"cachedInputTokens":200,"reasoningOutputTokens":10}}]
+        });
+        std::fs::write(opencodex.join("usage.jsonl"), format!("{other}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(
+            messages[0].model_id, "other-model",
+            "existing OpenCodex attribution wins"
+        );
+
+        let first = other.clone();
+        other["servedModel"] = serde_json::json!("another-model");
+        std::fs::write(opencodex.join("usage.jsonl"), format!("{first}\n{other}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(
+            messages[0].model_id, "group/auto",
+            "ambiguous OpenCodex claims stay unresolved"
+        );
     }
 
     #[test]

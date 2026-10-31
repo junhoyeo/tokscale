@@ -1639,6 +1639,9 @@ pub fn parser_generation() -> u64 {
     // Invalidate derived totals without discarding retained transcript history.
     acc ^= 2; // Claude Desktop parser generation: preserve full request identities
     acc = acc.wrapping_mul(FNV_PRIME);
+    // The Magpie overlay changes derived attribution, not source-cache rows.
+    acc ^= 1;
+    acc = acc.wrapping_mul(FNV_PRIME);
     acc
 }
 
