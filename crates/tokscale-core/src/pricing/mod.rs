@@ -935,6 +935,7 @@ impl PricingService {
             },
             coverage: authoritative || estimate.coverage,
             uncovered_buckets,
+            submission_safety_gap: selected.and_then(|row| row.evidence.submission_safety_gap()),
             estimate_status: status,
         }
     }
@@ -3577,6 +3578,8 @@ pub struct PricingExplanation {
     pub coverage: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uncovered_buckets: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submission_safety_gap: Option<lookup::SubmissionSafetyGap>,
     pub estimate_status: crate::sessions::EstimateStatus,
 }
 

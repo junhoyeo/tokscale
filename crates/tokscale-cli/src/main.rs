@@ -4017,6 +4017,9 @@ fn run_pricing_lookup(
                 if !row.coverage && !row.uncovered_buckets.is_empty() {
                     print!(" uncovered={}", row.uncovered_buckets.join(","));
                 }
+                if let Some(gap) = row.submission_safety_gap {
+                    print!(" submission_safety_gap={}", gap.as_str());
+                }
                 println!();
             }
         }

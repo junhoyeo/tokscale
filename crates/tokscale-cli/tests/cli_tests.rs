@@ -8165,6 +8165,61 @@ fn create_request_tier_pricing_explain_fixture() -> TempDir {
 }
 
 #[test]
+fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
+    let tmp = TempDir::new().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let empty = format!(r#"{{"timestamp":{now},"data":{{}}}}"#);
+    let openrouter = serde_json::json!({
+        "timestamp": now,
+        "data": {"vendor/atlas-chat": {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002
+        }}
+    })
+    .to_string();
+    write_canonical_pricing_cache_files(tmp.path(), &empty, &openrouter, &empty);
+    let session = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/safety");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("message.json"),
+        serde_json::json!({
+            "id": "message", "sessionID": "safety", "role": "assistant",
+            "modelID": "atlas-chat", "providerID": "gateway",
+            "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1780000000000u64}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = cmd_with_home(tmp.path())
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["coverage"], false);
+    assert_eq!(
+        rows[0]["submissionSafetyGap"],
+        "unverified_provider_identity"
+    );
+    cmd_with_home(tmp.path())
+        .args(["pricing", "explain", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "submission_safety_gap=unverified_provider_identity",
+        ));
+}
+
+#[test]
 fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
     let tmp = create_request_tier_pricing_explain_fixture();
     let output = cmd_with_home(tmp.path())
@@ -8185,6 +8240,7 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         .find(|row| row["rawModelId"] == "claude-haiku-5-5")
         .expect("long-context explanation");
     assert_eq!(long["coverage"], false);
+    assert!(long.get("submissionSafetyGap").is_none());
     assert_eq!(
         long["uncoveredBuckets"],
         serde_json::json!(["input_long_context_tier", "output_long_context_tier"])
@@ -8195,6 +8251,7 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         .find(|row| row["rawModelId"] == "claude-haiku-5.5")
         .expect("1-hour cache-write explanation");
     assert_eq!(hourly["coverage"], false);
+    assert!(hourly.get("submissionSafetyGap").is_none());
     assert_eq!(
         hourly["uncoveredBuckets"],
         serde_json::json!(["cache_write_1h_tier"])
