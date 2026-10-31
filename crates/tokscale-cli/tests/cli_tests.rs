@@ -6664,6 +6664,8 @@ fn test_submit_compacts_repeated_daily_regression_warnings_without_losing_detail
                 Err(error) => panic!("submit did not reach the fixture server: {error}"),
             }
         };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
