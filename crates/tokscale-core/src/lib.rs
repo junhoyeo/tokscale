@@ -20842,6 +20842,18 @@ mod tests {
             estimate.evidence.kind,
             pricing::lookup::ResolutionKind::ModelPart
         );
+        let explanation = serde_json::to_value(pricing.explain_message(&message)).unwrap();
+        assert_eq!(explanation["coverage"], false);
+        assert_eq!(
+            explanation["submissionSafetyGap"],
+            "unverified_provider_identity"
+        );
+        let mut reported = message.clone();
+        reported.cost = 0.25;
+        reported.mark_provider_reported_cost();
+        let reported = serde_json::to_value(pricing.explain_message(&reported)).unwrap();
+        assert_eq!(reported["coverage"], true);
+        assert!(reported.get("submissionSafetyGap").is_none());
 
         let graph = build_graph_from_messages(
             vec![message],

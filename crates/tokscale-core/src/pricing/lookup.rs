@@ -297,7 +297,8 @@ impl ResolutionEvidence {
 }
 
 /// Why a resolution is not safe to publish to the shared leaderboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SubmissionSafetyGap {
     /// The considered candidates do not publish the same rates, so the
     /// selected candidate's price is one of several conflicting answers.
@@ -308,6 +309,16 @@ pub enum SubmissionSafetyGap {
     /// A bare model id resolved through another provider's qualified catalog
     /// key, without evidence that the request used that provider's price.
     UnverifiedProviderIdentity,
+}
+
+impl SubmissionSafetyGap {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PriceDisagreement => "price_disagreement",
+            Self::UnverifiedModelIdentity => "unverified_model_identity",
+            Self::UnverifiedProviderIdentity => "unverified_provider_identity",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4437,6 +4448,17 @@ fn exact_match_with_provider_prefixes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submission_safety_gap_text_matches_json() {
+        for gap in [
+            SubmissionSafetyGap::PriceDisagreement,
+            SubmissionSafetyGap::UnverifiedModelIdentity,
+            SubmissionSafetyGap::UnverifiedProviderIdentity,
+        ] {
+            assert_eq!(serde_json::to_value(gap).unwrap(), gap.as_str());
+        }
+    }
 
     /// Mock LiteLLM data matching real API responses for OpenCode Zen models
     fn mock_litellm() -> HashMap<String, ModelPricing> {
