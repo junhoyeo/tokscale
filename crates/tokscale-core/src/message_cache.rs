@@ -2141,7 +2141,9 @@ fn parser_version(client: ClientId) -> u32 {
         // model, so a session that alternated models on every reply kept one
         // record per reply. v9 folds same-model turns inside windows of the
         // timeline, so cached v8 entries for those sessions are rebuilt.
-        ClientId::Droid => 9,
+        // v9->v10: reply counts follow their transcript timestamps rather
+        // than the first record per model, fixing date-filtered counts.
+        ClientId::Droid => 10,
         // v1->v2: `compaction/summary` events carry the provider-reported cost
         // of DSH's summarize call and used to fall through unread, so v1
         // entries undercount every session that compacted (#1152). DSH has not
@@ -7215,7 +7217,7 @@ mod tests {
         // A finished Droid session's settings.json is never rewritten again, so
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
-        assert_eq!(parser_version(ClientId::Droid), 9);
+        assert_eq!(parser_version(ClientId::Droid), 10);
     }
 
     #[test]
