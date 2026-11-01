@@ -7,31 +7,35 @@ export const WITHHOLDING_MAX_DAILY_OUTPUT_TOKENS = 10_000_000_000;
 export const WITHHOLDING_MAX_DAILY_TOTAL_TOKENS = 500_000_000_000;
 export const WITHHOLDING_MAX_TOTAL_TOKENS = 1_000_000_000_000_000;
 /**
- * Hard limit for physically impossible single-message token volumes on clients
- * whose exported `messages` count represents individual LLM inferences.
- * Real-world LLM context windows ceiling around 1M-2M tokens (e.g. Gemini 1.5 Pro).
- * A single inference reporting 100+ million tokens (or 1+ billion tokens) is
- * undeniably fabricated or corrupted.
+ * Per-message leaderboard limit for clients whose exported token and message
+ * buckets retain individual LLM inference counts through aggregation. Counts
+ * remain self-reported; this limit does not establish authenticity.
  */
 export const WITHHOLDING_MAX_TOKENS_PER_MESSAGE = 100_000_000;
 
 /**
- * Clients whose exported `messages` count is not guaranteed to be a
- * per-inference counter on every record — e.g. whole-session fallback records
+ * Clients whose exported tokens and `messages` are not guaranteed to describe
+ * the same set of individual inferences — e.g. whole-session fallback records
  * with `messages = 1` (Droid when transcript is missing or exceeds
  * `MAX_TRANSCRIPT_BYTES`, Zed `cumulative_token_usage` fallback, Vibe session
  * files, WorkBuddy `session_usage` rows, Kiro session/execution fallbacks),
  * agent-execution or session-level model summaries (`codebuddy`, `fx`,
  * `reasonix`, `grok`, `crush`, `warp`), or session reply counts placed on a
  * single fragment while sibling fragments carry `messages = 0` (`droid`,
- * `copilot`, `hermes`).
+ * `copilot`, `hermes`). Codex can emit a retained cumulative total as one
+ * message when only total usage is available, and Trae exports session totals.
+ * Claude and cc-mirror variants merge count-neutral advisor/tool-result tokens
+ * into model buckets that can also contain counted assistant messages. Once
+ * aggregated, those supplementary tokens cannot be subtracted reliably.
  *
  * Daily and lifetime token ceilings still apply to these clients, but dividing
  * their cumulative token bucket by `messages` does not measure a single LLM
  * context window.
  */
 export const NON_PER_INFERENCE_MESSAGE_CLIENTS = [
+  "claude",
   "codebuddy",
+  "codex",
   "copilot",
   "crush",
   "devin-desktop",
@@ -43,21 +47,22 @@ export const NON_PER_INFERENCE_MESSAGE_CLIENTS = [
   "kiro",
   "mux",
   "reasonix",
+  "trae",
   "vibe",
   "warp",
   "workbuddy",
   "zed",
 ] as const;
 
-export const NON_PER_INFERENCE_CLIENT_REGEX = `^(${NON_PER_INFERENCE_MESSAGE_CLIENTS.join("|")})$`;
+// Shared by JavaScript enforcement and PostgreSQL review signals. cc-mirror
+// variants use the Claude parser and need the same exclusion as Claude itself.
+export const NON_PER_INFERENCE_CLIENT_REGEX = `^(${NON_PER_INFERENCE_MESSAGE_CLIENTS.join("|")})$|^cc-mirror/`;
 
-const NON_PER_INFERENCE_MESSAGE_CLIENT_SET: ReadonlySet<string> = new Set(
-  NON_PER_INFERENCE_MESSAGE_CLIENTS
-);
+const NON_PER_INFERENCE_MESSAGE_CLIENT_PATTERN = new RegExp(NON_PER_INFERENCE_CLIENT_REGEX);
 
 export function hasPerInferenceMessageCount(clientName: string): boolean {
   const normalized = clientName.trim().toLowerCase();
-  return normalized.length > 0 && !NON_PER_INFERENCE_MESSAGE_CLIENT_SET.has(normalized);
+  return normalized.length > 0 && !NON_PER_INFERENCE_MESSAGE_CLIENT_PATTERN.test(normalized);
 }
 
 export type WithholdingTrigger =

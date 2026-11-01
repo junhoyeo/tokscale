@@ -320,7 +320,7 @@ describe("POST /api/submit - ledger withholding", () => {
   const excessivePerMessage: MockTxOptions = {
     aggregates: { totalTokens: 1_200_000_000, totalCost: "50", inputTokens: 1_200_000_000, outputTokens: 500 },
     allDaysSourceBreakdown: {
-      claude: {
+      opencode: {
         tokens: 1_200_000_000,
         cost: 50,
         input: 1_200_000_000,

@@ -40,7 +40,7 @@ describe("ledger volume withholding", () => {
         tokens: 1_000_000_000,
         outputTokens: 500,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             tokens: 1_000_000_000,
             messages: 1,
           },
@@ -63,7 +63,7 @@ describe("ledger volume withholding", () => {
         tokens: 1_500_000_000,
         outputTokens: 500,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             tokens: 0,
             messages: 0,
             models: {
@@ -88,7 +88,7 @@ describe("ledger volume withholding", () => {
         tokens: 1_500_000_000,
         outputTokens: 500,
         sourceBreakdown: {
-          claude: { tokens: 1_500_000_000, messages: 1 },
+          opencode: { tokens: 1_500_000_000, messages: 1 },
         },
       },
       {
@@ -96,7 +96,7 @@ describe("ledger volume withholding", () => {
         tokens: 10_000,
         outputTokens: 5_000,
         sourceBreakdown: {
-          codex: { tokens: 10_000, messages: 1_000 },
+          cursor: { tokens: 10_000, messages: 1_000 },
         },
       },
     ]);
@@ -128,7 +128,7 @@ describe("ledger volume withholding", () => {
     expect(evaluateSubmissionForWithholding(usage)).toEqual({ shouldWithhold: false, reason: "" });
   });
 
-  it("does not mix a 200M-token count-neutral fragment into an ordinary 100-token/1-message Codex contribution on the same day", () => {
+  it("does not mix a 200M-token count-neutral fragment into an ordinary 100-token/1-message OpenCode contribution on the same day", () => {
     const breakdown = foldIncomingClientContributions([
       {
         client: "droid",
@@ -138,7 +138,7 @@ describe("ledger volume withholding", () => {
         messages: 0,
       },
       {
-        client: "codex",
+        client: "opencode",
         modelId: "gpt-5",
         tokens: { input: 80, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
         cost: 0.01,
@@ -158,7 +158,7 @@ describe("ledger volume withholding", () => {
     expect(evaluateSubmissionForWithholding(usage)).toEqual({ shouldWithhold: false, reason: "" });
   });
 
-  it("does not mix a 200M-token count-neutral fragment on one device with a 100-token/1-message Codex contribution on another device on the same date", () => {
+  it("does not mix a 200M-token count-neutral fragment on one device with a 100-token/1-message OpenCode contribution on another device on the same date", () => {
     const device1Breakdown = foldIncomingClientContributions([
       {
         client: "droid",
@@ -172,7 +172,7 @@ describe("ledger volume withholding", () => {
 
     const device2Breakdown = foldIncomingClientContributions([
       {
-        client: "codex",
+        client: "opencode",
         modelId: "gpt-5",
         tokens: { input: 80, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
         cost: 0.01,
@@ -223,17 +223,17 @@ describe("ledger volume withholding", () => {
   });
 
   it("does not mix a count-neutral model fragment into a sibling model's message count under the same per-inference client", () => {
-    // Claude Code advisor models carry messages = 0 alongside the main turn's model with messages = 1
+    // A count-neutral model bucket must not borrow a sibling model's message count.
     const breakdown = foldIncomingClientContributions([
       {
-        client: "claude",
+        client: "opencode",
         modelId: "claude-opus-4",
         tokens: { input: 200_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
         cost: 10,
         messages: 0,
       },
       {
-        client: "claude",
+        client: "opencode",
         modelId: "claude-sonnet-4",
         tokens: { input: 80, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
         cost: 0.01,
@@ -253,7 +253,77 @@ describe("ledger volume withholding", () => {
     expect(evaluateSubmissionForWithholding(usage)).toEqual({ shouldWithhold: false, reason: "" });
   });
 
-  it.each(NON_PER_INFERENCE_MESSAGE_CLIENTS)(
+  it.each(["claude", "cc-mirror/custom"])(
+    "keeps %s advisor tokens visible after they merge into a counted model bucket",
+    (clientName) => {
+      // The Claude parser emits count-neutral advisor calls, and the CLI
+      // aggregates them by model before submitting. A day with 1,000 Opus
+      // calls, each using a 200k-token Sonnet advisor, followed by one direct
+      // 100-token Sonnet call has this shape. No inference exceeds 200k tokens.
+      const breakdown = foldIncomingClientContributions([
+        {
+          client: clientName,
+          modelId: "claude-opus-4",
+          tokens: { input: 100_000, output: 100_000, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          cost: 0,
+          messages: 1_000,
+        },
+        {
+          client: clientName,
+          modelId: "claude-sonnet-4",
+          tokens: { input: 200_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          cost: 0,
+          messages: 0,
+        },
+        {
+          client: clientName,
+          modelId: "claude-sonnet-4",
+          tokens: { input: 80, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+          cost: 0,
+          messages: 1,
+        },
+      ]);
+      expect(breakdown[clientName].models["claude-sonnet-4"].messages).toBe(1);
+      expect(breakdown[clientName].models["claude-sonnet-4"].tokens).toBe(200_000_100);
+      const totals = recalculateDayTotals(breakdown);
+      const usage = getWithholdingUsageTotals([{
+        date: "2026-10-02",
+        tokens: totals.tokens,
+        outputTokens: totals.outputTokens,
+        sourceBreakdown: breakdown,
+      }]);
+      expect(usage.maxTokensPerMessage).toBeUndefined();
+      expect(evaluateSubmissionForWithholding(usage).shouldWithhold).toBe(false);
+    }
+  );
+
+  it.each(["codex", "trae"])(
+    "keeps a %s cumulative session record visible when its export counts one message",
+    (clientName) => {
+      const breakdown = foldIncomingClientContributions([{
+        client: clientName,
+        modelId: "gpt-5.4",
+        tokens: { input: 1_000, output: 1_000, cacheRead: 200_000_000, cacheWrite: 0, reasoning: 0 },
+        cost: 200,
+        messages: 1,
+      }]);
+      const totals = recalculateDayTotals(breakdown);
+      const usage = getWithholdingUsageTotals([{
+        date: "2026-10-02",
+        tokens: totals.tokens,
+        outputTokens: totals.outputTokens,
+        sourceBreakdown: breakdown,
+      }]);
+      expect(usage.maxTokensPerMessage).toBeUndefined();
+      expect(evaluateSubmissionForWithholding(usage).shouldWithhold).toBe(false);
+    }
+  );
+
+  it.each([
+    ...NON_PER_INFERENCE_MESSAGE_CLIENTS,
+    "cc-mirror/custom",
+    "  CC-MIRROR/ANOTHER-VARIANT  ",
+  ])(
     "skips non-per-inference client %s for per-message enforcement while preserving daily limits",
     (clientName) => {
       expect(hasPerInferenceMessageCount(clientName)).toBe(false);
@@ -276,6 +346,24 @@ describe("ledger volume withholding", () => {
       ]);
       expect(usage.maxTokensPerMessage).toBeUndefined();
       expect(evaluateSubmissionForWithholding(usage)).toEqual({ shouldWithhold: false, reason: "" });
+
+      const row = {
+        date: "2026-04-30", tokens: DAILY_LIMIT + 1, outputTokens: 0,
+        sourceBreakdown: { [clientName]: { tokens: DAILY_LIMIT + 1, messages: 1 } },
+      };
+      expect(evaluateSubmissionForWithholding(getWithholdingUsageTotals([row])).trigger)
+        .toBe("daily_token_limit");
+      expect(evaluateSubmissionForWithholding(getWithholdingUsageTotals([{
+        ...row, tokens: OUTPUT_LIMIT + 1, outputTokens: OUTPUT_LIMIT + 1,
+      }])).trigger).toBe("daily_output_limit");
+
+      const lifetimeRows = Array.from({ length: TOTAL_LIMIT / DAILY_LIMIT }, (_, index) => ({
+        ...row,
+        date: new Date(Date.UTC(2016, 0, index + 1)).toISOString().slice(0, 10),
+        tokens: DAILY_LIMIT,
+      }));
+      expect(evaluateSubmissionForWithholding(getWithholdingUsageTotals(lifetimeRows)).trigger)
+        .toBe("total_token_limit");
     }
   );
 
@@ -286,7 +374,7 @@ describe("ledger volume withholding", () => {
         date: "2026-04-30",
         tokens: 500_000_000,
         outputTokens: 500,
-        sourceBreakdown: { claude: { tokens: 500_000_000, messages: 0 } },
+        sourceBreakdown: { opencode: { tokens: 500_000_000, messages: 0 } },
       },
     ]);
     expect(usage.maxTokensPerMessage).toBeUndefined();
@@ -300,8 +388,8 @@ describe("ledger volume withholding", () => {
         tokens: 1_000_000_000,
         outputTokens: 500,
         sourceBreakdown: {
-          claude: { tokens: 1_000_000_000, messages: -5 },
-          codex: { tokens: 1_000_000_000, messages: null },
+          opencode: { tokens: 1_000_000_000, messages: -5 },
+          cursor: { tokens: 1_000_000_000, messages: null },
           gemini: { tokens: 1_000_000_000, messages: "not-a-number" as unknown as number },
         },
       },
@@ -318,7 +406,7 @@ describe("ledger volume withholding", () => {
         tokens: 50_000_000_000,
         outputTokens: 5_000_000_000,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             tokens: 50_000_000_000,
             messages: 20_000_000,
             models: {
@@ -339,7 +427,7 @@ describe("ledger volume withholding", () => {
         tokens: 1_000_000_000,
         outputTokens: 0,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             tokens: { input: 1_000_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
             messages: 1,
           },
@@ -377,12 +465,12 @@ describe("ledger volume withholding", () => {
         tokens: 1_000_010_000,
         outputTokens: 500,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             input: 1_000_000_000,
             output: 0,
             messages: 1,
           },
-          codex: {
+          cursor: {
             tokens: 10_000,
             messages: 1_000,
           },
@@ -400,7 +488,7 @@ describe("ledger volume withholding", () => {
         tokens: "1e9",
         outputTokens: 500,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             tokens: "1e9",
             messages: "1",
           },
@@ -418,7 +506,7 @@ describe("ledger volume withholding", () => {
         tokens: 1_200_000_000,
         outputTokens: 500,
         sourceBreakdown: {
-          claude: {
+          opencode: {
             tokens: 1_200_000_000,
             messages: 0,
             models: {
@@ -454,7 +542,7 @@ describe("ledger volume withholding", () => {
     const rows = [{
       date: "2026-04-30", tokens: 1_600_000, outputTokens: 600_000,
       sourceBreakdown: {
-        claude: {
+        opencode: {
           tokens: 1_600_000,
           messages: 100,
           models: {
@@ -473,7 +561,7 @@ describe("ledger volume withholding", () => {
     const overNestedZeroMsgModel = [{
       date: "2026-04-30", tokens: 1_500_000_000, outputTokens: 0,
       sourceBreakdown: {
-        claude: {
+        opencode: {
           tokens: 1_500_000_000,
           messages: 1,
           models: {

@@ -448,7 +448,7 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
 
   it("atomically withholds physically impossible single-message token volume (1+ billion tokens / 1 msg)", async () => {
     const a = await account();
-    const cs = [client("claude", "claude-sonnet-4", tokens(1_000_000_000, 500), 10, 1)];
+    const cs = [client("opencode", "claude-sonnet-4", tokens(1_000_000_000, 500), 10, 1)];
     await submit(a, payload(cs));
     expect(await hidden(a)).toBe(true);
     expect(await signals(a)).toContain("usageLimit");
@@ -504,9 +504,38 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     expect(await getModerationHistory(a.id)).toHaveLength(0);
   });
 
+  it.each(["claude", "cc-mirror/zai"] as const)(
+    "keeps mixed advisor and ordinary usage from %s visible",
+    async clientName => {
+      const a = await account();
+      // Claude advisor calls have messages=0. Folding them into the same model
+      // as an ordinary response produces this model bucket with messages=1.
+      await submit(a, payload([
+        client(clientName, "claude-opus-4", tokens(100_000, 100_000), 0, 1000),
+        client(clientName, "claude-sonnet-4", tokens(200_000_080, 20), 0, 1),
+      ]));
+      expect(await hidden(a)).toBe(false);
+      expect(await signals(a)).not.toContain("usageLimit");
+      expect(await signals(a)).not.toContain("tokensPerMessage");
+      expect(await getModerationHistory(a.id)).toHaveLength(0);
+    }
+  );
+
+  it.each([
+    { clientName: "trae", usage: tokens(1000, 1000, 200_000_000), cost: 200 },
+    { clientName: "codex", usage: tokens(200_000_000, 0), cost: 0 },
+  ] as const)("keeps cumulative $clientName usage with a session count visible", async ({ clientName, usage, cost }) => {
+    const a = await account();
+    await submit(a, payload([client(clientName, "gpt-5.4", usage, cost, 1)]));
+    expect(await hidden(a)).toBe(false);
+    expect(await signals(a)).not.toContain("usageLimit");
+    expect(await signals(a)).not.toContain("tokensPerMessage");
+    expect(await getModerationHistory(a.id)).toHaveLength(0);
+  });
+
   it("prevents dilution across multiple devices on the same date", async () => {
     const a = await account();
-    const spoofedClient = [client("claude", "claude-sonnet-4", tokens(1_500_000_000, 500), 10, 1)];
+    const spoofedClient = [client("opencode", "claude-sonnet-4", tokens(1_500_000_000, 500), 10, 1)];
     const normalClient = [client("codex", "gpt-4o", tokens(10_000, 5000), 1, 1000)];
     await submit(a, payload(spoofedClient, { device: "device-1" }));
     await submit(a, payload(normalClient, { device: "device-2" }));
@@ -517,14 +546,14 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
 
   it("flags impossible per-message volume when formatted in scientific notation in sourceBreakdown", async () => {
     const a = await account();
-    const cs = [client("claude", "claude-sonnet-4", tokens(1000, 500), 10, 1)];
+    const cs = [client("opencode", "claude-sonnet-4", tokens(1000, 500), 10, 1)];
     await submit(a, payload(cs));
     const sql = database();
     await sql`
       UPDATE daily_breakdown
       SET source_breakdown = jsonb_set(
         source_breakdown,
-        '{claude,tokens}',
+        '{opencode,tokens}',
         '"1.5e9"'::jsonb
       ),
       tokens = 1500000000

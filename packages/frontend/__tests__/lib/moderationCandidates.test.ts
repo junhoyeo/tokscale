@@ -4,6 +4,7 @@ import type { SQL } from "drizzle-orm";
 import { getModerationCandidates } from "@/lib/moderation/candidates";
 import { applyModerationAction } from "@/lib/moderation/actions";
 import { db } from "@/lib/db";
+import { NON_PER_INFERENCE_CLIENT_REGEX } from "@/lib/moderation/withholding";
 
 const dialect = new PgDialect();
 
@@ -213,7 +214,8 @@ describe("getModerationCandidates - moderation action metadata exposure", () => 
     const executedSql = query.sql.replace(/\s+/g, " ");
 
     expect(executedSql).toContain("tokens_per_msg AS (");
-    expect(executedSql).toContain("LOWER(TRIM(client.key)) !~");
+    expect(executedSql).toContain("LOWER(BTRIM(client.key)) !~");
+    expect(query.params).toContain(NON_PER_INFERENCE_CLIENT_REGEX);
     expect(executedSql).toContain("zero_msg_model_tokens");
     expect(executedSql).toContain("c.client_tokens > 0 AND COALESCE(m.nested_tokens, 0) > c.client_tokens AS over_nested");
     expect(executedSql).toContain("LEFT JOIN tokens_per_msg tpm ON tpm.submission_id = p.submission_id");

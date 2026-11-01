@@ -263,7 +263,9 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       WHERE jsonb_typeof(d.source_breakdown) = 'object'
         AND jsonb_typeof(client.value) = 'object'
         AND LENGTH(TRIM(client.key)) > 0
-        AND LOWER(TRIM(client.key)) !~ ${NON_PER_INFERENCE_CLIENT_REGEX}
+        -- Match submission enforcement, including Claude-based cc-mirror
+        -- variants whose model buckets mix counted and count-neutral usage.
+        AND LOWER(BTRIM(client.key)) !~ ${NON_PER_INFERENCE_CLIENT_REGEX}
       GROUP BY d.submission_id
     ),
     -- modelsForHighWater() assigns a partial map's scalar remainder to
