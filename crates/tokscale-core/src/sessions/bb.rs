@@ -259,12 +259,7 @@ fn resolve_provider_and_model(
         .map(str::to_string)
         .or_else(|| thread.model_override.clone())
         .or_else(|| thread.default_model.clone())
-        .unwrap_or_else(|| match thread.provider_id.as_str() {
-            "claude-code" => "claude-3-7-sonnet".to_string(),
-            "codex" => "gpt-4o".to_string(),
-            "pi" => "pi".to_string(),
-            other => other.to_string(),
-        });
+        .unwrap_or_else(|| "unknown".to_string());
 
     let raw_provider = thread.provider_id.trim();
     let canonical = match raw_provider {
@@ -273,7 +268,8 @@ fn resolve_provider_and_model(
         other => provider_identity::canonical_provider(other)
             .map(|s| s.to_string())
             .or_else(|| {
-                provider_identity::inferred_provider_from_model(&model_id).map(|s| s.to_string())
+                provider_identity::inferred_provider_from_model_delimited(&model_id)
+                    .map(|s| s.to_string())
             })
             .unwrap_or_else(|| other.to_string()),
     };
@@ -453,7 +449,7 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
             let model = active_fallback_model
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
-            let prov = provider_identity::inferred_provider_from_model(&model)
+            let prov = provider_identity::inferred_provider_from_model_delimited(&model)
                 .unwrap_or("unknown")
                 .to_string();
             (prov, model, None, None, None, None, None)
@@ -885,5 +881,62 @@ mod tests {
         let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
         assert_eq!(total_input, 2500);
         assert_eq!(total_output, 500);
+    }
+
+    #[test]
+    fn test_parse_bb_sqlite_unmodeled_thread_preserves_unknown() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_unmodeled', NULL, 'claude-code', NULL, 'Unmodeled', NULL, 1000)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_u1', 'thr_unmodeled', 'turn_u1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"last\": {\"totalTokens\": 120, \"inputTokens\": 100, \"outputTokens\": 20}}}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        let messages = parse_bb_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.provider_id, "anthropic");
+        assert_eq!(msg.model_id, "unknown");
+    }
+
+    #[test]
+    fn test_parse_bb_sqlite_delimited_provider_matching() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+
+        // Substring "claude" in "myclaudex-1" should NOT match anthropic under delimited inference.
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_custom', NULL, 'custom-proxy', 'myclaudex-1', 'Custom', NULL, 1000)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_d1', 'thr_custom', 'turn_d1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"last\": {\"totalTokens\": 120, \"inputTokens\": 100, \"outputTokens\": 20}}}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        let messages = parse_bb_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.provider_id, "custom_proxy");
+        assert_eq!(msg.model_id, "myclaudex-1");
     }
 }

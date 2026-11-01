@@ -2234,7 +2234,8 @@ fn parser_version(client: ClientId) -> u32 {
         // metadata when a persisted reset/sentinel snapshot removes it.
         ClientId::Muse => 3,
         ClientId::Vibe => 1,
-        ClientId::Bb => 1,
+        // v1->v2: cumulative total differencing and fork deduplication.
+        ClientId::Bb => 2,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -8839,7 +8840,113 @@ mod tests {
 
     #[test]
     fn test_bb_parser_version() {
-        assert_eq!(parser_version(ClientId::Bb), 1);
+        assert_eq!(parser_version(ClientId::Bb), 2);
+    }
+
+    #[test]
+    fn test_bb_parser_version_invalidates_v1_entries() {
+        assert_eq!(parser_version(ClientId::Bb), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_bb_v1_shard_invalidates_and_reparses_to_v2() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let bb_dir = source_home.path().join(".bb");
+        std::fs::create_dir_all(&bb_dir).unwrap();
+        let source = bb_dir.join("bb.db");
+
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT,
+                provider_id TEXT NOT NULL,
+                model_override TEXT,
+                title TEXT,
+                parent_thread_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY NOT NULL,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT,
+                sequence INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at)
+            VALUES ('thr_test', NULL, 'claude-code', 'claude-3-7-sonnet', 'Test', NULL, 1000);
+            INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+            VALUES ('evt_1', 'thr_test', 'turn_1', 1, 'thread/tokenUsage/updated',
+                    '{"tokenUsage":{"last":{"totalTokens":1200,"inputTokens":1000,"outputTokens":200}}}', 1100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let current_identity = CacheIdentity::for_client(ClientId::Bb);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 1,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_message = UnifiedMessage::new(
+            "bb",
+            "stale-model",
+            "stale-provider",
+            "thr_test",
+            1000,
+            crate::TokenBreakdown {
+                input: 9999,
+                output: 9999,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["bb".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-3-7-sonnet");
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 200);
+
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache
+            .get(current_identity, &source)
+            .expect("the v2 parse must replace the stale v1 row");
+        assert_eq!(rebuilt.parser_version, 2);
     }
 
     #[test]

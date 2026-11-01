@@ -2645,6 +2645,25 @@ fn parse_all_messages_streaming<S: MessageSink>(
         )
     }
 
+    fn load_or_parse_bb_sqlite_source(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> CachedParseOutcome {
+        load_or_parse_source_with_fingerprint_and_policy(
+            message_cache::CacheIdentity::for_client(ClientId::Bb),
+            path,
+            source_cache,
+            pricing,
+            HistoryRetention::LiveFileOnly,
+            message_cache::SourceFingerprint::check_sqlite_path,
+            |path, _| {
+                let scan = sessions::bb::scan_bb_sqlite(path);
+                (scan.messages, scan.complete)
+            },
+        )
+    }
+
     /// MiMo rows and exact provenance are one cache payload. A warm hit never
     /// opens SQLite, and a cold read collects both in one reader snapshot.
     fn load_or_parse_micode_source(
@@ -4353,13 +4372,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             mut messages,
             cache_entry,
             ..
-        } = load_or_parse_sqlite_source(
-            message_cache::CacheIdentity::for_client(ClientId::Bb),
-            db_path,
-            &source_cache,
-            pricing,
-            sessions::bb::parse_bb_sqlite,
-        );
+        } = load_or_parse_bb_sqlite_source(db_path, &source_cache, pricing);
         machine_labeler.label_messages(db_path, &mut messages);
         all_messages.extend(
             messages

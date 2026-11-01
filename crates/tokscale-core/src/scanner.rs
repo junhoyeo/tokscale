@@ -785,6 +785,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "sessions.db" => file_name == "sessions.db",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                "bb.db" => file_name == "bb.db",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
                 // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
                 // sidecars SQLite writes alongside the main file.
@@ -1492,7 +1493,12 @@ fn discover_devin_cli_dbs(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
 /// Looks in:
 /// 1. Primary path from `BB_DATA_DIR` or `~/.bb/bb.db`.
 /// 2. Development instances under `~/.bb-dev/*/bb.db`.
-fn discover_bb_dbs(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+/// 3. Configured extra scan roots (both direct files and directories containing `bb.db`).
+fn discover_bb_dbs(
+    home_dir: &str,
+    use_env_roots: bool,
+    extra_roots: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     let default_path = PathBuf::from(
@@ -1513,6 +1519,14 @@ fn discover_bb_dbs(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
                     candidates.push(candidate);
                 }
             }
+        }
+    }
+
+    for root in extra_roots {
+        if root.is_file() {
+            candidates.push(root);
+        } else if root.is_dir() {
+            candidates.extend(scan_directory(&root.to_string_lossy(), "bb.db"));
         }
     }
 
@@ -2785,10 +2799,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Bb) {
-        bb_roots.extend(discover_bb_dbs(home_dir, use_env_roots));
-        bb_roots.sort_unstable();
-        bb_roots.dedup();
-        result.bb_dbs = bb_roots;
+        result.bb_dbs = discover_bb_dbs(home_dir, use_env_roots, bb_roots);
     }
 
     if enabled.contains(&ClientId::Hermes) {
@@ -5432,6 +5443,43 @@ mod tests {
             result.get(ClientId::DevinCli).is_empty(),
             "Devin SQLite databases should use the dedicated scan result"
         );
+    }
+
+    #[test]
+    fn test_scan_all_clients_with_scanner_settings_discovers_bb_extra_databases() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_db = home.join(".bb/bb.db");
+        fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        File::create(&default_db).unwrap();
+
+        let extra_dir = home.join("custom/bb_instance");
+        let extra_db = extra_dir.join("bb.db");
+        fs::create_dir_all(&extra_dir).unwrap();
+        File::create(&extra_db).unwrap();
+
+        let direct_file = home.join("archive/isolated.db");
+        fs::create_dir_all(direct_file.parent().unwrap()).unwrap();
+        File::create(&direct_file).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "bb": [extra_dir, direct_file]
+            }
+        }))
+        .unwrap();
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["bb".to_string()],
+            false,
+            &settings,
+        );
+
+        assert_eq!(result.bb_dbs.len(), 3);
+        assert!(result.bb_dbs.contains(&default_db));
+        assert!(result.bb_dbs.contains(&extra_db));
+        assert!(result.bb_dbs.contains(&direct_file));
     }
 
     #[test]

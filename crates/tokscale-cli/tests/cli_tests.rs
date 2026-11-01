@@ -8842,25 +8842,71 @@ fn test_bb_client_e2e_cold_and_warm() {
     .unwrap();
     drop(conn);
 
-    for pass in ["cold", "warm"] {
-        let output = cmd_with_home(tmp.path())
-            .args(["models", "--json", "--client", "bb", "--no-spinner"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{pass}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass}");
-        assert_eq!(json["totalInput"].as_i64(), Some(800), "{pass}");
-        assert_eq!(json["totalOutput"].as_i64(), Some(200), "{pass}");
-        assert_eq!(json["entries"][0]["client"].as_str(), Some("bb"));
-        assert_eq!(
-            json["entries"][0]["model"].as_str(),
-            Some("claude-3-7-sonnet")
-        );
-        assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
-    }
+    // Cold pass
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cold: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1), "cold");
+    assert_eq!(json["totalInput"].as_i64(), Some(800), "cold");
+    assert_eq!(json["totalOutput"].as_i64(), Some(200), "cold");
+    assert_eq!(json["entries"][0]["client"].as_str(), Some("bb"));
+    assert_eq!(
+        json["entries"][0]["model"].as_str(),
+        Some("claude-3-7-sonnet")
+    );
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+
+    // Warm pass: unchanged database verifies warm cache replay
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "warm: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1), "warm");
+    assert_eq!(json["totalInput"].as_i64(), Some(800), "warm");
+    assert_eq!(json["totalOutput"].as_i64(), Some(200), "warm");
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+
+    // Mutate the database: insert a second event to verify incremental detection and update
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+        VALUES (
+            'evt_2', 'thr_test', 'turn_2', 2, 'thread/tokenUsage/updated',
+            '{"tokenUsage":{"last":{"totalTokens":700,"inputTokens":500,"cachedInputTokens":100,"cacheReadInputTokens":100,"cacheWriteInputTokens":0,"outputTokens":200,"reasoningOutputTokens":0}}}',
+            1787275020000
+        )
+        "#,
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mutated: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(2), "mutated");
+    assert_eq!(json["totalInput"].as_i64(), Some(1200), "mutated");
+    assert_eq!(json["totalOutput"].as_i64(), Some(400), "mutated");
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(300));
 }

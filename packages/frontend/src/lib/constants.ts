@@ -161,7 +161,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   muse: "https://github.com/meta-models.png",
   vibe: "https://github.com/mistralai.png",
   proma: "https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png",
-  bb: "https://raw.githubusercontent.com/get-bb/bb/main/assets/bb-logo.svg",
+  bb: "https://github.com/get-bb.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {

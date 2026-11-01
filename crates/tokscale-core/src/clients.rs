@@ -1145,7 +1145,7 @@ define_clients!(
     Bb = 59 => {
         id: "bb",
         display: "BB",
-        logo: Some("https://raw.githubusercontent.com/get-bb/bb/main/assets/bb-logo.svg"),
+        logo: Some("https://github.com/get-bb.png"),
         root: PathRoot::EnvVar {
             var: "BB_DATA_DIR",
             fallback_relative: ".bb",
