@@ -234,6 +234,36 @@ pub(crate) fn devin_cli_row_stats(db_path: &Path) -> Option<DevinCliRowStats> {
     stats
 }
 
+/// Hash over the `sessions` fields the message query joins (`model`,
+/// `working_directory`) plus `title`. The table is small — a few dozen rows —
+/// so reading and hashing it costs nothing, and any in-place edit to a joined
+/// field flips the fingerprint where row stats alone see no change.
+pub(crate) fn devin_cli_sessions_hash(db_path: &Path) -> Option<u64> {
+    let conn = open_readonly_sqlite_opt(db_path)?;
+    let mut hash = 0u64;
+    sqlite_for_each_row_on(
+        &conn,
+        db_path,
+        "SELECT id, COALESCE(model,''), COALESCE(working_directory,''), \
+         COALESCE(title,'') FROM sessions ORDER BY id",
+        None,
+        &mut |row| {
+            let id: String = row.get(0)?;
+            let model: String = row.get(1)?;
+            let working_directory: String = row.get(2)?;
+            let title: String = row.get(3)?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&id, &mut hasher);
+            std::hash::Hash::hash(&model, &mut hasher);
+            std::hash::Hash::hash(&working_directory, &mut hasher);
+            std::hash::Hash::hash(&title, &mut hasher);
+            hash ^= std::hash::Hasher::finish(&hasher);
+            Ok(())
+        },
+    );
+    Some(hash)
+}
+
 /// `(count, sum)` of just the rows past `after_row_id`, range-scanned on the
 /// rowid index. Compared against the deltas between two fingerprints this
 /// proves a diff was pure append; any deletion or id reuse below the mark

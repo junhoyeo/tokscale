@@ -2649,17 +2649,20 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// write, so `check_sqlite_path` can never reach `Unchanged` for an active
     /// database — every scan would re-parse the whole `message_nodes` table.
     /// The row-stats fingerprint instead moves only when usage rows appear or
-    /// disappear, which is the only change the parser can observe: `size`
-    /// carries the row count, `modified_ns` the max `row_id`, and
-    /// `content_hash`'s first 8 bytes the `row_id` sum — together the count
-    /// and sum detect deletions, not just appends.
+    /// disappear: `size` carries the row count, `modified_ns` the max
+    /// `row_id`, and `content_hash`'s first 8 bytes the `row_id` sum —
+    /// together the count and sum detect deletions, not just appends. The
+    /// next 8 bytes hash the joined `sessions` fields, so an in-place
+    /// model/title/workspace edit also moves the fingerprint.
     fn devin_cli_fingerprint(
         path: &Path,
         cached: Option<&message_cache::SourceFingerprint>,
     ) -> Option<message_cache::FingerprintStatus> {
         let stats = sessions::devin::devin_cli_row_stats(path)?;
+        let sessions_hash = sessions::devin::devin_cli_sessions_hash(path).unwrap_or(0);
         let mut content_hash = [0u8; 32];
         content_hash[..8].copy_from_slice(&stats.row_id_sum.to_le_bytes());
+        content_hash[8..16].copy_from_slice(&sessions_hash.to_le_bytes());
         let fingerprint = message_cache::SourceFingerprint {
             size: stats.row_count.max(0) as u64,
             modified_ns: stats.max_row_id.max(0) as u64,
@@ -2675,18 +2678,28 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
 
     /// Merges an entry's cached messages with rows appended since its
-    /// watermark, or returns `None` to force the full parse. The delta
-    /// identity — count and `row_id` sum between the two fingerprints must
-    /// equal the stats of rows past the mark — proves the change was pure
-    /// append; a delete paired with an insert, or any id reuse, breaks it.
-    /// Rows written between the fingerprint and the parse are then merged
-    /// deduped by their dedup key so a lagging watermark cannot double-count
-    /// them on the next scan.
+    /// watermark, or returns `None` to force the full parse. A changed
+    /// `sessions` hash means joined fields were edited in place and cached
+    /// messages are stale. The delta identity — count and `row_id` sum
+    /// between the two fingerprints must equal the stats of rows past the
+    /// mark — proves the rest was pure append; a delete paired with an
+    /// insert, or any id reuse, breaks it. Rows written between the
+    /// fingerprint and the parse get replayed by the next scan, so the merge
+    /// drops exact replay copies while keeping distinct rows that share a
+    /// `request_id` dedup key (they collapse downstream, but must stay
+    /// visible to the raw recount).
     fn devin_cli_resume(
         path: &Path,
         entry: &message_cache::CachedSourceEntry,
         fingerprint: &message_cache::SourceFingerprint,
     ) -> Option<SourceParse> {
+        let old_sessions =
+            u64::from_le_bytes(entry.fingerprint.content_hash[8..16].try_into().ok()?);
+        let new_sessions =
+            u64::from_le_bytes(fingerprint.content_hash[8..16].try_into().ok()?);
+        if old_sessions != new_sessions {
+            return None;
+        }
         let after_row_id = entry.fingerprint.modified_ns as i64;
         let (appended_count, appended_sum) = sessions::devin::devin_cli_appended_stats(
             path,
@@ -2712,11 +2725,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 after_row_id,
             ))
         {
-            if message
-                .dedup_key
-                .as_ref()
-                .is_none_or(|key| seen.insert(key.clone()))
-            {
+            let identity = (
+                message.session_id.clone(),
+                message.dedup_key.clone(),
+                message.timestamp,
+                message.tokens.total(),
+            );
+            if seen.insert(identity) {
                 messages.push(message);
             }
         }
