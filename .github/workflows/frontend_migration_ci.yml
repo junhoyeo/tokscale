@@ -26,6 +26,7 @@ on:
       - "packages/frontend/src/app/api/submit/route.ts"
       - "packages/frontend/src/lib/validation/**"
       - "packages/frontend/__tests__/integration/submitWithholdingPostgres.test.ts"
+      - "packages/frontend/__tests__/integration/submissionSecurityPostgres.test.ts"
       - "packages/frontend/src/lib/reconciliation/ratchetCensus.ts"
       - "packages/frontend/__tests__/integration/ratchetCensusPostgres.test.ts"
       - "packages/frontend/src/lib/leaderboard/getLeaderboard.ts"
