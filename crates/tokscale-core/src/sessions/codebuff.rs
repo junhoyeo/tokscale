@@ -38,8 +38,16 @@ const DEFAULT_MODEL: &str = "codebuff-unknown";
 /// v1->v2: Freebuff's root agent family moved from `base2-free*` to
 /// `base3-free*` (plus the `base3-fast-free-*` lane), and the marker now
 /// matches a `free` path segment instead of a fixed `base2-free` prefix.
-/// Files that parsed to nothing under v1 have unchanged bytes and mtimes, so
-/// only this bump retires those cached empties.
+///
+/// The source-cache entries this retires are not the empty ones: a cached
+/// entry holding no messages is already treated as unusable and re-parsed
+/// (see `load_or_parse_resumable_source`), so those self-heal. What a warm
+/// cache keeps serving is the *derived* totals — the TUI's aggregate cache
+/// is keyed by `parser_generation()`, which hashes every client's
+/// `parser_version()`, and it is served on the strength of that generation
+/// alone. Without this bump the TUI keeps painting the pre-fix totals
+/// (zero Freebuff rows) even after the source scan would have corrected
+/// them, so the bump is what makes the fix visible.
 pub(crate) const CODEBUFF_CHAT_PARSER_BASE_VERSION: u32 = 2;
 
 /// Parse a single `chat-messages.json` file into UnifiedMessages.
