@@ -8796,3 +8796,74 @@ fn test_proma_native_display_and_fork_usage_count_once_cold_and_warm() {
         assert_eq!(json["entries"][0]["cacheWrite"].as_i64(), Some(10));
     }
 }
+
+#[test]
+fn test_bb_client_e2e_cold_and_warm() {
+    let tmp = create_empty_fixture_dir();
+    let bb_dir = tmp.path().join(".bb");
+    fs::create_dir_all(&bb_dir).unwrap();
+    let db_path = bb_dir.join("bb.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT,
+            provider_id TEXT NOT NULL,
+            model_override TEXT,
+            title TEXT,
+            parent_thread_id TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE events (
+            id TEXT PRIMARY KEY NOT NULL,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT,
+            sequence INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        INSERT INTO projects (id, name) VALUES ('prj_test', 'cli-project');
+        INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at)
+        VALUES ('thr_test', 'prj_test', 'claude-code', 'claude-3-7-sonnet', 'CLI Test Thread', NULL, 1787275000000);
+        INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+        VALUES (
+            'evt_1', 'thr_test', 'turn_1', 1, 'thread/tokenUsage/updated',
+            '{"tokenUsage":{"last":{"totalTokens":1200,"inputTokens":1000,"cachedInputTokens":200,"cacheReadInputTokens":200,"cacheWriteInputTokens":0,"outputTokens":200,"reasoningOutputTokens":0}}}',
+            1787275010000
+        );
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    for pass in ["cold", "warm"] {
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "models",
+                "--json",
+                "--client",
+                "bb",
+                "--no-spinner",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalMessages"].as_i64(), Some(1), "{pass}");
+        assert_eq!(json["totalInput"].as_i64(), Some(800), "{pass}");
+        assert_eq!(json["totalOutput"].as_i64(), Some(200), "{pass}");
+        assert_eq!(json["entries"][0]["client"].as_str(), Some("bb"));
+        assert_eq!(json["entries"][0]["model"].as_str(), Some("claude-3-7-sonnet"));
+        assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+    }
+}

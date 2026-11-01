@@ -1237,6 +1237,7 @@ pub enum ClientFilter {
     Aside,
     Vibe,
     Proma,
+    Bb,
     Synthetic,
 }
 
@@ -1306,6 +1307,7 @@ impl ClientFilter {
             Self::Aside => "aside",
             Self::Vibe => "vibe",
             Self::Proma => "proma",
+            Self::Bb => "bb",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1378,6 +1380,7 @@ impl ClientFilter {
             Self::Aside => Some(ClientId::Aside),
             Self::Vibe => Some(ClientId::Vibe),
             Self::Proma => Some(ClientId::Proma),
+            Self::Bb => Some(ClientId::Bb),
             Self::Synthetic => None,
         }
     }
@@ -1446,6 +1449,7 @@ impl ClientFilter {
             ClientId::Aside => Self::Aside,
             ClientId::Vibe => Self::Vibe,
             ClientId::Proma => Self::Proma,
+            ClientId::Bb => Self::Bb,
         }
     }
 

@@ -4346,6 +4346,26 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
+    // BB (get-bb/bb) SQLite database sessions.
+    for db_path in &scan_result.bb_dbs {
+        let CachedParseOutcome {
+            mut messages,
+            cache_entry,
+            ..
+        } = load_or_parse_sqlite_source(
+            message_cache::CacheIdentity::for_client(ClientId::Bb),
+            db_path,
+            &source_cache,
+            pricing,
+            sessions::bb::parse_bb_sqlite,
+        );
+        machine_labeler.label_messages(db_path, &mut messages);
+        all_messages.extend(messages);
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // Keep the whole source's accounting state while streaming its records.
     // Partial input must not become a warm cache that suppresses future retries.
     let dsh_warnings = Mutex::new(Vec::new());
@@ -7947,6 +7967,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
+
+    let bb_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .bb_dbs
+        .par_iter()
+        .flat_map(|db_path| sessions::bb::parse_bb_sqlite(db_path))
+        .collect();
+    let mut bb_seen: HashSet<String> = HashSet::new();
+    let bb_msgs: Vec<ParsedMessage> = bb_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut bb_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let bb_count = summed_parsed_message_count(&bb_msgs);
+    counts.set(ClientId::Bb, bb_count);
+    messages.extend(bb_msgs);
 
     // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
     // the parent's rows verbatim in a second file, so dedup across the lane.

@@ -157,6 +157,9 @@ pub struct ScanResult {
     /// `workspaceStorage/*/chatSessions/*.jsonl`, plus the empty-window
     /// store at `globalStorage/emptyWindowChatSessions/*.jsonl`.
     pub copilot_vscode_sessions: Vec<PathBuf>,
+    /// BB (`get-bb/bb`) SQLite databases (`bb.db`) discovered under `~/.bb`,
+    /// `~/.bb-dev/*/`, or configured extra scan roots.
+    pub bb_dbs: Vec<PathBuf>,
 }
 
 impl Default for ScanResult {
@@ -180,6 +183,7 @@ impl Default for ScanResult {
             opencode_json_dir: None,
             devin_dbs: Vec::new(),
             copilot_vscode_sessions: Vec::new(),
+            bb_dbs: Vec::new(),
         }
     }
 }
@@ -1483,6 +1487,38 @@ fn discover_devin_cli_dbs(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
     )
 }
 
+/// Discover BB (`get-bb/bb`) `bb.db` SQLite databases.
+///
+/// Looks in:
+/// 1. Primary path from `BB_DATA_DIR` or `~/.bb/bb.db`.
+/// 2. Development instances under `~/.bb-dev/*/bb.db`.
+fn discover_bb_dbs(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    let default_path = PathBuf::from(
+        ClientId::Bb
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots),
+    );
+    if default_path.is_file() {
+        candidates.push(default_path);
+    }
+
+    let bb_dev_dir = Path::new(home_dir).join(".bb-dev");
+    if bb_dev_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&bb_dev_dir) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bb.db");
+                if candidate.is_file() {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    dedup_dbs_by_canonical_path(candidates)
+}
+
 /// Returns true if `name` matches the MiMo Code db naming rule:
 /// `mimocode.db` or `mimocode-<channel>.db`.
 fn is_micode_db_filename(name: &str) -> bool {
@@ -2192,6 +2228,7 @@ fn scan_all_clients_with_env_strategy_inner(
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
     let mut devin_cli_roots: Vec<PathBuf> = Vec::new();
+    let mut bb_roots: Vec<PathBuf> = Vec::new();
     // Every OpenClaw agents root the scan covers; each is also searched for
     // per-agent SQLite transcript databases once the roots are settled.
     let mut openclaw_agent_roots: Vec<PathBuf> = Vec::new();
@@ -2221,6 +2258,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Grok
                 | ClientId::PrimeAgent
                 | ClientId::Proma
+                | ClientId::Bb
         ) {
             continue;
         }
@@ -2249,6 +2287,8 @@ fn scan_all_clients_with_env_strategy_inner(
             }
         } else if client_id == ClientId::DevinCli {
             devin_cli_roots.push(path);
+        } else if client_id == ClientId::Bb {
+            bb_roots.push(path);
         } else if client_id == ClientId::Grok {
             push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &path);
         } else if client_id == ClientId::Senpi {
@@ -2393,6 +2433,8 @@ fn scan_all_clients_with_env_strategy_inner(
             warn_if_escapes_home(Path::new(home_dir), client_id, &PathBuf::from(&path));
             if client_id == ClientId::DevinCli {
                 devin_cli_roots.push(PathBuf::from(path));
+            } else if client_id == ClientId::Bb {
+                bb_roots.push(PathBuf::from(path));
             } else if client_id == ClientId::Grok {
                 push_grok_dual_source_scan_tasks(
                     &mut tasks,
@@ -2740,6 +2782,13 @@ fn scan_all_clients_with_env_strategy_inner(
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         devin_cli_roots.push(PathBuf::from(devin_db_path));
         result.devin_dbs = discover_devin_cli_dbs(devin_cli_roots);
+    }
+
+    if enabled.contains(&ClientId::Bb) {
+        bb_roots.extend(discover_bb_dbs(home_dir, use_env_roots));
+        bb_roots.sort_unstable();
+        bb_roots.dedup();
+        result.bb_dbs = bb_roots;
     }
 
     if enabled.contains(&ClientId::Hermes) {
