@@ -21,7 +21,7 @@ vi.mock("@/lib/groups/cache", () => ({ revalidateUserGroupLeaderboards: vi.fn() 
 vi.mock("@/lib/leaderboard/getLeaderboard", () => ({ getLeaderboardData: vi.fn(async () => ({})) }));
 
 import { POST } from "@/app/api/submit/route";
-import { db } from "@/lib/db";
+import { apiTokens, db } from "@/lib/db";
 import { validateSubmission } from "@/lib/validation/submission";
 import { applyModerationAction, getModerationHistory } from "@/lib/moderation/actions";
 import { getModerationCandidates } from "@/lib/moderation/candidates";
@@ -106,6 +106,67 @@ async function signals(a: { id: string }) {
   return candidates.find(c => c.userId === a.id)?.signals.map(s => s.key) ?? [];
 }
 
+// Pause after the real token UPDATE has acquired its row lock. This preserves
+// the production lock order while making overlapping operations deterministic.
+function pauseNextTokenTouch() {
+  let arrived!: () => void;
+  let release!: () => void;
+  const reached = new Promise<void>(resolve => { arrived = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const transaction = db.transaction.bind(db);
+  vi.spyOn(db, "transaction").mockImplementationOnce((callback, config) =>
+    transaction(tx => callback(new Proxy(tx, {
+      get(target, property) {
+        if (property === "update") return (...args: Parameters<typeof tx.update>) => {
+          const builder = target.update(...args);
+          if (args[0] !== apiTokens) return builder;
+          return new Proxy(builder, {
+            get(updateTarget, updateProperty) {
+              if (updateProperty === "set") return (values: Parameters<typeof builder.set>[0]) => {
+                const query = updateTarget.set(values);
+                return new Proxy(query, {
+                  get(queryTarget, queryProperty) {
+                    if (queryProperty === "where") return async (...whereArgs: Parameters<typeof query.where>) => {
+                      const result = await queryTarget.where(...whereArgs);
+                      arrived();
+                      await resume;
+                      return result;
+                    };
+                    const value = Reflect.get(queryTarget, queryProperty);
+                    return typeof value === "function" ? value.bind(queryTarget) : value;
+                  },
+                });
+              };
+              const value = Reflect.get(updateTarget, updateProperty);
+              return typeof value === "function" ? value.bind(updateTarget) : value;
+            },
+          });
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    })), config)
+  );
+  return { reached, release };
+}
+
+async function waitForLock(queryPrefix: string) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const [row] = await database()`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND query LIKE ${`${queryPrefix}%`}
+      ) AS waiting
+    `;
+    if (row.waiting) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${queryPrefix} to block`);
+}
+
 // Uses a migrated, disposable PostgreSQL database. Only cache side effects are
 // stubbed; authentication, validation, merging, SQL and locking are real.
 describeWithPostgres("submission withholding PostgreSQL integration", () => {
@@ -130,6 +191,22 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
       metrics: { totalActiveTimeMs: 60_000, longestContinuousMs: 60_000, sessionCount: 1, maxConcurrentSessions: 1 },
     }));
     expect(await hidden(a)).toBe(false);
+  });
+
+  it("rejects a token if its account was deleted after authentication", async () => {
+    const a = await account();
+    const transaction = db.transaction.bind(db);
+    vi.spyOn(db, "transaction").mockImplementationOnce(async (callback, config) => {
+      await database()`DELETE FROM users WHERE id = ${a.id}`;
+      return transaction(callback, config);
+    });
+    const data = payload([client("opencode", "claude-sonnet-4", tokens(1000, 1000))]);
+    const response = await POST(new Request("http://localhost/api/submit", {
+      method: "POST", headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      body: JSON.stringify(data),
+    }));
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Invalid API token" });
   });
 
   it("atomically withholds excessive daily output and records only one action", async () => {
@@ -257,6 +334,52 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     }
     expect(await hidden(a)).toBe(false);
     expect(await sql`SELECT id FROM moderation_actions WHERE target_user_id = ${a.id}`).toHaveLength(2);
+  }, 10_000);
+
+  it("allows account deletion to complete alongside a withholding submission", async () => {
+    const a = await account();
+    await submit(a, payload([client("opencode", "claude-sonnet-4", tokens(1000, 1000))]));
+    const gate = pauseNextTokenTouch();
+    const inFlightSubmit = submit(a, payload([
+      client("opencode", "claude-sonnet-4", tokens(1000, 20_000_000_000), 1000),
+    ]));
+    await gate.reached;
+    // This is the same parent DELETE used by /api/settings/account; its FK
+    // cascades must wait on the parent rather than cycling through api_tokens.
+    const deletion = database()`DELETE FROM users WHERE id = ${a.id} RETURNING id`.execute();
+    try {
+      await waitForLock("DELETE FROM users");
+    } finally {
+      gate.release();
+      await inFlightSubmit;
+    }
+    expect(await deletion).toHaveLength(1);
+  }, 10_000);
+
+  it("preserves an administrator restore that waits for an in-flight submission", async () => {
+    const a = await account();
+    const admin = await account();
+    const data = payload([client("opencode", "claude-sonnet-4", tokens(1000, 20_000_000_000), 1000)]);
+    await submit(a, data);
+    const gate = pauseNextTokenTouch();
+    const inFlightSubmit = submit(a, data);
+    await gate.reached;
+    const restore = applyModerationAction({
+      target: { id: a.id, username: a.username, leaderboardHidden: true },
+      actorUserId: admin.id, actorUsername: admin.username,
+      action: "unhide", reason: "Restored after review",
+    });
+    try {
+      await waitForLock('update "users"');
+    } finally {
+      gate.release();
+      await inFlightSubmit;
+    }
+    expect((await restore).changed).toBe(true);
+    expect(await hidden(a)).toBe(false);
+    expect((await getModerationHistory(a.id))[0].action).toBe("unhide");
+    await submit(a, data);
+    expect(await hidden(a)).toBe(false);
   }, 10_000);
 
   it("accepts the CLI's gap-merged continuous-time metrics", async () => {

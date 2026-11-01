@@ -204,7 +204,13 @@ function buildTx(selectResults: unknown[][]) {
       };
       return builder;
     }),
-    select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+    select: vi.fn((columns: Record<string, unknown>) =>
+      makeAwaitableBuilder(
+        "leaderboardHidden" in columns
+          ? [{ leaderboardHidden: false }]
+          : selectResults.shift() ?? []
+      ),
+    ),
     insert: vi.fn(() => {
       const builder = {
         values: vi.fn(() => builder),

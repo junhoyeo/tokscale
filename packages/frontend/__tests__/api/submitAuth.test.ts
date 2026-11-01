@@ -524,7 +524,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         insertCall += 1;
         if (insertCall === 1) {
@@ -759,7 +765,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         const builder = {
           values: vi.fn(() => builder),
@@ -953,7 +965,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         const builder = {
           values: vi.fn(() => builder),
@@ -1137,7 +1155,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         insertCall += 1;
         if (insertCall === 1) {
@@ -1350,6 +1374,9 @@ describe("POST /api/submit auth path", () => {
         return builder;
       }),
       select: vi.fn((fields?: Record<string, unknown>) => {
+        if (fields && "leaderboardHidden" in fields) {
+          return makeAwaitableBuilder([{ leaderboardHidden: false }]);
+        }
         if (fields) selectFields.push(fields);
         return makeAwaitableBuilder(selectResults.shift() ?? []);
       }),
@@ -1617,7 +1644,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         const builder = {
           values: vi.fn(() => builder),
@@ -1826,7 +1859,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         const builder = {
           values: vi.fn(() => builder),
@@ -2024,7 +2063,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         insertCall += 1;
         if (insertCall === 1) {
@@ -2171,7 +2216,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         const builder = {
           values: vi.fn(() => builder),
@@ -2315,7 +2366,13 @@ describe("POST /api/submit auth path", () => {
         };
         return builder;
       }),
-      select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+      select: vi.fn((columns: Record<string, unknown>) =>
+        makeAwaitableBuilder(
+          "leaderboardHidden" in columns
+            ? [{ leaderboardHidden: false }]
+            : selectResults.shift() ?? []
+        ),
+      ),
       insert: vi.fn(() => {
         insertCall += 1;
         if (insertCall === 1) {

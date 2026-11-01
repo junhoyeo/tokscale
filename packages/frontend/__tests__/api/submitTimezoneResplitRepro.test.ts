@@ -341,7 +341,13 @@ function buildTx(initialDays: PersistedDay[]) {
       };
       return builder;
     }),
-    select: vi.fn(() => makeAwaitableBuilder(nextSelectResult())),
+    select: vi.fn((columns: Record<string, unknown>) =>
+      makeAwaitableBuilder(
+        "leaderboardHidden" in columns
+          ? [{ leaderboardHidden: false }]
+          : nextSelectResult()
+      ),
+    ),
     insert: vi.fn(() => {
       const builder = {
         values: vi.fn(() => builder),

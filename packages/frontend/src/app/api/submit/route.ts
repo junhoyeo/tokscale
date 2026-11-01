@@ -500,6 +500,8 @@ async function recordRatchetCensus(params: {
   }
 }
 
+class SubmissionUserMissingError extends Error {}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -620,6 +622,19 @@ export async function POST(request: Request) {
       isBackfill ? "backfill" : "cli"
     );
     const result = await db.transaction(async (tx) => {
+      // Account deletion locks the parent before cascading to tokens and
+      // submissions. Match that order and keep manual moderation serialized
+      // through commit. NO KEY UPDATE still allows unrelated FK checks.
+      const [currentUser] = await tx
+        .select({ leaderboardHidden: users.leaderboardHidden })
+        .from(users)
+        .where(eq(users.id, tokenRecord.userId))
+        .for("no key update")
+        .limit(1);
+      if (!currentUser) {
+        throw new SubmissionUserMissingError();
+      }
+
       await tx
         .update(apiTokens)
         .set({ lastUsedAt: new Date() })
@@ -1763,14 +1778,7 @@ export async function POST(request: Request) {
       const withholdingResult = evaluateSubmissionForWithholding(withholdingUsage);
       let autoWithheld = false;
       if (withholdingResult.shouldWithhold) {
-        const [currentUser] = await tx
-          .select({ leaderboardHidden: users.leaderboardHidden })
-          .from(users)
-          .where(eq(users.id, tokenRecord.userId))
-          .for("update")
-          .limit(1);
-
-        if (currentUser && !currentUser.leaderboardHidden) {
+        if (!currentUser.leaderboardHidden) {
           const [latestModAction] = await tx
             .select({
               action: moderationActions.action,
@@ -1935,6 +1943,9 @@ export async function POST(request: Request) {
       warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {
+    if (error instanceof SubmissionUserMissingError) {
+      return NextResponse.json({ error: "Invalid API token" }, { status: 401 });
+    }
     console.error("Submit error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
