@@ -1927,7 +1927,14 @@ fn test_parse_hermes_sqlite_copies_session_title() {
             started_at REAL NOT NULL,
             message_count INTEGER DEFAULT 0,
             title TEXT,
-            billing_provider TEXT
+            billing_provider TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
+            cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0,
+            estimated_cost_usd REAL,
+            actual_cost_usd REAL
         );
         CREATE TABLE session_model_usage (
             session_id TEXT NOT NULL,
@@ -1941,10 +1948,13 @@ fn test_parse_hermes_sqlite_copies_session_title() {
             estimated_cost_usd REAL NOT NULL DEFAULT 0,
             actual_cost_usd REAL NOT NULL DEFAULT 0
         );
-        INSERT INTO sessions (id, source, model, started_at, message_count, title, billing_provider)
-        VALUES
-            ('session-titled', 'cli', 'glm-5.2', 1775008000.0, 4, '  部署监控  ', 'zai'),
-            ('session-blank', 'cli', 'glm-5.2', 1775008000.0, 1, '   ', 'zai');
+        INSERT INTO sessions (
+            id, source, model, started_at, message_count, title, billing_provider,
+            input_tokens, output_tokens
+        ) VALUES
+            ('session-titled', 'cli', 'glm-5.2', 1775008000.0, 4, '  部署监控  ', 'zai', 0, 0),
+            ('session-blank', 'cli', 'glm-5.2', 1775008000.0, 1, '   ', 'zai', 0, 0),
+            ('session-totals', 'cli', 'glm-5.2', 1775008000.0, 2, '  会话总量标题  ', 'zai', 40, 8);
         INSERT INTO session_model_usage (
             session_id, model, billing_provider, input_tokens, output_tokens
         ) VALUES
@@ -1966,4 +1976,11 @@ fn test_parse_hermes_sqlite_copies_session_title() {
     assert_eq!(titled.session_title.as_deref(), Some("部署监控"));
     assert_eq!(titled.tokens.input, 100);
     assert_eq!(blank.session_title, None);
+    let totals = messages
+        .iter()
+        .find(|message| message.session_id == "session-totals")
+        .unwrap();
+    assert_eq!(totals.session_title.as_deref(), Some("会话总量标题"));
+    assert_eq!(totals.tokens.input, 40);
+    assert_eq!(totals.dedup_key.as_deref(), Some("session-totals"));
 }
