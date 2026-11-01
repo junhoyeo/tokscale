@@ -83,6 +83,11 @@ function payload(modelId = "gpt-5", input = 1000): SubmissionData {
 }
 
 function submit(token?: string, data: unknown = payload(), headers: Record<string, string> = {}) {
+  const rawCookie = headers.cookie ?? headers.Cookie;
+  if (rawCookie !== undefined) {
+    const match = /(?:^|;\s*)tt_session=([^;]+)/.exec(rawCookie);
+    state.cookie = match?.[1];
+  }
   return POST(new Request("http://localhost/api/submit", {
     method: "POST",
     headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
@@ -123,6 +128,18 @@ describeWithPostgres("submission security PostgreSQL integration", () => {
     const a = await account();
     const response = await submit(token, payload(), headers);
     expect(response.status).toBe(401);
+    await expectNoSubmission(a);
+  });
+
+  it("rejects an active web session cookie or session token without a personal API token", async () => {
+    const a = await account();
+    const sessionToken = await webSession(a);
+    const cookieResponse = await submit(undefined, payload(), { cookie: `tt_session=${sessionToken}` });
+    expect(cookieResponse.status).toBe(401);
+    expect(state.cookie).toBe(sessionToken);
+
+    const bearerSessionResponse = await submit(sessionToken, payload(), { cookie: `tt_session=${sessionToken}` });
+    expect(bearerSessionResponse.status).toBe(401);
     await expectNoSubmission(a);
   });
 

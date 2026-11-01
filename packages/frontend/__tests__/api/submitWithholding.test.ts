@@ -133,7 +133,11 @@ function makeAwaitableBuilder(result: unknown) {
 interface MockTxOptions {
   userLeaderboardHidden?: boolean;
   usersUpdateReturnedRows?: Array<{ id: string }>;
-  latestModAction?: { action: string; actorUsername: string | null } | null;
+  latestModAction?: {
+    action: string;
+    actorUserId?: string | null;
+    actorUsername: string | null;
+  } | null;
   aggregates?: {
     totalTokens: number;
     totalCost: string;
@@ -146,6 +150,7 @@ interface MockTxOptions {
     maxConcurrentSessions: number;
     sessionCount: number;
   };
+  existingDeviceDays?: unknown[];
   allDaysSourceBreakdown?: Record<string, unknown>;
   allDaysRows?: unknown[];
 }
@@ -170,7 +175,7 @@ function setupMockTx(options: MockTxOptions = {}) {
   };
 
   const allDaysBreakdown = options.allDaysSourceBreakdown ?? {
-    claude: {
+    opencode: {
       tokens: aggregates.totalTokens,
       cost: parseFloat(aggregates.totalCost),
       input: aggregates.inputTokens,
@@ -223,6 +228,9 @@ function setupMockTx(options: MockTxOptions = {}) {
       if (keys.includes("totalActiveTimeMs")) {
         return makeAwaitableBuilder([deviceTotals]);
       }
+      if (keys.includes("sourceBreakdown") && keys.includes("id")) {
+        return makeAwaitableBuilder(options.existingDeviceDays ?? []);
+      }
       if (keys.includes("sourceBreakdown")) {
         return makeAwaitableBuilder(options.allDaysRows ?? defaultAllDaysRows);
       }
@@ -265,6 +273,7 @@ function setupMockTx(options: MockTxOptions = {}) {
       return builder;
     }),
     execute: vi.fn(() => Promise.resolve()),
+    transaction: vi.fn((cb: (sp: typeof tx) => Promise<unknown>) => cb(tx)),
   };
 
   mockState.db.transaction.mockImplementation(async (cb: (t: typeof tx) => Promise<unknown>) => cb(tx));
@@ -370,7 +379,7 @@ describe("POST /api/submit - ledger withholding", () => {
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"shouldWithhold":false'));
   });
 
-  it("keeps a 200M-token count-neutral Droid fragment visible alongside a 1-message Codex contribution", async () => {
+  it("keeps a 200M-token count-neutral Droid fragment visible alongside a 1-message OpenCode contribution", async () => {
     const ctx = await submit({
       aggregates: { totalTokens: 200_000_100, totalCost: "20", inputTokens: 200_000_100, outputTokens: 0 },
       allDaysRows: [
@@ -391,7 +400,7 @@ describe("POST /api/submit - ledger withholding", () => {
           tokens: 100,
           outputTokens: 0,
           sourceBreakdown: {
-            codex: {
+            opencode: {
               tokens: 100,
               messages: 1,
               models: { "gpt-5": { tokens: 100, messages: 1 } },
@@ -430,7 +439,7 @@ describe("POST /api/submit - ledger withholding", () => {
     const ctx = await submit({
       aggregates: { totalTokens: 200_000_100, totalCost: "20", inputTokens: 200_000_100, outputTokens: 0 },
       allDaysSourceBreakdown: {
-        claude: {
+        opencode: {
           tokens: 200_000_100,
           messages: 1,
           models: {
@@ -451,8 +460,21 @@ describe("POST /api/submit - ledger withholding", () => {
     expect(ctx.moderationActionInserts).toHaveLength(0);
   });
 
+  it("respects an administrator restore even when the administrator's username is system", async () => {
+    const ctx = await submit({
+      ...excessiveOutput,
+      latestModAction: {
+        action: "unhide",
+        actorUserId: "admin-uuid-1",
+        actorUsername: "system",
+      },
+    });
+    expect(ctx.usersUpdates).toHaveLength(0);
+    expect(ctx.moderationActionInserts).toHaveLength(0);
+  });
+
   it.each(["system", null, " "])("does not infer an administrator override from actor %s", async (actorUsername) => {
-    const ctx = await submit({ ...excessiveOutput, latestModAction: { action: "unhide", actorUsername } });
+    const ctx = await submit({ ...excessiveOutput, latestModAction: { action: "unhide", actorUserId: null, actorUsername } });
     expect(ctx.usersUpdates).toHaveLength(1);
     expect(ctx.moderationActionInserts).toHaveLength(1);
   });
@@ -518,5 +540,33 @@ describe("POST /api/submit - ledger withholding", () => {
       ],
     });
     expect(ctx.usersUpdates).toHaveLength(0);
+  });
+
+  it("evaluates post-merge ledger state independently of pre-existing device day rows", async () => {
+    const ctx = await submit({
+      existingDeviceDays: [
+        {
+          id: "day-1",
+          date: "2026-04-30",
+          timestampMs: null,
+          activeTimeMs: null,
+          sourceBreakdown: {
+            opencode: {
+              tokens: 1_000,
+              cost: 0.01,
+              input: 500,
+              output: 500,
+              messages: 2,
+              models: {
+                "claude-sonnet-4": { tokens: 1_000, input: 500, output: 500, cost: 0.01, messages: 2 },
+              },
+            },
+          },
+        },
+      ],
+      ...excessiveOutput,
+    });
+    expect(ctx.usersUpdates).toHaveLength(1);
+    expect(ctx.moderationActionInserts).toHaveLength(1);
   });
 });

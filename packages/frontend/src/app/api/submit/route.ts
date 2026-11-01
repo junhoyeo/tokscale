@@ -12,6 +12,7 @@ import {
 import {
   evaluateSubmissionForWithholding,
   getWithholdingUsageTotals,
+  hasAdminUnhideOverride,
 } from "@/lib/moderation/withholding";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
@@ -1782,6 +1783,7 @@ export async function POST(request: Request) {
           const [latestModAction] = await tx
             .select({
               action: moderationActions.action,
+              actorUserId: moderationActions.actorUserId,
               actorUsername: moderationActions.actorUsername,
             })
             .from(moderationActions)
@@ -1789,11 +1791,7 @@ export async function POST(request: Request) {
             .orderBy(desc(moderationActions.createdAt), desc(moderationActions.id))
             .limit(1);
 
-          const modActor = latestModAction?.actorUsername?.trim().toLowerCase();
-          const isAdminApproved =
-            latestModAction?.action === "unhide" &&
-            Boolean(modActor) &&
-            modActor !== "system";
+          const isAdminApproved = hasAdminUnhideOverride(latestModAction);
 
           if (!isAdminApproved) {
             const updatedRows = await tx
@@ -1805,15 +1803,20 @@ export async function POST(request: Request) {
                   eq(users.leaderboardHidden, false),
                   sql`NOT EXISTS (
                     SELECT 1 FROM (
-                      SELECT action, actor_username
+                      SELECT action, actor_user_id, actor_username
                       FROM ${moderationActions}
                       WHERE ${moderationActions.targetUserId} = ${tokenRecord.userId}
                       ORDER BY ${moderationActions.createdAt} DESC, ${moderationActions.id} DESC
                       LIMIT 1
                     ) AS latest_mod
                     WHERE latest_mod.action = 'unhide'
-                      AND LENGTH(TRIM(COALESCE(latest_mod.actor_username, ''))) > 0
-                      AND LOWER(TRIM(latest_mod.actor_username)) <> 'system'
+                      AND (
+                        latest_mod.actor_user_id IS NOT NULL
+                        OR (
+                          LENGTH(TRIM(COALESCE(latest_mod.actor_username, ''))) > 0
+                          AND LOWER(TRIM(latest_mod.actor_username)) <> 'system'
+                        )
+                      )
                   )`,
                 ),
               )

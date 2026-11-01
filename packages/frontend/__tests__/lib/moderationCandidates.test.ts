@@ -4,7 +4,10 @@ import type { SQL } from "drizzle-orm";
 import { getModerationCandidates } from "@/lib/moderation/candidates";
 import { applyModerationAction } from "@/lib/moderation/actions";
 import { db } from "@/lib/db";
-import { NON_PER_INFERENCE_CLIENT_REGEX } from "@/lib/moderation/withholding";
+import {
+  hasAdminUnhideOverride,
+  NON_PER_INFERENCE_CLIENT_REGEX,
+} from "@/lib/moderation/withholding";
 
 const dialect = new PgDialect();
 
@@ -217,7 +220,7 @@ describe("getModerationCandidates - moderation action metadata exposure", () => 
     expect(executedSql).toContain("LOWER(BTRIM(client.key)) !~");
     expect(query.params).toContain(NON_PER_INFERENCE_CLIENT_REGEX);
     expect(executedSql).toContain("zero_msg_model_tokens");
-    expect(executedSql).toContain("c.client_tokens > 0 AND COALESCE(m.nested_tokens, 0) > c.client_tokens AS over_nested");
+    expect(executedSql).toContain("COALESCE(m.nested_tokens, 0) > c.client_tokens AS over_nested");
     expect(executedSql).toContain("LEFT JOIN tokens_per_msg tpm ON tpm.submission_id = p.submission_id");
     expect(executedSql).toContain("COALESCE(tpm.max_tokens_per_message, 0) AS max_tokens_per_message");
     expect(executedSql).toMatch(/OR max_tokens_per_message > \$\d+/);
@@ -302,16 +305,23 @@ describe("applyModerationAction - admin override protection integration", () => 
       createdAt: expect.any(Object),
     });
 
-    // In Phase 2 admin override check:
-    // const modActor = latestModAction?.actorUsername?.trim().toLowerCase();
-    // const hasAdminOverride = latestModAction && latestModAction.action === "unhide" && Boolean(modActor && modActor !== "system");
-    const record = insertedRecord as unknown as InsertedAction;
-    expect(record).not.toBeNull();
-    const modActor = record.actorUsername.trim().toLowerCase();
-    const hasAdminOverride =
-      record.action === "unhide" &&
-      Boolean(modActor && modActor !== "system");
-    expect(hasAdminOverride).toBe(true);
+    expect(hasAdminUnhideOverride(insertedRecord)).toBe(true);
+
+    await applyModerationAction({
+      target,
+      actorUserId: "admin-uuid-123",
+      actorUsername: "system",
+      action: "unhide",
+      reason: "Restored by admin named system",
+    });
+    expect(hasAdminUnhideOverride(insertedRecord)).toBe(true);
+    expect(
+      hasAdminUnhideOverride({
+        action: "hide",
+        actorUserId: null,
+        actorUsername: "system",
+      })
+    ).toBe(false);
   });
 
   it("records hide action with authenticated admin username and sets leaderboardHidden true", async () => {

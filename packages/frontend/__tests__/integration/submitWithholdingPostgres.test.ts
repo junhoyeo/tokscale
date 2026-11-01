@@ -73,6 +73,49 @@ function payload(clients: Client[], opts: {
     ...(opts.metrics ? { timeMetrics: opts.metrics } : {}),
   };
 }
+function multiDayPayload(dates: string[], clients: Client[], device = "test-device"): SubmissionData {
+  const breakdown = tokens();
+  for (const c of clients) {
+    for (const k of Object.keys(breakdown) as Array<keyof typeof breakdown>) {
+      breakdown[k] += c.tokens[k];
+    }
+  }
+  const dayTokens = Object.values(breakdown).reduce((s, n) => s + n, 0);
+  const dayCost = clients.reduce((s, c) => s + c.cost, 0);
+  const dayMessages = clients.reduce((s, c) => s + c.messages, 0);
+  const sortedDates = [...dates].sort();
+  const byYear = new Map<string, string[]>();
+  for (const d of sortedDates) {
+    const y = d.slice(0, 4);
+    const list = byYear.get(y) ?? [];
+    list.push(d);
+    byYear.set(y, list);
+  }
+  const totalTokens = dayTokens * sortedDates.length;
+  const totalCost = dayCost * sortedDates.length;
+  return {
+    meta: { generatedAt: "2026-05-01T00:00:00Z", version: "4.20.0", dateRange: { start: sortedDates[0], end: sortedDates[sortedDates.length - 1] } },
+    device: { id: device },
+    summary: {
+      totalTokens, totalCost, totalDays: sortedDates.length, activeDays: dayTokens > 0 ? sortedDates.length : 0,
+      averagePerDay: dayCost, maxCostInSingleDay: dayCost,
+      clients: [...new Set(clients.map(c => c.client))], models: clients.map(c => c.modelId),
+    },
+    years: [...byYear.entries()].map(([year, yearDates]) => ({
+      year,
+      totalTokens: dayTokens * yearDates.length,
+      totalCost: dayCost * yearDates.length,
+      range: { start: yearDates[0], end: yearDates[yearDates.length - 1] },
+    })),
+    contributions: sortedDates.map(date => ({
+      date,
+      clients,
+      totals: { tokens: dayTokens, cost: dayCost, messages: dayMessages },
+      intensity: 1,
+      tokenBreakdown: breakdown,
+    })),
+  };
+}
 async function account() {
   const id = randomUUID();
   const token = `tt_${randomUUID().replaceAll("-", "")}`;
@@ -238,6 +281,23 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     expect(await sql`SELECT id FROM moderation_actions WHERE target_user_id = ${a.id}`).toHaveLength(2);
   });
 
+  it("preserves an approved unhide when the administrator's username is system", async () => {
+    const a = await account();
+    const admin = await account();
+    const data = payload([client("claude", "claude-sonnet-4", tokens(1000, 20_000_000_000), 1000)]);
+    await submit(a, data);
+    expect(await hidden(a)).toBe(true);
+    const restored = await applyModerationAction({
+      target: { id: a.id, username: a.username, leaderboardHidden: true },
+      actorUserId: admin.id, actorUsername: "system", action: "unhide", reason: "Approved by admin named system",
+    });
+    expect(restored.changed).toBe(true);
+    await submit(a, data);
+    expect(await hidden(a)).toBe(false);
+    const sql = database();
+    expect(await sql`SELECT id FROM moderation_actions WHERE target_user_id = ${a.id}`).toHaveLength(2);
+  });
+
   it("orders decisions by the state change when an earlier administrator transaction is delayed", async () => {
     const a = await account();
     const admin = await account();
@@ -299,6 +359,32 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     expect(await hidden(a)).toBe(false);
     expect(await signals(a)).not.toContain("usageLimit");
   });
+
+  it("withholds multi-date usage that reaches the lifetime token ceiling while each day stays below daily limits", async () => {
+    const a = await account();
+    // 2,500 days * 400B tokens/day = 1,000,000,000,000,000 (WITHHOLDING_MAX_TOTAL_TOKENS),
+    // while each individual day stays below the 500B daily total limit, 10B daily output
+    // limit, and 100M per-message limit.
+    const startMs = Date.UTC(2019, 0, 1);
+    const dates = Array.from({ length: 2500 }, (_, i) =>
+      new Date(startMs + i * 86_400_000).toISOString().slice(0, 10)
+    );
+    const cs = [client("opencode", "claude-sonnet-4", tokens(0, 0, 400_000_000_000), 1, 10_000)];
+
+    await submit(a, multiDayPayload(dates.slice(0, 2499), cs));
+    expect(await hidden(a)).toBe(false);
+    expect(await signals(a)).not.toContain("usageLimit");
+
+    await submit(a, payload(cs, { date: dates[2499] }));
+    expect(await hidden(a)).toBe(true);
+    expect(await signals(a)).toContain("usageLimit");
+    const [action] = await getModerationHistory(a.id);
+    expect(action).toMatchObject({
+      action: "hide",
+      actorUsername: "system",
+      reason: "Under investigation",
+    });
+  }, 15_000);
 
   it("allows a concurrent administrator restore to win over a waiting submit", async () => {
     const a = await account();
@@ -582,11 +668,11 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     expect(action.reason).toBe("Under investigation");
   });
 
-  it("keeps a 200M-token count-neutral Droid fragment visible alongside a 1-message Codex contribution on the same day or across devices", async () => {
+  it("keeps a 200M-token count-neutral Droid fragment visible alongside a 1-message OpenCode contribution on the same day or across devices", async () => {
     const sameDayAccount = await account();
     await submit(sameDayAccount, payload([
       client("droid", "claude-sonnet-4", tokens(0, 0, 200_000_000), 20, 0),
-      client("codex", "gpt-5", tokens(100, 0), 0.01, 1),
+      client("opencode", "gpt-5", tokens(100, 0), 0.01, 1),
     ]));
     expect(await hidden(sameDayAccount)).toBe(false);
     expect(await signals(sameDayAccount)).not.toContain("usageLimit");
@@ -597,7 +683,7 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
       client("droid", "claude-sonnet-4", tokens(0, 0, 200_000_000), 20, 0),
     ], { device: "device-1" }));
     await submit(multiDeviceAccount, payload([
-      client("codex", "gpt-5", tokens(100, 0), 0.01, 1),
+      client("opencode", "gpt-5", tokens(100, 0), 0.01, 1),
     ], { device: "device-2" }));
     expect(await hidden(multiDeviceAccount)).toBe(false);
     expect(await signals(multiDeviceAccount)).not.toContain("usageLimit");
@@ -615,11 +701,11 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     expect(await getModerationHistory(a.id)).toHaveLength(0);
   });
 
-  it("keeps a count-neutral advisor model fragment (messages: 0) visible alongside a 1-message model under the same client", async () => {
+  it("keeps a count-neutral model fragment (messages: 0) visible alongside a 1-message model under the same eligible client", async () => {
     const a = await account();
     await submit(a, payload([
-      client("claude", "claude-opus-4", tokens(0, 0, 200_000_000), 20, 0),
-      client("claude", "claude-sonnet-4", tokens(100, 0), 0.01, 1),
+      client("opencode", "claude-opus-4", tokens(0, 0, 200_000_000), 20, 0),
+      client("opencode", "claude-sonnet-4", tokens(100, 0), 0.01, 1),
     ]));
     expect(await hidden(a)).toBe(false);
     expect(await signals(a)).not.toContain("usageLimit");
@@ -688,5 +774,42 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     expect(candidate!.maxTokensPerMessage).toBe(1_500_000_000);
     expect(candidate!.signals.map(s => s.key)).toContain("usageLimit");
     expect(candidate!.signals.map(s => s.key)).toContain("tokensPerMessage");
+  });
+
+  it("ignores retained nested model maps on emptied days and tolerates malformed Cursor numeric strings in getModerationCandidates", async () => {
+    const a = await account();
+    await submit(a, payload([
+      client("cursor", "premium-tool-call", tokens(), 100),
+      client("opencode", "claude-sonnet-4", tokens(1000, 500), 0.01, 2),
+    ]));
+    const sql = database();
+    await sql`
+      UPDATE daily_breakdown
+      SET tokens = 0,
+          input_tokens = 0,
+          output_tokens = 0,
+          source_breakdown = jsonb_build_object(
+            'cursor', jsonb_build_object(
+              'tokens', 'not-a-number',
+              'cost', 'NaN',
+              'modelId', 'premium-tool-call',
+              'models', jsonb_build_object(
+                'premium-tool-call', jsonb_build_object('tokens', 'bad', 'cost', 'invalid')
+              )
+            ),
+            'opencode', jsonb_build_object(
+              'tokens', 0,
+              'messages', 0,
+              'models', jsonb_build_object(
+                'claude-sonnet-4', jsonb_build_object('tokens', 200000000, 'messages', 1)
+              )
+            )
+          )
+      WHERE submission_id = (SELECT id FROM submissions WHERE user_id = ${a.id})
+    `;
+    const candidates = await getModerationCandidates();
+    const candidate = candidates.find(c => c.userId === a.id);
+    expect(candidate?.signals.map(s => s.key) ?? []).not.toContain("tokensPerMessage");
+    expect(candidate?.signals.map(s => s.key) ?? []).not.toContain("usageLimit");
   });
 });

@@ -60,13 +60,17 @@ describe("ledger volume withholding", () => {
     const usage = getWithholdingUsageTotals([
       {
         date: "2026-04-30",
-        tokens: 1_500_000_000,
+        tokens: 1_510_000_000,
         outputTokens: 500,
         sourceBreakdown: {
           opencode: {
-            tokens: 0,
-            messages: 0,
+            tokens: 1_510_000_000,
+            messages: 1_000,
             models: {
+              "normal-model": {
+                tokens: 10_000_000,
+                messages: 999,
+              },
               "spoof-model": {
                 tokens: 1_500_000_000,
                 messages: 1,
@@ -556,6 +560,24 @@ describe("ledger volume withholding", () => {
       maxDailyTokens: 1_600_000,
       maxDailyOutputTokens: 600_000,
       maxTokensPerMessage: 16_000,
+    });
+
+    const emptiedDayWithRetainedModels = [{
+      date: "2026-04-30", tokens: 0, outputTokens: 0,
+      sourceBreakdown: {
+        opencode: {
+          tokens: 0,
+          messages: 0,
+          models: {
+            old: { tokens: 200_000_000, messages: 1 },
+          },
+        },
+      },
+    }];
+    expect(getWithholdingUsageTotals(emptiedDayWithRetainedModels)).toEqual({
+      totalTokens: 0,
+      maxDailyTokens: 0,
+      maxDailyOutputTokens: 0,
     });
 
     const overNestedZeroMsgModel = [{

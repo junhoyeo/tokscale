@@ -189,7 +189,7 @@ export function getWithholdingUsageTotals(
           }
         }
 
-        const isOverNested = clientTokens > 0 && modelTokensSum > clientTokens;
+        const isOverNested = modelTokensSum > clientTokens;
         if (!isOverNested && maxModelRatio > 0) {
           maxTokensPerMessage = Math.max(maxTokensPerMessage, maxModelRatio);
         }
@@ -263,4 +263,36 @@ export function evaluateSubmissionForWithholding(
     };
   }
   return { shouldWithhold: false, reason: "" };
+}
+
+export interface LatestModerationAction {
+  action?: string | null;
+  actorUserId?: string | null;
+  actorUsername?: string | null;
+}
+
+/**
+ * Whether the latest moderation action on an account is an administrator
+ * restore (`unhide`) rather than an automatic system withholding row.
+ *
+ * Automatic withholding writes `actorUserId: null` and `actorUsername: "system"`
+ * with `action: "hide"`. Checking `actorUserId` first ensures a real
+ * administrator whose GitHub handle is `"system"` still preserves their
+ * approval, while the username fallback preserves approvals after an
+ * administrator's user row is deleted (`ON DELETE SET NULL`).
+ */
+export function hasAdminUnhideOverride(
+  latestAction: LatestModerationAction | null | undefined
+): boolean {
+  if (!latestAction || latestAction.action !== "unhide") {
+    return false;
+  }
+  if (
+    typeof latestAction.actorUserId === "string" &&
+    latestAction.actorUserId.trim().length > 0
+  ) {
+    return true;
+  }
+  const modActor = latestAction.actorUsername?.trim().toLowerCase();
+  return Boolean(modActor) && modActor !== "system";
 }

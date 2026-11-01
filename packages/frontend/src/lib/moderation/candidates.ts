@@ -258,7 +258,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       ) m ON true
       CROSS JOIN LATERAL (
         SELECT
-          c.client_tokens > 0 AND COALESCE(m.nested_tokens, 0) > c.client_tokens AS over_nested
+          COALESCE(m.nested_tokens, 0) > c.client_tokens AS over_nested
       ) ov
       WHERE jsonb_typeof(d.source_breakdown) = 'object'
         AND jsonb_typeof(client.value) = 'object'
@@ -275,49 +275,77 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     cursor_non_token_cost AS (
       SELECT d.submission_id,
         SUM(LEAST(
-          COALESCE((c.entry->>'cost')::numeric, 0),
+          cv.cost,
           CASE
             WHEN c.entry->>'modelId' = 'premium-tool-call' THEN
               CASE WHEN p.tokenless AND r.tokenless
-                THEN COALESCE((m.entry->>'cost')::numeric, 0) + r.cost
+                THEN mv.cost + r.cost
                 ELSE 0 END
             ELSE
-              CASE WHEN p.tokenless THEN COALESCE((m.entry->>'cost')::numeric, 0) ELSE 0 END
+              CASE WHEN p.tokenless THEN mv.cost ELSE 0 END
               + CASE WHEN COALESCE(c.entry->>'modelId', '') = '' THEN r.cost ELSE 0 END
           END
         )) AS excluded_cost
       FROM daily_breakdown d
       CROSS JOIN LATERAL (SELECT d.source_breakdown->'cursor' AS entry) c
-      CROSS JOIN LATERAL (SELECT c.entry->'models'->'premium-tool-call' AS entry) m
+      CROSS JOIN LATERAL (
+        SELECT
+          CASE WHEN (c.entry->>'cost') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'cost')::numeric ELSE 0 END AS cost,
+          CASE WHEN (c.entry->>'tokens') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'tokens')::numeric ELSE 0 END AS tokens,
+          CASE WHEN (c.entry->>'input') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'input')::numeric ELSE 0 END AS input,
+          CASE WHEN (c.entry->>'output') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'output')::numeric ELSE 0 END AS output,
+          CASE WHEN (c.entry->>'cacheRead') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'cacheRead')::numeric ELSE 0 END AS cache_read,
+          CASE WHEN (c.entry->>'cacheWrite') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'cacheWrite')::numeric ELSE 0 END AS cache_write,
+          CASE WHEN (c.entry->>'reasoning') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'reasoning')::numeric ELSE 0 END AS reasoning
+      ) cv
+      CROSS JOIN LATERAL (
+        SELECT
+          CASE
+            WHEN jsonb_typeof(c.entry->'models') = 'object'
+              AND jsonb_typeof(c.entry->'models'->'premium-tool-call') = 'object'
+            THEN c.entry->'models'->'premium-tool-call'
+            ELSE '{}'::jsonb
+          END AS entry
+      ) m
+      CROSS JOIN LATERAL (
+        SELECT
+          CASE WHEN (m.entry->>'cost') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (m.entry->>'cost')::numeric ELSE 0 END AS cost
+      ) mv
       CROSS JOIN LATERAL (
         SELECT NOT EXISTS (
           SELECT 1 FROM unnest(ARRAY['tokens', 'input', 'output', 'cacheRead', 'cacheWrite', 'reasoning']) AS f(name)
-          WHERE COALESCE((m.entry->>f.name)::numeric, 0) <> 0
+          WHERE CASE
+            WHEN (m.entry->>f.name) ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+            THEN (m.entry->>f.name)::numeric
+            ELSE 0
+          END <> 0
         ) AS tokenless
       ) p
       CROSS JOIN LATERAL (
         SELECT
-          COALESCE(SUM((model.value->>'cost')::numeric), 0) AS cost,
-          COALESCE(SUM((model.value->>'tokens')::numeric), 0) AS tokens,
-          COALESCE(SUM((model.value->>'input')::numeric), 0) AS input,
-          COALESCE(SUM((model.value->>'output')::numeric), 0) AS output,
-          COALESCE(SUM((model.value->>'cacheRead')::numeric), 0) AS cache_read,
-          COALESCE(SUM((model.value->>'cacheWrite')::numeric), 0) AS cache_write,
-          COALESCE(SUM((model.value->>'reasoning')::numeric), 0) AS reasoning
+          COALESCE(SUM(CASE WHEN (model.value->>'cost') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cost')::numeric ELSE 0 END), 0) AS cost,
+          COALESCE(SUM(CASE WHEN (model.value->>'tokens') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'tokens')::numeric ELSE 0 END), 0) AS tokens,
+          COALESCE(SUM(CASE WHEN (model.value->>'input') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'input')::numeric ELSE 0 END), 0) AS input,
+          COALESCE(SUM(CASE WHEN (model.value->>'output') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'output')::numeric ELSE 0 END), 0) AS output,
+          COALESCE(SUM(CASE WHEN (model.value->>'cacheRead') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cacheRead')::numeric ELSE 0 END), 0) AS cache_read,
+          COALESCE(SUM(CASE WHEN (model.value->>'cacheWrite') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cacheWrite')::numeric ELSE 0 END), 0) AS cache_write,
+          COALESCE(SUM(CASE WHEN (model.value->>'reasoning') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'reasoning')::numeric ELSE 0 END), 0) AS reasoning
         FROM jsonb_each(CASE WHEN jsonb_typeof(c.entry->'models') = 'object'
           THEN c.entry->'models' ELSE '{}'::jsonb END) model
+        WHERE jsonb_typeof(model.value) = 'object'
       ) n
       CROSS JOIN LATERAL (
         SELECT
-          GREATEST(COALESCE((c.entry->>'cost')::numeric, 0) - n.cost, 0) AS cost,
-          COALESCE((c.entry->>'tokens')::numeric, 0) <= n.tokens
-            AND COALESCE((c.entry->>'input')::numeric, 0) <= n.input
-            AND COALESCE((c.entry->>'output')::numeric, 0) <= n.output
-            AND COALESCE((c.entry->>'cacheRead')::numeric, 0) <= n.cache_read
-            AND COALESCE((c.entry->>'cacheWrite')::numeric, 0) <= n.cache_write
-            AND COALESCE((c.entry->>'reasoning')::numeric, 0) <= n.reasoning AS tokenless
+          GREATEST(cv.cost - n.cost, 0) AS cost,
+          cv.tokens <= n.tokens
+            AND cv.input <= n.input
+            AND cv.output <= n.output
+            AND cv.cache_read <= n.cache_read
+            AND cv.cache_write <= n.cache_write
+            AND cv.reasoning <= n.reasoning AS tokenless
       ) r
-      WHERE jsonb_typeof(c.entry) = 'object'
+      WHERE jsonb_typeof(d.source_breakdown) = 'object'
+        AND jsonb_typeof(c.entry) = 'object'
       GROUP BY d.submission_id
     ),
     -- Scoped to accounts that actually have a matching name: the per-model
