@@ -139,8 +139,7 @@ impl BbTokenUsageBreakdown {
         let output = if raw_output >= reasoning
             && self.total_tokens.is_some_and(|total| {
                 total == uncached_input + cache_read + cache_write + raw_output
-            })
-        {
+            }) {
             raw_output - reasoning
         } else {
             raw_output
@@ -362,155 +361,156 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
                  WHERE type IN ('thread/tokenUsage/updated', 'provider/modelFallback') \
                  ORDER BY thread_id, sequence ASC";
 
-    let scan = sqlite_for_each_row_on(
-        &conn,
-        db_path,
-        query,
-        Some("BB event"),
-        &mut |row| {
-            let _event_id: String = row.get(0)?;
-            let thread_id: String = row.get(1)?;
-            let turn_id: Option<String> = row.get(2)?;
-            let sequence: i64 = row.get(3)?;
-            let event_type: String = row.get(4)?;
-            let data_json: String = row.get(5)?;
-            let created_at_ms: Option<i64> = row.get(6)?;
+    let scan = sqlite_for_each_row_on(&conn, db_path, query, Some("BB event"), &mut |row| {
+        let _event_id: String = row.get(0)?;
+        let thread_id: String = row.get(1)?;
+        let turn_id: Option<String> = row.get(2)?;
+        let sequence: i64 = row.get(3)?;
+        let event_type: String = row.get(4)?;
+        let data_json: String = row.get(5)?;
+        let created_at_ms: Option<i64> = row.get(6)?;
 
-            if current_thread_id.as_deref() != Some(thread_id.as_str()) {
-                current_thread_id = Some(thread_id.clone());
-                active_fallback_model = None;
+        if current_thread_id.as_deref() != Some(thread_id.as_str()) {
+            current_thread_id = Some(thread_id.clone());
+            active_fallback_model = None;
+        }
+
+        let Some(event_data) = parse_json_line::<BbEventData>(&data_json, &mut buffer) else {
+            malformed_rows += 1;
+            return Ok(());
+        };
+
+        if event_type == "provider/modelFallback" {
+            if let Some(fallback) = event_data.fallback_model {
+                active_fallback_model = Some(fallback);
             }
+            return Ok(());
+        }
 
-            let Some(event_data) = parse_json_line::<BbEventData>(&data_json, &mut buffer) else {
-                malformed_rows += 1;
-                return Ok(());
-            };
+        let Some(token_container) = event_data.token_usage else {
+            return Ok(());
+        };
 
-            if event_type == "provider/modelFallback" {
-                if let Some(fallback) = event_data.fallback_model {
-                    active_fallback_model = Some(fallback);
-                }
-                return Ok(());
+        let tokens = if let Some(last) = token_container.last.as_ref().filter(|u| !u.is_zero()) {
+            let breakdown = last.to_breakdown(token_container.prompt_cache_ttl_ms);
+            if let Some(total) = &token_container.total {
+                thread_totals.insert(
+                    thread_id.clone(),
+                    total.to_breakdown(token_container.prompt_cache_ttl_ms),
+                );
             }
-
-            let Some(token_container) = event_data.token_usage else {
-                return Ok(());
+            breakdown
+        } else if let Some(total) = token_container.total.as_ref().filter(|u| !u.is_zero()) {
+            let current_total = total.to_breakdown(token_container.prompt_cache_ttl_ms);
+            let prev_total = thread_totals.entry(thread_id.clone()).or_default();
+            let delta = TokenBreakdown {
+                input: current_total.input.saturating_sub(prev_total.input),
+                output: current_total.output.saturating_sub(prev_total.output),
+                cache_read: current_total
+                    .cache_read
+                    .saturating_sub(prev_total.cache_read),
+                cache_write: current_total
+                    .cache_write
+                    .saturating_sub(prev_total.cache_write),
+                cache_write_1h: current_total
+                    .cache_write_1h
+                    .saturating_sub(prev_total.cache_write_1h),
+                reasoning: current_total.reasoning.saturating_sub(prev_total.reasoning),
             };
+            *prev_total = current_total;
+            delta
+        } else {
+            return Ok(());
+        };
 
-            let tokens = if let Some(last) = token_container.last.as_ref().filter(|u| !u.is_zero()) {
-                let breakdown = last.to_breakdown(token_container.prompt_cache_ttl_ms);
-                if let Some(total) = &token_container.total {
-                    thread_totals.insert(
-                        thread_id.clone(),
-                        total.to_breakdown(token_container.prompt_cache_ttl_ms),
-                    );
-                }
-                breakdown
-            } else if let Some(total) = token_container.total.as_ref().filter(|u| !u.is_zero()) {
-                let current_total = total.to_breakdown(token_container.prompt_cache_ttl_ms);
-                let prev_total = thread_totals.entry(thread_id.clone()).or_default();
-                let delta = TokenBreakdown {
-                    input: current_total.input.saturating_sub(prev_total.input),
-                    output: current_total.output.saturating_sub(prev_total.output),
-                    cache_read: current_total.cache_read.saturating_sub(prev_total.cache_read),
-                    cache_write: current_total.cache_write.saturating_sub(prev_total.cache_write),
-                    cache_write_1h: current_total
-                        .cache_write_1h
-                        .saturating_sub(prev_total.cache_write_1h),
-                    reasoning: current_total
-                        .reasoning
-                        .saturating_sub(prev_total.reasoning),
-                };
-                *prev_total = current_total;
-                delta
-            } else {
-                return Ok(());
-            };
+        if tokens.total() == 0 {
+            return Ok(());
+        }
 
-            if tokens.total() == 0 {
-                return Ok(());
-            }
+        let timestamp = created_at_ms.filter(|ts| *ts > 0).unwrap_or(db_mtime_ms);
 
-            let timestamp = created_at_ms
-                .filter(|ts| *ts > 0)
-                .unwrap_or(db_mtime_ms);
+        let (
+            provider_id,
+            model_id,
+            workspace_key,
+            workspace_label,
+            service_tier,
+            session_title,
+            parent_session_id,
+        ) = if let Some(thread) = thread_metas.get(&thread_id) {
+            let (prov, model) =
+                resolve_provider_and_model(thread, active_fallback_model.as_deref());
+            (
+                prov,
+                model,
+                thread.project_id.clone(),
+                thread.project_name.clone(),
+                thread.service_tier.clone(),
+                thread.title.clone(),
+                thread.parent_thread_id.clone(),
+            )
+        } else {
+            let model = active_fallback_model
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            let prov = provider_identity::inferred_provider_from_model(&model)
+                .unwrap_or("unknown")
+                .to_string();
+            (prov, model, None, None, None, None, None)
+        };
 
-            let (provider_id, model_id, workspace_key, workspace_label, service_tier, session_title, parent_session_id) =
-                if let Some(thread) = thread_metas.get(&thread_id) {
-                    let (prov, model) = resolve_provider_and_model(thread, active_fallback_model.as_deref());
-                    (
-                        prov,
-                        model,
-                        thread.project_id.clone(),
-                        thread.project_name.clone(),
-                        thread.service_tier.clone(),
-                        thread.title.clone(),
-                        thread.parent_thread_id.clone(),
-                    )
-                } else {
-                    let model = active_fallback_model.clone().unwrap_or_else(|| "default".to_string());
-                    let prov = provider_identity::inferred_provider_from_model(&model)
-                        .unwrap_or("unknown")
-                        .to_string();
-                    (prov, model, None, None, None, None, None)
-                };
-
-            let is_turn_start = if let Some(turn) = &turn_id {
-                let seen = turn_first_message_seen.entry(turn.clone()).or_insert(false);
-                if !*seen {
-                    *seen = true;
-                    true
-                } else {
-                    false
-                }
+        let is_turn_start = if let Some(turn) = &turn_id {
+            let seen = turn_first_message_seen.entry(turn.clone()).or_insert(false);
+            if !*seen {
+                *seen = true;
+                true
             } else {
                 false
-            };
-
-            // Deduplication key: forked threads replicate past turns with new event IDs
-            // but matching `turn_id` and sequence within turn.
-            let dedup_key = if let Some(turn) = &turn_id {
-                format!(
-                    "bb:{turn}:{sequence}:{}:{}",
-                    tokens.input, tokens.output
-                )
-            } else {
-                format!(
-                    "bb:{timestamp}:{sequence}:{}:{}",
-                    tokens.input, tokens.output
-                )
-            };
-
-            let mut msg = UnifiedMessage::new_with_dedup(
-                "bb",
-                model_id,
-                provider_id,
-                thread_id,
-                timestamp,
-                tokens,
-                0.0,
-                Some(dedup_key),
-            );
-            msg.workspace_key = workspace_key;
-            msg.workspace_label = workspace_label;
-            msg.service_tier = service_tier;
-            msg.session_title = session_title;
-            msg.parent_session_id = parent_session_id;
-            msg.is_turn_start = is_turn_start;
-            msg.cost_source = CostSource::Estimated;
-            msg.agent = Some("BB".to_string());
-
-            if msg
-                .dedup_key
-                .as_ref()
-                .is_none_or(|key| internal_seen.insert(key.clone()))
-            {
-                messages.push(msg);
             }
+        } else {
+            false
+        };
 
-            Ok(())
-        },
-    );
+        // Deduplication key: forked threads replicate past turns with new event IDs
+        // but matching `turn_id` and sequence within turn.
+        let dedup_key = if let Some(turn) = &turn_id {
+            format!("bb:{turn}:{sequence}:{}:{}", tokens.input, tokens.output)
+        } else {
+            format!(
+                "bb:{timestamp}:{sequence}:{}:{}",
+                tokens.input, tokens.output
+            )
+        };
+
+        let mut msg = UnifiedMessage::new_with_dedup(
+            "bb",
+            model_id,
+            provider_id,
+            thread_id,
+            timestamp,
+            tokens,
+            0.0,
+            Some(dedup_key),
+        );
+        msg.workspace_key = workspace_key;
+        msg.workspace_label = workspace_label;
+        msg.service_tier = service_tier;
+        msg.session_title = session_title;
+        msg.parent_session_id = parent_session_id;
+        msg.is_turn_start = is_turn_start;
+        msg.cost_source = CostSource::Estimated;
+        msg.agent = Some("BB".to_string());
+
+        if msg
+            .dedup_key
+            .as_ref()
+            .is_none_or(|key| internal_seen.insert(key.clone()))
+        {
+            messages.push(msg);
+        }
+
+        Ok(())
+    });
 
     if malformed_rows > 0 {
         debug!(

@@ -8844,13 +8844,7 @@ fn test_bb_client_e2e_cold_and_warm() {
 
     for pass in ["cold", "warm"] {
         let output = cmd_with_home(tmp.path())
-            .args([
-                "models",
-                "--json",
-                "--client",
-                "bb",
-                "--no-spinner",
-            ])
+            .args(["models", "--json", "--client", "bb", "--no-spinner"])
             .output()
             .unwrap();
         assert!(
@@ -8863,7 +8857,10 @@ fn test_bb_client_e2e_cold_and_warm() {
         assert_eq!(json["totalInput"].as_i64(), Some(800), "{pass}");
         assert_eq!(json["totalOutput"].as_i64(), Some(200), "{pass}");
         assert_eq!(json["entries"][0]["client"].as_str(), Some("bb"));
-        assert_eq!(json["entries"][0]["model"].as_str(), Some("claude-3-7-sonnet"));
+        assert_eq!(
+            json["entries"][0]["model"].as_str(),
+            Some("claude-3-7-sonnet")
+        );
         assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
     }
 }

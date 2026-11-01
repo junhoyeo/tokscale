@@ -2684,10 +2684,7 @@ mod tests {
             crate::tui::client_ui::from_hotkey('J'),
             Some(ClientId::Proma)
         );
-        assert_eq!(
-            crate::tui::client_ui::from_hotkey('Z'),
-            Some(ClientId::Bb)
-        );
+        assert_eq!(crate::tui::client_ui::from_hotkey('Z'), Some(ClientId::Bb));
     }
 
     #[test]
