@@ -4347,6 +4347,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
 
     // BB (get-bb/bb) SQLite database sessions.
+    let mut bb_seen: HashSet<String> = HashSet::new();
     for db_path in &scan_result.bb_dbs {
         let CachedParseOutcome {
             mut messages,
@@ -4360,7 +4361,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
             sessions::bb::parse_bb_sqlite,
         );
         machine_labeler.label_messages(db_path, &mut messages);
-        all_messages.extend(messages);
+        all_messages.extend(
+            messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut bb_seen, message)),
+        );
         if let Some(entry) = cache_entry {
             source_cache.insert(entry);
         }

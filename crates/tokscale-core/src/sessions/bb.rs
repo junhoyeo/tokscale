@@ -43,7 +43,7 @@ use super::UnifiedMessage;
 use crate::{provider_identity, CostSource, TokenBreakdown};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -354,6 +354,8 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
     let mut current_thread_id: Option<String> = None;
     let mut active_fallback_model: Option<String> = None;
     let mut turn_first_message_seen: HashMap<String, bool> = HashMap::new();
+    let mut internal_seen: HashSet<String> = HashSet::new();
+    let mut thread_totals: HashMap<String, TokenBreakdown> = HashMap::new();
 
     let query = "SELECT id, thread_id, turn_id, sequence, type, data, created_at \
                  FROM events \
@@ -366,7 +368,7 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
         query,
         Some("BB event"),
         &mut |row| {
-            let event_id: String = row.get(0)?;
+            let _event_id: String = row.get(0)?;
             let thread_id: String = row.get(1)?;
             let turn_id: Option<String> = row.get(2)?;
             let sequence: i64 = row.get(3)?;
@@ -395,17 +397,36 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
                 return Ok(());
             };
 
-            let usage_breakdown = token_container
-                .last
-                .as_ref()
-                .filter(|u| !u.is_zero())
-                .or_else(|| token_container.total.as_ref().filter(|u| !u.is_zero()));
-
-            let Some(usage) = usage_breakdown else {
+            let tokens = if let Some(last) = token_container.last.as_ref().filter(|u| !u.is_zero()) {
+                let breakdown = last.to_breakdown(token_container.prompt_cache_ttl_ms);
+                if let Some(total) = &token_container.total {
+                    thread_totals.insert(
+                        thread_id.clone(),
+                        total.to_breakdown(token_container.prompt_cache_ttl_ms),
+                    );
+                }
+                breakdown
+            } else if let Some(total) = token_container.total.as_ref().filter(|u| !u.is_zero()) {
+                let current_total = total.to_breakdown(token_container.prompt_cache_ttl_ms);
+                let prev_total = thread_totals.entry(thread_id.clone()).or_default();
+                let delta = TokenBreakdown {
+                    input: current_total.input.saturating_sub(prev_total.input),
+                    output: current_total.output.saturating_sub(prev_total.output),
+                    cache_read: current_total.cache_read.saturating_sub(prev_total.cache_read),
+                    cache_write: current_total.cache_write.saturating_sub(prev_total.cache_write),
+                    cache_write_1h: current_total
+                        .cache_write_1h
+                        .saturating_sub(prev_total.cache_write_1h),
+                    reasoning: current_total
+                        .reasoning
+                        .saturating_sub(prev_total.reasoning),
+                };
+                *prev_total = current_total;
+                delta
+            } else {
                 return Ok(());
             };
 
-            let tokens = usage.to_breakdown(token_container.prompt_cache_ttl_ms);
             if tokens.total() == 0 {
                 return Ok(());
             }
@@ -455,7 +476,7 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
                 )
             } else {
                 format!(
-                    "bb:{event_id}:{sequence}:{}:{}",
+                    "bb:{timestamp}:{sequence}:{}:{}",
                     tokens.input, tokens.output
                 )
             };
@@ -479,7 +500,13 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
             msg.cost_source = CostSource::Estimated;
             msg.agent = Some("BB".to_string());
 
-            messages.push(msg);
+            if msg
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| internal_seen.insert(key.clone()))
+            {
+                messages.push(msg);
+            }
 
             Ok(())
         },
@@ -757,5 +784,106 @@ mod tests {
         let messages = parse_bb_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "claude-3-5-haiku");
+    }
+
+    #[test]
+    fn test_parse_bb_sqlite_fork_dedup() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+
+        // Thread 1: original thread with turn 1
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_parent', NULL, 'claude-code', 'claude-3-7-sonnet', 'Parent Thread', NULL, 1000)",
+            [],
+        )
+        .unwrap();
+
+        // Thread 2: forked from Thread 1
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_child', NULL, 'claude-code', 'claude-3-7-sonnet', 'Child Thread', 'thr_parent', 2000)",
+            [],
+        )
+        .unwrap();
+
+        // Turn 1 event in Thread 1
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_t1_1', 'thr_parent', 'turn_1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"last\": {\"totalTokens\": 500, \"inputTokens\": 400, \"outputTokens\": 100}}}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        // Fork copies turn 1 into Thread 2 with matching turn_id and sequence
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_t2_1', 'thr_child', 'turn_1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"last\": {\"totalTokens\": 500, \"inputTokens\": 400, \"outputTokens\": 100}}}', 2100)",
+            [],
+        )
+        .unwrap();
+
+        // Turn 2 is a new turn only in Thread 2
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_t2_2', 'thr_child', 'turn_2', 2, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"last\": {\"totalTokens\": 600, \"inputTokens\": 450, \"outputTokens\": 150}}}', 2200)",
+            [],
+        )
+        .unwrap();
+
+        let messages = parse_bb_sqlite(&db_path);
+        // Turn 1 was duplicated across threads, but should be deduplicated so only 2 messages exist
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 400);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[1].tokens.input, 450);
+        assert_eq!(messages[1].tokens.output, 150);
+    }
+
+    #[test]
+    fn test_parse_bb_sqlite_cumulative_total_delta() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_cumul', NULL, 'claude-code', 'claude-3-7-sonnet', 'Cumulative Thread', NULL, 1000)",
+            [],
+        )
+        .unwrap();
+
+        // Event 1: only has `total` (1000 input, 200 output)
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_c1', 'thr_cumul', 'turn_c1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"total\": {\"totalTokens\": 1200, \"inputTokens\": 1000, \"outputTokens\": 200}}}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        // Event 2: cumulative total has grown to 2500 input, 500 output (delta: 1500 input, 300 output)
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_c2', 'thr_cumul', 'turn_c2', 2, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"total\": {\"totalTokens\": 3000, \"inputTokens\": 2500, \"outputTokens\": 500}}}', 1200)",
+            [],
+        )
+        .unwrap();
+
+        let messages = parse_bb_sqlite(&db_path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 200);
+        assert_eq!(messages[1].tokens.input, 1500);
+        assert_eq!(messages[1].tokens.output, 300);
+        let total_input: i64 = messages.iter().map(|m| m.tokens.input).sum();
+        let total_output: i64 = messages.iter().map(|m| m.tokens.output).sum();
+        assert_eq!(total_input, 2500);
+        assert_eq!(total_output, 500);
     }
 }
