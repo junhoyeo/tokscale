@@ -10006,16 +10006,27 @@ mod tests {
     /// cache is admitted on `parser_generation()` alone, and that value is
     /// derived from every client's `parser_version()`; a base that did not
     /// move would let the pre-fix totals be painted even though the source
-    /// scan now reports rows. Pinning the exact versions keeps a later edit
-    /// from quietly reusing the number this change retires.
+    /// scan now reports rows.
+    ///
+    /// The pre-bump generation is pinned as a literal rather than derived from
+    /// the current versions, because deriving it would make this pass even if
+    /// the bump were removed — the value would simply follow whatever the
+    /// constant said. `13555121629452759766` is what `parser_generation()`
+    /// returned with `CODEBUFF_CHAT_PARSER_BASE_VERSION` at 1, measured by
+    /// running it before the bump. A later edit that reuses v1 for this family
+    /// lands back on that number and fails here.
     #[test]
     fn test_codebuff_chat_family_bump_moves_the_parser_generation() {
+        const PRE_BUMP_GENERATION: u64 = 13_555_121_629_452_759_766;
+
         assert_eq!(parser_version(ClientId::Codebuff), 2);
         assert_eq!(parser_version(ClientId::Freebuff), 2);
-        // The generation is persisted in the TUI cache, so it must be stable
-        // across calls and never collide with the pre-field serde default.
-        assert_eq!(parser_generation(), parser_generation());
-        assert_ne!(parser_generation(), 0);
+        assert_ne!(
+            parser_generation(),
+            PRE_BUMP_GENERATION,
+            "the bump must change the generation, or a warm TUI keeps painting \
+             the pre-fix totals"
+        );
     }
 
     #[test]
