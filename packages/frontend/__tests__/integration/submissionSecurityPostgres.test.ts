@@ -27,6 +27,7 @@ import { GET as getModerationUser, POST as moderate } from "@/app/api/admin/mode
 import { GET as getCandidates } from "@/app/api/admin/moderation/candidates/route";
 import { applyModerationAction, findModerationTarget, getModerationHistory } from "@/lib/moderation/actions";
 import { getModerationCandidates } from "@/lib/moderation/candidates";
+import { evaluateSubmissionForWithholding, getWithholdingUsageTotals, hasPerInferenceMessageCount } from "@/lib/moderation/withholding";
 import { validateSubmission } from "@/lib/validation/submission";
 
 const describeWithPostgres = process.env.SUBMISSION_WITHHOLDING_DB_INTEGRATION === "1" ? describe : describe.skip;
@@ -369,5 +370,65 @@ describeWithPostgres("submission security PostgreSQL integration", () => {
     expect(historyRes.headers.get("content-type")).toContain("application/json");
     const historyBody = await historyRes.json();
     expect(historyBody.history[0].reason).toBe(xssReason);
+  });
+
+  it("clamps IEEE-754 Infinity overflows ('1e309') fail-closed and normalizes whitespace client keys identically in JS and SQL", async () => {
+    const a = await account();
+    const b = await account();
+    expect((await submit(a.token, payload("gpt-4o", 1_000))).status).toBe(200);
+    expect((await submit(b.token, payload("gpt-4o", 50_000_000))).status).toBe(200);
+
+    const jsTotals = getWithholdingUsageTotals([
+      {
+        date: "2026-04-30",
+        tokens: 1_100,
+        outputTokens: 100,
+        sourceBreakdown: {
+          opencode: {
+            tokens: "1e309",
+            messages: "1",
+            models: { "gpt-4o": { tokens: "1e309", messages: "1" } },
+          },
+          "claude\t": {
+            tokens: 500_000_000,
+            messages: 1,
+          },
+        },
+      },
+    ]);
+    expect(hasPerInferenceMessageCount("claude\t")).toBe(false);
+    expect(evaluateSubmissionForWithholding(jsTotals).shouldWithhold).toBe(true);
+
+    const sql = database();
+    await sql`
+      UPDATE daily_breakdown
+      SET source_breakdown = jsonb_build_object(
+        'opencode', jsonb_build_object(
+          'tokens', '1e309',
+          'messages', '1',
+          'models', jsonb_build_object('gpt-4o', jsonb_build_object('tokens', '1e309', 'messages', '1'))
+        )
+      )
+      WHERE submission_id = (SELECT id FROM submissions WHERE user_id = ${a.id})
+    `;
+    await sql`
+      UPDATE daily_breakdown
+      SET source_breakdown = jsonb_build_object(
+        E'claude\\t', jsonb_build_object(
+          'tokens', 500000000,
+          'messages', 1
+        )
+      )
+      WHERE submission_id = (SELECT id FROM submissions WHERE user_id = ${b.id})
+    `;
+
+    const candidates = await getModerationCandidates();
+    const candA = candidates.find((c) => c.userId === a.id);
+    expect(candA).toBeDefined();
+    expect(candA?.maxTokensPerMessage).toBeGreaterThan(100_000_000);
+    expect(candA?.signals.some((s) => s.key === "usageLimit" || s.key === "tokensPerMessage")).toBe(true);
+
+    const candB = candidates.find((c) => c.userId === b.id);
+    expect(candB?.maxTokensPerMessage ?? 0).toBe(0);
   });
 });

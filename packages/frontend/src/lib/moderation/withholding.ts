@@ -93,20 +93,27 @@ export interface WithholdingDailyRow {
   sourceBreakdown?: unknown;
 }
 
+function clampFiniteMax(value: number): number {
+  if (value === Number.POSITIVE_INFINITY) return Number.MAX_VALUE;
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
 function toCount(value: TokenCount): number {
-  const count = Number(value ?? 0);
-  return Number.isFinite(count) ? Math.max(0, count) : 0;
+  if (typeof value === "string" && /^[+-]?Infinity$/i.test(value.trim())) {
+    return 0;
+  }
+  return clampFiniteMax(Number(value ?? 0));
 }
 
 function sumTokenBreakdown(obj: unknown): number {
   if (!obj || typeof obj !== "object") return 0;
   const rec = obj as Record<string, unknown>;
-  return (
+  return clampFiniteMax(
     toCount(rec.input as TokenCount) +
-    toCount(rec.output as TokenCount) +
-    toCount(rec.cacheRead as TokenCount) +
-    toCount(rec.cacheWrite as TokenCount) +
-    toCount(rec.reasoning as TokenCount)
+      toCount(rec.output as TokenCount) +
+      toCount(rec.cacheRead as TokenCount) +
+      toCount(rec.cacheWrite as TokenCount) +
+      toCount(rec.reasoning as TokenCount)
   );
 }
 
@@ -178,13 +185,16 @@ export function getWithholdingUsageTotals(
               toTokenCount(modelObj.tokens)
             );
             const modelMessages = toCount(modelObj.messages as TokenCount);
-            modelTokensSum += modelTokens;
+            modelTokensSum = clampFiniteMax(modelTokensSum + modelTokens);
             if (modelMessages > 0) {
               if (modelTokens > 0) {
-                maxModelRatio = Math.max(maxModelRatio, modelTokens / modelMessages);
+                maxModelRatio = Math.max(
+                  maxModelRatio,
+                  clampFiniteMax(modelTokens / modelMessages)
+                );
               }
             } else {
-              zeroMessageModelTokens += modelTokens;
+              zeroMessageModelTokens = clampFiniteMax(zeroMessageModelTokens + modelTokens);
             }
           }
         }
@@ -201,7 +211,7 @@ export function getWithholdingUsageTotals(
           if (countedClientTokens > 0) {
             maxTokensPerMessage = Math.max(
               maxTokensPerMessage,
-              countedClientTokens / clientMessages
+              clampFiniteMax(countedClientTokens / clientMessages)
             );
           }
         }
@@ -209,11 +219,11 @@ export function getWithholdingUsageTotals(
     }
 
     const day = byDate.get(row.date) ?? { tokens: 0, output: 0 };
-    day.tokens += tokens;
-    day.output += output;
+    day.tokens = clampFiniteMax(day.tokens + tokens);
+    day.output = clampFiniteMax(day.output + output);
     byDate.set(row.date, day);
 
-    totalTokens += tokens;
+    totalTokens = clampFiniteMax(totalTokens + tokens);
     maxDailyTokens = Math.max(maxDailyTokens, day.tokens);
     maxDailyOutputTokens = Math.max(maxDailyOutputTokens, day.output);
   }
