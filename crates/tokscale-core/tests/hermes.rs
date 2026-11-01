@@ -203,6 +203,10 @@ fn test_parse_hermes_sqlite_reads_session_rows_and_preserves_message_count() {
         msg.dedup_key.as_deref(),
         Some("hermes:session-1:claude-sonnet-4:anthropic")
     );
+    assert_eq!(
+        msg.session_title, None,
+        "a schema without sessions.title still parses, with no title"
+    );
 }
 
 /// Hermes records `completion_tokens_details.reasoning_tokens` inside
@@ -1904,4 +1908,62 @@ fn test_parse_hermes_sqlite_groups_split_by_bucket_timezone() {
         local_messages.iter().map(|m| m.tokens.input).sum::<i64>(),
         400
     );
+}
+
+/// Current Hermes builds store the conversation title on `sessions.title`.
+/// The usage queries must copy a non-blank title onto each parsed message and
+/// leave a blank one unset, without changing the token totals.
+#[test]
+fn test_parse_hermes_sqlite_copies_session_title() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("titled-state.db");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            title TEXT,
+            billing_provider TEXT
+        );
+        CREATE TABLE session_model_usage (
+            session_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            billing_provider TEXT NOT NULL DEFAULT '',
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            actual_cost_usd REAL NOT NULL DEFAULT 0
+        );
+        INSERT INTO sessions (id, source, model, started_at, message_count, title, billing_provider)
+        VALUES
+            ('session-titled', 'cli', 'glm-5.2', 1775008000.0, 4, '  部署监控  ', 'zai'),
+            ('session-blank', 'cli', 'glm-5.2', 1775008000.0, 1, '   ', 'zai');
+        INSERT INTO session_model_usage (
+            session_id, model, billing_provider, input_tokens, output_tokens
+        ) VALUES
+            ('session-titled', 'glm-5.2', 'zai', 100, 20),
+            ('session-blank', 'glm-5.2', 'zai', 10, 2);
+        "#,
+    )
+    .unwrap();
+
+    let messages = parse_hermes_sqlite(&db_path);
+    let titled = messages
+        .iter()
+        .find(|message| message.session_id == "session-titled")
+        .unwrap();
+    let blank = messages
+        .iter()
+        .find(|message| message.session_id == "session-blank")
+        .unwrap();
+    assert_eq!(titled.session_title.as_deref(), Some("部署监控"));
+    assert_eq!(titled.tokens.input, 100);
+    assert_eq!(blank.session_title, None);
 }
