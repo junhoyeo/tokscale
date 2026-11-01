@@ -266,10 +266,10 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       ) ov
       WHERE jsonb_typeof(d.source_breakdown) = 'object'
         AND jsonb_typeof(client.value) = 'object'
-        AND LENGTH(REGEXP_REPLACE(client.key, '^[[:space:]]+|[[:space:]]+$', '', 'g')) > 0
+        AND LENGTH(REGEXP_REPLACE(client.key, '^[[:space:]\\uFEFF\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+|[[:space:]\\uFEFF\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+$', '', 'g')) > 0
         -- Match submission enforcement, including Claude-based cc-mirror
         -- variants whose model buckets mix counted and count-neutral usage.
-        AND LOWER(REGEXP_REPLACE(client.key, '^[[:space:]]+|[[:space:]]+$', '', 'g')) !~ ${NON_PER_INFERENCE_CLIENT_REGEX}
+        AND LOWER(REGEXP_REPLACE(client.key, '^[[:space:]\\uFEFF\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+|[[:space:]\\uFEFF\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+$', '', 'g')) !~ ${NON_PER_INFERENCE_CLIENT_REGEX}
       GROUP BY d.submission_id
     ),
     -- modelsForHighWater() assigns a partial map's scalar remainder to

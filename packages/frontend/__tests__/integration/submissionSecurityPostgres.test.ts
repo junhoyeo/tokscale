@@ -389,14 +389,15 @@ describeWithPostgres("submission security PostgreSQL integration", () => {
             messages: "1",
             models: { "gpt-4o": { tokens: "1e309", messages: "1" } },
           },
-          "claude\t": {
+          "\uFEFFclaude\t": {
             tokens: 500_000_000,
             messages: 1,
           },
         },
       },
     ]);
-    expect(hasPerInferenceMessageCount("claude\t")).toBe(false);
+    expect(hasPerInferenceMessageCount("\uFEFFclaude\t")).toBe(false);
+    expect(hasPerInferenceMessageCount("\uFEFFclaude")).toBe(false);
     expect(evaluateSubmissionForWithholding(jsTotals).shouldWithhold).toBe(true);
 
     const sql = database();
@@ -414,7 +415,7 @@ describeWithPostgres("submission security PostgreSQL integration", () => {
     await sql`
       UPDATE daily_breakdown
       SET source_breakdown = jsonb_build_object(
-        E'claude\\t', jsonb_build_object(
+        E'\\uFEFFclaude\\t', jsonb_build_object(
           'tokens', 500000000,
           'messages', 1
         )

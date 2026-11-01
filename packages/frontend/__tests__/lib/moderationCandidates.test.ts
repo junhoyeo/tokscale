@@ -217,7 +217,9 @@ describe("getModerationCandidates - moderation action metadata exposure", () => 
     const executedSql = query.sql.replace(/\s+/g, " ");
 
     expect(executedSql).toContain("tokens_per_msg AS (");
-    expect(executedSql).toContain("LOWER(REGEXP_REPLACE(client.key, '^[[:space:]]+|[[:space:]]+$', '', 'g')) !~");
+    expect(executedSql).toContain(
+      "LOWER(REGEXP_REPLACE(client.key, '^[[:space:]\\uFEFF\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+|[[:space:]\\uFEFF\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+$', '', 'g')) !~"
+    );
     expect(query.params).toContain(NON_PER_INFERENCE_CLIENT_REGEX);
     expect(executedSql).toContain("zero_msg_model_tokens");
     expect(executedSql).toContain("COALESCE(m.nested_tokens, 0) > c.client_tokens AS over_nested");
