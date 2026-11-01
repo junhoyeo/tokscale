@@ -371,19 +371,23 @@ describeWithPostgres("submission withholding PostgreSQL integration", () => {
     );
     const cs = [client("opencode", "claude-sonnet-4", tokens(0, 0, 400_000_000_000), 1, 10_000)];
 
-    await submit(a, multiDayPayload(dates.slice(0, 2499), cs));
-    expect(await hidden(a)).toBe(false);
-    expect(await signals(a)).not.toContain("usageLimit");
+    try {
+      await submit(a, multiDayPayload(dates.slice(0, 2499), cs));
+      expect(await hidden(a)).toBe(false);
+      expect(await signals(a)).not.toContain("usageLimit");
 
-    await submit(a, payload(cs, { date: dates[2499] }));
-    expect(await hidden(a)).toBe(true);
-    expect(await signals(a)).toContain("usageLimit");
-    const [action] = await getModerationHistory(a.id);
-    expect(action).toMatchObject({
-      action: "hide",
-      actorUsername: "system",
-      reason: "Under investigation",
-    });
+      await submit(a, payload(cs, { date: dates[2499] }));
+      expect(await hidden(a)).toBe(true);
+      expect(await signals(a)).toContain("usageLimit");
+      const [action] = await getModerationHistory(a.id);
+      expect(action).toMatchObject({
+        action: "hide",
+        actorUsername: "system",
+        reason: "Under investigation",
+      });
+    } finally {
+      await database()`DELETE FROM users WHERE id = ${a.id}`;
+    }
   }, 15_000);
 
   it("allows a concurrent administrator restore to win over a waiting submit", async () => {
