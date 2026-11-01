@@ -2645,6 +2645,56 @@ fn parse_all_messages_streaming<S: MessageSink>(
         )
     }
 
+    /// Devin CLI databases sit on a WAL whose file metadata changes on every
+    /// write, so `check_sqlite_path` can never reach `Unchanged` for an active
+    /// database — every scan would re-parse the whole `message_nodes` table.
+    /// The row-stats fingerprint instead moves only when usage rows appear or
+    /// disappear, which is the only change the parser can observe: `size`
+    /// carries the row count, `modified_ns` the max `row_id`.
+    fn devin_cli_fingerprint(
+        path: &Path,
+        cached: Option<&message_cache::SourceFingerprint>,
+    ) -> Option<message_cache::FingerprintStatus> {
+        let stats = sessions::devin::devin_cli_row_stats(path)?;
+        let fingerprint = message_cache::SourceFingerprint {
+            size: stats.row_count.max(0) as u64,
+            modified_ns: stats.max_row_id.max(0) as u64,
+            sample_hashes: Vec::new(),
+            content_hash: [0; 32],
+            related_files: Vec::new(),
+        };
+        Some(if cached == Some(&fingerprint) {
+            message_cache::FingerprintStatus::Unchanged
+        } else {
+            message_cache::FingerprintStatus::Changed(fingerprint)
+        })
+    }
+
+    /// Merges an entry's cached messages with rows appended since its
+    /// watermark. Returns `None` (falling back to the full parse) when the row
+    /// count shrank: a `row_id`-after scan cannot tell which cached messages a
+    /// deletion took.
+    fn devin_cli_resume(
+        path: &Path,
+        entry: &message_cache::CachedSourceEntry,
+        fingerprint: &message_cache::SourceFingerprint,
+    ) -> Option<SourceParse> {
+        if fingerprint.size < entry.fingerprint.size {
+            return None;
+        }
+        let after_row_id = entry.fingerprint.modified_ns as i64;
+        let mut messages = entry.messages.clone();
+        messages.extend(sessions::devin::parse_devin_cli_sqlite_after(
+            path,
+            after_row_id,
+        ));
+        Some(SourceParse {
+            messages,
+            cacheable: true,
+            claude_checkpoint: None,
+        })
+    }
+
     /// MiMo rows and exact provenance are one cache payload. A warm hit never
     /// opens SQLite, and a cold read collects both in one reader snapshot.
     fn load_or_parse_micode_source(
@@ -4738,12 +4788,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
             .devin_dbs
             .par_iter()
             .map(|db_path| {
-                let mut outcome = load_or_parse_sqlite_source(
+                let mut outcome = load_or_parse_resumable_source(
                     message_cache::CacheIdentity::for_client(ClientId::DevinCli),
                     db_path,
                     &source_cache,
                     pricing,
-                    sessions::devin::parse_devin_cli_sqlite,
+                    HistoryRetention::LiveFileOnly,
+                    devin_cli_fingerprint,
+                    |path, _| SourceParse {
+                        messages: sessions::devin::parse_devin_cli_sqlite(path),
+                        cacheable: true,
+                        claude_checkpoint: None,
+                    },
+                    Some(&devin_cli_resume),
                 );
                 machine_labeler.label_messages(db_path, &mut outcome.messages);
                 outcome
