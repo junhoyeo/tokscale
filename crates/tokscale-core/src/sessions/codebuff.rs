@@ -34,7 +34,13 @@ const DEFAULT_MODEL: &str = "codebuff-unknown";
 /// each member's version from it (base plus a per-client offset that
 /// preserves independent history) so no member can be left serving stale
 /// cache entries.
-pub(crate) const CODEBUFF_CHAT_PARSER_BASE_VERSION: u32 = 1;
+///
+/// v1->v2: Freebuff's root agent family moved from `base2-free*` to
+/// `base3-free*` (plus the `base3-fast-free-*` lane), and the marker now
+/// matches a `free` path segment instead of a fixed `base2-free` prefix.
+/// Files that parsed to nothing under v1 have unchanged bytes and mtimes, so
+/// only this bump retires those cached empties.
+pub(crate) const CODEBUFF_CHAT_PARSER_BASE_VERSION: u32 = 2;
 
 /// Parse a single `chat-messages.json` file into UnifiedMessages.
 pub fn parse_codebuff_file(path: &Path) -> Vec<UnifiedMessage> {
