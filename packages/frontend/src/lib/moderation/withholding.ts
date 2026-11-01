@@ -284,7 +284,7 @@ export interface LatestModerationAction {
 export function hasAdminUnhideOverride(
   latestAction: LatestModerationAction | null | undefined
 ): boolean {
-  if (!latestAction || latestAction.action !== "unhide") {
+  if (latestAction?.action !== "unhide") {
     return false;
   }
   if (

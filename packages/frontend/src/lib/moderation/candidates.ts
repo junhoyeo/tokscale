@@ -157,7 +157,7 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         MAX(
           GREATEST(
             CASE
-              WHEN (client.value->>'messages') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+              WHEN (client.value->>'messages') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
                 AND (client.value->>'messages')::numeric > 0
               THEN
                 GREATEST(
@@ -181,24 +181,24 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
         SELECT
           GREATEST(
             CASE
-              WHEN (client.value->>'tokens') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+              WHEN (client.value->>'tokens') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
               THEN (client.value->>'tokens')::numeric
               ELSE 0
             END,
             COALESCE(
-              CASE WHEN (client.value->>'input') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->>'input')::numeric ELSE 0 END +
-              CASE WHEN (client.value->>'output') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->>'output')::numeric ELSE 0 END +
-              CASE WHEN (client.value->>'cacheRead') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->>'cacheRead')::numeric ELSE 0 END +
-              CASE WHEN (client.value->>'cacheWrite') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->>'cacheWrite')::numeric ELSE 0 END +
-              CASE WHEN (client.value->>'reasoning') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->>'reasoning')::numeric ELSE 0 END,
+              CASE WHEN (client.value->>'input') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->>'input')::numeric ELSE 0 END +
+              CASE WHEN (client.value->>'output') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->>'output')::numeric ELSE 0 END +
+              CASE WHEN (client.value->>'cacheRead') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->>'cacheRead')::numeric ELSE 0 END +
+              CASE WHEN (client.value->>'cacheWrite') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->>'cacheWrite')::numeric ELSE 0 END +
+              CASE WHEN (client.value->>'reasoning') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->>'reasoning')::numeric ELSE 0 END,
               0
             ),
             COALESCE(
-              CASE WHEN (client.value->'tokens'->>'input') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->'tokens'->>'input')::numeric ELSE 0 END +
-              CASE WHEN (client.value->'tokens'->>'output') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->'tokens'->>'output')::numeric ELSE 0 END +
-              CASE WHEN (client.value->'tokens'->>'cacheRead') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->'tokens'->>'cacheRead')::numeric ELSE 0 END +
-              CASE WHEN (client.value->'tokens'->>'cacheWrite') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->'tokens'->>'cacheWrite')::numeric ELSE 0 END +
-              CASE WHEN (client.value->'tokens'->>'reasoning') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (client.value->'tokens'->>'reasoning')::numeric ELSE 0 END,
+              CASE WHEN (client.value->'tokens'->>'input') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->'tokens'->>'input')::numeric ELSE 0 END +
+              CASE WHEN (client.value->'tokens'->>'output') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->'tokens'->>'output')::numeric ELSE 0 END +
+              CASE WHEN (client.value->'tokens'->>'cacheRead') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->'tokens'->>'cacheRead')::numeric ELSE 0 END +
+              CASE WHEN (client.value->'tokens'->>'cacheWrite') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->'tokens'->>'cacheWrite')::numeric ELSE 0 END +
+              CASE WHEN (client.value->'tokens'->>'reasoning') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (client.value->'tokens'->>'reasoning')::numeric ELSE 0 END,
               0
             ),
             0
@@ -225,30 +225,30 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
           SELECT
             GREATEST(
               CASE
-                WHEN (model.value->>'tokens') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+                WHEN (model.value->>'tokens') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
                 THEN (model.value->>'tokens')::numeric
                 ELSE 0
               END,
               COALESCE(
-                CASE WHEN (model.value->>'input') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'input')::numeric ELSE 0 END +
-                CASE WHEN (model.value->>'output') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'output')::numeric ELSE 0 END +
-                CASE WHEN (model.value->>'cacheRead') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cacheRead')::numeric ELSE 0 END +
-                CASE WHEN (model.value->>'cacheWrite') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cacheWrite')::numeric ELSE 0 END +
-                CASE WHEN (model.value->>'reasoning') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'reasoning')::numeric ELSE 0 END,
+                CASE WHEN (model.value->>'input') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'input')::numeric ELSE 0 END +
+                CASE WHEN (model.value->>'output') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'output')::numeric ELSE 0 END +
+                CASE WHEN (model.value->>'cacheRead') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'cacheRead')::numeric ELSE 0 END +
+                CASE WHEN (model.value->>'cacheWrite') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'cacheWrite')::numeric ELSE 0 END +
+                CASE WHEN (model.value->>'reasoning') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'reasoning')::numeric ELSE 0 END,
                 0
               ),
               COALESCE(
-                CASE WHEN (model.value->'tokens'->>'input') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->'tokens'->>'input')::numeric ELSE 0 END +
-                CASE WHEN (model.value->'tokens'->>'output') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->'tokens'->>'output')::numeric ELSE 0 END +
-                CASE WHEN (model.value->'tokens'->>'cacheRead') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->'tokens'->>'cacheRead')::numeric ELSE 0 END +
-                CASE WHEN (model.value->'tokens'->>'cacheWrite') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->'tokens'->>'cacheWrite')::numeric ELSE 0 END +
-                CASE WHEN (model.value->'tokens'->>'reasoning') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->'tokens'->>'reasoning')::numeric ELSE 0 END,
+                CASE WHEN (model.value->'tokens'->>'input') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->'tokens'->>'input')::numeric ELSE 0 END +
+                CASE WHEN (model.value->'tokens'->>'output') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->'tokens'->>'output')::numeric ELSE 0 END +
+                CASE WHEN (model.value->'tokens'->>'cacheRead') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->'tokens'->>'cacheRead')::numeric ELSE 0 END +
+                CASE WHEN (model.value->'tokens'->>'cacheWrite') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->'tokens'->>'cacheWrite')::numeric ELSE 0 END +
+                CASE WHEN (model.value->'tokens'->>'reasoning') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->'tokens'->>'reasoning')::numeric ELSE 0 END,
                 0
               ),
               0
             ) AS model_tokens,
             CASE
-              WHEN (model.value->>'messages') ~ '^[+]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+              WHEN (model.value->>'messages') ~ '^[+]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
                 AND (model.value->>'messages')::numeric > 0
               THEN (model.value->>'messages')::numeric
               ELSE 0
@@ -290,13 +290,13 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       CROSS JOIN LATERAL (SELECT d.source_breakdown->'cursor' AS entry) c
       CROSS JOIN LATERAL (
         SELECT
-          CASE WHEN (c.entry->>'cost') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'cost')::numeric ELSE 0 END AS cost,
-          CASE WHEN (c.entry->>'tokens') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'tokens')::numeric ELSE 0 END AS tokens,
-          CASE WHEN (c.entry->>'input') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'input')::numeric ELSE 0 END AS input,
-          CASE WHEN (c.entry->>'output') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'output')::numeric ELSE 0 END AS output,
-          CASE WHEN (c.entry->>'cacheRead') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'cacheRead')::numeric ELSE 0 END AS cache_read,
-          CASE WHEN (c.entry->>'cacheWrite') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'cacheWrite')::numeric ELSE 0 END AS cache_write,
-          CASE WHEN (c.entry->>'reasoning') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (c.entry->>'reasoning')::numeric ELSE 0 END AS reasoning
+          CASE WHEN (c.entry->>'cost') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'cost')::numeric ELSE 0 END AS cost,
+          CASE WHEN (c.entry->>'tokens') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'tokens')::numeric ELSE 0 END AS tokens,
+          CASE WHEN (c.entry->>'input') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'input')::numeric ELSE 0 END AS input,
+          CASE WHEN (c.entry->>'output') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'output')::numeric ELSE 0 END AS output,
+          CASE WHEN (c.entry->>'cacheRead') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'cacheRead')::numeric ELSE 0 END AS cache_read,
+          CASE WHEN (c.entry->>'cacheWrite') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'cacheWrite')::numeric ELSE 0 END AS cache_write,
+          CASE WHEN (c.entry->>'reasoning') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (c.entry->>'reasoning')::numeric ELSE 0 END AS reasoning
       ) cv
       CROSS JOIN LATERAL (
         SELECT
@@ -309,13 +309,13 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       ) m
       CROSS JOIN LATERAL (
         SELECT
-          CASE WHEN (m.entry->>'cost') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (m.entry->>'cost')::numeric ELSE 0 END AS cost
+          CASE WHEN (m.entry->>'cost') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (m.entry->>'cost')::numeric ELSE 0 END AS cost
       ) mv
       CROSS JOIN LATERAL (
         SELECT NOT EXISTS (
           SELECT 1 FROM unnest(ARRAY['tokens', 'input', 'output', 'cacheRead', 'cacheWrite', 'reasoning']) AS f(name)
           WHERE CASE
-            WHEN (m.entry->>f.name) ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+            WHEN (m.entry->>f.name) ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
             THEN (m.entry->>f.name)::numeric
             ELSE 0
           END <> 0
@@ -323,13 +323,13 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       ) p
       CROSS JOIN LATERAL (
         SELECT
-          COALESCE(SUM(CASE WHEN (model.value->>'cost') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cost')::numeric ELSE 0 END), 0) AS cost,
-          COALESCE(SUM(CASE WHEN (model.value->>'tokens') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'tokens')::numeric ELSE 0 END), 0) AS tokens,
-          COALESCE(SUM(CASE WHEN (model.value->>'input') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'input')::numeric ELSE 0 END), 0) AS input,
-          COALESCE(SUM(CASE WHEN (model.value->>'output') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'output')::numeric ELSE 0 END), 0) AS output,
-          COALESCE(SUM(CASE WHEN (model.value->>'cacheRead') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cacheRead')::numeric ELSE 0 END), 0) AS cache_read,
-          COALESCE(SUM(CASE WHEN (model.value->>'cacheWrite') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'cacheWrite')::numeric ELSE 0 END), 0) AS cache_write,
-          COALESCE(SUM(CASE WHEN (model.value->>'reasoning') ~ '^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (model.value->>'reasoning')::numeric ELSE 0 END), 0) AS reasoning
+          COALESCE(SUM(CASE WHEN (model.value->>'cost') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'cost')::numeric ELSE 0 END), 0) AS cost,
+          COALESCE(SUM(CASE WHEN (model.value->>'tokens') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'tokens')::numeric ELSE 0 END), 0) AS tokens,
+          COALESCE(SUM(CASE WHEN (model.value->>'input') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'input')::numeric ELSE 0 END), 0) AS input,
+          COALESCE(SUM(CASE WHEN (model.value->>'output') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'output')::numeric ELSE 0 END), 0) AS output,
+          COALESCE(SUM(CASE WHEN (model.value->>'cacheRead') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'cacheRead')::numeric ELSE 0 END), 0) AS cache_read,
+          COALESCE(SUM(CASE WHEN (model.value->>'cacheWrite') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'cacheWrite')::numeric ELSE 0 END), 0) AS cache_write,
+          COALESCE(SUM(CASE WHEN (model.value->>'reasoning') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$' THEN (model.value->>'reasoning')::numeric ELSE 0 END), 0) AS reasoning
         FROM jsonb_each(CASE WHEN jsonb_typeof(c.entry->'models') = 'object'
           THEN c.entry->'models' ELSE '{}'::jsonb END) model
         WHERE jsonb_typeof(model.value) = 'object'
@@ -435,20 +435,21 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
     client_attribution AS (
       SELECT
         d.submission_id,
-        m.nested_tokens > COALESCE((client.value->>'tokens')::numeric, 0)
+        m.nested_tokens > c.scalar_tokens
           AS over_nested,
         CASE
-          WHEN m.nested_tokens > COALESCE((client.value->>'tokens')::numeric, 0)
+          WHEN m.nested_tokens > c.scalar_tokens
             THEN 0
           ELSE m.nested_named_tokens
         END AS attributed_nested_tokens,
         m.nested_slop_tokens,
         GREATEST(
-          COALESCE((client.value->>'tokens')::numeric, 0) - m.nested_tokens,
+          c.scalar_tokens - m.nested_tokens,
           0
         ) AS remainder,
         CASE
-          WHEN jsonb_typeof(client.value->'modelId') = 'string'
+          WHEN jsonb_typeof(client.value) = 'object'
+            AND jsonb_typeof(client.value->'modelId') = 'string'
             AND client.value->>'modelId' !~* ${UNNAMED_MODEL_REGEX}
           THEN client.value->>'modelId'
         END AS remainder_model
@@ -459,20 +460,55 @@ export async function getModerationCandidates(): Promise<ScoredCandidate[]> {
       ) AS client(key, value)
       CROSS JOIN LATERAL (
         SELECT
-          COALESCE(SUM(COALESCE((model.value->>'tokens')::numeric, 0)), 0)
-            AS nested_tokens,
+          CASE
+            WHEN jsonb_typeof(client.value) = 'object'
+              AND (client.value->>'tokens') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
+            THEN (client.value->>'tokens')::numeric
+            ELSE 0
+          END AS scalar_tokens
+      ) AS c
+      CROSS JOIN LATERAL (
+        SELECT
           COALESCE(
-            SUM(COALESCE((model.value->>'tokens')::numeric, 0))
-              FILTER (WHERE model.key !~* ${UNNAMED_MODEL_REGEX}),
+            SUM(
+              CASE
+                WHEN jsonb_typeof(model.value) = 'object'
+                  AND (model.value->>'tokens') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
+                THEN (model.value->>'tokens')::numeric
+                ELSE 0
+              END
+            ),
+            0
+          ) AS nested_tokens,
+          COALESCE(
+            SUM(
+              CASE
+                WHEN jsonb_typeof(model.value) = 'object'
+                  AND (model.value->>'tokens') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
+                THEN (model.value->>'tokens')::numeric
+                ELSE 0
+              END
+            ) FILTER (WHERE model.key !~* ${UNNAMED_MODEL_REGEX}),
             0
           ) AS nested_named_tokens,
           COALESCE(
-            SUM(COALESCE((model.value->>'tokens')::numeric, 0))
-              FILTER (WHERE model.key ~* ${SLOP_MODEL_REGEX}),
+            SUM(
+              CASE
+                WHEN jsonb_typeof(model.value) = 'object'
+                  AND (model.value->>'tokens') ~ '^[+-]?[0-9]{1,38}(\.[0-9]{1,38})?([eE][+-]?[0-9]{1,4})?$'
+                THEN (model.value->>'tokens')::numeric
+                ELSE 0
+              END
+            ) FILTER (WHERE model.key ~* ${SLOP_MODEL_REGEX}),
             0
           ) AS nested_slop_tokens
         FROM jsonb_each(
-          CASE WHEN jsonb_typeof(client.value->'models') = 'object' THEN client.value->'models' ELSE '{}'::jsonb END
+          CASE
+            WHEN jsonb_typeof(client.value) = 'object'
+              AND jsonb_typeof(client.value->'models') = 'object'
+            THEN client.value->'models'
+            ELSE '{}'::jsonb
+          END
         ) AS model(key, value)
       ) AS m
     ),
