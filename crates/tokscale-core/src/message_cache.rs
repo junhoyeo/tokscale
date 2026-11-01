@@ -8844,11 +8844,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bb_parser_version_invalidates_v1_entries() {
-        assert_eq!(parser_version(ClientId::Bb), 2);
-    }
-
-    #[test]
     #[serial_test::serial]
     fn test_bb_v1_shard_invalidates_and_reparses_to_v2() {
         let cache_home = TempDir::new().unwrap();

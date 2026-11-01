@@ -518,7 +518,7 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
 
     BbSqliteScan {
         messages,
-        complete: scan.completed(),
+        complete: scan.completed() && malformed_rows == 0,
     }
 }
 
@@ -938,5 +938,44 @@ mod tests {
         let msg = &messages[0];
         assert_eq!(msg.provider_id, "custom_proxy");
         assert_eq!(msg.model_id, "myclaudex-1");
+    }
+
+    #[test]
+    fn test_scan_bb_sqlite_malformed_event_row_marks_incomplete() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_malformed', NULL, 'claude-code', 'claude-3-7-sonnet', 'Malformed', NULL, 1000)",
+            [],
+        )
+        .unwrap();
+
+        // Valid event 1
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_valid', 'thr_malformed', 'turn_1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\": {\"last\": {\"totalTokens\": 120, \"inputTokens\": 100, \"outputTokens\": 20}}}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        // Malformed event 2
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('evt_bad', 'thr_malformed', 'turn_2', 2, 'thread/tokenUsage/updated', \
+             'NOT_JSON_DATA', 1200)",
+            [],
+        )
+        .unwrap();
+
+        let scan = scan_bb_sqlite(&db_path);
+        assert_eq!(scan.messages.len(), 1);
+        assert!(
+            !scan.complete,
+            "scan with malformed rows must not be marked complete"
+        );
     }
 }
