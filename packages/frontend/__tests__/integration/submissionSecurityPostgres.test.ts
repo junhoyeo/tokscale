@@ -333,7 +333,7 @@ describeWithPostgres("submission security PostgreSQL integration", () => {
           'cost', 'Infinity',
           'modelId', 'premium-tool-call',
           'models', jsonb_build_object(
-            'premium-tool-call', jsonb_build_object('tokens', 'NaN', 'cost', '1e999999', 'input', '999999999999999999999999999999999999999999999')
+            'premium-tool-call', jsonb_build_object('tokens', 'NaN', 'cost', '1e999999', 'input', repeat('9', 131073))
           )
         ),
         'opencode', (source_breakdown->'opencode') || jsonb_build_object(
