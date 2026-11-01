@@ -99,6 +99,66 @@ describe("validateSubmission PostgreSQL column boundary guards", () => {
     );
   });
 
+  it("accepts summary and year totalCost at MAX_TOTAL_COST and rejects over-max >= 10^14 overflowing DECIMAL(18, 4)", () => {
+    const maxTotalCost = 99_999_999_999_999;
+    const overMaxTotalCost = 100_000_000_000_000;
+
+    // Boundary check at max
+    const maxPayload = buildValidSubmission({
+      summary: {
+        totalTokens: 300,
+        totalCost: maxTotalCost,
+        totalDays: 1,
+        activeDays: 1,
+        averagePerDay: 1.5,
+        maxCostInSingleDay: 1.5,
+        clients: ["opencode"],
+        models: ["claude-sonnet-4"],
+      },
+      years: [
+        {
+          year: "2026",
+          totalTokens: 300,
+          totalCost: maxTotalCost,
+          range: { start: "2026-04-30", end: "2026-04-30" },
+        },
+      ],
+    });
+    const maxResult = validateSubmission(maxPayload);
+    // summary.totalCost should pass schema parsing without throwing overflow schema error
+    expect(maxResult.errors.filter((e) => e.includes("totalCost"))).toEqual([]);
+
+    // Over-max check
+    const overMaxPayload = buildValidSubmission({
+      summary: {
+        totalTokens: 300,
+        totalCost: overMaxTotalCost,
+        totalDays: 1,
+        activeDays: 1,
+        averagePerDay: 1.5,
+        maxCostInSingleDay: 1.5,
+        clients: ["opencode"],
+        models: ["claude-sonnet-4"],
+      },
+      years: [
+        {
+          year: "2026",
+          totalTokens: 300,
+          totalCost: overMaxTotalCost,
+          range: { start: "2026-04-30", end: "2026-04-30" },
+        },
+      ],
+    });
+    const overMaxResult = validateSubmission(overMaxPayload);
+    expect(overMaxResult.valid).toBe(false);
+    expect(overMaxResult.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("summary.totalCost"),
+        expect.stringContaining("years.0.totalCost"),
+      ]),
+    );
+  });
+
   it("rejects daily or client cost >= 10^10 that overflows DECIMAL(14, 4)", () => {
     const overflowCost = 10_000_000_000;
     const payload = buildValidSubmission({
@@ -273,12 +333,12 @@ describe("validateSubmission PostgreSQL column boundary guards", () => {
     );
   });
 
-  it("rejects impossible calendar dates like 2025-02-29 or 2025-99-99", () => {
+  it("rejects impossible calendar dates like 2025-02-29, 2025-99-99, or non-AD year 0000", () => {
     const payload = buildValidSubmission({
       meta: {
         generatedAt: "2026-05-01T00:00:00.000Z",
         version: "1.2.3",
-        dateRange: { start: "2025-02-29", end: "2025-99-99" },
+        dateRange: { start: "0000-01-01", end: "2025-99-99" },
       },
       contributions: [
         {
@@ -303,9 +363,9 @@ describe("validateSubmission PostgreSQL column boundary guards", () => {
     expect(result.valid).toBe(false);
     expect(result.errors).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("meta.dateRange.start: Invalid calendar date"),
-        expect.stringContaining("meta.dateRange.end: Invalid calendar date"),
-        expect.stringContaining("contributions.0.date: Invalid calendar date"),
+        expect.stringContaining("meta.dateRange.start"),
+        expect.stringContaining("meta.dateRange.end"),
+        expect.stringContaining("contributions.0.date"),
       ]),
     );
   });

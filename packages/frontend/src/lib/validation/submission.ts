@@ -33,7 +33,7 @@ const TOKEN_ABSOLUTE_TOLERANCE = 100;
 // - varchar(20): submissions.cli_version
 const MAX_PG_INT4 = 2_147_483_647;
 const MAX_DAILY_COST = 9_999_999_999.9999;
-const MAX_TOTAL_COST = 99_999_999_999_999.9999;
+const MAX_TOTAL_COST = 99_999_999_999_999;
 const MAX_CLI_VERSION_LENGTH = 20;
 
 const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -41,10 +41,10 @@ const NonNegativeInt32Schema = z.number().finite().int().min(0).max(MAX_PG_INT4)
 const DailyCostSchema = z.number().finite().min(0).max(MAX_DAILY_COST);
 const TotalCostSchema = z.number().finite().min(0).max(MAX_TOTAL_COST);
 
-// Keep date fields calendar-safe so out-of-range dates (e.g. "2025-02-29" or
-// "2025-99-99") fail validation with 400 instead of raising SQLSTATE 22008 on
-// PostgreSQL `date` columns.
-const CalendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
+// Keep date fields calendar-safe so out-of-range dates (e.g. "2025-02-29",
+// "2025-99-99", or non-AD year "0000-01-01") fail validation with 400
+// instead of raising SQLSTATE 22008 on PostgreSQL `date` columns.
+const CalendarDateSchema = z.string().regex(/^(?!0000-)\d{4}-\d{2}-\d{2}$/).refine(
   (value) => {
     const parsed = new Date(`${value}T00:00:00.000Z`);
     return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
