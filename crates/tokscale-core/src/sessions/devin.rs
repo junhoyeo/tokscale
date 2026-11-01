@@ -203,13 +203,15 @@ const DEVIN_CLI_MESSAGE_QUERY_AFTER: &str = r#"
     "#;
 
 /// Row stats used as the Devin CLI source fingerprint and the incremental
-/// resume watermark: `row_count` detects deletions a `row_id`-after scan
-/// cannot see, and `max_row_id` is the mark new rows append past. Both values
-/// come from the rowid index, so polling an idle database reads no
-/// `chat_message` blobs at all.
+/// resume watermark. `row_count` and `row_id_sum` detect deletions a
+/// `row_id`-after scan cannot see — any removed row changes their sum —
+/// and `max_row_id` is the mark new rows append past. All three walk the
+/// rowid b-tree's leaf cells; the `chat_message` payloads live on overflow
+/// pages this query never touches.
 pub(crate) struct DevinCliRowStats {
     pub row_count: i64,
     pub max_row_id: i64,
+    pub row_id_sum: i64,
 }
 
 pub(crate) fn devin_cli_row_stats(db_path: &Path) -> Option<DevinCliRowStats> {
@@ -218,13 +220,38 @@ pub(crate) fn devin_cli_row_stats(db_path: &Path) -> Option<DevinCliRowStats> {
     sqlite_for_each_row_on(
         &conn,
         db_path,
-        "SELECT COUNT(*), COALESCE(MAX(row_id), 0) FROM message_nodes",
+        "SELECT COUNT(*), COALESCE(MAX(row_id), 0), COALESCE(SUM(row_id), 0) FROM message_nodes",
         None,
         &mut |row| {
             stats = Some(DevinCliRowStats {
                 row_count: row.get(0)?,
                 max_row_id: row.get(1)?,
+                row_id_sum: row.get(2)?,
             });
+            Ok(())
+        },
+    );
+    stats
+}
+
+/// `(count, sum)` of just the rows past `after_row_id`, range-scanned on the
+/// rowid index. Compared against the deltas between two fingerprints this
+/// proves a diff was pure append; any deletion or id reuse below the mark
+/// makes the identities fail.
+pub(crate) fn devin_cli_appended_stats(
+    db_path: &Path,
+    after_row_id: i64,
+) -> Option<(i64, i64)> {
+    let conn = open_readonly_sqlite_opt(db_path)?;
+    let mut stats = None;
+    sqlite_for_each_row_on_with_params(
+        &conn,
+        db_path,
+        "SELECT COUNT(*), COALESCE(SUM(row_id), 0) FROM message_nodes WHERE row_id > ?1",
+        &[&after_row_id],
+        None,
+        &mut |row| {
+            stats = Some((row.get(0)?, row.get(1)?));
             Ok(())
         },
     );

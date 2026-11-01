@@ -6252,7 +6252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_devin_parser_versions_invalidate_v3_entries() {
+    fn test_devin_parser_versions_invalidate_v4_entries() {
         assert_eq!(parser_version(ClientId::DevinCli), 5);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }

@@ -2650,17 +2650,21 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// database — every scan would re-parse the whole `message_nodes` table.
     /// The row-stats fingerprint instead moves only when usage rows appear or
     /// disappear, which is the only change the parser can observe: `size`
-    /// carries the row count, `modified_ns` the max `row_id`.
+    /// carries the row count, `modified_ns` the max `row_id`, and
+    /// `content_hash`'s first 8 bytes the `row_id` sum — together the count
+    /// and sum detect deletions, not just appends.
     fn devin_cli_fingerprint(
         path: &Path,
         cached: Option<&message_cache::SourceFingerprint>,
     ) -> Option<message_cache::FingerprintStatus> {
         let stats = sessions::devin::devin_cli_row_stats(path)?;
+        let mut content_hash = [0u8; 32];
+        content_hash[..8].copy_from_slice(&stats.row_id_sum.to_le_bytes());
         let fingerprint = message_cache::SourceFingerprint {
             size: stats.row_count.max(0) as u64,
             modified_ns: stats.max_row_id.max(0) as u64,
             sample_hashes: Vec::new(),
-            content_hash: [0; 32],
+            content_hash,
             related_files: Vec::new(),
         };
         Some(if cached == Some(&fingerprint) {
@@ -2671,23 +2675,51 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
 
     /// Merges an entry's cached messages with rows appended since its
-    /// watermark. Returns `None` (falling back to the full parse) when the row
-    /// count shrank: a `row_id`-after scan cannot tell which cached messages a
-    /// deletion took.
+    /// watermark, or returns `None` to force the full parse. The delta
+    /// identity — count and `row_id` sum between the two fingerprints must
+    /// equal the stats of rows past the mark — proves the change was pure
+    /// append; a delete paired with an insert, or any id reuse, breaks it.
+    /// Rows written between the fingerprint and the parse are then merged
+    /// deduped by their dedup key so a lagging watermark cannot double-count
+    /// them on the next scan.
     fn devin_cli_resume(
         path: &Path,
         entry: &message_cache::CachedSourceEntry,
         fingerprint: &message_cache::SourceFingerprint,
     ) -> Option<SourceParse> {
-        if fingerprint.size < entry.fingerprint.size {
-            return None;
-        }
         let after_row_id = entry.fingerprint.modified_ns as i64;
-        let mut messages = entry.messages.clone();
-        messages.extend(sessions::devin::parse_devin_cli_sqlite_after(
+        let (appended_count, appended_sum) = sessions::devin::devin_cli_appended_stats(
             path,
             after_row_id,
-        ));
+        )?;
+        let old_sum = i64::from_le_bytes(entry.fingerprint.content_hash[..8].try_into().ok()?);
+        let new_sum = i64::from_le_bytes(fingerprint.content_hash[..8].try_into().ok()?);
+        if fingerprint.size as i64 - entry.fingerprint.size as i64 != appended_count
+            || new_sum - old_sum != appended_sum
+        {
+            return None;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut messages = Vec::with_capacity(
+            entry.messages.len() + appended_count.max(0) as usize,
+        );
+        for message in entry
+            .messages
+            .iter()
+            .cloned()
+            .chain(sessions::devin::parse_devin_cli_sqlite_after(
+                path,
+                after_row_id,
+            ))
+        {
+            if message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| seen.insert(key.clone()))
+            {
+                messages.push(message);
+            }
+        }
         Some(SourceParse {
             messages,
             cacheable: true,
