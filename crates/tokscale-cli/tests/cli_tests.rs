@@ -6731,6 +6731,138 @@ fn test_submit_compacts_repeated_daily_regression_warnings_without_losing_detail
     );
 }
 
+#[test]
+fn test_submit_compacts_missing_client_and_active_time_preservation_warnings() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = create_temp_fixture_dir();
+    write_fake_credentials(tmp.path());
+    let mut warnings: Vec<String> = (1..=4)
+        .map(|day| {
+            format!("Day 2026-03-{day:02}: Preserved codex because it disappeared from this same-device resubmit; kept {day},154,188,083 tokens.")
+        })
+        .collect();
+    warnings.push("Day 2026-03-27: Preserved opencode because it disappeared from this same-device resubmit; kept 58,503,692 tokens.".to_string());
+    warnings.push("Day 2026-04-01: Preserved zcode because this same-device resubmit would reduce 500 tokens to 400.".to_string());
+    for day in 1..=4 {
+        warnings.push(format!("Day 2026-10-{day:02}: Preserved {day}16300880ms active time because this same-device resubmit reported only {day}0206166ms."));
+    }
+    warnings.push(
+        "Ignored Amp changes because this snapshot cannot advance the device high-water."
+            .to_string(),
+    );
+
+    let body = serde_json::json!({"success":true,"warnings":warnings}).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("submit did not reach the fixture server: {error}"),
+            }
+        };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; content_length];
+            reader.read_exact(&mut request).unwrap();
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_URL", api)
+        .env("TOKSCALE_API_TOKEN", "fixture-token")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--no-spinner", "submit", "--client", "opencode"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Preserved codex: 4 days missing from this device's resubmit"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-03-01: Preserved codex because it disappeared"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=4 {
+        assert!(
+            stdout.contains(&format!("2026-03-{day:02}: {day},154,188,083")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Preserved active time: 4 daily decreases on this device"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-10-01: Preserved 116300880ms active time because"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=4 {
+        assert!(
+            stdout.contains(&format!("2026-10-{day:02}: {day}16300880 -> {day}0206166")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Day 2026-03-27: Preserved opencode because it disappeared from this same-device resubmit; kept 58,503,692 tokens."),
+        "uncompacted single disappeared warning must be printed verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains("Day 2026-04-01: Preserved zcode because this same-device resubmit would reduce 500 tokens to 400."),
+        "uncompacted single decrease warning must be printed verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Ignored Amp changes because this snapshot cannot advance the device high-water."
+        ),
+        "unrecognized warning must be printed verbatim: {stdout}"
+    );
+}
+
 /// Regression: a long proxy-model history fans out to one warning row per
 /// provider/model pair and used to bury the submittable summary. Detail rows
 /// are capped (mirroring the tokenless-row reporter) with an aggregate total.
