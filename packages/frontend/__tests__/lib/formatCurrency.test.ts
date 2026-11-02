@@ -36,7 +36,13 @@ describe("formatCurrency", () => {
     expect(formatCurrency(999_995_000)).toBe("$1.00B");
   });
 
+  it("promotes 999.996 to $1.00K instead of $1000.00", () => {
+    expect(formatCurrency(999.996)).toBe("$1.00K");
+    expect(formatCurrency(999.999)).toBe("$1.00K");
+  });
+
   it("does not promote values well below the boundary", () => {
     expect(formatCurrency(999_994)).toBe("$999.99K");
+    expect(formatCurrency(999.994)).toBe("$999.99");
   });
 });
