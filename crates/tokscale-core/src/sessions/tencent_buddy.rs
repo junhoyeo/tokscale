@@ -347,9 +347,9 @@ pub(crate) fn parse_jsonl_file(
 ///
 /// The message timestamps are deliberately left alone. `SessionSpan` projects a
 /// message as `[timestamp, timestamp + duration_ms]`, and moving the stamp to the
-/// turn's start (the dsh approach in #11, where an exact per-request anchor
-/// exists) would drag every step of the turn backwards by up to the whole turn
-/// and move the day buckets it lands in.
+/// turn's start (the dsh approach in Javis603/tokscale#11, where an exact
+/// per-request anchor exists) would drag every step of the turn backwards by up
+/// to the whole turn and move the day buckets it lands in.
 fn spread_turn_duration(
     messages: &mut [UnifiedMessage],
     turn_indices: &[usize],
