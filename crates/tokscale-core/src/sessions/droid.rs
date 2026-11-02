@@ -292,8 +292,7 @@ fn resolve_usage_timestamp(lock_timestamp: Option<i64>, modified: Option<i64>) -
 ///
 /// `replies` is how many assistant replies the turn stands for. It is 1 until
 /// `coalesce_turns` folds a run together. The session's replies are summed and
-/// carried on a single emitted record, so the session reports the number of
-/// calls it made without its apportioned records counting as separate sessions.
+/// carried on the corresponding emitted record so date filters can count it.
 struct TranscriptTurn {
     timestamp: i64,
     context_weight: u128,
@@ -827,24 +826,6 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
                 )
             })
             .collect();
-        // One countable record per model. A single total on the first record
-        // would report every request as whichever model ran first, which is
-        // the same bug as stamping the token total with the last model.
-        // Later records of that model stay at zero so a long single-model
-        // session is still one session, not one session per call.
-        let mut reply_on_first = vec![0i32; turns.len()];
-        let mut first_index: HashMap<&str, usize> = HashMap::new();
-        for (index, turn) in turns.iter().enumerate() {
-            let replies = turn.replies.max(1);
-            let model = identities[index].0.as_str();
-            if let Some(&first) = first_index.get(model) {
-                reply_on_first[first] = reply_on_first[first].saturating_add(replies);
-            } else {
-                first_index.insert(model, index);
-                reply_on_first[index] = replies;
-            }
-        }
-
         return turns
             .iter()
             .enumerate()
@@ -871,10 +852,7 @@ pub fn parse_droid_file(path: &Path) -> Vec<UnifiedMessage> {
                     super::BillingIdentityOrigin::ExplicitSession,
                 )
                 .with_pricing_model(&pricing_raw);
-                // Count-neutral fragments keep a single-model session as one
-                // session. The first record of each model carries that model's
-                // calls, so a switch does not file them under the first model.
-                message.message_count = reply_on_first[index];
+                message.message_count = turn.replies;
                 message
             })
             .collect();
@@ -1313,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_count_rides_on_exactly_one_record() {
+    fn test_reply_counts_follow_their_timestamps() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let settings = write_session(
             temp_dir.path(),
@@ -1328,10 +1306,20 @@ mod tests {
         let messages = parse_droid_file(&settings);
 
         assert_eq!(messages.len(), 2);
-        // Both calls are counted, but only one record is countable: the second
-        // is an attribution fragment of the same session, not a new session.
         assert_eq!(messages.iter().map(|m| m.message_count).sum::<i32>(), 2);
-        assert_eq!(messages.iter().filter(|m| m.message_count > 0).count(), 1);
+        assert_eq!(
+            messages.iter().map(|m| m.message_count).collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        let second_day = messages[1].timestamp;
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.timestamp >= second_day)
+                .map(|m| m.message_count)
+                .sum::<i32>(),
+            1
+        );
     }
 
     #[test]
@@ -1339,7 +1327,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         // 40 replies ten minutes apart: every gap exceeds the idle threshold,
         // so each apportioned record would open its own session interval. The
-        // session count must stay 1 while all 40 calls are still reported.
+        // source session count must stay 1 while all 40 calls are reported.
         let replies = 40;
         let transcript: Vec<String> = (0..replies)
             .map(|i| {
@@ -1748,6 +1736,16 @@ mod tests {
         assert_eq!(
             messages.iter().map(|m| m.message_count).collect::<Vec<_>>(),
             vec![1, 1, 1]
+        );
+        let intervals =
+            crate::sessionize::sessionize(&messages, crate::sessionize::DEFAULT_IDLE_GAP_MS);
+        assert_eq!(
+            crate::sessionize::compute_time_metrics(
+                &intervals,
+                crate::sessionize::DEFAULT_IDLE_GAP_MS,
+            )
+            .session_count,
+            1
         );
     }
 
