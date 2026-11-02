@@ -19,7 +19,18 @@ const DEFAULT_PROVIDER: &str = "tencent";
 /// happens; `message_cache::parser_version()` derives each member's version
 /// from it (base plus a per-client offset that preserves independent history)
 /// so no member can be left serving stale cache entries.
-pub(crate) const TENCENT_BUDDY_PARSER_BASE_VERSION: u32 = 1;
+///
+/// Version 2 anchors extension-log settlements on the preceding
+/// `Model prepared:` line and reports the elapsed generation window as
+/// `duration_ms`.
+///
+/// Version 3 spreads the wall-clock duration recorded by each `turn-metrics`
+/// line over the usage rows of that turn, so JSONL transcripts report
+/// throughput as well.
+///
+/// Logs are append-only, so cached rows from an older version have to be
+/// re-parsed to gain either field.
+pub(crate) const TENCENT_BUDDY_PARSER_BASE_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 struct BuddyLine {
@@ -32,6 +43,10 @@ struct BuddyLine {
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     cwd: Option<String>,
+    /// Wall-clock length of a completed user turn, recorded on the
+    /// `turn-metrics` line CodeBuddy writes after the final reply.
+    #[serde(rename = "durationMs")]
+    duration_ms: Option<i64>,
     message: Option<BuddyMessage>,
     #[serde(rename = "providerData")]
     provider_data: Option<BuddyProviderData>,
@@ -207,6 +222,9 @@ pub(crate) fn parse_jsonl_file(
     let fallback_timestamp = super::utils::file_modified_timestamp_ms(path);
     let mut keyed_indices: HashMap<String, usize> = HashMap::new();
     let mut messages: Vec<UnifiedMessage> = Vec::new();
+    // Indices of the usage rows produced since the current user turn started.
+    // `turn-metrics` closes the turn; its duration is spread over these rows.
+    let mut turn_indices: Vec<usize> = Vec::new();
 
     for_each_json_line(path, &mut |_index, trimmed| {
         let mut bytes = trimmed.as_bytes().to_vec();
@@ -214,6 +232,17 @@ pub(crate) fn parse_jsonl_file(
             Ok(item) => item,
             Err(_) => return,
         };
+
+        if item.line_type.as_deref() == Some("turn-metrics") {
+            spread_turn_duration(&mut messages, &turn_indices, item.duration_ms);
+            turn_indices.clear();
+            return;
+        }
+
+        if item.line_type.as_deref() == Some("message") && item.role.as_deref() == Some("user") {
+            turn_indices.clear();
+            return;
+        }
 
         let is_assistant_message = item.line_type.as_deref() == Some("message")
             && item.role.as_deref() == Some("assistant");
@@ -300,10 +329,64 @@ pub(crate) fn parse_jsonl_file(
             keyed_indices.insert(key, messages.len());
         }
 
+        turn_indices.push(messages.len());
         messages.push(message);
     });
 
     messages
+}
+
+/// Spread a turn's measured wall-clock duration over the usage rows that turn
+/// produced, in proportion to their output tokens.
+///
+/// CodeBuddy writes one `turn-metrics` line per finished user turn, carrying the
+/// wall-clock length of that turn and no token counts; the tokens live on the
+/// per-step rows. Splitting the duration by output keeps the ratio a consumer
+/// computes (`sum(output) / sum(duration)`) equal to the turn's real rate instead
+/// of attributing the whole turn to a single step.
+///
+/// The message timestamps are deliberately left alone. `SessionSpan` projects a
+/// message as `[timestamp, timestamp + duration_ms]`, and moving the stamp to the
+/// turn's start (the dsh approach in #11, where an exact per-request anchor
+/// exists) would drag every step of the turn backwards by up to the whole turn
+/// and move the day buckets it lands in.
+fn spread_turn_duration(
+    messages: &mut [UnifiedMessage],
+    turn_indices: &[usize],
+    duration_ms: Option<i64>,
+) {
+    let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
+        return;
+    };
+    let total_output: i64 = turn_indices
+        .iter()
+        .map(|index| messages[*index].tokens.output.max(0))
+        .sum();
+    if total_output <= 0 {
+        return;
+    }
+
+    let mut assigned = 0i64;
+    for (position, index) in turn_indices.iter().enumerate() {
+        let is_last = position + 1 == turn_indices.len();
+        let message = &mut messages[*index];
+        let share = if is_last {
+            duration_ms - assigned
+        } else {
+            duration_ms * message.tokens.output.max(0) / total_output
+        };
+        assigned += share;
+        if share > 0 {
+            message.duration_ms = Some(share);
+        }
+    }
+}
+
+/// A `Model prepared:` record, keyed by agent id, that anchors the generation
+/// clock for the execution the agent reports next.
+struct PreparedAgent {
+    model_id: String,
+    prepared_at_ms: Option<i64>,
 }
 
 pub(crate) fn parse_extension_log_file(
@@ -317,13 +400,19 @@ pub(crate) fn parse_extension_log_file(
         .and_then(|name| name.to_str())
         .unwrap_or("extension-log")
         .to_string();
-    let mut models_by_agent: HashMap<String, String> = HashMap::new();
+    let mut prepared_by_agent: HashMap<String, PreparedAgent> = HashMap::new();
     let mut messages = Vec::new();
 
     for_each_json_line(path, &mut |_index, line| {
         if line.contains("[CraftInvokableAgent]") && line.contains("Model prepared:") {
             if let Some((agent_id, model_id)) = parse_model_prepared_line(line) {
-                models_by_agent.insert(agent_id, model_id);
+                prepared_by_agent.insert(
+                    agent_id,
+                    PreparedAgent {
+                        model_id,
+                        prepared_at_ms: parse_log_timestamp_ms(line),
+                    },
+                );
             }
             return;
         }
@@ -353,11 +442,26 @@ pub(crate) fn parse_extension_log_file(
             return;
         };
 
-        let timestamp = parse_log_timestamp_ms(line).unwrap_or(fallback_timestamp);
-        let model_id = models_by_agent
-            .get(&agent_id)
-            .cloned()
+        let settled_at = parse_log_timestamp_ms(line).unwrap_or(fallback_timestamp);
+        // Consume the anchor: one `Model prepared:` record describes one
+        // execution. Leaving it in place would hand a later settlement of the
+        // same agent a stale clock and bill the whole gap between two
+        // executions as one generation.
+        let prepared = prepared_by_agent.remove(&agent_id);
+        let model_id = prepared
+            .as_ref()
+            .map(|prepared| prepared.model_id.clone())
             .unwrap_or_else(|| default_model.to_string());
+        // Date the message at the anchor, not at the settlement. `SessionSpan`
+        // projects a message as `[timestamp, timestamp + duration_ms]`, so
+        // stamping the settlement would push the interval forward by one
+        // generation and move the day buckets it lands in.
+        let (timestamp, duration_ms) = match prepared.and_then(|prepared| prepared.prepared_at_ms) {
+            Some(prepared_at) if settled_at > prepared_at => {
+                (prepared_at, Some(settled_at - prepared_at))
+            }
+            _ => (settled_at, None),
+        };
         let provider_id = provider_identity::inferred_provider_from_model(&model_id)
             .unwrap_or(DEFAULT_PROVIDER)
             .to_string();
@@ -370,6 +474,7 @@ pub(crate) fn parse_extension_log_file(
             tokens,
             0.0,
         );
+        message.duration_ms = duration_ms;
         // Key on the SECOND, not the millisecond. The same [AgentReporter] line
         // is written to multiple sinks (the extension's own log AND the host's
         // output-channel log), each prefixed by its own logger a few ms apart, so
@@ -377,7 +482,11 @@ pub(crate) fn parse_extension_log_file(
         // executions of the same agent with identical usage are seconds-to-minutes
         // apart, so second granularity still keeps them separate (the timestamp
         // was added to this key precisely to protect those).
-        let dedup_second = timestamp.div_euclid(1000);
+        //
+        // This keys on the settlement time rather than on `timestamp`: the
+        // anchor can differ by a few ms between mirrored sinks, and only the
+        // settlement is guaranteed to agree across them.
+        let dedup_second = settled_at.div_euclid(1000);
         message.dedup_key = Some(format!(
             "{client}:extension-log:{agent_id}:{dedup_second}:{}:{}:{}:{}:{}",
             message.tokens.input,
@@ -676,5 +785,139 @@ mod tests {
         assert_eq!(from_host.len(), 1);
         assert!(from_extension[0].dedup_key.is_some());
         assert_eq!(from_extension[0].dedup_key, from_host[0].dedup_key);
+    }
+
+    #[test]
+    fn parse_extension_log_file_measures_generation_window_from_model_prepared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj__session.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: Kimi-K2.7-Code (kimi-k2.7)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":140732,"outputTokens":635,"totalTokens":141367}"#,
+        )
+        .unwrap();
+
+        let messages = parse_extension_log_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.duration_ms, Some(1_100));
+        // The message is dated at the anchor and the span closes on the
+        // settlement, so the projected interval still ends where the log
+        // reports the execution finishing.
+        let prepared_at = parse_log_timestamp_ms(
+            "[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: Kimi-K2.7-Code (kimi-k2.7)",
+        )
+        .unwrap();
+        let settled_at = parse_log_timestamp_ms(
+            "[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {}",
+        )
+        .unwrap();
+        assert_eq!(message.timestamp, prepared_at);
+        assert_eq!(message.timestamp + message.duration_ms.unwrap(), settled_at);
+    }
+
+    #[test]
+    fn parse_extension_log_file_leaves_settlement_without_anchor_untimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj__rotated.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+        )
+        .unwrap();
+
+        let messages = parse_extension_log_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
+    }
+
+    #[test]
+    fn parse_extension_log_file_does_not_reuse_a_consumed_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}
+[2026/7/1 16:57:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":11,"outputTokens":2,"totalTokens":13}"#,
+        )
+        .unwrap();
+
+        let messages = parse_extension_log_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].duration_ms, Some(1_100));
+        // Without a fresh `Model prepared:` line the second settlement stays
+        // untimed instead of billing the minute between the two executions.
+        assert_eq!(messages[1].duration_ms, None);
+    }
+
+    #[test]
+    fn parse_jsonl_file_spreads_turn_duration_over_its_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"user-1","timestamp":1780000000000,"type":"message","role":"user","sessionId":"s1","cwd":"/Users/alice/repo"}
+{"id":"call-1","timestamp":1780000001000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-1","usage":{"prompt_tokens":10,"completion_tokens":100}}}
+{"id":"call-2","timestamp":1780000002000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-2","usage":{"prompt_tokens":10,"completion_tokens":300}}}
+{"id":"turn-1","timestamp":1780000003000,"type":"turn-metrics","sessionId":"s1","durationMs":4000}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 2);
+        // The turn's 4 s is split 1:3 by output tokens, and the ratio a consumer
+        // computes from these rows is the turn's own rate.
+        assert_eq!(messages[0].duration_ms, Some(1_000));
+        assert_eq!(messages[1].duration_ms, Some(3_000));
+        // Timestamps stay where the steps were written; only the duration is
+        // attributed, so day buckets do not move.
+        assert_eq!(messages[0].timestamp, 1_780_000_001_000);
+        assert_eq!(messages[1].timestamp, 1_780_000_002_000);
+    }
+
+    #[test]
+    fn parse_jsonl_file_resets_the_turn_at_the_next_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two-turns.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"user-1","timestamp":1780000000000,"type":"message","role":"user","sessionId":"s1","cwd":"/Users/alice/repo"}
+{"id":"call-1","timestamp":1780000001000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-1","usage":{"prompt_tokens":10,"completion_tokens":100}}}
+{"id":"turn-1","timestamp":1780000002000,"type":"turn-metrics","sessionId":"s1","durationMs":1000}
+{"id":"user-2","timestamp":1780000003000,"type":"message","role":"user","sessionId":"s1","cwd":"/Users/alice/repo"}
+{"id":"call-2","timestamp":1780000004000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-2","usage":{"prompt_tokens":10,"completion_tokens":100}}}
+{"id":"turn-2","timestamp":1780000005000,"type":"turn-metrics","sessionId":"s1","durationMs":3000}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].duration_ms, Some(1_000));
+        assert_eq!(messages[1].duration_ms, Some(3_000));
+    }
+
+    #[test]
+    fn parse_jsonl_file_ignores_zero_length_turn_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"user-1","timestamp":1780000000000,"type":"message","role":"user","sessionId":"s1","cwd":"/Users/alice/repo"}
+{"id":"call-1","timestamp":1780000001000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-1","usage":{"prompt_tokens":10,"completion_tokens":100}}}
+{"id":"turn-1","timestamp":1780000002000,"type":"turn-metrics","sessionId":"s1","durationMs":0}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
     }
 }
