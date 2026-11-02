@@ -8,6 +8,7 @@ mod device;
 mod hindsight;
 mod paths;
 mod process_liveness;
+mod submission_warnings;
 mod trae;
 mod tui;
 mod ui_glyphs;
@@ -7619,8 +7620,8 @@ fn post_submission(
             if let Some(warnings) = body.warnings {
                 if !warnings.is_empty() {
                     println!("{}", "  Warnings:".yellow());
-                    for warning in warnings {
-                        println!("{}", format!("    - {}", warning).bright_black());
+                    for line in submission_warnings::compact(&warnings) {
+                        println!("{}", format!("    {line}").bright_black());
                     }
                     println!();
                 }
