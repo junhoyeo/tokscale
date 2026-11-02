@@ -895,6 +895,7 @@ pub fn fetch_report() -> UsageFetchReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     use crate::commands::usage::test_server::{spawn_server, Seen};
@@ -1098,6 +1099,85 @@ mod tests {
         );
         let limited = fetch_report_at(&url, keychain_credentials, temp.path(), 1480);
         assert!(limited.diagnostics[0].message.contains("60s"));
+    }
+
+    /// Serves `429` with the given `Retry-After` value on every request and
+    /// counts how many requests actually reached the server.
+    fn spawn_limited_server(retry_after: &'static str) -> (String, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let seen = calls.clone();
+        let url = super::super::test_server::spawn_raw_server(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            format!(
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {retry_after}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .into_bytes()
+        });
+        (url, calls)
+    }
+
+    #[test]
+    fn policy_zero_retry_after_blocks_requests_until_backoff_elapses() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, calls) = spawn_limited_server("0");
+        for (now, message, requests) in [
+            (1000, "HTTP 429; retry in 60s", 1),
+            (1030, "rate-limited; retry in 30s", 1),
+            (1060, "HTTP 429; retry in 120s", 2),
+            (1120, "rate-limited; retry in 60s", 2),
+            (1180, "HTTP 429; retry in 240s", 3),
+        ] {
+            let report = fetch_report_at(&url, keychain_credentials, temp.path(), now);
+            let diagnostic = &report.diagnostics[0].message;
+            assert!(diagnostic.contains(message), "at {now}: {diagnostic}");
+            assert!(
+                !diagnostic.contains("retry in 0s"),
+                "at {now}: {diagnostic}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), requests, "at {now}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn policy_zero_retry_after_cooldown_survives_restart() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let (url, calls) = spawn_limited_server("0");
+        let key = cooldown_key("stale-access-token");
+        fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // A new tokscale process starts with only what is on disk.
+        state::forget_memory(&state::path(temp.path(), &key));
+        clear_cooldown();
+        assert_eq!(
+            cooldown_remaining(&cooldown_path_in(temp.path(), &key), 1030),
+            Some(30)
+        );
+        let report = fetch_report_at(&url, keychain_credentials, temp.path(), 1030);
+        assert!(
+            report.diagnostics[0].message.contains("retry in 30s"),
+            "{:?}",
+            report.diagnostics
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn policy_past_http_date_retry_after_backs_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, calls) = spawn_limited_server("Thu, 01 Jan 1970 00:00:01 GMT");
+        let report = fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        assert!(
+            report.diagnostics[0]
+                .message
+                .contains("HTTP 429; retry in 60s"),
+            "{:?}",
+            report.diagnostics
+        );
+        fetch_report_at(&url, keychain_credentials, temp.path(), 1030);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1306,16 +1386,19 @@ mod tests {
             let calls = std::sync::atomic::AtomicU64::new(0);
             let url = super::super::test_server::spawn_raw_server(move |_| {
                 let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let (code, header, body) = match n {
-                    0 => (200, "", USAGE_BODY),
-                    1 => (429, "Retry-After: 0\r\n", "{}"),
+                let (code, body) = match n {
+                    0 => (200, USAGE_BODY),
                     _ => {
                         fs::rename(&server_path, &server_backup).unwrap();
                         fs::create_dir(&server_path).unwrap();
-                        (status, "", "{}")
+                        (status, "{}")
                     }
                 };
-                format!("HTTP/1.1 {code} Test\r\n{header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).into_bytes()
+                format!(
+                    "HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .into_bytes()
             });
             assert_eq!(
                 fetch_report_at(&url, keychain_credentials, temp.path(), 1000)
@@ -1323,12 +1406,13 @@ mod tests {
                     .len(),
                 1
             );
-            assert_eq!(
-                fetch_report_at(&url, keychain_credentials, temp.path(), 1060)
-                    .outputs
-                    .len(),
-                1
-            );
+            // Another writer persisted the quota sample at 1060 and left the
+            // account eligible, so the next request lands in that same second.
+            let mut disk: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            disk["observed_at"] = serde_json::json!(1060);
+            fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+            state::forget_memory(&path);
             assert!(
                 fetch_report_at(&url, keychain_credentials, temp.path(), 1060)
                     .outputs
