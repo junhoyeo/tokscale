@@ -435,6 +435,13 @@ pub(crate) fn parse_extension_log_file(
         let Some(agent_id) = bracket_value_after(line, "[AgentReporter]") else {
             return;
         };
+        // Consume the anchor the moment the settlement is identified, before
+        // its usage is parsed or validated: one `Model prepared:` record
+        // describes one execution, and every check below can bail out on a
+        // malformed or empty usage. Leaving the anchor in place would hand the
+        // next settlement of the same agent a stale clock and bill the whole
+        // gap between two executions as one generation.
+        let prepared = prepared_by_agent.remove(&agent_id);
         let Some(usage_json) = line.split("Agent execution successful with usage:").nth(1) else {
             return;
         };
@@ -457,11 +464,6 @@ pub(crate) fn parse_extension_log_file(
         // whole lifetime of the file.
         let parsed_settled_at = parse_log_timestamp_ms(line);
         let settled_at = parsed_settled_at.unwrap_or(fallback_timestamp);
-        // Consume the anchor: one `Model prepared:` record describes one
-        // execution. Leaving it in place would hand a later settlement of the
-        // same agent a stale clock and bill the whole gap between two
-        // executions as one generation.
-        let prepared = prepared_by_agent.remove(&agent_id);
         let model_id = prepared
             .as_ref()
             .map(|prepared| prepared.model_id.clone())
@@ -870,6 +872,27 @@ mod tests {
         // Without a fresh `Model prepared:` line the second settlement stays
         // untimed instead of billing the minute between the two executions.
         assert_eq!(messages[1].duration_ms, None);
+    }
+
+    #[test]
+    fn parse_extension_log_file_consumes_the_anchor_on_a_malformed_settlement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[2026/7/1 16:56:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":
+[2026/7/1 16:57:02.200] [info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+        )
+        .unwrap();
+
+        let messages = parse_extension_log_file("codebuddy", "codebuddy", &path);
+
+        // An unusable settlement still ends the execution it belongs to, so it
+        // takes the anchor with it. The later row must not inherit that start
+        // time and bill the minute between the two lines as one generation.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
     }
 
     #[test]
