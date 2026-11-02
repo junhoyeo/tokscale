@@ -6183,6 +6183,9 @@ impl<'a> GraphSink<'a> {
                         .or_insert((0, 0, usage.reason));
                     entry.0 += usage.message_count;
                     entry.1 = entry.1.saturating_add(usage.total_tokens);
+                    if entry.2 != usage.reason {
+                        entry.2 = MULTIPLE_MODEL_PRICING_REASONS;
+                    }
                 }
                 self.incomplete_cost_dates.extend(incomplete_cost_dates);
                 // Validate only the authoritatively priced subset. The zeroed
@@ -6364,6 +6367,7 @@ const ROUTING_LABEL_UNPRICED_REASON: &str =
     "generic routing label has no authoritative model-to-price mapping";
 const MISSING_MODEL_PRICING_REASON: &str = "no authoritative model-to-price mapping";
 const INCOMPLETE_MODEL_PRICING_REASON: &str = "pricing does not cover every populated token bucket";
+const MULTIPLE_MODEL_PRICING_REASONS: &str = "multiple pricing issues";
 const AMBIGUOUS_MODEL_PRICING_REASON: &str =
     "model price lookup is ambiguous across non-equivalent candidates";
 const UNVERIFIED_MODEL_IDENTITY_REASON: &str =
@@ -6467,6 +6471,9 @@ fn prepare_submission_pricing(
                 .0
                 .saturating_add(message.message_count.max(0) as usize);
             entry.1 = entry.1.saturating_add(message.tokens.total());
+            if entry.2 != reason {
+                entry.2 = MULTIPLE_MODEL_PRICING_REASONS;
+            }
             incomplete_cost_dates.insert(message.date.clone());
             // An unsafe estimate must not cross the submission boundary. Keep
             // the usage, but represent the unknown part honestly as zero and
@@ -20702,6 +20709,74 @@ mod tests {
             graph.unpriced_submission_usage[0].reason, ROUTING_LABEL_UNPRICED_REASON,
             "padded routing label must report the routing-label reason"
         );
+    }
+
+    #[test]
+    fn unpriced_model_reports_mixed_reasons_within_and_across_batches() {
+        let mut custom_models = HashMap::new();
+        custom_models.insert(
+            "known-model".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(custom_models),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let make_message = |raw_model: &str| {
+            UnifiedMessage::new(
+                "synthetic",
+                "display-model",
+                "gateway",
+                "session",
+                1_736_510_400_000,
+                TokenBreakdown {
+                    input: 1,
+                    cache_read: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .with_pricing_model(raw_model)
+        };
+        let missing = make_message("unfindable-9843");
+        let incomplete = make_message("known-model");
+        for (message, expected) in [
+            (missing.clone(), MISSING_MODEL_PRICING_REASON),
+            (incomplete.clone(), INCOMPLETE_MODEL_PRICING_REASON),
+        ] {
+            let (_, _, usage, _) = prepare_submission_pricing(vec![message], Some(&pricing));
+            assert_eq!(usage[0].reason, expected);
+        }
+
+        for (first, second) in [(missing.clone(), incomplete.clone()), (incomplete, missing)] {
+            let (_, _, usage, _) =
+                prepare_submission_pricing(vec![first.clone(), second.clone()], Some(&pricing));
+            assert_eq!(usage.len(), 1);
+            assert_eq!(usage[0].message_count, 2);
+            assert_eq!(usage[0].total_tokens, 4);
+            assert_eq!(usage[0].reason, "multiple pricing issues");
+
+            let mut sink = GraphSink::new(
+                None,
+                None,
+                Some(&pricing),
+                GraphPricingRequirement::Submission,
+            );
+            sink.accept(first);
+            sink.drain_batch();
+            sink.accept(second);
+            sink.drain_batch();
+            let entry = sink
+                .unpriced_usage
+                .get(&("gateway".into(), "display-model".into()))
+                .unwrap();
+            assert_eq!(*entry, (2, 4, "multiple pricing issues"));
+        }
     }
 
     #[test]
