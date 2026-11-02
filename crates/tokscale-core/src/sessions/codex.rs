@@ -118,6 +118,11 @@ pub struct CodexPayload {
     pub message: Option<String>,
     /// Turn-item payload (e.g. `EnteredReviewMode` on an `item_completed` event).
     pub item: Option<Value>,
+    /// `world_state` snapshot (`{"full":true,"state":{"model":...}}`). Some
+    /// Codex 0.147 rollouts name the model only here, before any
+    /// `turn_context` or with none at all. Kept as a raw value so another
+    /// entry type's `state` field of a different shape cannot fail the line.
+    pub state: Option<Value>,
 }
 
 /// Lenient `Option<i64>` deserializer for `CodexPayload::started_at`. Coerces
@@ -1387,6 +1392,21 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                     state.request_service_tier = Some(service_tier);
                 }
 
+                // A `world_state` snapshot names the model only until a
+                // `turn_context` (or a usage event) has set one; it never
+                // overrides a model the rollout already reported.
+                if entry.entry_type == "world_state" && state.current_model.is_none() {
+                    if let Some(model) = extract_world_state_model(&payload) {
+                        flush_pending_model_messages(
+                            &mut pending_model_messages,
+                            &mut messages,
+                            &mut fallback_timestamp_indices,
+                            &model,
+                        );
+                        state.current_model = Some(model);
+                    }
+                }
+
                 if !pending_model_messages.is_empty()
                     && event_model.is_none()
                     && !is_token_count
@@ -2461,6 +2481,11 @@ fn extract_model(payload: &CodexPayload) -> Option<String> {
         .or(payload.model.clone().filter(|s| !s.is_empty()))
         .or(payload.model_name.clone().filter(|s| !s.is_empty()))
         .or(payload.info.as_ref().and_then(extract_model_from_info))
+}
+
+fn extract_world_state_model(payload: &CodexPayload) -> Option<String> {
+    extract_string(payload.state.as_ref().and_then(|state| state.get("model")))
+        .filter(|model| !model.is_empty())
 }
 
 fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
@@ -3598,6 +3623,50 @@ mod tests {
 
         let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
         assert!(!parsed.unresolved_model_events);
+    }
+
+    #[test]
+    fn test_world_state_model_used_until_turn_context() {
+        let usage = |input: i64| {
+            format!(
+                r#"{{"timestamp":"2026-08-18T10:00:0{input}Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{total},"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}},"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}}}}}}}"#,
+                total = input * 10,
+            )
+        };
+        let reply = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#;
+
+        // No turn_context at all: the world_state model is the only one.
+        let file = create_test_file(&format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"session_meta","payload":{"source":"cli","model_provider":"openai"}}"#,
+            r#"{"type":"world_state","payload":{"full":true,"state":{"model":"gpt-5.6-luna"}}}"#,
+            usage(1),
+            reply,
+        ));
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].model_id, "gpt-5.6-luna");
+        assert!(!parsed.unresolved_model_events);
+
+        // A later turn_context takes over, and a later world_state does not
+        // override the turn_context model.
+        let file = create_test_file(&format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"world_state","payload":{"full":true,"state":{"model":"gpt-5.6-sol"}}}"#,
+            usage(1),
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            usage(2),
+            r#"{"type":"world_state","payload":{"full":true,"state":{"model":"gpt-5.6-sol"}}}"#,
+            usage(3),
+        ));
+        let messages = parse_codex_file(file.path());
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.model_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol", "gpt-5.5", "gpt-5.5"]
+        );
     }
 
     #[test]
