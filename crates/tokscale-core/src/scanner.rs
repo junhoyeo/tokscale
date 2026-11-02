@@ -981,6 +981,25 @@ pub fn built_in_extra_scan_paths_for(
             }
         }
 
+        // OmO's home-agent project store keeps task children under
+        // `~/.omo/agent/projects/<project>-<hash>/senpi-task/children`, keyed by
+        // a hashed name rather than beneath the project's `cwd`.
+        if let Ok(projects) =
+            std::fs::read_dir(join_native_path(Path::new(home_dir), ".omo/agent/projects"))
+        {
+            paths.extend(
+                projects
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path().join("senpi-task").join("children"))
+                    .filter(|children| children.is_dir())
+                    .map(|children| (ClientId::Senpi, children)),
+            );
+        }
+        // Sub-agent runs also land in `~/.omo/memory/agents/<agent>/runtime/transcripts`.
+        paths.push((
+            ClientId::Senpi,
+            join_native_path(Path::new(home_dir), ".omo/memory"),
+        ));
         paths.push((ClientId::Senpi, omo_sessions));
         paths.push((
             ClientId::Senpi,
@@ -9253,6 +9272,45 @@ mod tests {
             "Main sessions in ~/.omo/agent/sessions must be discovered by default"
         );
         assert_eq!(canonical_files.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_discovers_omo_home_agent_project_children_and_memory_transcripts() {
+        let home_dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let omo = home_dir.path().join(".omo");
+        let project_child = omo
+            .join("agent/projects/myproj-1a2b3c/senpi-task/children/st_1/sessions/st_1")
+            .join("2026-10-30T00-00-00-000Z_st_1.jsonl");
+        let memory_transcript =
+            omo.join("memory/agents/explorer/runtime/transcripts/0b7c/transcript.jsonl");
+        let unrelated = omo
+            .join("agent/projects/myproj-1a2b3c/other")
+            .join("notes.jsonl");
+        for path in [&project_child, &memory_transcript, &unrelated] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap();
+        }
+        let _env = senpi_test_env_guard();
+        let _current_dir = CurrentDirGuard::set(elsewhere.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert_eq!(
+            canonical_files,
+            HashSet::from([
+                project_child.canonicalize().unwrap(),
+                memory_transcript.canonicalize().unwrap(),
+            ]),
+            "home-agent project task children and memory transcripts must be scanned by default"
+        );
     }
 
     #[test]
