@@ -358,22 +358,31 @@ fn spread_turn_duration(
     let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
         return;
     };
-    let total_output: i64 = turn_indices
+    // Sum and divide in i128: `duration_ms * output` can exceed i64 for a
+    // malformed transcript, and a panic here would take the whole scan down.
+    let total_output: i128 = turn_indices
         .iter()
-        .map(|index| messages[*index].tokens.output.max(0))
+        .map(|index| messages[*index].tokens.output.max(0) as i128)
         .sum();
     if total_output <= 0 {
         return;
     }
+    // The integer remainder goes to the last row that actually produced output,
+    // so a trailing zero-output row cannot collect time it did not spend.
+    let Some(last_positive) = turn_indices
+        .iter()
+        .rposition(|index| messages[*index].tokens.output > 0)
+    else {
+        return;
+    };
 
     let mut assigned = 0i64;
     for (position, index) in turn_indices.iter().enumerate() {
-        let is_last = position + 1 == turn_indices.len();
         let message = &mut messages[*index];
-        let share = if is_last {
+        let share = if position == last_positive {
             duration_ms - assigned
         } else {
-            duration_ms * message.tokens.output.max(0) / total_output
+            (duration_ms as i128 * message.tokens.output.max(0) as i128 / total_output) as i64
         };
         assigned += share;
         if share > 0 {
@@ -442,7 +451,12 @@ pub(crate) fn parse_extension_log_file(
             return;
         };
 
-        let settled_at = parse_log_timestamp_ms(line).unwrap_or(fallback_timestamp);
+        // Keep the parsed settlement separately from the timestamp fallback:
+        // the file mtime is only good enough to date the message. Using it as
+        // the end of the measured window would invent a duration spanning the
+        // whole lifetime of the file.
+        let parsed_settled_at = parse_log_timestamp_ms(line);
+        let settled_at = parsed_settled_at.unwrap_or(fallback_timestamp);
         // Consume the anchor: one `Model prepared:` record describes one
         // execution. Leaving it in place would hand a later settlement of the
         // same agent a stale clock and bill the whole gap between two
@@ -456,8 +470,11 @@ pub(crate) fn parse_extension_log_file(
         // projects a message as `[timestamp, timestamp + duration_ms]`, so
         // stamping the settlement would push the interval forward by one
         // generation and move the day buckets it lands in.
-        let (timestamp, duration_ms) = match prepared.and_then(|prepared| prepared.prepared_at_ms) {
-            Some(prepared_at) if settled_at > prepared_at => {
+        let (timestamp, duration_ms) = match (
+            prepared.and_then(|prepared| prepared.prepared_at_ms),
+            parsed_settled_at,
+        ) {
+            (Some(prepared_at), Some(settled_at)) if settled_at > prepared_at => {
                 (prepared_at, Some(settled_at - prepared_at))
             }
             _ => (settled_at, None),
@@ -918,6 +935,50 @@ mod tests {
         let messages = parse_jsonl_file("codebuddy", "codebuddy", &path);
 
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].duration_ms, None);
+    }
+
+    #[test]
+    fn parse_jsonl_file_gives_the_remainder_to_the_last_timed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remainder.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"user-1","timestamp":1780000000000,"type":"message","role":"user","sessionId":"s1","cwd":"/Users/alice/repo"}
+{"id":"call-1","timestamp":1780000001000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-1","usage":{"prompt_tokens":10,"completion_tokens":100}}}
+{"id":"call-2","timestamp":1780000002000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-2","usage":{"prompt_tokens":10,"completion_tokens":100}}}
+{"id":"call-3","timestamp":1780000003000,"type":"function_call","sessionId":"s1","cwd":"/Users/alice/repo","providerData":{"model":"glm-5.2","messageId":"m-3","usage":{"prompt_tokens":10,"completion_tokens":0}}}
+{"id":"turn-1","timestamp":1780000004000,"type":"turn-metrics","sessionId":"s1","durationMs":1000}"#,
+        )
+        .unwrap();
+
+        let messages = parse_jsonl_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].duration_ms, Some(500));
+        // The 1000 ms cannot divide evenly across two rows, so the remainder
+        // lands on the last row that produced output rather than on the
+        // trailing row that generated nothing.
+        assert_eq!(messages[1].duration_ms, Some(500));
+        assert_eq!(messages[2].duration_ms, None);
+    }
+
+    #[test]
+    fn parse_extension_log_file_does_not_time_a_settlement_without_its_own_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj__session.log");
+        std::fs::write(
+            &path,
+            r#"[2026/7/1 16:56:01.100] [info] [CraftInvokableAgent] [agent-1] Model prepared: GLM-5.2 (glm-5.2)
+[info] [AgentReporter] [agent-1] Agent execution successful with usage: {"inputTokens":10,"outputTokens":2,"totalTokens":12}"#,
+        )
+        .unwrap();
+
+        let messages = parse_extension_log_file("codebuddy", "codebuddy", &path);
+
+        assert_eq!(messages.len(), 1);
+        // The settlement line has no parsable clock. Falling back to the file
+        // mtime would have invented a duration spanning the whole file's life.
         assert_eq!(messages[0].duration_ms, None);
     }
 }
