@@ -1178,14 +1178,13 @@ fn flushed_message_identity(
     {
         return None;
     }
-    let normalized_model = (context.include_synthetic
-        && sessions::synthetic::is_synthetic_gateway(&message.model_id, &message.provider_id))
-    .then(|| {
-        let mut model_id = message.model_id.to_string();
-        let mut provider_id = message.provider_id.to_string();
-        sessions::synthetic::normalize_synthetic_gateway_fields(&mut model_id, &mut provider_id);
-        model_id
-    });
+    let normalized_model = context
+        .include_synthetic
+        .then(|| {
+            sessions::synthetic::synthetic_gateway_fields(&message.model_id, &message.provider_id)
+        })
+        .flatten()
+        .map(|fields| fields.model_id);
     let date = match &context.timezone {
         Some(timezone) => {
             let mut rebucketed = message.clone();
@@ -1412,20 +1411,8 @@ fn flush_retained_message<S: MessageSink>(
     sink: &mut S,
     estimate_source: Option<EstimateSource>,
 ) {
-    if context.include_synthetic
-        && sessions::synthetic::is_synthetic_gateway(&message.model_id, &message.provider_id)
-    {
-        let raw_model = message.model_id.clone();
-        let mut model_id = message.model_id.to_string();
-        let mut provider_id = message.provider_id.to_string();
-        sessions::synthetic::normalize_synthetic_gateway_fields(&mut model_id, &mut provider_id);
-        if model_id != raw_model.as_str() {
-            message.model_id = SharedStr::from(model_id);
-        }
-        if provider_id != message.provider_id.as_str() {
-            message.provider_id = SharedStr::from(provider_id);
-        }
-        message.preserve_pricing_model(raw_model.as_str());
+    if context.include_synthetic {
+        message.normalize_synthetic_gateway();
     }
 
     if let Some(timezone) = &context.timezone {
@@ -8517,25 +8504,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     if include_synthetic {
         for msg in &mut messages {
-            if !sessions::synthetic::is_synthetic_gateway(&msg.model_id, &msg.provider_id) {
-                continue;
-            }
-            let raw_model = msg.model_id.clone();
-            let mut model_id = msg.model_id.to_string();
-            let mut provider_id = msg.provider_id.to_string();
-            sessions::synthetic::normalize_synthetic_gateway_fields(
-                &mut model_id,
-                &mut provider_id,
+            sessions::synthetic::normalize_synthetic_gateway_identity(
+                &mut msg.model_id,
+                &mut msg.provider_id,
+                &mut msg.pricing_model_id,
             );
-            if model_id != raw_model.as_str() {
-                msg.model_id = SharedStr::from(model_id);
-            }
-            if provider_id != msg.provider_id.as_str() {
-                msg.provider_id = SharedStr::from(provider_id);
-            }
-            if msg.model_id != raw_model && msg.pricing_model_id.is_none() {
-                msg.pricing_model_id = Some(raw_model);
-            }
         }
     }
 

@@ -501,6 +501,16 @@ impl UnifiedMessage {
         }
     }
 
+    /// Rewrite a Synthetic gateway row to its pricing identity. See
+    /// [`synthetic::normalize_synthetic_gateway_identity`].
+    pub fn normalize_synthetic_gateway(&mut self) -> bool {
+        synthetic::normalize_synthetic_gateway_identity(
+            &mut self.model_id,
+            &mut self.provider_id,
+            &mut self.pricing_model_id,
+        )
+    }
+
     pub fn pricing_context(&self) -> crate::pricing::PricingContext<'_> {
         crate::pricing::PricingContext {
             raw_model: self.pricing_model_id.as_deref().unwrap_or(&self.model_id),
