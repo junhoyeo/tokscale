@@ -3290,6 +3290,30 @@ fn scan_all_clients_with_env_strategy_inner(
         prefer_amp_cache_over_legacy(result.get_mut(ClientId::Amp), Path::new(&amp_cache_root));
     }
 
+    // OpenCode's `claude-agent` provider runs the Claude Agent SDK, which also
+    // writes Claude Code transcripts. OpenCode owns that usage, so drop the
+    // duplicate transcripts. Look the databases up even for a Claude-only scan
+    // so `--claude` does not report OpenCode work as Claude Code usage.
+    if enabled.contains(&ClientId::Claude) && !result.get(ClientId::Claude).is_empty() {
+        let opencode_dbs = if enabled.contains(&ClientId::OpenCode) {
+            result.opencode_dbs.clone()
+        } else {
+            let xdg_data = if use_env_roots {
+                std::env::var("XDG_DATA_HOME")
+                    .unwrap_or_else(|_| join_native(home_dir, ".local/share"))
+            } else {
+                join_native(home_dir, ".local/share")
+            };
+            let mut dbs = discover_opencode_dbs(&PathBuf::from(join_native(&xdg_data, "opencode")));
+            merge_user_opencode_db_paths(&mut dbs, &scanner_settings.opencode_db_paths);
+            dbs
+        };
+        crate::sessions::opencode_claude_agent::drop_claimed_claude_paths(
+            result.get_mut(ClientId::Claude),
+            &opencode_dbs,
+        );
+    }
+
     result
 }
 

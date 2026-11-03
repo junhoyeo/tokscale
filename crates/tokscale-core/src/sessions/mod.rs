@@ -46,6 +46,7 @@ pub mod mux;
 pub mod omp;
 pub mod openclaw;
 pub mod opencode;
+pub(crate) mod opencode_claude_agent;
 pub mod opencode_schema;
 pub mod opencodereview;
 pub(crate) mod opencodex;
