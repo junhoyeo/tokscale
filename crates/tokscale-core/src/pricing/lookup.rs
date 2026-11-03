@@ -23,6 +23,9 @@ const ORIGINAL_PROVIDER_PREFIXES: &[&str] = &[
     "anthropic/",
     "openai/",
     "google/",
+    // LiteLLM's namespace for Google's own AI Studio API; OpenRouter spells
+    // the same vendor `google/`.
+    "gemini/",
     "meta-llama/",
     "mistralai/",
     "minimax/",
@@ -8054,6 +8057,82 @@ mod tests {
         assert_eq!(result.matched_key, "google/gemini-2.5-pro");
         assert_eq!(result.source, "LiteLLM");
         assert!(!result.matched_key.starts_with("vertex_ai"));
+    }
+
+    // LiteLLM keys Google's own AI Studio API `gemini/<model>`; OpenRouter keys
+    // the same vendor `google/<model>`. Under a `google` hint both match, so the
+    // original-provider tie-break decides, and `gemini/` must count as original.
+    fn gemini_namespace_priced(input: f64, output: f64) -> ModelPricing {
+        ModelPricing {
+            input_cost_per_token: Some(input),
+            output_cost_per_token: Some(output),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn google_hint_prefers_litellm_gemini_namespace_over_openrouter_google() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gemini/gemini-3.8-flash".into(),
+            gemini_namespace_priced(7.5e-7, 3.75e-6),
+        );
+        litellm.insert(
+            "gemini-3.8-flash".into(),
+            gemini_namespace_priced(7.5e-7, 3.75e-6),
+        );
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "google/gemini-3.8-flash".into(),
+            gemini_namespace_priced(8.25e-7, 4.125e-6),
+        );
+        let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+
+        let result = lookup
+            .lookup_with_provider("gemini-3.8-flash", Some("google"))
+            .unwrap();
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.matched_key, "gemini/gemini-3.8-flash");
+        assert_eq!(result.pricing.input_cost_per_token, Some(7.5e-7));
+    }
+
+    #[test]
+    fn gemini_namespace_is_original_not_reseller() {
+        assert!(is_original_provider("gemini/gemini-3.8-flash"));
+        assert!(!is_reseller_provider("gemini/gemini-3.8-flash"));
+        // `gemini` without a slash is a model-name prefix, not a namespace.
+        assert!(!is_original_provider("gemini-3.8-flash"));
+    }
+
+    // Controls: other vendors keep OpenRouter's prefixed key, and a Google model
+    // only OpenRouter has still prices from OpenRouter.
+    #[test]
+    fn gemini_namespace_leaves_other_vendors_and_openrouter_only_models_alone() {
+        for (hint, bare, prefixed) in [
+            ("anthropic", "claude-x-9", "anthropic/claude-x-9"),
+            ("openai", "gpt-x-9", "openai/gpt-x-9"),
+        ] {
+            let mut litellm = HashMap::new();
+            litellm.insert(bare.into(), gemini_namespace_priced(1e-6, 2e-6));
+            let mut openrouter = HashMap::new();
+            openrouter.insert(prefixed.into(), gemini_namespace_priced(2e-6, 4e-6));
+            let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+            let result = lookup.lookup_with_provider(bare, Some(hint)).unwrap();
+            assert_eq!(result.source, "OpenRouter", "hint {hint}");
+            assert_eq!(result.matched_key, prefixed, "hint {hint}");
+        }
+
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "google/gemini-only-or-1".into(),
+            gemini_namespace_priced(3e-6, 6e-6),
+        );
+        let lookup = PricingLookup::new(HashMap::new(), openrouter, HashMap::new());
+        let result = lookup
+            .lookup_with_provider("gemini-only-or-1", Some("google"))
+            .unwrap();
+        assert_eq!(result.source, "OpenRouter");
+        assert_eq!(result.matched_key, "google/gemini-only-or-1");
     }
 
     #[test]
