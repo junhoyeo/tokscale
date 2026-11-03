@@ -2815,9 +2815,9 @@ not valid json at all
     ) -> UnifiedMessage {
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
-            "auto".to_string(),
+            "auto",
             PROVIDER_ID,
-            session_id.to_string(),
+            session_id,
             1_770_983_426_000,
             TokenBreakdown {
                 input: 100,

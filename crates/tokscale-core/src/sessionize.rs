@@ -255,6 +255,14 @@ pub fn compute_time_metrics(intervals: &[SessionInterval], _idle_gap_ms: i64) ->
     let mut session_count = 0_u32;
     for interval in intervals {
         let group = (interval.client.as_str(), interval.session_id.as_str());
+        // Droid's timestamped records are apportioned from one cumulative
+        // source session, including when idle gaps split its activity spans.
+        if interval.client == "droid" {
+            if positive_groups.insert(group) {
+                session_count = session_count.saturating_add(1);
+            }
+            continue;
+        }
         if interval.message_count > 0 {
             session_count = session_count.saturating_add(1);
             positive_groups.insert(group);

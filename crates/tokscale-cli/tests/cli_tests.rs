@@ -6631,6 +6631,106 @@ fn test_submit_stealth_preview_shorthands_upload_without_warnings() {
     );
 }
 
+#[test]
+fn test_submit_compacts_repeated_daily_regression_warnings_without_losing_details() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = create_temp_fixture_dir();
+    write_fake_credentials(tmp.path());
+    let warnings: Vec<String> = (1..=9)
+        .map(|day| format!("Day 2026-05-{day:02}: Preserved hermes because this same-device resubmit would reduce 1,000 tokens to {day}00."))
+        .chain([
+            "Ignored Amp changes because this snapshot cannot advance the device high-water.".to_string(),
+            "Day 2026-06-01: Preserved workbuddy because this same-device resubmit would reduce 90 tokens to 80.".to_string(),
+            "Day 2026-06-02: Preserved unrelated warning with a different format.".to_string(),
+        ])
+        .collect();
+    let body = serde_json::json!({"success":true,"warnings":warnings}).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("submit did not reach the fixture server: {error}"),
+            }
+        };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; content_length];
+            reader.read_exact(&mut request).unwrap();
+        }
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_URL", api)
+        .env("TOKSCALE_API_TOKEN", "fixture-token")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--no-spinner", "submit", "--client", "opencode"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Preserved hermes: 9 daily token decreases"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-05-01: Preserved hermes because"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=9 {
+        assert!(
+            stdout.contains(&format!("2026-05-{day:02}: 1,000 -> {day}00")),
+            "{stdout}"
+        );
+    }
+    assert!(stdout.contains("Ignored Amp changes"), "{stdout}");
+    assert!(
+        stdout.contains("Day 2026-06-01: Preserved workbuddy because"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Day 2026-06-02: Preserved unrelated warning"),
+        "{stdout}"
+    );
+}
+
 /// Regression: a long proxy-model history fans out to one warning row per
 /// provider/model pair and used to bury the submittable summary. Detail rows
 /// are capped (mirroring the tokenless-row reporter) with an aggregate total.
