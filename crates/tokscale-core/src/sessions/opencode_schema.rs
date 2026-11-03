@@ -680,6 +680,79 @@ fn merge_duplicate_workspace(
 // Field resolution
 // =============================================================================
 
+struct AcceptedSchemaUsage {
+    model_id: String,
+    cache_read: i64,
+    cache_write: i64,
+    input: i64,
+    output: i64,
+    reasoning: i64,
+    created_ms: f64,
+    completed_ms: Option<f64>,
+}
+
+/// The accept/reject gates shared by message ingest and the Claude-agent
+/// claim scan. A payload that returns `None` is absent from reports.
+fn accepted_schema_usage(
+    msg: &OpenCodeSchemaMessage,
+    cfg: &OpenCodeSchemaConfig,
+) -> Option<AcceptedSchemaUsage> {
+    // v1 rows carry an explicit role; v2 rows omit it and are pre-filtered
+    // by the SQL `type` column, so only a dual-schema client may treat a
+    // missing role as assistant.
+    let is_assistant = if cfg.dual_schema {
+        msg.is_assistant()
+    } else {
+        msg.role.as_deref() == Some("assistant")
+    };
+    if !is_assistant {
+        return None;
+    }
+
+    let tokens = msg.tokens.as_ref()?;
+    let (cache_read, cache_write) = resolve_cache(tokens.cache.as_ref(), cfg.strict_cache)?;
+    let model_id = if cfg.dual_schema {
+        msg.resolve_model_id()
+    } else {
+        msg.model_id.clone()
+    }?;
+    // A payload with no `$.time` is dropped unless the client supplies a
+    // fallback, matching the mandatory `time` field its own type declared.
+    let (created_ms, completed_ms) = match msg.time {
+        Some(ref time) => (
+            normalize_epoch(time.created, cfg),
+            time.completed
+                .map(|completed| normalize_epoch(completed, cfg)),
+        ),
+        None => (cfg.fallback_timestamp? as f64, None),
+    };
+
+    Some(AcceptedSchemaUsage {
+        model_id,
+        cache_read,
+        cache_write,
+        input: tokens.input.max(0),
+        output: tokens.output.max(0),
+        reasoning: tokens.reasoning.unwrap_or(0).max(0),
+        created_ms,
+        completed_ms,
+    })
+}
+
+/// Whether `data` would become a counted OpenCode message.
+///
+/// The caller still has to apply the SQL `type = 'assistant'` filter. v2
+/// payloads omit `role`, and a missing role is assistant only because that
+/// column already selected them.
+pub(crate) fn opencode_payload_is_countable_usage(data: &str) -> bool {
+    let mut bytes = data.as_bytes().to_vec();
+    let msg: OpenCodeSchemaMessage = match simd_json::from_slice(&mut bytes) {
+        Ok(msg) => msg,
+        Err(_) => return false,
+    };
+    accepted_schema_usage(&msg, &OpenCodeSchemaConfig::opencode()).is_some()
+}
+
 /// Clamp `$.tokens.cache` to `(read, write)`, or reject the message when the
 /// client requires a well-formed cache object and the payload lacks one.
 fn resolve_cache(cache: Option<&OpenCodeSchemaCache>, strict: bool) -> Option<(i64, i64)> {
@@ -860,27 +933,16 @@ impl SchemaAccumulator {
             Err(_) => return None,
         };
 
-        // v1 rows carry an explicit role; v2 rows omit it and are pre-filtered
-        // by the SQL `type` column, so only a dual-schema client may treat a
-        // missing role as assistant.
-        let is_assistant = if cfg.dual_schema {
-            msg.is_assistant()
-        } else {
-            msg.role.as_deref() == Some("assistant")
-        };
-        if !is_assistant {
-            return None;
-        }
-
-        let tokens = msg.tokens.as_ref()?;
-        let (cache_read, cache_write) = resolve_cache(tokens.cache.as_ref(), cfg.strict_cache)?;
-
-        let resolved_model_id = if cfg.dual_schema {
-            msg.resolve_model_id()
-        } else {
-            msg.model_id.clone()
-        };
-        let model_id = resolved_model_id?;
+        let AcceptedSchemaUsage {
+            model_id,
+            cache_read,
+            cache_write,
+            input,
+            output,
+            reasoning,
+            created_ms,
+            completed_ms,
+        } = accepted_schema_usage(&msg, cfg)?;
 
         let billing_provider = if cfg.dual_schema {
             msg.resolve_provider_id()
@@ -888,17 +950,6 @@ impl SchemaAccumulator {
             msg.provider_id.clone()
         };
         let provider_id = resolve_provider(&msg, &model_id, cfg);
-
-        // A payload with no `$.time` is dropped unless the client supplies a
-        // fallback, matching the mandatory `time` field its own type declared.
-        let (created_ms, completed_ms) = match msg.time {
-            Some(ref time) => (
-                normalize_epoch(time.created, cfg),
-                time.completed
-                    .map(|completed| normalize_epoch(completed, cfg)),
-            ),
-            None => (cfg.fallback_timestamp? as f64, None),
-        };
 
         let agent_or_mode = if cfg.prefer_mode_over_agent {
             msg.mode.clone().or_else(|| msg.agent.clone())
@@ -913,9 +964,6 @@ impl SchemaAccumulator {
             }
         });
 
-        let input = tokens.input.max(0);
-        let output = tokens.output.max(0);
-        let reasoning = tokens.reasoning.unwrap_or(0).max(0);
         let reported = reported_cost(msg.cost);
         let cost = reported.unwrap_or(0.0);
 
