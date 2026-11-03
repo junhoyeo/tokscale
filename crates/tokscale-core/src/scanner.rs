@@ -124,6 +124,8 @@ pub struct ScanResult {
     pub copilot_desktop_db: Option<PathBuf>,
     /// Copilot CLI usage database at `~/.copilot/session-store.db`.
     pub copilot_session_store_db: Option<PathBuf>,
+    /// Native Copilot CLI session-state event files at `~/.copilot/session-state/*/events.jsonl`.
+    pub copilot_session_state_files: Vec<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
@@ -166,6 +168,7 @@ impl Default for ScanResult {
             opencode_dbs: Vec::new(),
             copilot_desktop_db: None,
             copilot_session_store_db: None,
+            copilot_session_state_files: Vec::new(),
             synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
@@ -1761,7 +1764,7 @@ fn push_unique_scan_task(
     let pattern = if matches!(client_id, ClientId::MiMoCode | ClientId::MiMoDesktop) {
         // Reject invalid explicit aliases before canonical-root dedup, or an
         // alias.txt listed first could suppress a valid alias.db of the store.
-        if raw_path.is_file() && !raw_path.extension().is_some_and(|ext| ext == "db") {
+        if raw_path.is_file() && raw_path.extension() != Some(std::ffi::OsStr::new("db")) {
             return;
         }
         "micode-db"
@@ -1981,6 +1984,30 @@ pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_
             discovered.push(raw.clone());
         }
     }
+}
+
+pub(crate) fn discover_copilot_session_state_files(home_dir: &str) -> Vec<PathBuf> {
+    let session_state_dir = PathBuf::from(join_native(home_dir, ".copilot/session-state"));
+    let mut files = Vec::new();
+    let entries = match std::fs::read_dir(&session_state_dir) {
+        Ok(entries) => entries,
+        Err(_) => return files,
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            let events_path = path.join("events.jsonl");
+            if events_path.is_file() {
+                files.push(events_path);
+            }
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            files.push(path);
+        }
+    }
+
+    files.sort_unstable();
+    files
 }
 
 fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -3265,6 +3292,7 @@ fn scan_all_clients_with_env_strategy_inner(
             result.copilot_session_store_db = Some(session_store_db);
         }
 
+        result.copilot_session_state_files = discover_copilot_session_state_files(home_dir);
         result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
 
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
@@ -6598,6 +6626,24 @@ mod tests {
             Some(&session_store_db)
         );
         assert!(result.copilot_desktop_db.is_none());
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot_discovers_session_state_files() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let session_state_dir = home.join(".copilot/session-state/test-session-1");
+        fs::create_dir_all(&session_state_dir).unwrap();
+        let events_file = session_state_dir.join("events.jsonl");
+        File::create(&events_file).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(result.copilot_session_state_files, vec![events_file]);
     }
 
     #[test]

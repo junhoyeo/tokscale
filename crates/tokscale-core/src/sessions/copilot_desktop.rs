@@ -50,28 +50,28 @@ struct SessionStateMetadata {
 /// writes two snapshots of the same running total. [`shutdown_deltas`] turns
 /// them into the per-run increments the rest of this module assumes.
 #[derive(Debug, Clone)]
-struct ShutdownUsage {
+pub(crate) struct ShutdownUsage {
     /// Identity of the originating event, used to build a dedup key that
     /// survives rotation or compaction of `events.jsonl`. Position in the file
     /// would not: dropping one earlier line renumbers every record after it,
     /// so already-submitted rows would come back under new keys and be counted
     /// twice. The event's own `id` is a UUID; its `timestamp` is the fallback.
-    event_id: String,
-    timestamp_ms: i64,
+    pub(crate) event_id: String,
+    pub(crate) timestamp_ms: i64,
     /// The `modelMetrics` key, trimmed. That key is the identity of the
     /// tracker counter these numbers came from, so it is what the running peak,
     /// the verbatim-record dedup, and the submitted dedup key are all grouped
     /// by. Trimming it here keeps that grouping identical to the model the
     /// emitted message is attributed to, which is trimmed too: two spellings
     /// that differ only by padding are one model everywhere or nowhere.
-    model: String,
+    pub(crate) model: String,
     /// Concrete model active for this shutdown when the tracker key is `auto`.
-    attributed_model: Option<String>,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    reasoning: i64,
+    pub(crate) attributed_model: Option<String>,
+    pub(crate) input: i64,
+    pub(crate) output: i64,
+    pub(crate) cache_read: i64,
+    pub(crate) cache_write: i64,
+    pub(crate) reasoning: i64,
 }
 
 /// The five token buckets a shutdown record reports, in a fixed order so
@@ -103,13 +103,13 @@ impl ShutdownUsage {
 
 /// What one session's shutdown snapshots resolve to: the increments to emit,
 /// and the usage they account for.
-struct ShutdownAttribution {
+pub(crate) struct ShutdownAttribution {
     /// One entry per snapshot that added usage, already differenced into the
     /// increment it contributed.
-    deltas: Vec<ShutdownUsage>,
+    pub(crate) deltas: Vec<ShutdownUsage>,
     /// The total the snapshots account for, which the caller subtracts from the
     /// row's lifetime total. Not necessarily the sum of `deltas`.
-    consumed: UsageBuckets,
+    pub(crate) consumed: UsageBuckets,
 }
 
 /// Convert cumulative shutdown snapshots into the usage each one actually
@@ -145,7 +145,7 @@ struct ShutdownAttribution {
 /// already submitted the rotated-away snapshot it is exact; on one scanning a
 /// truncated log for the first time it under-reports the baseline rather than
 /// re-dating it, because nothing on disk distinguishes the two cases.
-fn shutdown_deltas(
+pub(crate) fn shutdown_deltas(
     mut snapshots: Vec<ShutdownUsage>,
     complete_from_start: bool,
 ) -> ShutdownAttribution {
@@ -507,7 +507,7 @@ fn read_events_metadata(events_path: &Path) -> SessionStateMetadata {
     metadata
 }
 
-fn collect_shutdown_usage(event: &Value, out: &mut Vec<ShutdownUsage>) {
+pub(crate) fn collect_shutdown_usage(event: &Value, out: &mut Vec<ShutdownUsage>) {
     // The desktop app nests event payloads under `data`; a flat record is
     // accepted too so a shutdown that omits the envelope still reports usage
     // rather than silently contributing nothing.
