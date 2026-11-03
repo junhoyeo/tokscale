@@ -13,13 +13,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::opencode_schema::opencode_payload_is_countable_usage;
+use super::opencode_schema::{
+    opencode_payload_is_countable_usage, OPENCODE_SCHEMA_PARSER_BASE_VERSION,
+};
 use super::utils::open_readonly_sqlite_opt;
 use crate::message_cache::{FingerprintStatus, SourceFingerprint};
 
-/// Bump when the claim rules change. A cached set from an older version is
-/// discarded even if the database file is unchanged.
+/// Bump when the claim rules in this module change. A cached set from an older
+/// version is discarded even if the database file is unchanged.
 const CLAIM_LOGIC_VERSION: u32 = 1;
+
+/// Claims depend on both this module and the shared OpenCode driver's
+/// countable-usage gate, so a cached set is valid only when both match.
+const CLAIM_CACHE_VERSION: (u32, u32) = (CLAIM_LOGIC_VERSION, OPENCODE_SCHEMA_PARSER_BASE_VERSION);
 
 const CLAIM_QUERY: &str = "\
 SELECT data FROM session_message
@@ -78,11 +84,15 @@ fn collect_from_db(db_path: &Path, ids: &mut HashSet<String>) -> bool {
         Ok(rows) => rows,
         Err(_) => return false,
     };
-    let Ok(rows) = rows.collect::<Result<Vec<_>, _>>() else {
-        return false;
-    };
+    // Stream rows instead of buffering every payload: OpenCode histories can
+    // be large. A fetch error (e.g. SQLITE_BUSY mid-scan) ends the step loop;
+    // keep what was claimed so far but report the scan as incomplete.
     let mut complete = true;
-    for data in rows {
+    for row in rows {
+        let Ok(data) = row else {
+            complete = false;
+            break;
+        };
         if !opencode_payload_is_countable_usage(&data) {
             continue;
         }
@@ -145,7 +155,7 @@ pub(crate) fn drop_claimed_claude_paths(paths: &mut Vec<PathBuf>, opencode_dbs: 
 
 #[derive(Serialize, Deserialize)]
 struct ClaimCacheFile {
-    logic_version: u32,
+    version: (u32, u32),
     fingerprint: SourceFingerprint,
     session_ids: Vec<String>,
 }
@@ -168,7 +178,7 @@ fn claim_cache_path(db_path: &Path) -> PathBuf {
 fn read_claim_cache(db_path: &Path) -> Option<HashSet<String>> {
     let path = claim_cache_path(db_path);
     let cached: ClaimCacheFile = bincode::deserialize(&std::fs::read(path).ok()?).ok()?;
-    if cached.logic_version != CLAIM_LOGIC_VERSION {
+    if cached.version != CLAIM_CACHE_VERSION {
         return None;
     }
     match SourceFingerprint::check_sqlite_path(db_path, Some(&cached.fingerprint))? {
@@ -188,16 +198,29 @@ fn write_claim_cache(db_path: &Path, fingerprint: &SourceFingerprint, ids: &Hash
     let mut session_ids: Vec<String> = ids.iter().cloned().collect();
     session_ids.sort();
     let cached = ClaimCacheFile {
-        logic_version: CLAIM_LOGIC_VERSION,
+        version: CLAIM_CACHE_VERSION,
         fingerprint: fingerprint.clone(),
         session_ids,
     };
     let Ok(bytes) = bincode::serialize(&cached) else {
         return;
     };
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, bytes).is_ok() {
-        let _ = crate::fs_atomic::replace_file(&tmp, &path);
+    // Concurrent reports may write the same entry, so each writer needs its
+    // own temp file; a shared name lets one truncate it while another renames.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let tmp = parent.join(format!(
+        ".{}.{}.{nanos:x}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("claims"),
+        std::process::id(),
+    ));
+    let written =
+        std::fs::write(&tmp, bytes).and_then(|()| crate::fs_atomic::replace_file(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -382,6 +405,14 @@ mod tests {
             vec![sdk.clone()],
             "an unchanged database must reuse the cached claim set"
         );
+
+        // A cache written under another OpenCode driver version is stale even
+        // though the database is unchanged.
+        cached.version.1 = OPENCODE_SCHEMA_PARSER_BASE_VERSION + 1;
+        std::fs::write(&cache_path, bincode::serialize(&cached).unwrap()).unwrap();
+        let mut paths = vec![sdk.clone(), other.clone()];
+        drop_claimed_claude_paths(&mut paths, std::slice::from_ref(&db));
+        assert_eq!(paths, vec![other.clone()]);
 
         let conn = Connection::open(&db).unwrap();
         insert_message(
