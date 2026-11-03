@@ -2119,19 +2119,24 @@ impl LightSpinner {
 
         let handle = thread::spawn(move || {
             let mut frame = 0usize;
-            let mut stderr = io::stderr().lock();
-
-            let _ = write!(stderr, "\x1b[?25l");
-            let _ = stderr.flush();
+            {
+                let mut stderr = io::stderr().lock();
+                let _ = write!(stderr, "\x1b[?25l");
+                let _ = stderr.flush();
+            }
 
             while running_thread.load(Ordering::Relaxed) {
                 let spinner = Self::frame(frame);
-                let _ = write!(stderr, "\r\x1b[K  {} {}", spinner, message);
-                let _ = stderr.flush();
+                {
+                    let mut stderr = io::stderr().lock();
+                    let _ = write!(stderr, "\r\x1b[K  {} {}", spinner, message);
+                    let _ = stderr.flush();
+                }
                 frame = frame.wrapping_add(1);
                 thread::sleep(Duration::from_millis(Self::FRAME_MS));
             }
 
+            let mut stderr = io::stderr().lock();
             let _ = write!(stderr, "\r\x1b[K\x1b[?25h");
             let _ = stderr.flush();
         });
@@ -9908,6 +9913,26 @@ mod tests {
             chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap(),
         );
         assert_eq!(label, None);
+    }
+
+    #[test]
+    fn test_light_spinner_releases_stderr_between_frames() {
+        let spinner = LightSpinner::start("Testing stderr locking...");
+        thread::sleep(Duration::from_millis(100));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = thread::spawn(move || {
+            let _stderr = io::stderr().lock();
+            tx.send(()).unwrap();
+        });
+
+        let acquired_while_running = rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        spinner.stop();
+        writer.join().unwrap();
+        assert!(
+            acquired_while_running,
+            "spinner must not hold stderr locked while idle"
+        );
     }
 
     #[test]
