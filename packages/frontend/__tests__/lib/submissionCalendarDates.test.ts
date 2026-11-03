@@ -18,6 +18,7 @@ const tokens = {
 function buildSubmission(
   date: string,
   range: { start: string; end: string } = { start: date, end: date },
+  yearRange: { start: string; end: string } = range,
 ): Record<string, unknown> {
   return {
     meta: {
@@ -40,7 +41,7 @@ function buildSubmission(
         year: date.slice(0, 4),
         totalTokens: 300,
         totalCost: 1.5,
-        range,
+        range: yearRange,
       },
     ],
     contributions: [
@@ -75,6 +76,19 @@ describe("validateSubmission calendar dates", () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors).toContain("meta.dateRange.end: Invalid calendar date");
+  });
+
+  it("rejects an impossible year range bound on its own", () => {
+    const result = validateSubmission(
+      buildSubmission(
+        "2026-02-28",
+        { start: "2026-02-01", end: "2026-02-28" },
+        { start: "2026-02-01", end: "2026-02-30" },
+      ),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(["years.0.range.end: Invalid calendar date"]);
   });
 
   it.each(["2024-02-29", "2026-02-28", "2025-12-31"])(
