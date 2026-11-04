@@ -256,7 +256,7 @@ fn tz_env_zone() -> Option<chrono_tz::Tz> {
 /// the agreement window, where a year either way is immaterial.
 const YEAR_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 
-/// The first instant [`zones_agree`] checks: the Unix epoch.
+/// The first instant [`zones_agree`] checks: the Unix epoch, except on Windows.
 ///
 /// Every day key in tokscale is derived from a `timestamp` field holding Unix
 /// milliseconds, and the rebucket passes decline to move a message whose
@@ -264,7 +264,24 @@ const YEAR_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 /// that value is the parsers' "no timestamp" sentinel, not a real instant. So
 /// the epoch is not a convenient cut-off: it is a lower bound on every instant
 /// auto-pinning can actually re-key.
-pub(crate) const AGREEMENT_WINDOW_START_MS: i64 = 0;
+///
+/// On Windows it starts at [`WINDOWS_AGREEMENT_WINDOW_START_MS`] instead.
+pub(crate) const AGREEMENT_WINDOW_START_MS: i64 = if cfg!(windows) {
+    WINDOWS_AGREEMENT_WINDOW_START_MS
+} else {
+    0
+};
+
+/// 2000-01-01T00:00:00Z: where the agreement window starts on Windows.
+///
+/// `chrono::Local` reads Win32 zone data there, which carries no history before
+/// its earliest rule and applies that rule to every earlier year — the US
+/// 1987–2006 rule to 1970–1986 in `Eastern Standard Time`, for one. Checked from
+/// the epoch, the correctly detected `America/New_York` therefore disagrees with
+/// `Local` in every pre-1987 summer and no zone with DST history since 1970 can
+/// ever auto-pin. No AI coding client's usage log predates this floor, so the
+/// instants it skips are ones the rebucket passes never meet in practice.
+const WINDOWS_AGREEMENT_WINDOW_START_MS: i64 = 946_684_800_000;
 
 /// How far past "now" [`zones_agree`] checks.
 ///
@@ -277,7 +294,7 @@ pub(crate) const AGREEMENT_WINDOW_AHEAD_MS: i64 = 10 * YEAR_MS;
 // it to two constants nobody re-reads. Narrowing either edge means the pin can
 // be accepted for instants nobody checked.
 const _: () = assert!(
-    AGREEMENT_WINDOW_START_MS == 0,
+    AGREEMENT_WINDOW_START_MS == 0 || cfg!(windows),
     "the rebucket passes skip non-positive timestamps, so the window must start \
      at the epoch to cover every instant they do move"
 );
@@ -307,7 +324,9 @@ const _: () = assert!(
 ///
 /// So the window runs from [`AGREEMENT_WINDOW_START_MS`] — the Unix epoch, the
 /// lower bound on any instant the rebucket passes will move — to ten years
-/// ahead. Nothing auto-pinning can re-key falls outside it.
+/// ahead. Nothing auto-pinning can re-key falls outside it. Windows is the one
+/// exception: its `Local` has no pre-1987 history to compare against, so the
+/// window starts at [`WINDOWS_AGREEMENT_WINDOW_START_MS`] there.
 ///
 /// # What the wider window costs
 ///
@@ -531,6 +550,7 @@ mod tests {
             zones_agree(&tokyo, &plus_nine),
             "Asia/Tokyo has had no DST since the epoch"
         );
+        #[cfg(not(windows))]
         assert!(
             !zones_agree(&seoul, &plus_nine),
             "Asia/Seoul's 1987-88 DST is inside the window and must be seen"
@@ -570,6 +590,7 @@ mod tests {
     /// are exactly that pair: both fixed at UTC+09:00 for decades, but Seoul
     /// observed DST in 1987 and 1988 and Tokyo did not.
     #[test]
+    #[cfg(not(windows))]
     fn zones_that_only_diverge_before_the_last_decade_are_still_rejected() {
         let seoul: chrono_tz::Tz = "Asia/Seoul".parse().unwrap();
         let tokyo: chrono_tz::Tz = "Asia/Tokyo".parse().unwrap();
@@ -588,6 +609,23 @@ mod tests {
             !zones_agree(&seoul, &tokyo),
             "a divergence older than the previous window must still be caught — \
              Seoul's 1987-88 DST moves day boundaries the pin would silently rewrite"
+        );
+    }
+
+    /// Windows' `chrono::Local` has no zone history before its earliest Win32
+    /// rule, so a correctly detected zone only matches it from some recent year
+    /// on. New York and Toronto stand in for that: identical rules since 2000,
+    /// but split over the 1974-75 US emergency DST.
+    #[test]
+    fn windows_window_accepts_zones_that_only_diverge_before_2000() {
+        let new_york: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let toronto: chrono_tz::Tz = "America/Toronto".parse().unwrap();
+        let end = chrono::Utc::now().timestamp_millis() + AGREEMENT_WINDOW_AHEAD_MS;
+
+        assert!(!zones_agree_between(&new_york, &toronto, 0, end));
+        assert!(
+            zones_agree_between(&new_york, &toronto, WINDOWS_AGREEMENT_WINDOW_START_MS, end),
+            "a divergence older than the Windows floor must not block pinning there"
         );
     }
 
