@@ -29,15 +29,20 @@ const TOKEN_ABSOLUTE_TOLERANCE = 100;
 const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const NonNegativeNumberSchema = z.number().finite().min(0);
 
-// Keep the protocol field calendar-safe even while the allocator deliberately
-// treats its client-reported value as unverified metadata.
-const RetentionFloorSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
+// A YYYY-MM-DD string that names a real calendar day. The regex alone lets
+// through values like 2026-02-30 or 2026-13-01, which pass every string
+// comparison below but make Postgres reject the `date` column on insert.
+const CalendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
   (value) => {
     const parsed = new Date(`${value}T00:00:00.000Z`);
     return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
   },
   { message: "Invalid calendar date" },
 );
+
+// Keep the protocol field calendar-safe even while the allocator deliberately
+// treats its client-reported value as unverified metadata.
+const RetentionFloorSchema = CalendarDateSchema;
 
 const TokenBreakdownSchema = z.object({
   input: NonNegativeIntegerSchema,
@@ -86,7 +91,7 @@ const ClientContributionSchema = z.object({
 });
 
 const DailyContributionSchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: CalendarDateSchema,
   timestampMs: z.number().int().min(1e12).max(Number.MAX_SAFE_INTEGER).optional(),
   activeTimeMs: z.number().int().min(0).optional(),
   totals: z.object({
@@ -117,8 +122,8 @@ const YearSummarySchema = z.object({
   totalTokens: NonNegativeIntegerSchema,
   totalCost: NonNegativeNumberSchema,
   range: z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    start: CalendarDateSchema,
+    end: CalendarDateSchema,
   }),
 });
 
@@ -137,8 +142,8 @@ const ExportMetaSchema = z.object({
   generatedAt: z.string(),
   version: z.string(),
   dateRange: z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    start: CalendarDateSchema,
+    end: CalendarDateSchema,
   }),
 });
 
