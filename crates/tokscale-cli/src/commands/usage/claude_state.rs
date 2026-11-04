@@ -142,12 +142,16 @@ impl State {
         self.sample(now, false)
             .filter(|s| now - s.freshness.as_ref().unwrap().fetched_at < FRESH_SAMPLE_SECS)
     }
-    pub fn limited(&mut self, wait: Option<u64>, now: u64) -> u64 {
+    /// `Retry-After` can only lengthen the progressive backoff: the usage
+    /// endpoint answers some 429s with `Retry-After: 0`, and honoring that
+    /// would re-request on every refresh while the limit is still in force.
+    pub fn limited(&mut self, retry_after: Option<u64>, now: u64) -> u64 {
         self.failures = self.failures.saturating_add(1);
-        let wait = wait
-            .unwrap_or_else(|| {
-                FRESH_SAMPLE_SECS.saturating_mul(1u64 << self.failures.saturating_sub(1).min(6))
-            })
+        let backoff =
+            FRESH_SAMPLE_SECS.saturating_mul(1u64 << self.failures.saturating_sub(1).min(6));
+        let wait = retry_after
+            .unwrap_or_default()
+            .max(backoff)
             .min(MAX_STALE_SECS);
         self.until = now.saturating_add(wait);
         wait
@@ -166,6 +170,43 @@ pub(super) fn forget_memory(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_zero_retry_after_uses_progressive_backoff() {
+        let mut state = State::default();
+        assert_eq!(state.limited(Some(0), 1000), 60);
+        assert_eq!(state.until, 1060);
+        assert_eq!(state.limited(Some(0), 1060), 120);
+        assert_eq!(state.until, 1180);
+        assert_eq!(state.limited(Some(0), 1180), 240);
+    }
+
+    #[test]
+    fn limited_short_retry_after_is_raised_to_backoff() {
+        let mut state = State::default();
+        assert_eq!(state.limited(Some(30), 1000), 60);
+    }
+
+    #[test]
+    fn limited_longer_retry_after_is_honored() {
+        let mut state = State::default();
+        assert_eq!(state.limited(Some(300), 1000), 300);
+        assert_eq!(state.limited(Some(10_000), 1300), 3600);
+    }
+
+    #[test]
+    fn limited_repeated_zero_caps_at_one_hour() {
+        let mut state = State::default();
+        let mut now = 1000;
+        let waits: Vec<u64> = (0..8)
+            .map(|_| {
+                let wait = state.limited(Some(0), now);
+                now += wait;
+                wait
+            })
+            .collect();
+        assert_eq!(waits, [60, 120, 240, 480, 960, 1920, 3600, 3600]);
+    }
 
     #[test]
     fn disk_lock_reports_contention_as_would_block_on_every_platform() {
