@@ -4771,6 +4771,18 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     exists: roots[1].exists(),
                 });
             }
+            if client == ClientId::Copilot {
+                let session_state = home_dir.join(".copilot/session-state");
+                additional_paths.push(AdditionalPath {
+                    path: session_state.to_string_lossy().to_string(),
+                    exists: session_state.exists(),
+                });
+                let session_store = home_dir.join(".copilot/session-store.db");
+                additional_paths.push(AdditionalPath {
+                    path: session_store.to_string_lossy().to_string(),
+                    exists: session_store.exists(),
+                });
+            }
             if client == ClientId::Zcode {
                 let path = home_dir.join(".zcode/cli/db/db.sqlite");
                 additional_paths.push(AdditionalPath {

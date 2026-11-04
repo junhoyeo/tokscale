@@ -17,6 +17,7 @@ pub mod codex;
 pub mod commandcode;
 pub mod copilot;
 pub mod copilot_desktop;
+pub mod copilot_session_state;
 pub mod copilot_session_store;
 pub mod copilot_vscode;
 pub mod crush;
