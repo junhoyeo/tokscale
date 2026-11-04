@@ -2988,7 +2988,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_from_cached_datasets_returns_none_when_both_sources_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut env = crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_CONFIG_DIR"]);
+        env.set("TOKSCALE_CONFIG_DIR", temp.path());
         assert!(PricingService::from_cached_datasets(None, None, None).is_none());
     }
 

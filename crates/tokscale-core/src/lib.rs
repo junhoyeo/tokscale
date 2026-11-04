@@ -2649,6 +2649,25 @@ fn parse_all_messages_streaming<S: MessageSink>(
         )
     }
 
+    fn load_or_parse_bb_sqlite_source(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> CachedParseOutcome {
+        load_or_parse_source_with_fingerprint_and_policy(
+            message_cache::CacheIdentity::for_client(ClientId::Bb),
+            path,
+            source_cache,
+            pricing,
+            HistoryRetention::LiveFileOnly,
+            message_cache::SourceFingerprint::check_sqlite_path,
+            |path, _| {
+                let scan = sessions::bb::scan_bb_sqlite(path);
+                (scan.messages, scan.complete)
+            },
+        )
+    }
+
     /// MiMo rows and exact provenance are one cache payload. A warm hit never
     /// opens SQLite, and a cold read collects both in one reader snapshot.
     fn load_or_parse_micode_source(
@@ -4348,6 +4367,25 @@ fn parse_all_messages_streaming<S: MessageSink>(
         );
         machine_labeler.label_messages(db_path, &mut messages);
         all_messages.extend(messages);
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    // BB (get-bb/bb) SQLite database sessions.
+    let mut bb_seen: HashSet<String> = HashSet::new();
+    for db_path in &scan_result.bb_dbs {
+        let CachedParseOutcome {
+            mut messages,
+            cache_entry,
+            ..
+        } = load_or_parse_bb_sqlite_source(db_path, &source_cache, pricing);
+        machine_labeler.label_messages(db_path, &mut messages);
+        all_messages.extend(
+            messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut bb_seen, message)),
+        );
         if let Some(entry) = cache_entry {
             source_cache.insert(entry);
         }
@@ -7967,6 +8005,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
+
+    let bb_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .bb_dbs
+        .par_iter()
+        .flat_map(|db_path| sessions::bb::parse_bb_sqlite(db_path))
+        .collect();
+    let mut bb_seen: HashSet<String> = HashSet::new();
+    let bb_msgs: Vec<ParsedMessage> = bb_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut bb_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let bb_count = summed_parsed_message_count(&bb_msgs);
+    counts.set(ClientId::Bb, bb_count);
+    messages.extend(bb_msgs);
 
     // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
     // the parent's rows verbatim in a second file, so dedup across the lane.
