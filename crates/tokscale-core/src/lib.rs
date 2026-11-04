@@ -15501,8 +15501,10 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        // A Freebuff chat: marked by its `base2-free*` root agent id, with no
-        // authoritative usage — only estimated text.
+        // A Freebuff chat: marked by its free root agent id, with no
+        // authoritative usage — only estimated text. Uses the v3 family the
+        // current Freebuff CLI writes; the parser must not depend on the v2
+        // `base2-free*` spelling.
         let freebuff_chat = manicode
             .join("projects")
             .join("proj")
@@ -15515,7 +15517,7 @@ mod tests {
                 { "variant": "user", "content": "hello world", "timestamp": "2026-08-07T13:00:00.000Z" },
                 { "variant": "ai", "timestamp": "2026-08-07T13:01:00.000Z", "blocks": [ { "content": "Hello!" } ],
                   "metadata": { "runState": { "sessionState": { "mainAgentState": {
-                      "agentType": "base2-free-deepseek-flash" } } } } }
+                      "agentType": "base3-free-catalog" } } } } }
             ]"#,
         )
         .unwrap();

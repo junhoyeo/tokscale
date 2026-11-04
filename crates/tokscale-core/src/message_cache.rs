@@ -9928,6 +9928,236 @@ mod tests {
         assert_eq!(parser_version(ClientId::Kilo), 2);
     }
 
+    /// A warm v1 entry for a `base3-free*` chat holds no rows — that is what
+    /// the pre-fix marker cached for these exact bytes — and its fingerprint
+    /// stays valid because the file never changed. Nothing but the parser
+    /// version can reject it.
+    ///
+    /// The empty payload is re-parsed rather than served regardless (see
+    /// `load_or_parse_resumable_source`), so this also pins that the recovery
+    /// does not depend on the bump; the bump's own job is the derived-total
+    /// cache, pinned by `test_codebuff_chat_family_bump_moves_the_parser_generation`
+    /// below. Seeding through `write_shard_with_limit` writes the predecessor's
+    /// envelope, which is the level an upgrading user actually hits.
+    #[test]
+    #[serial_test::serial]
+    fn test_freebuff_stale_empty_cache_is_rejected_and_rebuilt_with_same_fingerprint() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let manicode = source_home.path().join(".config").join("manicode");
+        let chat_dir = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-10-30T14-43-08.442Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            manicode.join("settings.json"),
+            r#"{"freebuffModel":"openai/gpt-6.1-terra"}"#,
+        )
+        .unwrap();
+        let messages_path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &messages_path,
+            r#"[
+                { "variant": "user", "content": "hello world", "timestamp": "2026-10-30T14:43:08.442Z" },
+                { "variant": "ai", "content": "", "blocks": [ { "type": "text", "content": "Hello there, friend!" } ],
+                  "timestamp": "2026-10-30T14:43:09.442Z",
+                  "metadata": { "runState": { "sessionState": { "mainAgentState": {
+                      "agentType": "base3-free-catalog" } } } } }
+            ]"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Freebuff);
+        // The lane fingerprints through `check_path_samples_only`, which stores
+        // a zeroed `content_hash` sentinel; seeding with `from_path`'s real
+        // content hash would make the stored entry differ from a rebuilt one
+        // for reasons that have nothing to do with the version bump.
+        let fingerprint = match SourceFingerprint::check_path_samples_only(&messages_path, None) {
+            Some(FingerprintStatus::Changed(fingerprint)) => fingerprint,
+            Some(FingerprintStatus::Unchanged) => {
+                panic!("an uncached source must build a fingerprint")
+            }
+            None => panic!("the source must be readable"),
+        };
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &messages_path,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &messages_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        assert!(
+            SourceMessageCache::load()
+                .get(identity, &messages_path)
+                .is_none(),
+            "a shard written at the previous parser version must not be served"
+        );
+
+        let scan = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["freebuff".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let scanned = scan();
+        assert_eq!(
+            scanned.len(),
+            1,
+            "the estimated row must be recovered from the empty warm entry"
+        );
+        assert_eq!(scanned[0].client, "freebuff");
+        assert_eq!(scanned[0].model_id, "openai/gpt-6.1-terra");
+        // "Hello there, friend!" is 20 chars (5 estimated output tokens);
+        // "hello world" is 11 chars (3 estimated input tokens).
+        assert_eq!(scanned[0].tokens.output, 5);
+        assert_eq!(scanned[0].tokens.input, 3);
+        assert!(
+            matches!(
+                SourceFingerprint::check_path_samples_only(&messages_path, Some(&fingerprint)),
+                Some(FingerprintStatus::Unchanged)
+            ),
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let cached = SourceMessageCache::load()
+            .get(identity, &messages_path)
+            .expect("the reparsed entry should be persisted at the current version");
+        assert_eq!(cached.parser_version, identity.parser_version);
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages.len(), 1);
+
+        // The repair has to land on disk, not just in this scan: an upgrading
+        // user runs once and the next run is warm.
+        assert_eq!(
+            scan(),
+            scanned,
+            "the warm scan must agree with the cold one"
+        );
+    }
+
+    /// The other half of the shared scan: the Codebuff lane must keep
+    /// reporting nothing for a Freebuff-marked chat, warm entry or not. A
+    /// marker that widened to any `base3*` root would put an estimated
+    /// Freebuff row into a Codebuff-only user's breakdown here.
+    #[test]
+    #[serial_test::serial]
+    fn test_codebuff_lane_does_not_claim_a_freebuff_chat_warm() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let manicode = source_home.path().join(".config").join("manicode");
+        let chat_dir = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-10-30T14-43-08.442Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            manicode.join("settings.json"),
+            r#"{"freebuffModel":"openai/gpt-6.1-terra"}"#,
+        )
+        .unwrap();
+        let messages_path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &messages_path,
+            r#"[
+                { "variant": "user", "content": "hello world", "timestamp": "2026-10-30T14:43:08.442Z" },
+                { "variant": "ai", "content": "", "blocks": [ { "type": "text", "content": "Hello there, friend!" } ],
+                  "timestamp": "2026-10-30T14:43:09.442Z",
+                  "metadata": { "runState": { "sessionState": { "mainAgentState": {
+                      "agentType": "base3-free-catalog" } } } } }
+            ]"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Codebuff);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &messages_path,
+            SourceFingerprint::from_path(&messages_path).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &messages_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        // Cold and warm: the Codebuff lane owns chats with authoritative usage,
+        // and this one has none.
+        for attempt in ["cold", "warm"] {
+            let scanned = crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["codebuff".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            );
+            assert!(
+                scanned.is_empty(),
+                "the {attempt} Codebuff scan must not claim a Freebuff chat, got {scanned:?}"
+            );
+        }
+    }
+
+    /// The bump is what makes the fix visible to a warm TUI. Its aggregate
+    /// cache is admitted on `parser_generation()` alone, and that value is
+    /// derived from every client's `parser_version()`; a base that did not
+    /// move would let the pre-fix totals be painted even though the source
+    /// scan now reports rows.
+    ///
+    /// The pre-bump generation is pinned as a literal rather than derived from
+    /// the current versions, because deriving it would make this pass even if
+    /// the bump were removed — the value would simply follow whatever the
+    /// constant said. `13555121629452759766` is what `parser_generation()`
+    /// returned with `CODEBUFF_CHAT_PARSER_BASE_VERSION` at 1, measured by
+    /// running it before the bump. A later edit that reuses v1 for this family
+    /// lands back on that number and fails here.
+    #[test]
+    fn test_codebuff_chat_family_bump_moves_the_parser_generation() {
+        const PRE_BUMP_GENERATION: u64 = 13_555_121_629_452_759_766;
+
+        assert_eq!(parser_version(ClientId::Codebuff), 2);
+        assert_eq!(parser_version(ClientId::Freebuff), 2);
+        assert_ne!(
+            parser_generation(),
+            PRE_BUMP_GENERATION,
+            "the bump must change the generation, or a warm TUI keeps painting \
+             the pre-fix totals"
+        );
+    }
+
     #[test]
     fn test_claude_sidechain_fingerprint_tracks_nested_parent_session_changes() {
         let dir = TempDir::new().unwrap();
