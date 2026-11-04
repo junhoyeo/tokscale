@@ -16,6 +16,8 @@
  * score is a prompt to investigate rather than a verdict.
  */
 
+import { evaluateSubmissionForWithholding } from "./withholding";
+
 export interface CandidateRow {
   userId: string;
   username: string;
@@ -27,6 +29,13 @@ export interface CandidateRow {
   hasBackfill: boolean;
   /** Sum of this user's daily_breakdown rows. */
   dailyTokens: number;
+  dailyMaxTokens?: number;
+  dailyMaxOutputTokens?: number;
+  maxTokensPerMessage?: number;
+  outputTokens?: number;
+  totalActiveTimeMs?: number;
+  /** Total cost after removing legacy Cursor charges with no token attribution. */
+  tokenAttributedCost?: number;
   /** How many OTHER users report a near-identical token total. */
   nearDuplicateCount: number;
   /**
@@ -87,6 +96,18 @@ export interface CandidateRow {
    * field instead.
    */
   totalTokensExact: bigint;
+  /**
+   * Actor who performed the latest moderation action on this user ("system" or admin username).
+   */
+  latestActorUsername?: string | null;
+  /**
+   * Action of the most recent moderation action ("hide" | "unhide").
+   */
+  latestAction?: string | null;
+  /**
+   * Reason recorded in the most recent moderation action.
+   */
+  latestActionReason?: string | null;
 }
 
 export interface CandidateContext {
@@ -103,7 +124,10 @@ export interface CandidateSignal {
     | "duplicateTotal"
     | "dailyMismatch"
     | "impliedRate"
-    | "slopModelName";
+    | "outputRate"
+    | "usageLimit"
+    | "slopModelName"
+    | "tokensPerMessage";
   /** Shown verbatim in the review UI. */
   label: string;
   weight: number;
@@ -401,7 +425,7 @@ export const SITE_SHARE_THRESHOLD = 0.05;
 /** Multiples of the median that stop being explainable as heavy usage. */
 export const MEDIAN_RATIO_THRESHOLD = 500;
 /**
- * Only an upper bound. There is deliberately no floor.
+ * Only an upper per-token rate bound. There is deliberately no rate floor.
  *
  * A low implied rate carries no signal: local models via Ollama or LM Studio
  * cost nothing, free tiers cost nothing, and cache reads are an order of
@@ -413,6 +437,30 @@ export const MEDIAN_RATIO_THRESHOLD = 500;
  * The ceiling still means something: nobody pays above list price.
  */
 export const MAX_IMPLIED_RATE = 0.001;
+/**
+ * Require $10 of token-attributed cost to keep small absolute pricing and
+ * attribution discrepancies out of the queue. This is a review gate on cost,
+ * not a lower bound on per-token rates.
+ */
+export const MIN_REVIEW_COST = 10;
+/**
+ * Require one million output tokens before considering the recorded rate.
+ * Smaller samples can magnify brief or incomplete active-time measurements.
+ */
+export const REVIEW_OUTPUT_TOKEN_FLOOR = 1_000_000;
+/**
+ * A deliberately high review threshold of 10,000 output tokens per active
+ * second keeps ordinary recorded rates out of the queue. Partial active-time
+ * coverage can exceed it, so this is advisory rather than a physical limit.
+ */
+export const REVIEW_MAX_OUTPUT_TOKENS_PER_ACTIVE_SECOND = 10_000;
+/**
+ * Advisory review threshold for per-message token volume.
+ * Commercial production context windows ceiling at 1M-2M tokens.
+ * A single message averaging > 10,000,000 tokens is far outside plausible
+ * LLM context boundaries and warrants administrator inspection.
+ */
+export const REVIEW_MAX_TOKENS_PER_MESSAGE = 10_000_000;
 /**
  * Daily rows should sum to roughly the stored total. A large gap is the
  * fingerprint of the ratchet, not of heavy usage.
@@ -438,6 +486,40 @@ export function scoreCandidate(
   context: CandidateContext
 ): ScoredCandidate {
   const signals: CandidateSignal[] = [];
+
+  const volume = evaluateSubmissionForWithholding({
+    totalTokens: row.dailyTokens,
+    maxDailyTokens: row.dailyMaxTokens,
+    maxDailyOutputTokens: row.dailyMaxOutputTokens,
+    maxTokensPerMessage: row.maxTokensPerMessage,
+  });
+  if (volume.shouldWithhold) {
+    signals.push({ key: "usageLimit", label: volume.reason, weight: 50 });
+  }
+
+  const maxTokensPerMessage = row.maxTokensPerMessage ?? 0;
+  if (maxTokensPerMessage > REVIEW_MAX_TOKENS_PER_MESSAGE) {
+    signals.push({
+      key: "tokensPerMessage",
+      label: `Recorded volume of ${Math.round(maxTokensPerMessage).toLocaleString("en-US")} tokens/message exceeds the review threshold of ${REVIEW_MAX_TOKENS_PER_MESSAGE.toLocaleString("en-US")} tokens/message; LLM context window may be implausible`,
+      weight: 25,
+    });
+  }
+
+  // Device high-waters and filtered submits can cover less history than the
+  // output total. This ratio is a review hint, never a physical invariant.
+  const outputTokens = row.outputTokens ?? 0;
+  const activeTimeMs = row.totalActiveTimeMs ?? 0;
+  if (outputTokens >= REVIEW_OUTPUT_TOKEN_FLOOR && activeTimeMs > 0) {
+    const rate = outputTokens / (activeTimeMs / 1000);
+    if (rate > REVIEW_MAX_OUTPUT_TOKENS_PER_ACTIVE_SECOND) {
+      signals.push({
+        key: "outputRate",
+        label: `Recorded output/active-time ratio is ${Math.round(rate).toLocaleString("en-US")} tokens/sec; active-time coverage may be partial`,
+        weight: 10,
+      });
+    }
+  }
 
   if (context.siteTokens > 0) {
     const share = row.totalTokens / context.siteTokens;
@@ -523,12 +605,13 @@ export function scoreCandidate(
     }
   }
 
-  if (row.totalTokens > 0) {
-    const impliedRate = row.totalCost / row.totalTokens;
+  const tokenAttributedCost = row.tokenAttributedCost ?? row.totalCost;
+  if (row.totalTokens > 0 && tokenAttributedCost >= MIN_REVIEW_COST) {
+    const impliedRate = tokenAttributedCost / row.totalTokens;
     if (impliedRate > MAX_IMPLIED_RATE) {
       signals.push({
         key: "impliedRate",
-        label: `Implied $${impliedRate.toPrecision(3)}/token is above any provider's list price`,
+        label: `Implied $${impliedRate.toPrecision(3)}/token is above the review threshold; check pricing and attribution`,
         weight: 15,
       });
     }

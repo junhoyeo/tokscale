@@ -1,4 +1,4 @@
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { revalidatePath, revalidateTag } from "next/cache";
 import { db, moderationActions, users } from "@/lib/db";
 import {
@@ -59,7 +59,15 @@ export async function applyModerationAction(params: {
   action: ModerationAction;
   reason: string;
 }): Promise<{ changed: boolean; leaderboardHidden: boolean }> {
-  const { target, actorUserId, actorUsername, action, reason } = params;
+  const { target, actorUserId, action, reason } = params;
+  const actorUsername = params.actorUsername?.trim() ?? "";
+  if (!actorUsername) {
+    throw new Error("Actor username is required");
+  }
+  const trimmedReason = reason?.trim() ?? "";
+  if (!trimmedReason) {
+    throw new Error("A reason is required");
+  }
   const nextHidden = action === "hide";
 
   const changed = await db.transaction(async (tx) => {
@@ -89,7 +97,10 @@ export async function applyModerationAction(params: {
       actorUserId,
       actorUsername,
       action,
-      reason,
+      reason: trimmedReason,
+      // The user row remains locked until commit. now() would instead record
+      // BEGIN time and can sort a delayed decision before an earlier change.
+      createdAt: sql`clock_timestamp()`,
     });
 
     return updatedTarget.username;
@@ -144,7 +155,7 @@ export async function getModerationHistory(
     })
     .from(moderationActions)
     .where(eq(moderationActions.targetUserId, targetUserId))
-    .orderBy(desc(moderationActions.createdAt))
+    .orderBy(desc(moderationActions.createdAt), desc(moderationActions.id))
     .limit(limit);
 
   return rows;

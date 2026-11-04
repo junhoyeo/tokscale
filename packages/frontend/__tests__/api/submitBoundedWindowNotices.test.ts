@@ -265,6 +265,7 @@ function existingSubmissionRow() {
 
 function selectResult(columns: Record<string, unknown>, store: Store) {
   const keys = new Set(Object.keys(columns));
+  if (keys.has("leaderboardHidden")) return [{ leaderboardHidden: false }];
   if (keys.has("date") && keys.has("sourceBreakdown")) return store.days;
   if (keys.size === 1 && keys.has("sourceBreakdown")) {
     return store.days.map(({ sourceBreakdown }) => ({ sourceBreakdown }));
