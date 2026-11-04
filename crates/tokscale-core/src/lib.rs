@@ -225,18 +225,20 @@ fn normalize_anthropic_prefixed_claude_model(model_id: &str) -> Option<String> {
 /// model after it: `anthropic/claude-opus-5-5`, `openai-codex/gpt-6.1-sol`.
 ///
 /// The prefix must canonicalize to the same provider that
-/// [`provider_identity::inferred_provider_from_model`] reads from the model
-/// family, so gateway spellings of one vendor (`openai-codex`, `x-ai`) fold
-/// while router labels (`cohere/north-mini-code:free`, `cline-free/…`),
-/// resellers (`openrouter/…`, `azure/gpt-4o`) and nested paths keep their
-/// prefix: for those the slash is part of the model name.
+/// [`provider_identity::inferred_provider_from_model_delimited`] reads from the
+/// model family. The delimited form matches a family word only at a word
+/// boundary, so `mistral/demistralized` is not a Mistral model. Gateway
+/// spellings of one vendor (`openai-codex`, `x-ai`) fold while router labels
+/// (`cohere/north-mini-code:free`, `cline-free/…`), resellers (`openrouter/…`,
+/// `azure/gpt-4o`) and nested paths keep their prefix: for those the slash is
+/// part of the model name.
 fn strip_first_party_provider_prefix(model_id: &str) -> Option<&str> {
     let (prefix, model) = model_id.split_once('/')?;
     if model.is_empty() || model.contains('/') {
         return None;
     }
     let prefix_provider = provider_identity::canonical_provider(prefix)?;
-    let model_provider = provider_identity::inferred_provider_from_model(model)
+    let model_provider = provider_identity::inferred_provider_from_model_delimited(model)
         .and_then(provider_identity::canonical_provider)?;
     (prefix_provider == model_provider).then_some(model)
 }
@@ -11946,6 +11948,21 @@ mod tests {
             "anthropic/claude/opus-5-5",
             // nothing after the prefix
             "anthropic/",
+        ] {
+            assert_eq!(normalize_syntactic(raw), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn prefix_is_kept_when_the_family_word_is_only_a_substring() {
+        // The model after the prefix merely contains a family word inside a
+        // longer word, so it is not that vendor's model.
+        for raw in [
+            "mistral/demistralized",
+            "openai/hypergpt-9",
+            "google/ungeminied-1",
+            "xai/ungrokked",
+            "anthropic/preclaude-3",
         ] {
             assert_eq!(normalize_syntactic(raw), raw, "{raw}");
         }
