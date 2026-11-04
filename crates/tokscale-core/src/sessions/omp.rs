@@ -64,9 +64,12 @@ mod tests {
         assert_eq!(messages[0].tokens.output, 10);
         assert_eq!(
             messages[0].workspace_key,
-            Some("/tmp/workspace".to_string())
+            Some(crate::sessions::SharedStr::from("/tmp/workspace"))
         );
-        assert_eq!(messages[0].workspace_label, Some("workspace".to_string()));
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("workspace"))
+        );
     }
 
     #[test]

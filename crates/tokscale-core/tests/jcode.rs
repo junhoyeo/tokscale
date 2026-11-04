@@ -276,7 +276,7 @@ fn test_jcode_billing_journal_metadata_is_scoped_to_its_batch() {
     assert_eq!(
         messages[0].billing_identity,
         BillingIdentity::Known {
-            id: "gateway-a".to_string(),
+            id: "gateway-a".to_string().into(),
             origin: BillingIdentityOrigin::ExplicitSession,
         }
     );
@@ -286,7 +286,7 @@ fn test_jcode_billing_journal_metadata_is_scoped_to_its_batch() {
     assert_eq!(
         messages[6].billing_identity,
         BillingIdentity::Known {
-            id: "gateway-b".to_string(),
+            id: "gateway-b".to_string().into(),
             origin: BillingIdentityOrigin::ExplicitSession,
         }
     );
@@ -332,7 +332,7 @@ fn test_jcode_billing_journal_corrections_preserve_original_scope() {
         assert_eq!(
             message.billing_identity,
             BillingIdentity::Known {
-                id: provider.to_string(),
+                id: provider.to_string().into(),
                 origin: BillingIdentityOrigin::ExplicitSession,
             }
         );
@@ -397,7 +397,7 @@ async fn test_jcode_billing_pricing_uses_only_proven_journal_scope() {
             assert_eq!(
                 message.billing_identity,
                 BillingIdentity::Known {
-                    id: "gateway-b".to_string(),
+                    id: "gateway-b".to_string().into(),
                     origin: BillingIdentityOrigin::ExplicitSession,
                 }
             );
@@ -517,7 +517,7 @@ fn test_jcode_billing_nonemitted_journal_ids_keep_their_first_batch_scope() {
         assert_eq!(messages.len(), 3);
         let expected = first_provider.map_or(BillingIdentity::Unknown, |provider| {
             BillingIdentity::Known {
-                id: provider.to_string(),
+                id: provider.to_string().into(),
                 origin: BillingIdentityOrigin::ExplicitSession,
             }
         });

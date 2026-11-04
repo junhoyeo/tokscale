@@ -51,6 +51,9 @@ const CalendarDateSchema = z.string().regex(/^(?!0000-)\d{4}-\d{2}-\d{2}$/).refi
   },
   { message: "Invalid calendar date" },
 );
+
+// Keep the protocol field calendar-safe even while the allocator deliberately
+// treats its client-reported value as unverified metadata.
 const RetentionFloorSchema = CalendarDateSchema;
 
 const TokenBreakdownSchema = z.object({

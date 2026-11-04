@@ -457,11 +457,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             continue;
         }
 
-        let agent = row
-            .agent
-            .as_deref()
-            .or(row.mode.as_deref())
-            .map(str::to_string);
+        let agent = row.agent.as_deref().or(row.mode.as_deref());
         let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,

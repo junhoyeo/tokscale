@@ -173,7 +173,7 @@ pub fn parse_mcode_file(path: &Path) -> Vec<UnifiedMessage> {
                         Some(provider_id),
                         super::BillingIdentityOrigin::ExplicitRecord,
                     );
-                    message.agent = Some("headless".to_string());
+                    message.agent = Some("headless".into());
                     message.is_turn_start = index == 0;
                     messages.push(message);
                 }

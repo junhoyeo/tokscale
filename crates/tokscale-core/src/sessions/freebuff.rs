@@ -11,11 +11,14 @@
 //!
 //! The discriminator used here is the **root agent id** the run actually used.
 //! Freebuff hardcodes FREE mode and maps every model its picker offers onto a
-//! `base2-free*` root agent (`base2-free`, `base2-free-deepseek-flash`,
-//! `base2-free-minimax-m3`, `base2-free-luna`, ...), while Codebuff's modes map
-//! to `base2`, `base2-lite`, `base2-max` and `base2-plan`. On turn completion
-//! the CLI persists the run state onto the assistant message, so that id is
-//! readable per chat at
+//! root agent carrying a `free` path segment: the v2 family (`base2-free`,
+//! `base2-free-deepseek-flash`, `base2-free-minimax-m3`, `base2-free-luna`,
+//! ...), the v3 family (`base3-free`, `base3-free-catalog`,
+//! `base3-free-gpt-6-1-terra`, ...) and the v3 fast lane
+//! (`base3-fast-free-deepseek-flash`). Codebuff's modes map to `base2`,
+//! `base2-lite`, `base2-max`, `base2-plan`, `base3` and `base3-fast-worker-*`,
+//! none of which carry that segment. On turn completion the CLI persists the
+//! run state onto the assistant message, so that id is readable per chat at
 //! `metadata.runState.sessionState.mainAgentState.agentType`.
 //!
 //! A chat is treated as Freebuff only when it carries that positive marker.
@@ -46,10 +49,24 @@ use std::path::Path;
 const CLIENT_ID: &str = "freebuff";
 const DEFAULT_MODEL: &str = "freebuff-unknown";
 
-/// Root agent ids Freebuff runs are prefixed with. Codebuff's own roots
-/// (`base2`, `base2-lite`, `base2-max`, `base2-plan`) never match, so this is a
-/// positive marker rather than an absence test.
-const FREEBUFF_ROOT_AGENT_PREFIX: &str = "base2-free";
+/// Whether a root agent id is one Freebuff resolves.
+///
+/// Freebuff hardcodes FREE mode, so every root agent its model picker resolves
+/// carries a `free` path segment: the v2 family (`base2-free`,
+/// `base2-free-deepseek-flash`, ...), the v3 family (`base3-free`,
+/// `base3-free-catalog`, `base3-free-gpt-6-1-terra`, ...) and the v3 fast lane
+/// (`base3-fast-free-deepseek-flash`). Codebuff's own roots (`base2`,
+/// `base2-lite`, `base2-max`, `base2-plan`, `base3`, `base3-fast-worker-*`)
+/// never carry that segment, so this stays a positive marker rather than an
+/// absence test.
+///
+/// Matching the segment (not a fixed `base2-free` prefix) is what keeps a
+/// renamed agent family from silently emptying this parser: Freebuff moved
+/// from `base2-free*` to `base3-free*`, and a prefix check against the old
+/// family attributed every chat after that move to nothing at all.
+fn is_free_root_agent(agent: &str) -> bool {
+    agent.split('-').any(|segment| segment == "free")
+}
 
 /// Read the root agent id a message's persisted run state recorded, if any.
 /// The CLI attaches the whole `RunState` to the assistant message when a turn
@@ -70,7 +87,7 @@ fn is_freebuff_chat(messages: &[Value]) -> bool {
     messages
         .iter()
         .filter_map(root_agent_id)
-        .any(|agent| agent.starts_with(FREEBUFF_ROOT_AGENT_PREFIX))
+        .any(is_free_root_agent)
 }
 
 /// Collect the textual content of a Freebuff message for token estimation.
@@ -113,8 +130,8 @@ fn model_from_settings(path: &Path) -> Option<String> {
 
 /// Parse a single `chat-messages.json` into estimated Freebuff UnifiedMessages.
 ///
-/// Returns an empty vec unless the chat carries a `base2-free*` root agent id,
-/// so Codebuff chats sharing this directory are never claimed as Freebuff.
+/// Returns an empty vec unless the chat carries a Freebuff root agent id, so
+/// Codebuff chats sharing this directory are never claimed as Freebuff.
 pub fn parse_freebuff_file(path: &Path) -> Vec<UnifiedMessage> {
     let Some(bytes) = read_file_or_none(path) else {
         return Vec::new();

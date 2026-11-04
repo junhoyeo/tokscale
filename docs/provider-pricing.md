@@ -36,7 +36,7 @@ tokscale pricing explain --json --no-spinner
 
 `--provider` still selects a pricing source (`custom`, `litellm`, `openrouter`, `models.dev`); it is not a billing channel. `--source` is the clearer equivalent. A lookup without `--billing-provider` cannot choose scoped rules, even if only one exists. Forced upstream sources bypass custom. Custom-only queries, validation and listing are offline.
 
-`pricing explain` is a local per-message report using cached catalogs and local overrides without network fetches. It reports attribution provider, billing identity/evidence, raw/display model, price source/scope, matched model, normalization/alias evidence, base-rate basis, effective multiplier, final estimate, coverage and estimate status. Use `--billing-provider` to filter it. Incomplete normal report totals also produce a stderr warning; JSON stdout stays machine-readable. Private channel labels and explanation fields are not added to public submission payloads. Do not publish this local diagnostic report without reviewing it.
+`pricing explain` is a local per-message report using cached catalogs and local overrides without network fetches. It reports attribution provider, billing identity/evidence, raw/display model, price source/scope, matched model, normalization/alias evidence, base-rate basis, effective multiplier, final estimate, coverage and estimate status. When a selected price is unsafe for submission, `submissionSafetyGap` identifies the evidence gap; `uncoveredBuckets` separately lists missing rates. Use `--billing-provider` to filter it. Incomplete normal report totals also produce a stderr warning; JSON stdout stays machine-readable. Private channel labels and explanation fields are not added to public submission payloads. Do not publish this local diagnostic report without reviewing it.
 
 ## Errors, history and downgrade behavior
 
@@ -47,6 +47,8 @@ Cache wire migration preserves supported legacy messages, token splits, authorit
 Old configuration files need no rewrite. Older binaries ignore `provider_overrides`, so downgrading disables scoped prices and can change estimates. Do not rely on scoped pricing with an older version.
 
 ## Source-format limits
+
+For Codex response-scoped usage, Tokscale can use a uniquely matched local Magpie response ID and agreeing token counters to identify the served model. Failed streams, remote or reported rows, duplicate IDs, router labels and conflicting OpenCodex claims cannot establish an identity. The gateway ledger does not add token usage, and its provider is not billing-channel evidence. Ordinary Codex token-count rows without a response ID are unchanged.
 
 Provider-shaped model strings are not automatically billing evidence. The Roo task-log parser uses `modelInfo.providerId` only: [Roo's protocol classifier](https://github.com/RooCodeInc/Roo-Code/blob/b867ec9145750d0ae1ff7f02d35406e9bf2a0b16/packages/types/src/provider-settings.ts#L530-L547) collapses several channels into an API protocol family. Mux's persisted `byModel` prefix remains Unknown because [gateway normalization](https://github.com/coder/xum/blob/9484694582925d4e1e3687cfacdb18c3ef99908f/src/common/utils/providers/modelEntries.test.ts#L174-L224) removes the actual routing label. Reasonix and FX model-prefix-only records likewise remain Unknown; this avoids guessing from vendor or plugin namespaces. All can still use legacy global rules and upstream estimates. An explicit channel field can be supported later when the source format supplies one.
 

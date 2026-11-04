@@ -879,6 +879,7 @@ pub fn get_client_color(client: &str) -> Color {
         "muse" => Color::Rgb(0, 100, 224),   // #0064E0 Muse brand blue
         "proma" => Color::Rgb(99, 102, 241), // #6366F1
         "vibe" => Color::Rgb(250, 82, 15),   // #FA520F Mistral orange
+        "bb" => Color::Rgb(79, 70, 229),     // #4F46E5 Indigo
         _ => Color::Rgb(136, 136, 136),      // #888888
     }
 }

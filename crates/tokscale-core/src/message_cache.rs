@@ -1639,6 +1639,9 @@ pub fn parser_generation() -> u64 {
     // Invalidate derived totals without discarding retained transcript history.
     acc ^= 2; // Claude Desktop parser generation: preserve full request identities
     acc = acc.wrapping_mul(FNV_PRIME);
+    // The Magpie overlay changes derived attribution, not source-cache rows.
+    acc ^= 1;
+    acc = acc.wrapping_mul(FNV_PRIME);
     acc
 }
 
@@ -2141,7 +2144,9 @@ fn parser_version(client: ClientId) -> u32 {
         // model, so a session that alternated models on every reply kept one
         // record per reply. v9 folds same-model turns inside windows of the
         // timeline, so cached v8 entries for those sessions are rebuilt.
-        ClientId::Droid => 9,
+        // v9->v10: reply counts follow their transcript timestamps rather
+        // than the first record per model, fixing date-filtered counts.
+        ClientId::Droid => 10,
         // v1->v2: `compaction/summary` events carry the provider-reported cost
         // of DSH's summarize call and used to fall through unread, so v1
         // entries undercount every session that compacted (#1152). DSH has not
@@ -2234,6 +2239,8 @@ fn parser_version(client: ClientId) -> u32 {
         // metadata when a persisted reset/sentinel snapshot removes it.
         ClientId::Muse => 3,
         ClientId::Vibe => 1,
+        // v1->v2: cumulative total differencing and fork deduplication.
+        ClientId::Bb => 2,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -2478,23 +2485,25 @@ struct LegacyUnifiedMessageV7 {
 impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV7) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
             service_tier: None,
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
             machine_label: None,
@@ -2513,22 +2522,22 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV7 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -2568,23 +2577,25 @@ struct LegacyUnifiedMessageV8 {
 impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV8) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(crate::sessions::SharedStr::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
             machine_label: None,
@@ -2600,23 +2611,23 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV8 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(String::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -2656,23 +2667,25 @@ struct LegacyUnifiedMessageV9 {
 impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV9) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(crate::sessions::SharedStr::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
             machine_label: None,
@@ -2691,23 +2704,23 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV9 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(String::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -2815,24 +2828,28 @@ struct LegacyUnifiedMessageV10 {
 impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV10) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens,
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(crate::sessions::SharedStr::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
-            parent_session_id: message.parent_session_id,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
+            parent_session_id: message
+                .parent_session_id
+                .map(crate::sessions::SharedStr::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             copilot_context: None,
@@ -2847,24 +2864,24 @@ impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV10 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens,
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(String::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
-            parent_session_id: message.parent_session_id,
+            session_title: message.session_title.map(String::from),
+            parent_session_id: message.parent_session_id.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -6593,7 +6610,7 @@ mod tests {
         assert_eq!(cached_messages.len(), 1);
         // A full reparse would restore the path-derived session ID, so this
         // marker distinguishes a cache hit from equivalent parsed usage.
-        cached_messages[0].session_id = "cache-hit-marker".to_string();
+        cached_messages[0].session_id = "cache-hit-marker".to_string().into();
         let identity = CacheIdentity {
             namespace: "kimi",
             parser_version: 5,
@@ -6995,6 +7012,15 @@ mod tests {
     }
 
     #[test]
+    fn test_tencent_buddy_parser_version_invalidates_v2_entries() {
+        // Extension logs and JSONL transcripts are append-only and keep their
+        // fingerprints forever, so only the family version retires the v2 rows
+        // that were cached before either duration source was read.
+        assert_eq!(parser_version(ClientId::CodeBuddy), 3);
+        assert_eq!(parser_version(ClientId::WorkBuddy), 3);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn grok_v7_shard_reparses_unchanged_cost_and_call_count() {
         let cache_home = TempDir::new().unwrap();
@@ -7215,7 +7241,7 @@ mod tests {
         // A finished Droid session's settings.json is never rewritten again, so
         // its fingerprint keeps matching and only the version bump discards the
         // v1 lock-timestamp anchor.
-        assert_eq!(parser_version(ClientId::Droid), 9);
+        assert_eq!(parser_version(ClientId::Droid), 10);
     }
 
     #[test]
@@ -8837,6 +8863,112 @@ mod tests {
     }
 
     #[test]
+    fn test_bb_parser_version() {
+        assert_eq!(parser_version(ClientId::Bb), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_bb_v1_shard_invalidates_and_reparses_to_v2() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let bb_dir = source_home.path().join(".bb");
+        std::fs::create_dir_all(&bb_dir).unwrap();
+        let source = bb_dir.join("bb.db");
+
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT,
+                provider_id TEXT NOT NULL,
+                model_override TEXT,
+                title TEXT,
+                parent_thread_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY NOT NULL,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT,
+                sequence INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at)
+            VALUES ('thr_test', NULL, 'claude-code', 'claude-3-7-sonnet', 'Test', NULL, 1000);
+            INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+            VALUES ('evt_1', 'thr_test', 'turn_1', 1, 'thread/tokenUsage/updated',
+                    '{"tokenUsage":{"last":{"totalTokens":1200,"inputTokens":1000,"outputTokens":200}}}', 1100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let current_identity = CacheIdentity::for_client(ClientId::Bb);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 1,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_message = UnifiedMessage::new(
+            "bb",
+            "stale-model",
+            "stale-provider",
+            "thr_test",
+            1000,
+            crate::TokenBreakdown {
+                input: 9999,
+                output: 9999,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["bb".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-3-7-sonnet");
+        assert_eq!(messages[0].tokens.input, 1000);
+        assert_eq!(messages[0].tokens.output, 200);
+
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache
+            .get(current_identity, &source)
+            .expect("the v2 parse must replace the stale v1 row");
+        assert_eq!(rebuilt.parser_version, 2);
+    }
+
+    #[test]
     fn test_cursor_parser_version_retains_rows_needed_for_recount_proofs() {
         assert_eq!(parser_version(ClientId::Cursor), 6);
     }
@@ -9799,6 +9931,236 @@ mod tests {
         assert_eq!(parser_version(ClientId::Kilo), 2);
     }
 
+    /// A warm v1 entry for a `base3-free*` chat holds no rows — that is what
+    /// the pre-fix marker cached for these exact bytes — and its fingerprint
+    /// stays valid because the file never changed. Nothing but the parser
+    /// version can reject it.
+    ///
+    /// The empty payload is re-parsed rather than served regardless (see
+    /// `load_or_parse_resumable_source`), so this also pins that the recovery
+    /// does not depend on the bump; the bump's own job is the derived-total
+    /// cache, pinned by `test_codebuff_chat_family_bump_moves_the_parser_generation`
+    /// below. Seeding through `write_shard_with_limit` writes the predecessor's
+    /// envelope, which is the level an upgrading user actually hits.
+    #[test]
+    #[serial_test::serial]
+    fn test_freebuff_stale_empty_cache_is_rejected_and_rebuilt_with_same_fingerprint() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let manicode = source_home.path().join(".config").join("manicode");
+        let chat_dir = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-10-30T14-43-08.442Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            manicode.join("settings.json"),
+            r#"{"freebuffModel":"openai/gpt-6.1-terra"}"#,
+        )
+        .unwrap();
+        let messages_path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &messages_path,
+            r#"[
+                { "variant": "user", "content": "hello world", "timestamp": "2026-10-30T14:43:08.442Z" },
+                { "variant": "ai", "content": "", "blocks": [ { "type": "text", "content": "Hello there, friend!" } ],
+                  "timestamp": "2026-10-30T14:43:09.442Z",
+                  "metadata": { "runState": { "sessionState": { "mainAgentState": {
+                      "agentType": "base3-free-catalog" } } } } }
+            ]"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Freebuff);
+        // The lane fingerprints through `check_path_samples_only`, which stores
+        // a zeroed `content_hash` sentinel; seeding with `from_path`'s real
+        // content hash would make the stored entry differ from a rebuilt one
+        // for reasons that have nothing to do with the version bump.
+        let fingerprint = match SourceFingerprint::check_path_samples_only(&messages_path, None) {
+            Some(FingerprintStatus::Changed(fingerprint)) => fingerprint,
+            Some(FingerprintStatus::Unchanged) => {
+                panic!("an uncached source must build a fingerprint")
+            }
+            None => panic!("the source must be readable"),
+        };
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &messages_path,
+            fingerprint.clone(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &messages_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        assert!(
+            SourceMessageCache::load()
+                .get(identity, &messages_path)
+                .is_none(),
+            "a shard written at the previous parser version must not be served"
+        );
+
+        let scan = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["freebuff".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let scanned = scan();
+        assert_eq!(
+            scanned.len(),
+            1,
+            "the estimated row must be recovered from the empty warm entry"
+        );
+        assert_eq!(scanned[0].client, "freebuff");
+        assert_eq!(scanned[0].model_id, "openai/gpt-6.1-terra");
+        // "Hello there, friend!" is 20 chars (5 estimated output tokens);
+        // "hello world" is 11 chars (3 estimated input tokens).
+        assert_eq!(scanned[0].tokens.output, 5);
+        assert_eq!(scanned[0].tokens.input, 3);
+        assert!(
+            matches!(
+                SourceFingerprint::check_path_samples_only(&messages_path, Some(&fingerprint)),
+                Some(FingerprintStatus::Unchanged)
+            ),
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let cached = SourceMessageCache::load()
+            .get(identity, &messages_path)
+            .expect("the reparsed entry should be persisted at the current version");
+        assert_eq!(cached.parser_version, identity.parser_version);
+        assert_eq!(cached.fingerprint, fingerprint);
+        assert_eq!(cached.messages.len(), 1);
+
+        // The repair has to land on disk, not just in this scan: an upgrading
+        // user runs once and the next run is warm.
+        assert_eq!(
+            scan(),
+            scanned,
+            "the warm scan must agree with the cold one"
+        );
+    }
+
+    /// The other half of the shared scan: the Codebuff lane must keep
+    /// reporting nothing for a Freebuff-marked chat, warm entry or not. A
+    /// marker that widened to any `base3*` root would put an estimated
+    /// Freebuff row into a Codebuff-only user's breakdown here.
+    #[test]
+    #[serial_test::serial]
+    fn test_codebuff_lane_does_not_claim_a_freebuff_chat_warm() {
+        let cache_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home = TempDir::new().unwrap();
+        let manicode = source_home.path().join(".config").join("manicode");
+        let chat_dir = manicode
+            .join("projects")
+            .join("proj")
+            .join("chats")
+            .join("2026-10-30T14-43-08.442Z");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            manicode.join("settings.json"),
+            r#"{"freebuffModel":"openai/gpt-6.1-terra"}"#,
+        )
+        .unwrap();
+        let messages_path = chat_dir.join("chat-messages.json");
+        std::fs::write(
+            &messages_path,
+            r#"[
+                { "variant": "user", "content": "hello world", "timestamp": "2026-10-30T14:43:08.442Z" },
+                { "variant": "ai", "content": "", "blocks": [ { "type": "text", "content": "Hello there, friend!" } ],
+                  "timestamp": "2026-10-30T14:43:09.442Z",
+                  "metadata": { "runState": { "sessionState": { "mainAgentState": {
+                      "agentType": "base3-free-catalog" } } } } }
+            ]"#,
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::Codebuff);
+        let stale_identity = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: identity.parser_version.saturating_sub(1),
+        };
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &messages_path,
+            SourceFingerprint::from_path(&messages_path).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let stale_shard = cache_shard_path(identity, &messages_path);
+        ensure_cache_dir(stale_shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_shard,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        // Cold and warm: the Codebuff lane owns chats with authoritative usage,
+        // and this one has none.
+        for attempt in ["cold", "warm"] {
+            let scanned = crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["codebuff".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            );
+            assert!(
+                scanned.is_empty(),
+                "the {attempt} Codebuff scan must not claim a Freebuff chat, got {scanned:?}"
+            );
+        }
+    }
+
+    /// The bump is what makes the fix visible to a warm TUI. Its aggregate
+    /// cache is admitted on `parser_generation()` alone, and that value is
+    /// derived from every client's `parser_version()`; a base that did not
+    /// move would let the pre-fix totals be painted even though the source
+    /// scan now reports rows.
+    ///
+    /// The pre-bump generation is pinned as a literal rather than derived from
+    /// the current versions, because deriving it would make this pass even if
+    /// the bump were removed — the value would simply follow whatever the
+    /// constant said. `13555121629452759766` is what `parser_generation()`
+    /// returned with `CODEBUFF_CHAT_PARSER_BASE_VERSION` at 1, measured by
+    /// running it before the bump. A later edit that reuses v1 for this family
+    /// lands back on that number and fails here.
+    #[test]
+    fn test_codebuff_chat_family_bump_moves_the_parser_generation() {
+        const PRE_BUMP_GENERATION: u64 = 13_555_121_629_452_759_766;
+
+        assert_eq!(parser_version(ClientId::Codebuff), 2);
+        assert_eq!(parser_version(ClientId::Freebuff), 2);
+        assert_ne!(
+            parser_generation(),
+            PRE_BUMP_GENERATION,
+            "the bump must change the generation, or a warm TUI keeps painting \
+             the pre-fix totals"
+        );
+    }
+
     #[test]
     fn test_claude_sidechain_fingerprint_tracks_nested_parent_session_changes() {
         let dir = TempDir::new().unwrap();
@@ -10573,7 +10935,7 @@ mod tests {
             },
             0.25,
         );
-        retained.service_tier = service_tier.map(str::to_string);
+        retained.service_tier = service_tier.map(crate::sessions::SharedStr::from);
         entry.messages.push(retained);
         entry.messages[1].dedup_key = Some("uuid:retained-assistant-turn".to_string());
         entry.fallback_timestamp_indices = vec![1, CLAUDE_RETENTION_PROVENANCE_MARKER];
@@ -11001,7 +11363,7 @@ mod tests {
         let oversized_key = CacheKey::new(identity, &oversized_path);
         let small = test_entry(identity, &small_path, "small");
         let mut oversized = test_entry(identity, &oversized_path, "oversized");
-        oversized.messages[0].model_id = "x".repeat(TEST_SHARD_LIMIT as usize);
+        oversized.messages[0].model_id = "x".repeat(TEST_SHARD_LIMIT as usize).into();
 
         let mut cache = SourceMessageCache::default();
         cache.insert(small);
@@ -11038,9 +11400,9 @@ mod tests {
         let (path_one, path_two) = write_sources_in_distinct_shards(&source_dir, identity);
 
         let mut entry_one = test_entry(identity, &path_one, "session-1");
-        entry_one.messages[0].model_id = "a".repeat(20 * 1024);
+        entry_one.messages[0].model_id = "a".repeat(20 * 1024).into();
         let mut entry_two = test_entry(identity, &path_two, "session-2");
-        entry_two.messages[0].model_id = "b".repeat(20 * 1024);
+        entry_two.messages[0].model_id = "b".repeat(20 * 1024).into();
 
         let mut cache = SourceMessageCache::default();
         cache.insert(entry_one);
@@ -11515,7 +11877,7 @@ mod tests {
             0.0,
             Some("trace-cache:chat".to_string()),
         );
-        stale_message.agent = Some("github.copilot.subagent".to_string());
+        stale_message.agent = Some("github.copilot.subagent".to_string().into());
         let stale_duplicate = UnifiedMessage::new_with_dedup(
             "copilot",
             "gpt-5.4-mini",
@@ -12368,8 +12730,8 @@ mod tests {
 
     fn synthetic_placeholder_message(session_id: &str, dedup_key: &str) -> UnifiedMessage {
         let mut message = keyed_message(ClientId::Claude.as_str(), session_id, dedup_key);
-        message.model_id = " <SYNTHETIC> ".to_string();
-        message.provider_id = "unknown".to_string();
+        message.model_id = " <SYNTHETIC> ".to_string().into();
+        message.provider_id = "unknown".to_string().into();
         message
     }
 

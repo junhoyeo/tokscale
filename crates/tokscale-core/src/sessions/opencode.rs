@@ -115,7 +115,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         },
         cost,
-        agent,
+        agent.as_deref(),
     )
     .with_billing(
         billing_provider.as_deref(),

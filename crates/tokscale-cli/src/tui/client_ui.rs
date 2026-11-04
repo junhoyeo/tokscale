@@ -82,6 +82,9 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // letter from "misTral".
     ClientUi { hotkey: 'T' },
     ClientUi { hotkey: 'J' },
+    // BB: both cases of `b` are taken (`b` and `B`), `s` is the global
+    // "sources" picker binding, so `Z` takes the next available slot.
+    ClientUi { hotkey: 'Z' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

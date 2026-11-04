@@ -1112,7 +1112,9 @@ fn parse_claude_lines(
                     unified.billing_identity = billing_identity;
                     unified.preserve_pricing_model(&raw_model);
                     unified.duration_ms = duration_ms;
-                    unified.agent = sidechain_agent.clone();
+                    unified.agent = sidechain_agent
+                        .clone()
+                        .map(crate::sessions::SharedStr::from);
                     unified.set_workspace(workspace_key.clone(), workspace_label.clone());
                     // Mark the first assistant response after a user message as a turn start
                     if pending_turn_start {
@@ -1166,7 +1168,7 @@ fn parse_claude_lines(
                             split_reporting_dedup_keys.insert(key.clone());
                         }
                     }
-                    advisor.provider_id = choice.id;
+                    advisor.provider_id = choice.id.into();
                     messages.push(advisor);
                     provider_confidences.push(choice.confidence);
                 }
@@ -1780,7 +1782,7 @@ fn extract_claude_tool_result_message(
         context.client_id,
         model,
         provider_choice.id,
-        context.session_id.to_string(),
+        context.session_id,
         timestamp,
         TokenBreakdown {
             input: usage.input_tokens,
@@ -1798,7 +1800,9 @@ fn extract_claude_tool_result_message(
     .with_billing(provider_hint.as_deref(), billing_origin)
     .with_pricing_model(&raw_model);
     message.message_count = 0;
-    message.agent = context.sidechain_agent;
+    message.agent = context
+        .sidechain_agent
+        .map(crate::sessions::SharedStr::from);
     message.set_workspace(context.workspace_key, context.workspace_label);
     Some(message)
 }
@@ -2168,7 +2172,7 @@ fn extract_claude_headless_message(
             client_id,
             model,
             provider_id,
-            session_id.to_string(),
+            session_id,
             timestamp,
             {
                 let cache_write = extract_i64(usage.get("cache_creation_input_tokens"))
@@ -2331,13 +2335,13 @@ fn claude_provider_choice_from_hint(
 }
 
 fn update_claude_provider_id(
-    existing: &mut String,
+    existing: &mut crate::sessions::SharedStr,
     existing_confidence: &mut u8,
     candidate: ClaudeProviderChoice,
 ) {
     if candidate.confidence > *existing_confidence {
         *existing_confidence = candidate.confidence;
-        *existing = candidate.id;
+        *existing = crate::sessions::SharedStr::from(candidate.id);
     }
 }
 
@@ -2411,7 +2415,7 @@ fn finalize_headless_state(
         client_id,
         model,
         provider_id,
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: state.input.max(0),
@@ -3458,8 +3462,14 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("myproject"))
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("myproject"))
+        );
     }
 
     #[test]
@@ -3571,7 +3581,10 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("myproject"))
+        );
         assert_eq!(messages[0].tokens.input, 10);
     }
 
@@ -3624,7 +3637,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Explore".to_string()),
+            Some(crate::sessions::SharedStr::from("Explore")),
             "Should resolve agent name from meta sidecar and normalize"
         );
         assert_eq!(
@@ -3648,7 +3661,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent")),
             "Without meta sidecar, should fall back to generic label"
         );
         assert_eq!(messages[0].session_id, "parent-uuid-002");
@@ -3716,7 +3729,7 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 40);
         assert_eq!(
             messages[0].agent,
-            Some("Workflow Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Workflow Subagent")),
             "Tier 1 meta sidecar next to the deep nested transcript should resolve the name"
         );
     }
@@ -3786,7 +3799,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some(crate::sessions::SharedStr::from("Code Reviewer")),
             "Tier 2 must resolve the agent name across the deep workflows/<wf>/ nesting"
         );
         assert_eq!(messages[0].session_id, parent_session_id);
@@ -3805,7 +3818,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent")),
             "Legacy flat layout has no meta → Tier 3 fallback"
         );
         assert_eq!(
@@ -3856,9 +3869,18 @@ mod tests {
         assert_eq!(msgs3[0].session_id, "shared-parent-uuid");
 
         // Agent names should differ
-        assert_eq!(msgs1[0].agent, Some("Explore".to_string()));
-        assert_eq!(msgs2[0].agent, Some("Executor".to_string()));
-        assert_eq!(msgs3[0].agent, Some("Claude Code Subagent".to_string()));
+        assert_eq!(
+            msgs1[0].agent,
+            Some(crate::sessions::SharedStr::from("Explore"))
+        );
+        assert_eq!(
+            msgs2[0].agent,
+            Some(crate::sessions::SharedStr::from("Executor"))
+        );
+        assert_eq!(
+            msgs3[0].agent,
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent"))
+        );
     }
 
     #[test]
@@ -3890,8 +3912,14 @@ mod tests {
         assert_eq!(total_cache_write, 150, "cache_write: 100 + 50");
 
         // Both messages should have the same agent
-        assert_eq!(messages[0].agent, Some("Code Reviewer".to_string()));
-        assert_eq!(messages[1].agent, Some("Code Reviewer".to_string()));
+        assert_eq!(
+            messages[0].agent,
+            Some(crate::sessions::SharedStr::from("Code Reviewer"))
+        );
+        assert_eq!(
+            messages[1].agent,
+            Some(crate::sessions::SharedStr::from("Code Reviewer"))
+        );
     }
 
     #[test]
@@ -3954,7 +3982,7 @@ mod tests {
         );
         assert_eq!(
             messages[0].agent,
-            Some("Architect".to_string()),
+            Some(crate::sessions::SharedStr::from("Architect")),
             "Deduped message should retain agent"
         );
         assert_eq!(messages[0].session_id, "parent-dedup");
@@ -3978,7 +4006,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some(crate::sessions::SharedStr::from("Code Reviewer")),
             "Should strip oh-my-claudecode: prefix and normalize"
         );
     }
@@ -3995,7 +4023,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent")),
             "Still detected as sidechain"
         );
         // session_id should be the file stem (fallback)
@@ -4042,7 +4070,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Document Specialist".to_string()),
+            Some(crate::sessions::SharedStr::from("Document Specialist")),
             "Tier 2 should recover agent name from parent tool_use"
         );
         assert_eq!(messages[0].session_id, parent_session_id);
@@ -4081,7 +4109,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Explore".to_string()),
+            Some(crate::sessions::SharedStr::from("Explore")),
             "Tier 2 should work for flat layout too"
         );
     }
@@ -4127,7 +4155,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some(crate::sessions::SharedStr::from("Code Reviewer")),
             "Tier 1 (meta sidecar) should take precedence over Tier 2 (parent lookup)"
         );
     }
@@ -4193,7 +4221,10 @@ mod tests {
         let messages = parse_claude_file(&sidechain_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent, Some("Writer".to_string()));
+        assert_eq!(
+            messages[0].agent,
+            Some(crate::sessions::SharedStr::from("Writer"))
+        );
     }
 
     #[test]
@@ -4270,12 +4301,12 @@ mod tests {
 
         assert_eq!(
             msgs_a[0].agent,
-            Some("Explore".to_string()),
+            Some(crate::sessions::SharedStr::from("Explore")),
             "First agent should be explore"
         );
         assert_eq!(
             msgs_b[0].agent,
-            Some("Executor".to_string()),
+            Some(crate::sessions::SharedStr::from("Executor")),
             "Second agent should be executor"
         );
     }

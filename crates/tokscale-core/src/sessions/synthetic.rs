@@ -4,7 +4,7 @@
 //! and parses Octofriend's SQLite database when token data is available.
 
 use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
-use super::UnifiedMessage;
+use super::{SharedStr, UnifiedMessage};
 use crate::TokenBreakdown;
 use std::path::Path;
 
@@ -81,17 +81,64 @@ pub fn normalize_synthetic_model(model_id: &str) -> String {
     lower
 }
 
+/// Pricing-ready identity for a row routed through Synthetic's gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntheticGatewayFields {
+    /// Model ID with gateway prefixes stripped.
+    pub model_id: String,
+    /// Replacement provider, set only when the row named none.
+    pub provider_id: Option<&'static str>,
+}
+
+/// Normalized fields for a Synthetic gateway row, or `None` when the row did
+/// not go through the gateway. Borrows its inputs, so callers holding shared
+/// handles can check and normalize in one pass without copying first.
+pub fn synthetic_gateway_fields(
+    model_id: &str,
+    provider_id: &str,
+) -> Option<SyntheticGatewayFields> {
+    if !is_synthetic_gateway(model_id, provider_id) {
+        return None;
+    }
+    let provider_id = (provider_id.is_empty() || provider_id.eq_ignore_ascii_case("unknown"))
+        .then_some("synthetic");
+    Some(SyntheticGatewayFields {
+        model_id: normalize_synthetic_model(model_id),
+        provider_id,
+    })
+}
+
+/// Rewrite a Synthetic gateway row's identity in place for pricing, keeping
+/// the raw model as the pricing model when none is set. Returns `false` for
+/// rows that did not go through the gateway. Fields that do not change keep
+/// their shared handles, and the gateway check runs once.
+pub fn normalize_synthetic_gateway_identity(
+    model_id: &mut SharedStr,
+    provider_id: &mut SharedStr,
+    pricing_model_id: &mut Option<SharedStr>,
+) -> bool {
+    let Some(fields) = synthetic_gateway_fields(model_id, provider_id) else {
+        return false;
+    };
+    if fields.model_id != model_id.as_str() {
+        let raw = std::mem::replace(model_id, SharedStr::from(fields.model_id));
+        pricing_model_id.get_or_insert(raw);
+    }
+    if let Some(provider) = fields.provider_id {
+        *provider_id = SharedStr::from(provider);
+    }
+    true
+}
+
 /// Normalize synthetic gateway fields without changing the originating client.
 pub fn normalize_synthetic_gateway_fields(model_id: &mut String, provider_id: &mut String) -> bool {
-    if !is_synthetic_gateway(model_id, provider_id) {
+    let Some(fields) = synthetic_gateway_fields(model_id, provider_id) else {
         return false;
+    };
+    *model_id = fields.model_id;
+    if let Some(provider) = fields.provider_id {
+        *provider_id = provider.to_string();
     }
-
-    *model_id = normalize_synthetic_model(model_id);
-    if provider_id.is_empty() || provider_id.eq_ignore_ascii_case("unknown") {
-        *provider_id = "synthetic".to_string();
-    }
-
     true
 }
 
@@ -239,6 +286,48 @@ pub fn parse_octofriend_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gateway_message(model: &str, provider: &str) -> UnifiedMessage {
+        UnifiedMessage::new(
+            "opencode",
+            model,
+            provider,
+            "s1",
+            0,
+            TokenBreakdown::default(),
+            0.0,
+        )
+    }
+
+    #[test]
+    fn normalize_synthetic_gateway_rewrites_model_and_blank_provider() {
+        let mut msg = gateway_message("hf:deepseek-ai/DeepSeek-V3-0324", "unknown");
+        assert!(msg.normalize_synthetic_gateway());
+        assert_eq!(msg.model_id.as_str(), "deepseek-v3-0324");
+        assert_eq!(msg.provider_id.as_str(), "synthetic");
+        assert_eq!(
+            msg.pricing_model_id.as_deref(),
+            Some("hf:deepseek-ai/DeepSeek-V3-0324")
+        );
+    }
+
+    #[test]
+    fn normalize_synthetic_gateway_keeps_named_provider_and_existing_pricing_model() {
+        let mut msg = gateway_message("hf:zai-org/GLM-4.7", "glhf");
+        msg.pricing_model_id = Some("explicit".into());
+        assert!(msg.normalize_synthetic_gateway());
+        assert_eq!(msg.model_id.as_str(), "glm-4.7");
+        assert_eq!(msg.provider_id.as_str(), "glhf");
+        assert_eq!(msg.pricing_model_id.as_deref(), Some("explicit"));
+    }
+
+    #[test]
+    fn normalize_synthetic_gateway_ignores_other_rows() {
+        let mut msg = gateway_message("claude-sonnet-4", "anthropic");
+        assert!(!msg.normalize_synthetic_gateway());
+        assert_eq!(msg.model_id.as_str(), "claude-sonnet-4");
+        assert!(msg.pricing_model_id.is_none());
+    }
 
     #[test]
     fn test_is_synthetic_model_hf_prefix() {

@@ -124,6 +124,8 @@ pub struct ScanResult {
     pub copilot_desktop_db: Option<PathBuf>,
     /// Copilot CLI usage database at `~/.copilot/session-store.db`.
     pub copilot_session_store_db: Option<PathBuf>,
+    /// Native Copilot CLI session-state event files at `~/.copilot/session-state/*/events.jsonl`.
+    pub copilot_session_state_files: Vec<PathBuf>,
     pub synthetic_db: Option<PathBuf>,
     pub kilo_db: Option<PathBuf>,
     pub hermes_db: Option<PathBuf>,
@@ -157,6 +159,9 @@ pub struct ScanResult {
     /// `workspaceStorage/*/chatSessions/*.jsonl`, plus the empty-window
     /// store at `globalStorage/emptyWindowChatSessions/*.jsonl`.
     pub copilot_vscode_sessions: Vec<PathBuf>,
+    /// BB (`get-bb/bb`) SQLite databases (`bb.db`) discovered under `~/.bb`,
+    /// `~/.bb-dev/*/`, or configured extra scan roots.
+    pub bb_dbs: Vec<PathBuf>,
 }
 
 impl Default for ScanResult {
@@ -166,6 +171,7 @@ impl Default for ScanResult {
             opencode_dbs: Vec::new(),
             copilot_desktop_db: None,
             copilot_session_store_db: None,
+            copilot_session_state_files: Vec::new(),
             synthetic_db: None,
             kilo_db: None,
             hermes_db: None,
@@ -180,6 +186,7 @@ impl Default for ScanResult {
             opencode_json_dir: None,
             devin_dbs: Vec::new(),
             copilot_vscode_sessions: Vec::new(),
+            bb_dbs: Vec::new(),
         }
     }
 }
@@ -781,6 +788,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "sessions.db" => file_name == "sessions.db",
                 "state.db" => file_name == "state.db",
                 "threads.db" => file_name == "threads.db",
+                "bb.db" => file_name == "bb.db",
                 // Antigravity CLI conversation databases. `ends_with(".db")`
                 // naturally rejects the `.db-wal`/`.db-shm`/`.db-journal`
                 // sidecars SQLite writes alongside the main file.
@@ -981,6 +989,25 @@ pub fn built_in_extra_scan_paths_for(
             }
         }
 
+        // OmO's home-agent project store keeps task children under
+        // `~/.omo/agent/projects/<project>-<hash>/senpi-task/children`, keyed by
+        // a hashed name rather than beneath the project's `cwd`.
+        if let Ok(projects) =
+            std::fs::read_dir(join_native_path(Path::new(home_dir), ".omo/agent/projects"))
+        {
+            paths.extend(
+                projects
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path().join("senpi-task").join("children"))
+                    .filter(|children| children.is_dir())
+                    .map(|children| (ClientId::Senpi, children)),
+            );
+        }
+        // Sub-agent runs also land in `~/.omo/memory/agents/<agent>/runtime/transcripts`.
+        paths.push((
+            ClientId::Senpi,
+            join_native_path(Path::new(home_dir), ".omo/memory"),
+        ));
         paths.push((ClientId::Senpi, omo_sessions));
         paths.push((
             ClientId::Senpi,
@@ -1483,6 +1510,51 @@ fn discover_devin_cli_dbs(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
     )
 }
 
+/// Discover BB (`get-bb/bb`) `bb.db` SQLite databases.
+///
+/// Looks in:
+/// 1. Primary path from `BB_DATA_DIR` or `~/.bb/bb.db`.
+/// 2. Development instances under `~/.bb-dev/*/bb.db`.
+/// 3. Configured extra scan roots (both direct files and directories containing `bb.db`).
+fn discover_bb_dbs(
+    home_dir: &str,
+    use_env_roots: bool,
+    extra_roots: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    let default_path = PathBuf::from(
+        ClientId::Bb
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots),
+    );
+    if default_path.is_file() {
+        candidates.push(default_path);
+    }
+
+    let bb_dev_dir = Path::new(home_dir).join(".bb-dev");
+    if bb_dev_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&bb_dev_dir) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bb.db");
+                if candidate.is_file() {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    for root in extra_roots {
+        if root.is_file() {
+            candidates.push(root);
+        } else if root.is_dir() {
+            candidates.extend(scan_directory(&root.to_string_lossy(), "bb.db"));
+        }
+    }
+
+    dedup_dbs_by_canonical_path(candidates)
+}
+
 /// Returns true if `name` matches the MiMo Code db naming rule:
 /// `mimocode.db` or `mimocode-<channel>.db`.
 fn is_micode_db_filename(name: &str) -> bool {
@@ -1742,7 +1814,7 @@ fn push_unique_scan_task(
     let pattern = if matches!(client_id, ClientId::MiMoCode | ClientId::MiMoDesktop) {
         // Reject invalid explicit aliases before canonical-root dedup, or an
         // alias.txt listed first could suppress a valid alias.db of the store.
-        if raw_path.is_file() && !raw_path.extension().is_some_and(|ext| ext == "db") {
+        if raw_path.is_file() && raw_path.extension() != Some(std::ffi::OsStr::new("db")) {
             return;
         }
         "micode-db"
@@ -1962,6 +2034,30 @@ pub(crate) fn merge_user_opencode_db_paths(discovered: &mut Vec<PathBuf>, extra_
             discovered.push(raw.clone());
         }
     }
+}
+
+pub(crate) fn discover_copilot_session_state_files(home_dir: &str) -> Vec<PathBuf> {
+    let session_state_dir = PathBuf::from(join_native(home_dir, ".copilot/session-state"));
+    let mut files = Vec::new();
+    let entries = match std::fs::read_dir(&session_state_dir) {
+        Ok(entries) => entries,
+        Err(_) => return files,
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            let events_path = path.join("events.jsonl");
+            if events_path.is_file() {
+                files.push(events_path);
+            }
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            files.push(path);
+        }
+    }
+
+    files.sort_unstable();
+    files
 }
 
 fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
@@ -2192,6 +2288,7 @@ fn scan_all_clients_with_env_strategy_inner(
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
     let mut devin_cli_roots: Vec<PathBuf> = Vec::new();
+    let mut bb_roots: Vec<PathBuf> = Vec::new();
     // Every OpenClaw agents root the scan covers; each is also searched for
     // per-agent SQLite transcript databases once the roots are settled.
     let mut openclaw_agent_roots: Vec<PathBuf> = Vec::new();
@@ -2221,6 +2318,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Grok
                 | ClientId::PrimeAgent
                 | ClientId::Proma
+                | ClientId::Bb
         ) {
             continue;
         }
@@ -2249,6 +2347,8 @@ fn scan_all_clients_with_env_strategy_inner(
             }
         } else if client_id == ClientId::DevinCli {
             devin_cli_roots.push(path);
+        } else if client_id == ClientId::Bb {
+            bb_roots.push(path);
         } else if client_id == ClientId::Grok {
             push_grok_dual_source_scan_tasks(&mut tasks, &mut seen_scan_roots, &path);
         } else if client_id == ClientId::Senpi {
@@ -2393,6 +2493,8 @@ fn scan_all_clients_with_env_strategy_inner(
             warn_if_escapes_home(Path::new(home_dir), client_id, &PathBuf::from(&path));
             if client_id == ClientId::DevinCli {
                 devin_cli_roots.push(PathBuf::from(path));
+            } else if client_id == ClientId::Bb {
+                bb_roots.push(PathBuf::from(path));
             } else if client_id == ClientId::Grok {
                 push_grok_dual_source_scan_tasks(
                     &mut tasks,
@@ -2740,6 +2842,10 @@ fn scan_all_clients_with_env_strategy_inner(
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         devin_cli_roots.push(PathBuf::from(devin_db_path));
         result.devin_dbs = discover_devin_cli_dbs(devin_cli_roots);
+    }
+
+    if enabled.contains(&ClientId::Bb) {
+        result.bb_dbs = discover_bb_dbs(home_dir, use_env_roots, bb_roots);
     }
 
     if enabled.contains(&ClientId::Hermes) {
@@ -3246,6 +3352,7 @@ fn scan_all_clients_with_env_strategy_inner(
             result.copilot_session_store_db = Some(session_store_db);
         }
 
+        result.copilot_session_state_files = discover_copilot_session_state_files(home_dir);
         result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
 
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
@@ -3269,6 +3376,30 @@ fn scan_all_clients_with_env_strategy_inner(
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
         prefer_amp_cache_over_legacy(result.get_mut(ClientId::Amp), Path::new(&amp_cache_root));
+    }
+
+    // OpenCode's `claude-agent` provider runs the Claude Agent SDK, which also
+    // writes Claude Code transcripts. OpenCode owns that usage, so drop the
+    // duplicate transcripts. Look the databases up even for a Claude-only scan
+    // so `--claude` does not report OpenCode work as Claude Code usage.
+    if enabled.contains(&ClientId::Claude) && !result.get(ClientId::Claude).is_empty() {
+        let opencode_dbs = if enabled.contains(&ClientId::OpenCode) {
+            result.opencode_dbs.clone()
+        } else {
+            let xdg_data = if use_env_roots {
+                std::env::var("XDG_DATA_HOME")
+                    .unwrap_or_else(|_| join_native(home_dir, ".local/share"))
+            } else {
+                join_native(home_dir, ".local/share")
+            };
+            let mut dbs = discover_opencode_dbs(&PathBuf::from(join_native(&xdg_data, "opencode")));
+            merge_user_opencode_db_paths(&mut dbs, &scanner_settings.opencode_db_paths);
+            dbs
+        };
+        crate::sessions::opencode_claude_agent::drop_claimed_claude_paths(
+            result.get_mut(ClientId::Claude),
+            &opencode_dbs,
+        );
     }
 
     result
@@ -5386,6 +5517,43 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_clients_with_scanner_settings_discovers_bb_extra_databases() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let default_db = home.join(".bb/bb.db");
+        fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        File::create(&default_db).unwrap();
+
+        let extra_dir = home.join("custom/bb_instance");
+        let extra_db = extra_dir.join("bb.db");
+        fs::create_dir_all(&extra_dir).unwrap();
+        File::create(&extra_db).unwrap();
+
+        let direct_file = home.join("archive/isolated.db");
+        fs::create_dir_all(direct_file.parent().unwrap()).unwrap();
+        File::create(&direct_file).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "bb": [extra_dir, direct_file]
+            }
+        }))
+        .unwrap();
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["bb".to_string()],
+            false,
+            &settings,
+        );
+
+        assert_eq!(result.bb_dbs.len(), 3);
+        assert!(result.bb_dbs.contains(&default_db));
+        assert!(result.bb_dbs.contains(&extra_db));
+        assert!(result.bb_dbs.contains(&direct_file));
+    }
+
+    #[test]
     fn test_devin_desktop_scan_includes_configured_cli_lookup_databases() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -6579,6 +6747,24 @@ mod tests {
             Some(&session_store_db)
         );
         assert!(result.copilot_desktop_db.is_none());
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot_discovers_session_state_files() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let session_state_dir = home.join(".copilot/session-state/test-session-1");
+        fs::create_dir_all(&session_state_dir).unwrap();
+        let events_file = session_state_dir.join("events.jsonl");
+        File::create(&events_file).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(result.copilot_session_state_files, vec![events_file]);
     }
 
     #[test]
@@ -9253,6 +9439,45 @@ mod tests {
             "Main sessions in ~/.omo/agent/sessions must be discovered by default"
         );
         assert_eq!(canonical_files.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_senpi_discovers_omo_home_agent_project_children_and_memory_transcripts() {
+        let home_dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let omo = home_dir.path().join(".omo");
+        let project_child = omo
+            .join("agent/projects/myproj-1a2b3c/senpi-task/children/st_1/sessions/st_1")
+            .join("2026-10-30T00-00-00-000Z_st_1.jsonl");
+        let memory_transcript =
+            omo.join("memory/agents/explorer/runtime/transcripts/0b7c/transcript.jsonl");
+        let unrelated = omo
+            .join("agent/projects/myproj-1a2b3c/other")
+            .join("notes.jsonl");
+        for path in [&project_child, &memory_transcript, &unrelated] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap();
+        }
+        let _env = senpi_test_env_guard();
+        let _current_dir = CurrentDirGuard::set(elsewhere.path());
+
+        let result =
+            scan_without_extra_dirs(home_dir.path().to_str().unwrap(), &["senpi".to_string()]);
+
+        let canonical_files: HashSet<PathBuf> = result
+            .get(ClientId::Senpi)
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect();
+        assert_eq!(
+            canonical_files,
+            HashSet::from([
+                project_child.canonicalize().unwrap(),
+                memory_transcript.canonicalize().unwrap(),
+            ]),
+            "home-agent project task children and memory transcripts must be scanned by default"
+        );
     }
 
     #[test]

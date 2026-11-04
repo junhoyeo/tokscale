@@ -181,8 +181,8 @@ pub fn parse_hindsight_file(path: &Path) -> Vec<UnifiedMessage> {
             );
 
             let bank = record.bank.filter(|b| !b.trim().is_empty());
-            message.workspace_key = bank.clone();
-            message.workspace_label = bank;
+            message.workspace_key = bank.clone().map(crate::sessions::SharedStr::from);
+            message.workspace_label = bank.map(crate::sessions::SharedStr::from);
             message.duration_ms = record.duration_ms.map(|d| d.max(0));
             // Hindsight's own labels for the call: `consolidation`,
             // `retain`/`retain_extract_facts`, `refresh_mental_model`, and so
@@ -193,10 +193,10 @@ pub fn parse_hindsight_file(path: &Path) -> Vec<UnifiedMessage> {
                 record.scope.filter(|s| !s.trim().is_empty()),
             ) {
                 (Some(operation), Some(scope)) if scope != operation => {
-                    Some(format!("{operation} / {scope}"))
+                    Some(format!("{operation} / {scope}").into())
                 }
-                (Some(operation), _) => Some(operation),
-                (None, scope) => scope,
+                (Some(operation), _) => Some(operation.into()),
+                (None, scope) => scope.map(crate::sessions::SharedStr::from),
             };
 
             Some(message)
@@ -231,8 +231,14 @@ mod tests {
         assert_eq!(first.model_id, "deepseek-v4-flash:0731");
         assert_eq!(first.provider_id, "ollama-cloud");
         assert_eq!(first.session_id, "51b96021-07fc-4a64-b333-5c8c72833a44");
-        assert_eq!(first.workspace_key, Some("omp".to_string()));
-        assert_eq!(first.workspace_label, Some("omp".to_string()));
+        assert_eq!(
+            first.workspace_key,
+            Some(crate::sessions::SharedStr::from("omp"))
+        );
+        assert_eq!(
+            first.workspace_label,
+            Some(crate::sessions::SharedStr::from("omp"))
+        );
         assert_eq!(
             first.timestamp,
             DateTime::parse_from_rfc3339("2026-09-01T08:16:51.357104+00:00")
@@ -255,13 +261,21 @@ mod tests {
         );
         assert_eq!(
             first.session_title,
-            Some("retain / retain_extract_facts".to_string())
+            Some(crate::sessions::SharedStr::from(
+                "retain / retain_extract_facts"
+            ))
         );
 
         // Verify that bank "george" is mapped correctly on the third record
         let third = &messages[2];
-        assert_eq!(third.workspace_key, Some("george".to_string()));
-        assert_eq!(third.workspace_label, Some("george".to_string()));
+        assert_eq!(
+            third.workspace_key,
+            Some(crate::sessions::SharedStr::from("george"))
+        );
+        assert_eq!(
+            third.workspace_label,
+            Some(crate::sessions::SharedStr::from("george"))
+        );
         assert_eq!(third.session_id, "f01c47c4-6283-4631-99bf-b1417a1ce4c1");
         assert_eq!(third.tokens.input, 2787);
         assert_eq!(third.tokens.output, 360);

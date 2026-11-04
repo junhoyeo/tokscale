@@ -99,7 +99,7 @@ struct CandidateMatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BoundedLine {
+pub(crate) enum BoundedLine {
     Eof,
     Line,
     Oversized,
@@ -107,7 +107,10 @@ enum BoundedLine {
 
 /// Read and consume one JSONL row without allocating beyond the row cap. An
 /// oversized row is discarded through its newline and parsing continues.
-fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> io::Result<BoundedLine> {
+pub(crate) fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> io::Result<BoundedLine> {
     line.clear();
     let mut consumed = 0usize;
     let mut oversized = false;
@@ -231,7 +234,7 @@ impl AttributionIndex {
         if message.timestamp <= 0 {
             return Vec::new();
         }
-        let Some(rows) = self.by_selector.get(&message.model_id) else {
+        let Some(rows) = self.by_selector.get(message.model_id.as_str()) else {
             return Vec::new();
         };
         // The ledger row is stamped at its request start, which sits within
@@ -508,8 +511,8 @@ fn collect_candidates(
 fn count_claims(
     messages: &[UnifiedMessage],
     candidates: &[Vec<CandidateMatch>],
-) -> HashMap<(String, usize), usize> {
-    let mut claims: HashMap<(String, usize), usize> = HashMap::new();
+) -> HashMap<(super::SharedStr, usize), usize> {
+    let mut claims: HashMap<(super::SharedStr, usize), usize> = HashMap::new();
     for (message, matches) in messages.iter().zip(candidates) {
         for candidate in matches {
             *claims
@@ -525,7 +528,7 @@ fn count_claims(
 fn unique_claim(
     message: &UnifiedMessage,
     matches: &[CandidateMatch],
-    claims: &HashMap<(String, usize), usize>,
+    claims: &HashMap<(super::SharedStr, usize), usize>,
 ) -> Option<CandidateMatch> {
     if message.client != "codex" {
         return None;
@@ -556,18 +559,27 @@ fn unique_claim(
 /// must line up. Each ledger row may serve at most one Codex usage row.
 /// Ambiguity retains the original selector. A strict end-time match is tried
 /// first; the late window only fills in what the strict pass left unmatched.
+#[cfg(test)]
 pub(crate) fn attribute_codex_messages(
     home_dir: &str,
     use_env_roots: bool,
     messages: &mut [UnifiedMessage],
 ) -> usize {
+    attribute_codex_messages_with_claims(home_dir, use_env_roots, messages).0
+}
+
+pub(crate) fn attribute_codex_messages_with_claims(
+    home_dir: &str,
+    use_env_roots: bool,
+    messages: &mut [UnifiedMessage],
+) -> (usize, HashSet<usize>) {
     if !messages.iter().any(|message| message.client == "codex") {
-        return 0;
+        return (0, HashSet::new());
     }
 
     let path = usage_log_path(home_dir, use_env_roots);
     let Some(index) = load_attribution_index(&path) else {
-        return 0;
+        return (0, HashSet::new());
     };
 
     // Pass 1 uses the strict window, so it keeps every attribution that
@@ -602,6 +614,14 @@ pub(crate) fn attribute_codex_messages(
             resolved[message_index].is_none() && !reserved.contains(&(model_id, row_index))
         },
     );
+    let claims = strict
+        .iter()
+        .zip(&late)
+        .enumerate()
+        .filter_map(|(index, (strict, late))| {
+            (!strict.is_empty() || !late.is_empty()).then_some(index)
+        })
+        .collect();
     let late_claims = count_claims(messages, &late);
     for (message_index, message) in messages.iter().enumerate() {
         if resolved[message_index].is_none() && strict[message_index].is_empty() {
@@ -620,7 +640,7 @@ pub(crate) fn attribute_codex_messages(
         let tier_changed = target
             .service_tier
             .as_ref()
-            .is_some_and(|tier| message.service_tier.as_ref() != Some(tier));
+            .is_some_and(|tier| message.service_tier.as_deref() != Some(tier.as_str()));
         if message.provider_id == target.provider
             && message.model_id == target.model
             && !tier_changed
@@ -628,10 +648,10 @@ pub(crate) fn attribute_codex_messages(
             continue;
         }
 
-        message.provider_id = target.provider;
-        message.model_id = target.model;
+        message.provider_id = target.provider.into();
+        message.model_id = target.model.into();
         if let Some(service_tier) = target.service_tier {
-            message.service_tier = Some(service_tier);
+            message.service_tier = Some(service_tier.into());
         }
         // Estimates for the virtual selector cannot price the physical model.
         message.cost = 0.0;
@@ -639,7 +659,7 @@ pub(crate) fn attribute_codex_messages(
         attributed += 1;
     }
 
-    attributed
+    (attributed, claims)
 }
 
 #[cfg(test)]
