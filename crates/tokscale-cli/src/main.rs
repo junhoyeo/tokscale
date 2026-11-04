@@ -2113,12 +2113,17 @@ impl LightSpinner {
     const FRAME_MS: u64 = 40;
 
     fn start(message: &'static str) -> Self {
+        Self::start_with_ready(message, None)
+    }
+
+    fn start_with_ready(message: &'static str, ready: Option<std::sync::mpsc::Sender<()>>) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let running_thread = Arc::clone(&running);
         let message = message.to_string();
 
         let handle = thread::spawn(move || {
             let mut frame = 0usize;
+            let mut ready = ready;
             {
                 let mut stderr = io::stderr().lock();
                 let _ = write!(stderr, "\x1b[?25l");
@@ -2131,6 +2136,9 @@ impl LightSpinner {
                     let mut stderr = io::stderr().lock();
                     let _ = write!(stderr, "\r\x1b[K  {} {}", spinner, message);
                     let _ = stderr.flush();
+                }
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(());
                 }
                 frame = frame.wrapping_add(1);
                 thread::sleep(Duration::from_millis(Self::FRAME_MS));
@@ -9917,8 +9925,12 @@ mod tests {
 
     #[test]
     fn test_light_spinner_releases_stderr_between_frames() {
-        let spinner = LightSpinner::start("Testing stderr locking...");
-        thread::sleep(Duration::from_millis(100));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let spinner = LightSpinner::start_with_ready("Testing stderr locking...", Some(ready_tx));
+        assert!(
+            ready_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "spinner must render a frame before testing stderr access"
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         let writer = thread::spawn(move || {
