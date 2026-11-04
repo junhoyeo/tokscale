@@ -3556,7 +3556,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         .filter(|message| message.client == "copilot")
         .map(|message| message.session_id.clone())
         .collect();
-    let mut copilot_desktop_sessions: HashSet<String> = HashSet::new();
+    let mut copilot_desktop_sessions: HashSet<SharedStr> = HashSet::new();
     if let Some(db_path) = &scan_result.copilot_desktop_db {
         let mut desktop_msgs = sessions::copilot_desktop::parse_copilot_desktop_db(db_path);
         machine_labeler.label_messages(db_path, &mut desktop_msgs);
@@ -3571,7 +3571,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 }),
         );
     }
-    let mut copilot_cli_turn_timestamps: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut copilot_cli_turn_timestamps: HashMap<SharedStr, Vec<i64>> = HashMap::new();
     for file_path in &scan_result.copilot_session_state_files {
         let mut state_msgs =
             sessions::copilot_session_state::parse_copilot_session_state_file(file_path);
@@ -7577,7 +7577,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
-    let mut copilot_desktop_sessions: HashSet<String> = HashSet::new();
+    let mut copilot_desktop_sessions: HashSet<SharedStr> = HashSet::new();
     if let Some(db_path) = &scan_result.copilot_desktop_db {
         for message in sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
             .into_iter()
@@ -7587,7 +7587,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             copilot_unified_msgs.push(message);
         }
     }
-    let mut copilot_cli_turn_timestamps: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut copilot_cli_turn_timestamps: HashMap<SharedStr, Vec<i64>> = HashMap::new();
     for file_path in &scan_result.copilot_session_state_files {
         for message in sessions::copilot_session_state::parse_copilot_session_state_file(file_path)
             .into_iter()
