@@ -112,8 +112,8 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
 /// This is `normalize_syntactic` with **no alias folding**: purely structural
 /// canonicalization (lowercase, strip a `(reasoning-tier)` suffix, strip a
 /// trailing `-YYYYMMDD` date, rewrite `.`→`-` inside claude version numbers, and
-/// fold an `anthropic/claude-…` prefix). It never consults the user's
-/// machine-local `modelAliases`.
+/// fold a first-party `<provider>/` prefix such as `anthropic/claude-…`). It
+/// never consults the user's machine-local `modelAliases`.
 ///
 /// Every path that submits, uploads, exports as raw data, or persists a model id
 /// MUST use this, not [`normalize_model_for_grouping`]. A machine-local alias
@@ -154,7 +154,8 @@ pub fn model_name_for_grouping(client: &str, provider_id: &str, model_id: &str) 
 
 /// Structural-only model-name normalization: lowercase, strip a
 /// `(reasoning-tier)` suffix, strip a trailing `-YYYYMMDD` date, rewrite `.`→`-`
-/// inside claude version numbers, and fold an `anthropic/claude-…` prefix.
+/// inside claude version numbers, and fold a first-party `<provider>/` prefix
+/// (see [`strip_first_party_provider_prefix`]).
 ///
 /// This is the syntactic half of [`normalize_model_for_grouping`] /
 /// [`canonical_model_id`]. It is also used by [`model_alias::ModelAliasResolver`]
@@ -196,6 +197,8 @@ pub(crate) fn normalize_syntactic(model_id: &str) -> String {
 
     if let Some(canonical) = normalize_anthropic_prefixed_claude_model(&name) {
         name = canonical;
+    } else if let Some(bare) = strip_first_party_provider_prefix(&name) {
+        name = bare.to_string();
     }
 
     name
@@ -216,6 +219,26 @@ fn normalize_anthropic_prefixed_claude_model(model_id: &str) -> Option<String> {
     }
 
     Some(format!("claude-{family}-{major}-{minor}"))
+}
+
+/// Drop a `<provider>/` prefix when the prefix names the vendor that makes the
+/// model after it: `anthropic/claude-opus-5-5`, `openai-codex/gpt-6.1-sol`.
+///
+/// The prefix must canonicalize to the same provider that
+/// [`provider_identity::inferred_provider_from_model`] reads from the model
+/// family, so gateway spellings of one vendor (`openai-codex`, `x-ai`) fold
+/// while router labels (`cohere/north-mini-code:free`, `cline-free/…`),
+/// resellers (`openrouter/…`, `azure/gpt-4o`) and nested paths keep their
+/// prefix: for those the slash is part of the model name.
+fn strip_first_party_provider_prefix(model_id: &str) -> Option<&str> {
+    let (prefix, model) = model_id.split_once('/')?;
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    let prefix_provider = provider_identity::canonical_provider(prefix)?;
+    let model_provider = provider_identity::inferred_provider_from_model(model)
+        .and_then(provider_identity::canonical_provider)?;
+    (prefix_provider == model_provider).then_some(model)
 }
 
 fn retain_for_requested_clients(
@@ -11891,6 +11914,73 @@ mod tests {
         assert_eq!(entries[0].output, 10);
         assert_eq!(entries[0].cost, 4.0);
         assert_eq!(entries[0].message_count, 2);
+    }
+
+    #[test]
+    fn first_party_provider_prefix_folds_into_the_bare_model_id() {
+        for (raw, canonical) in [
+            ("anthropic/claude-opus-5-5", "claude-opus-5-5"),
+            ("anthropic/claude-sonnet-5.5", "claude-sonnet-5-5"),
+            ("anthropic/claude-opus-4-8-20260101", "claude-opus-4-8"),
+            ("openai-codex/gpt-6.1-sol", "gpt-6.1-sol"),
+            ("openai/gpt-5.4(high)", "gpt-5.4"),
+            ("x-ai/grok-4.7", "grok-4.7"),
+            ("Google/Gemini-3.8-Flash", "gemini-3.8-flash"),
+        ] {
+            assert_eq!(normalize_syntactic(raw), canonical, "{raw}");
+        }
+    }
+
+    #[test]
+    fn prefixes_that_are_part_of_the_model_name_are_kept() {
+        for raw in [
+            // router label: `cohere` does not make `north-mini-code`
+            "cohere/north-mini-code:free",
+            "cline-free/mimo-v2.6-flash",
+            // another vendor's prefix on a model it does not make
+            "openai/claude-opus-5-5",
+            "azure/gpt-4o",
+            "vertex_ai/gemini-2.5-pro",
+            // reseller or nested path
+            "openrouter/anthropic/claude-opus-5-5",
+            "anthropic/claude/opus-5-5",
+            // nothing after the prefix
+            "anthropic/",
+        ] {
+            assert_eq!(normalize_syntactic(raw), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn model_grouping_merges_provider_qualified_gateway_ids_across_clients() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "hermes",
+                    "openai-codex/gpt-6.1-sol",
+                    "omp-smoke",
+                    "session-1",
+                    1.25,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "omp",
+                    "gpt-6.1-sol",
+                    "openai",
+                    "session-2",
+                    2.75,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::Model,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "gpt-6.1-sol");
+        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries[0].cost, 4.0);
     }
 
     #[test]
