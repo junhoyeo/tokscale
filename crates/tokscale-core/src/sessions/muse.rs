@@ -181,7 +181,8 @@ pub fn parse_muse_file(path: &Path) -> Vec<UnifiedMessage> {
                     .is_none_or(|model| model == message.model_id)
                 {
                     if let Some(provider_id) = &metadata.provider_id {
-                        message.provider_id.clone_from(provider_id);
+                        message.provider_id =
+                            crate::sessions::SharedStr::from(provider_id.as_str());
                         message.billing_identity = super::BillingIdentity::from_explicit(
                             Some(provider_id),
                             super::BillingIdentityOrigin::ExplicitSession,

@@ -412,7 +412,7 @@ fn request_to_message(
         "copilot",
         model_id,
         provider_id,
-        session_id.to_string(),
+        session_id,
         timestamp_ms,
         tokens,
         0.0,
@@ -811,7 +811,11 @@ mod tests {
         parse_copilot_vscode_sessions_into(&[first, second], &mut |_, message| {
             // Keep only a tiny projection: the streaming API must not require
             // its consumer to retain each full message.
-            emitted.push((message.session_id, message.timestamp, message.tokens.input));
+            emitted.push((
+                message.session_id.to_string(),
+                message.timestamp,
+                message.tokens.input,
+            ));
         });
 
         assert_eq!(

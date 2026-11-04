@@ -392,7 +392,7 @@ pub(crate) fn parse_extension_log_file(
             message.set_workspace(Some(workspace_key), workspace_label);
         }
         if message.session_id.is_empty() {
-            message.session_id = fallback_session_id.clone();
+            message.session_id = fallback_session_id.clone().into();
         }
 
         messages.push(message);

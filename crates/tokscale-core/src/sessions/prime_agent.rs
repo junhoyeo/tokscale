@@ -2321,7 +2321,7 @@ mod tests {
 
             let mut per_model: HashMap<String, i64> = HashMap::new();
             for message in &messages {
-                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+                *per_model.entry(message.model_id.to_string()).or_default() += message.tokens.input;
             }
             per_model
         }
@@ -2503,7 +2503,7 @@ mod tests {
 
             let mut per_model: HashMap<String, i64> = HashMap::new();
             for message in &messages {
-                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+                *per_model.entry(message.model_id.to_string()).or_default() += message.tokens.input;
             }
             per_model
         }

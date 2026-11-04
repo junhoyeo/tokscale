@@ -1,19 +1,20 @@
 //! Scan-scoped side metadata; the public and cached message layout stays stable.
 
-use crate::{sessions::UnifiedMessage, CostSource, EstimateSource};
+use crate::sessions::{BillingIdentity, SharedStr, UnifiedMessage};
+use crate::{CostSource, EstimateSource};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(PartialEq, Eq, Hash)]
 struct AppliedEstimate {
-    client: String,
-    model: String,
-    provider: String,
-    billing_provider: Option<String>,
-    pricing_model: Option<String>,
-    session: String,
+    client: SharedStr,
+    model: SharedStr,
+    provider: SharedStr,
+    billing_provider: Option<SharedStr>,
+    pricing_model: Option<SharedStr>,
+    session: SharedStr,
     timestamp: i64,
-    service_tier: Option<String>,
+    service_tier: Option<SharedStr>,
     tokens: [i64; 6],
     cost_bits: u64,
 }
@@ -24,7 +25,10 @@ impl From<&UnifiedMessage> for AppliedEstimate {
             client: message.client.clone(),
             model: message.model_id.clone(),
             provider: message.provider_id.clone(),
-            billing_provider: message.billing_identity.id().map(str::to_owned),
+            billing_provider: match &message.billing_identity {
+                BillingIdentity::Known { id, .. } => Some(id.clone()),
+                BillingIdentity::Unknown => None,
+            },
             pricing_model: message.pricing_model_id.clone(),
             session: message.session_id.clone(),
             timestamp: message.timestamp,
@@ -107,6 +111,7 @@ impl CostEstimateCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::BillingIdentityOrigin;
     use crate::TokenBreakdown;
 
     fn estimated_message(cost: f64) -> UnifiedMessage {
@@ -172,5 +177,24 @@ mod tests {
         // other worker that reads pricing metadata.
         assert_eq!(capture.take(&message), Some(EstimateSource::Catalog));
         capture.clear();
+    }
+
+    #[test]
+    fn billing_provider_reuses_the_message_identity() {
+        let mut message = estimated_message(1.0);
+        message.billing_identity = BillingIdentity::from_explicit(
+            Some("anthropic"),
+            BillingIdentityOrigin::ExplicitRecord,
+        );
+        let BillingIdentity::Known { id, .. } = &message.billing_identity else {
+            panic!("expected a known billing identity");
+        };
+
+        let estimate = AppliedEstimate::from(&message);
+        let stored = estimate
+            .billing_provider
+            .as_ref()
+            .expect("billing provider");
+        assert!(stored.shares_allocation_with(id));
     }
 }

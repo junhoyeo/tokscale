@@ -894,10 +894,10 @@ impl PricingService {
                 .unwrap_or_default()
         };
         PricingExplanation {
-            client: message.client.clone(),
-            model_id: message.model_id.clone(),
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
             raw_model_id: message.pricing_context().raw_model.to_string(),
-            provider_id: message.provider_id.clone(),
+            provider_id: message.provider_id.to_string(),
             billing_identity: message.billing_identity.clone(),
             billing_provider_id: message.billing_identity.id().map(str::to_string),
             price_source: if authoritative {

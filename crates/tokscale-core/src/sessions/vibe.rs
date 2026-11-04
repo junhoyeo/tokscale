@@ -219,7 +219,7 @@ pub fn parse_vibe_file(path: &Path) -> Vec<UnifiedMessage> {
     if let Some(title) = meta.get("title").and_then(Value::as_str) {
         let trimmed = title.trim();
         if !trimmed.is_empty() {
-            message.session_title = Some(trimmed.to_string());
+            message.session_title = Some(trimmed.into());
         }
     }
 

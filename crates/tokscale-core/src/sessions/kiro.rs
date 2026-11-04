@@ -1446,9 +1446,11 @@ fn try_parse_kiro_workspace_session(
 pub(crate) fn suppress_snapshots_covered_by_executions(
     messages: Vec<UnifiedMessage>,
 ) -> Vec<UnifiedMessage> {
-    let mut executed_sessions: std::collections::HashSet<(Option<String>, String)> =
-        std::collections::HashSet::new();
-    let mut executed_ids: std::collections::HashSet<(Option<String>, String)> =
+    let mut executed_sessions: std::collections::HashSet<(
+        Option<crate::sessions::SharedStr>,
+        String,
+    )> = std::collections::HashSet::new();
+    let mut executed_ids: std::collections::HashSet<(Option<crate::sessions::SharedStr>, String)> =
         std::collections::HashSet::new();
     let mut executed_session_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -1460,9 +1462,12 @@ pub(crate) fn suppress_snapshots_covered_by_executions(
         else {
             continue;
         };
-        executed_sessions.insert((message.workspace_key.clone(), message.session_id.clone()));
+        executed_sessions.insert((
+            message.workspace_key.clone(),
+            message.session_id.to_string(),
+        ));
         executed_ids.insert((message.workspace_key.clone(), execution_id.to_string()));
-        executed_session_ids.insert(message.session_id.clone());
+        executed_session_ids.insert(message.session_id.to_string());
     }
     if executed_ids.is_empty() {
         return messages;
@@ -1487,7 +1492,7 @@ pub(crate) fn suppress_snapshots_covered_by_executions(
             // session UUID (execution `chatSessionId` == workspace-session
             // `sessionId`). Sessions with no counted execution are kept.
             if key.ends_with(":workspace-session") {
-                return !executed_session_ids.contains(&message.session_id);
+                return !executed_session_ids.contains(message.session_id.as_str());
             }
             if !key.ends_with(":globalstorage") {
                 return true;
@@ -1993,8 +1998,14 @@ mod tests {
         assert!(messages[0].is_turn_start);
         assert_eq!(messages[0].timestamp, 1770983426420);
         assert_eq!(messages[0].duration_ms, Some(580));
-        assert_eq!(messages[0].workspace_key, Some("/tmp/project".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("project".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("/tmp/project"))
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("project"))
+        );
     }
 
     #[test]
@@ -2658,7 +2669,10 @@ not valid json at all
         assert_eq!(m.tokens.cache_read, 0);
         assert_eq!(m.tokens.cache_write, 0);
         assert_eq!(m.tokens.reasoning, 0);
-        assert_eq!(m.workspace_key, Some("workspace-a".to_string()));
+        assert_eq!(
+            m.workspace_key,
+            Some(crate::sessions::SharedStr::from("workspace-a"))
+        );
         assert_eq!(
             m.dedup_key,
             Some("workspace-a/execution:globalstorage".to_string())
@@ -2693,8 +2707,14 @@ not valid json at all
         assert!(messages[0].tokens.output > 0);
         // (4a) Workspace attribution: the `<workspace>` segment after
         // `kiro.kiroagent/` flows through the same workspace helpers.
-        assert_eq!(messages[0].workspace_key, Some("workspace-a".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("workspace-a".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("workspace-a"))
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("workspace-a"))
+        );
         assert_eq!(
             messages[0].dedup_key,
             Some("workspace-a/execution:globalstorage".to_string())
@@ -2743,8 +2763,14 @@ not valid json at all
         // Model is extracted from completionOptions, not hardcoded to "auto".
         assert_eq!(messages[0].model_id, "claude-sonnet-4-5");
         // Workspace attribution matches the snapshot path.
-        assert_eq!(messages[0].workspace_key, Some("workspace-a".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("workspace-a".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("workspace-a"))
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("workspace-a"))
+        );
         // Duration is carried through (endTime - startTime = 1500ms).
         assert_eq!(messages[0].duration_ms, Some(1500));
     }
@@ -2789,9 +2815,9 @@ not valid json at all
     ) -> UnifiedMessage {
         let mut message = UnifiedMessage::new_with_dedup(
             CLIENT_ID,
-            "auto".to_string(),
+            "auto",
             PROVIDER_ID,
-            session_id.to_string(),
+            session_id,
             1_770_983_426_000,
             TokenBreakdown {
                 input: 100,
@@ -3293,8 +3319,14 @@ not valid json at all
         assert_eq!(messages[0].tokens.output, 4);
         assert!(messages[0].is_turn_start);
         // Workspace is the folder holding the sess_* dir.
-        assert_eq!(messages[0].workspace_key, Some("my-project".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("my-project".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("my-project"))
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("my-project"))
+        );
         // createdAt -> ms; duration = lastModifiedAt - createdAt = 2000ms.
         assert_eq!(messages[0].timestamp, 1782824230991);
         assert_eq!(messages[0].duration_ms, Some(2000));
@@ -6037,8 +6069,14 @@ not valid json at all
         assert_eq!(m.provider_id, PROVIDER_ID);
         assert_eq!(m.model_id, "claude-sonnet-4-5");
         assert_eq!(m.session_id, "sess-preserve-cli");
-        assert_eq!(m.workspace_key, Some("/tmp/project".to_string()));
-        assert_eq!(m.workspace_label, Some("project".to_string()));
+        assert_eq!(
+            m.workspace_key,
+            Some(crate::sessions::SharedStr::from("/tmp/project"))
+        );
+        assert_eq!(
+            m.workspace_label,
+            Some(crate::sessions::SharedStr::from("project"))
+        );
 
         // Dedup key = "{session_id}:{index}" (index 0 for the first turn).
         assert_eq!(m.dedup_key, Some("sess-preserve-cli:0".to_string()));
@@ -6262,7 +6300,10 @@ not valid json at all
         assert_eq!(m.tokens.cache_read, 0);
         assert_eq!(m.tokens.cache_write, 0);
         assert_eq!(m.tokens.reasoning, 0);
-        assert_eq!(m.workspace_key, Some("workspace-a".to_string()));
+        assert_eq!(
+            m.workspace_key,
+            Some(crate::sessions::SharedStr::from("workspace-a"))
+        );
         // CostSource is unused here but referenced to confirm the snapshot path
         // leaves cost handling untouched (no provider-reported credit).
         assert_eq!(m.cost_source, CostSource::Unknown);

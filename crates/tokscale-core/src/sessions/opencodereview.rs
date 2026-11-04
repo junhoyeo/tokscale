@@ -131,8 +131,9 @@ pub fn parse_opencodereview_file(path: &Path) -> Vec<UnifiedMessage> {
 
         if let Some(ws) = &workspace {
             if let Some(key) = super::normalize_workspace_key(ws) {
-                msg.workspace_label = super::workspace_label_from_key(&key);
-                msg.workspace_key = Some(key);
+                msg.workspace_label =
+                    super::workspace_label_from_key(&key).map(crate::sessions::SharedStr::from);
+                msg.workspace_key = Some(key.into());
             }
         }
 

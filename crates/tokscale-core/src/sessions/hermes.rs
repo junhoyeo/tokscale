@@ -650,7 +650,7 @@ fn message_from_parts(
         timestamp_ms,
         tokens,
         cost,
-        Some(HERMES_AGENT_NAME.to_string()),
+        Some(HERMES_AGENT_NAME),
     )
     .with_billing(
         row.billing_provider.as_deref(),
@@ -664,7 +664,7 @@ fn message_from_parts(
         .map(str::trim)
         .filter(|title| !title.is_empty())
     {
-        msg.session_title = Some(title.to_string());
+        msg.session_title = Some(title.into());
     }
     msg
 }

@@ -238,8 +238,9 @@ pub fn apply_session_titles(sources: &mut [(PathBuf, Vec<UnifiedMessage>)]) {
                 continue;
             }
             message.session_title = per_root
-                .and_then(|per_root| per_root.get(&message.session_id))
-                .cloned();
+                .and_then(|per_root| per_root.get(message.session_id.as_str()))
+                .cloned()
+                .map(crate::sessions::SharedStr::from);
         }
     }
 }
@@ -327,14 +328,18 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
         let (cost, cost_source) = reported_cost(model_usage.total_cost);
 
         messages.push(UnifiedMessage {
-            client: CLIENT_ID.to_string(),
-            model_id,
-            provider_id,
-            session_id: session_id.clone(),
-            workspace_key: workspace_key.clone(),
-            workspace_label: workspace_label.clone(),
+            client: CLIENT_ID.into(),
+            model_id: model_id.as_str().into(),
+            provider_id: provider_id.as_str().into(),
+            session_id: session_id.as_str().into(),
+            workspace_key: workspace_key
+                .as_deref()
+                .map(crate::sessions::SharedStr::from),
+            workspace_label: workspace_label
+                .as_deref()
+                .map(crate::sessions::SharedStr::from),
             timestamp,
-            date: String::new(),
+            date: String::new().into(),
             tokens,
             cost,
             cost_source,
@@ -350,7 +355,7 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
             is_turn_start: false,
             model_attribution_conflicted: false,
             billing_identity: super::BillingIdentity::Unknown,
-            pricing_model_id,
+            pricing_model_id: pricing_model_id.map(crate::sessions::SharedStr::from),
             estimate_status: crate::sessions::EstimateStatus::Unpriced,
             copilot_context: None,
             machine_label: None,
@@ -375,14 +380,18 @@ pub fn parse_fx_file(path: &Path) -> Vec<UnifiedMessage> {
         let (cost, cost_source) = reported_cost(snapshot.total_cost);
         if tokens.total() > 0 || request_count > 0 || cost > 0.0 {
             messages.push(UnifiedMessage {
-                client: CLIENT_ID.to_string(),
-                model_id: UNKNOWN_MODEL.to_string(),
-                provider_id: "zai".to_string(),
-                session_id: session_id.clone(),
-                workspace_key: workspace_key.clone(),
-                workspace_label: workspace_label.clone(),
+                client: CLIENT_ID.into(),
+                model_id: UNKNOWN_MODEL.into(),
+                provider_id: "zai".into(),
+                session_id: session_id.as_str().into(),
+                workspace_key: workspace_key
+                    .as_deref()
+                    .map(crate::sessions::SharedStr::from),
+                workspace_label: workspace_label
+                    .as_deref()
+                    .map(crate::sessions::SharedStr::from),
                 timestamp,
-                date: String::new(),
+                date: String::new().into(),
                 tokens,
                 cost,
                 cost_source,
@@ -652,7 +661,7 @@ mod tests {
         );
 
         let mut messages = parse_fx_file(&usage);
-        messages[0].session_title = Some("Stale cached title".to_string());
+        messages[0].session_title = Some("Stale cached title".to_string().into());
         apply_titles_from(&usage, &mut messages);
         assert_eq!(messages[0].session_title.as_deref(), Some("Renamed later"));
 
@@ -684,8 +693,8 @@ mod tests {
 
         let mut messages = parse_fx_file(&usage);
         let mut foreign = messages[0].clone();
-        foreign.client = "codex".to_string();
-        foreign.session_title = Some("Someone else's title".to_string());
+        foreign.client = "codex".to_string().into();
+        foreign.session_title = Some("Someone else's title".to_string().into());
         messages.push(foreign);
 
         apply_titles_from(&usage, &mut messages);

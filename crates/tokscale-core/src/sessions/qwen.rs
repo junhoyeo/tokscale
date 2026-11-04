@@ -311,10 +311,13 @@ mod tests {
         let messages = parse_qwen_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("test_project".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("test_project"))
+        );
         assert_eq!(
             messages[0].workspace_label,
-            Some("test_project".to_string())
+            Some(crate::sessions::SharedStr::from("test_project"))
         );
     }
 

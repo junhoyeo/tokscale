@@ -787,7 +787,7 @@ pub fn parse_cherrystudio_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .as_deref()
             .and_then(|message_id| titles.get(message_id))
             .and_then(|title| title.clone());
-        message.session_title = row_title;
+        message.session_title = row_title.map(crate::sessions::SharedStr::from);
         // `ai_usage_record.id` is the ledger's own primary key, so it is a
         // stable identity even when `created_at` collides.
         message.dedup_key = Some(format!("cherrystudio-sqlite:{}", row.id));
@@ -1181,7 +1181,7 @@ mod tests {
             for msg in parse_cherrystudio_file(path) {
                 total_messages += 1;
                 total_tokens += msg.tokens.total();
-                let e = by_model.entry(msg.model_id.clone()).or_default();
+                let e = by_model.entry(msg.model_id.to_string()).or_default();
                 e.0 += 1;
                 e.1 += msg.tokens.total();
             }

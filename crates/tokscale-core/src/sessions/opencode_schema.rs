@@ -670,7 +670,7 @@ fn merge_duplicate_workspace(
         (None, Some(key)) => message.set_workspace(Some(key), candidate_label),
         (Some(existing), Some(candidate)) if existing != candidate => {
             state.has_workspace_conflict = true;
-            message.set_workspace(None, None);
+            message.set_workspace(None::<&str>, None::<&str>);
         }
         _ => {}
     }
@@ -756,23 +756,23 @@ pub(crate) fn reported_cost(cost: Option<f64>) -> Option<f64> {
 /// channel-suffixed sibling database, or an overlap between schema generations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OpenCodeSchemaFingerprint {
-    billing_provider: Option<String>,
+    billing_provider: Option<crate::sessions::SharedStr>,
     created_bits: u64,
     completed_bits: Option<u64>,
-    model_id: String,
-    provider_id: String,
+    model_id: crate::sessions::SharedStr,
+    provider_id: crate::sessions::SharedStr,
     input: i64,
     output: i64,
     reasoning: i64,
     cache_read: i64,
     cache_write: i64,
     cost_bits: u64,
-    agent: Option<String>,
+    agent: Option<crate::sessions::SharedStr>,
     /// Surface/client tag for stores that host more than one product surface
     /// (e.g. MiMo Code CLI vs Xiaomi MiMo AI desktop sharing one SQLite file).
     /// `None` keeps legacy fingerprint equality so clients that do not split
     /// surfaces still collapse fork copies.
-    surface: Option<String>,
+    surface: Option<crate::sessions::SharedStr>,
 }
 
 #[derive(Debug, Clone)]
@@ -968,7 +968,7 @@ impl SchemaAccumulator {
                 reasoning,
             },
             cost,
-            agent.clone(),
+            agent.as_deref(),
         )
         .with_billing(
             billing_provider.as_deref(),
@@ -1006,7 +1006,7 @@ impl SchemaAccumulator {
         if let Some(ref title) = row_session_title {
             let trimmed = title.trim();
             if !trimmed.is_empty() {
-                unified.session_title = Some(trimmed.to_string());
+                unified.session_title = Some(trimmed.into());
             }
         }
 
@@ -1026,19 +1026,20 @@ impl SchemaAccumulator {
         let fingerprint = OpenCodeSchemaFingerprint {
             created_bits: created_ms.to_bits(),
             completed_bits: completed_ms.map(f64::to_bits),
-            model_id,
-            provider_id,
+            model_id: crate::sessions::SharedStr::from(model_id),
+            provider_id: crate::sessions::SharedStr::from(provider_id),
             billing_provider: billing_provider
                 .as_deref()
-                .and_then(super::normalize_billing_provider),
+                .and_then(super::normalize_billing_provider)
+                .map(crate::sessions::SharedStr::from),
             input,
             output,
             reasoning,
             cache_read,
             cache_write,
             cost_bits: cost.to_bits(),
-            agent,
-            surface,
+            agent: agent.map(crate::sessions::SharedStr::from),
+            surface: surface.map(crate::sessions::SharedStr::from),
         };
 
         // Cloning the small index list avoids holding a borrow of
@@ -1253,7 +1254,8 @@ fn refresh_changed_session_metadata(
 
     if !changed.is_empty() {
         for message in cached.iter_mut() {
-            let Some((workspace_root, session_title)) = changed.get(&message.session_id) else {
+            let Some((workspace_root, session_title)) = changed.get(message.session_id.as_str())
+            else {
                 continue;
             };
             set_workspace_from_root(message, workspace_root.as_deref());
@@ -1261,7 +1263,7 @@ fn refresh_changed_session_metadata(
                 .as_deref()
                 .map(str::trim)
                 .filter(|title| !title.is_empty())
-                .map(str::to_string);
+                .map(crate::sessions::SharedStr::from);
         }
     }
 

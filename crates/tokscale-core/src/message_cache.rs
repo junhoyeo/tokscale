@@ -2480,23 +2480,25 @@ struct LegacyUnifiedMessageV7 {
 impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV7) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
             service_tier: None,
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
             machine_label: None,
@@ -2515,22 +2517,22 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV7 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -2570,23 +2572,25 @@ struct LegacyUnifiedMessageV8 {
 impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV8) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(crate::sessions::SharedStr::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
             machine_label: None,
@@ -2602,23 +2606,23 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV8 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(String::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -2658,23 +2662,25 @@ struct LegacyUnifiedMessageV9 {
 impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV9) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(crate::sessions::SharedStr::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
             machine_label: None,
@@ -2693,23 +2699,23 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV9 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens.into(),
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(String::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
+            session_title: message.session_title.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -2817,24 +2823,28 @@ struct LegacyUnifiedMessageV10 {
 impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
     fn from(message: LegacyUnifiedMessageV10) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.into(),
+            model_id: message.model_id.into(),
+            provider_id: message.provider_id.into(),
+            session_id: message.session_id.into(),
+            workspace_key: message.workspace_key.map(crate::sessions::SharedStr::from),
+            workspace_label: message
+                .workspace_label
+                .map(crate::sessions::SharedStr::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.into(),
             tokens: message.tokens,
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(crate::sessions::SharedStr::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(crate::sessions::SharedStr::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
-            parent_session_id: message.parent_session_id,
+            session_title: message.session_title.map(crate::sessions::SharedStr::from),
+            parent_session_id: message
+                .parent_session_id
+                .map(crate::sessions::SharedStr::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             copilot_context: None,
@@ -2849,24 +2859,24 @@ impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
 impl From<UnifiedMessage> for LegacyUnifiedMessageV10 {
     fn from(message: UnifiedMessage) -> Self {
         Self {
-            client: message.client,
-            model_id: message.model_id,
-            provider_id: message.provider_id,
-            session_id: message.session_id,
-            workspace_key: message.workspace_key,
-            workspace_label: message.workspace_label,
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
+            provider_id: message.provider_id.to_string(),
+            session_id: message.session_id.to_string(),
+            workspace_key: message.workspace_key.map(String::from),
+            workspace_label: message.workspace_label.map(String::from),
             timestamp: message.timestamp,
-            date: message.date,
+            date: message.date.to_string(),
             tokens: message.tokens,
             cost: message.cost,
             cost_source: message.cost_source,
-            service_tier: message.service_tier,
+            service_tier: message.service_tier.map(String::from),
             duration_ms: message.duration_ms,
             message_count: message.message_count,
-            agent: message.agent,
+            agent: message.agent.map(String::from),
             dedup_key: message.dedup_key,
-            session_title: message.session_title,
-            parent_session_id: message.parent_session_id,
+            session_title: message.session_title.map(String::from),
+            parent_session_id: message.parent_session_id.map(String::from),
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
         }
@@ -6595,7 +6605,7 @@ mod tests {
         assert_eq!(cached_messages.len(), 1);
         // A full reparse would restore the path-derived session ID, so this
         // marker distinguishes a cache hit from equivalent parsed usage.
-        cached_messages[0].session_id = "cache-hit-marker".to_string();
+        cached_messages[0].session_id = "cache-hit-marker".to_string().into();
         let identity = CacheIdentity {
             namespace: "kimi",
             parser_version: 5,
@@ -10575,7 +10585,7 @@ mod tests {
             },
             0.25,
         );
-        retained.service_tier = service_tier.map(str::to_string);
+        retained.service_tier = service_tier.map(crate::sessions::SharedStr::from);
         entry.messages.push(retained);
         entry.messages[1].dedup_key = Some("uuid:retained-assistant-turn".to_string());
         entry.fallback_timestamp_indices = vec![1, CLAUDE_RETENTION_PROVENANCE_MARKER];
@@ -11003,7 +11013,7 @@ mod tests {
         let oversized_key = CacheKey::new(identity, &oversized_path);
         let small = test_entry(identity, &small_path, "small");
         let mut oversized = test_entry(identity, &oversized_path, "oversized");
-        oversized.messages[0].model_id = "x".repeat(TEST_SHARD_LIMIT as usize);
+        oversized.messages[0].model_id = "x".repeat(TEST_SHARD_LIMIT as usize).into();
 
         let mut cache = SourceMessageCache::default();
         cache.insert(small);
@@ -11040,9 +11050,9 @@ mod tests {
         let (path_one, path_two) = write_sources_in_distinct_shards(&source_dir, identity);
 
         let mut entry_one = test_entry(identity, &path_one, "session-1");
-        entry_one.messages[0].model_id = "a".repeat(20 * 1024);
+        entry_one.messages[0].model_id = "a".repeat(20 * 1024).into();
         let mut entry_two = test_entry(identity, &path_two, "session-2");
-        entry_two.messages[0].model_id = "b".repeat(20 * 1024);
+        entry_two.messages[0].model_id = "b".repeat(20 * 1024).into();
 
         let mut cache = SourceMessageCache::default();
         cache.insert(entry_one);
@@ -11517,7 +11527,7 @@ mod tests {
             0.0,
             Some("trace-cache:chat".to_string()),
         );
-        stale_message.agent = Some("github.copilot.subagent".to_string());
+        stale_message.agent = Some("github.copilot.subagent".to_string().into());
         let stale_duplicate = UnifiedMessage::new_with_dedup(
             "copilot",
             "gpt-5.4-mini",
@@ -12370,8 +12380,8 @@ mod tests {
 
     fn synthetic_placeholder_message(session_id: &str, dedup_key: &str) -> UnifiedMessage {
         let mut message = keyed_message(ClientId::Claude.as_str(), session_id, dedup_key);
-        message.model_id = " <SYNTHETIC> ".to_string();
-        message.provider_id = "unknown".to_string();
+        message.model_id = " <SYNTHETIC> ".to_string().into();
+        message.provider_id = "unknown".to_string().into();
         message
     }
 

@@ -934,7 +934,7 @@ fn parse_grok_unified_log_snapshot(
         );
         message.duration_ms = duration_ms;
         message.model_attribution_conflicted = model_attribution_conflicted;
-        message.session_id = session_id;
+        message.session_id = session_id.into();
         // Each unified-log row is one model request. User interaction turns
         // remain tracked separately by `is_turn_start`.
         message.message_count = 1;
@@ -1148,7 +1148,7 @@ fn unified_turn_coverage(messages: &[UnifiedMessage]) -> HashMap<GrokAggregateCo
 /// updates remain a fallback for sessions absent from that log, avoiding an
 /// additive merge of two representations of the same activity.
 pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let unified_sessions: HashSet<String> = messages
+    let unified_sessions: HashSet<crate::sessions::SharedStr> = messages
         .iter()
         .filter(|message| is_unified_log_message(message))
         .map(|message| message.session_id.clone())
@@ -2122,13 +2122,13 @@ mod tests {
     #[test]
     fn selector_recovers_unified_model_and_workspace_from_consistent_legacy_rows() {
         let mut legacy = test_message("covered", "grok:covered:0");
-        legacy.model_id = "grok-4.5".to_string();
+        legacy.model_id = "grok-4.5".to_string().into();
         legacy.set_workspace(
             Some("/tmp/project".to_string()),
             Some("project".to_string()),
         );
         let mut unified = test_message("covered", "grok-unified:covered:1:1:1");
-        unified.model_id = UNKNOWN_MODEL.to_string();
+        unified.model_id = UNKNOWN_MODEL.to_string().into();
         unified.workspace_key = None;
         unified.workspace_label = None;
 

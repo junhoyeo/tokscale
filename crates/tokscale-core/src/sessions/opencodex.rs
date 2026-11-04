@@ -231,7 +231,7 @@ impl AttributionIndex {
         if message.timestamp <= 0 {
             return Vec::new();
         }
-        let Some(rows) = self.by_selector.get(&message.model_id) else {
+        let Some(rows) = self.by_selector.get(message.model_id.as_str()) else {
             return Vec::new();
         };
         // The ledger row is stamped at its request start, which sits within
@@ -508,8 +508,8 @@ fn collect_candidates(
 fn count_claims(
     messages: &[UnifiedMessage],
     candidates: &[Vec<CandidateMatch>],
-) -> HashMap<(String, usize), usize> {
-    let mut claims: HashMap<(String, usize), usize> = HashMap::new();
+) -> HashMap<(super::SharedStr, usize), usize> {
+    let mut claims: HashMap<(super::SharedStr, usize), usize> = HashMap::new();
     for (message, matches) in messages.iter().zip(candidates) {
         for candidate in matches {
             *claims
@@ -525,7 +525,7 @@ fn count_claims(
 fn unique_claim(
     message: &UnifiedMessage,
     matches: &[CandidateMatch],
-    claims: &HashMap<(String, usize), usize>,
+    claims: &HashMap<(super::SharedStr, usize), usize>,
 ) -> Option<CandidateMatch> {
     if message.client != "codex" {
         return None;
@@ -620,7 +620,7 @@ pub(crate) fn attribute_codex_messages(
         let tier_changed = target
             .service_tier
             .as_ref()
-            .is_some_and(|tier| message.service_tier.as_ref() != Some(tier));
+            .is_some_and(|tier| message.service_tier.as_deref() != Some(tier.as_str()));
         if message.provider_id == target.provider
             && message.model_id == target.model
             && !tier_changed
@@ -628,10 +628,10 @@ pub(crate) fn attribute_codex_messages(
             continue;
         }
 
-        message.provider_id = target.provider;
-        message.model_id = target.model;
+        message.provider_id = target.provider.into();
+        message.model_id = target.model.into();
         if let Some(service_tier) = target.service_tier {
-            message.service_tier = Some(service_tier);
+            message.service_tier = Some(service_tier.into());
         }
         // Estimates for the virtual selector cannot price the physical model.
         message.cost = 0.0;

@@ -1747,7 +1747,8 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                     message.service_tier = state
                         .request_service_tier
                         .clone()
-                        .or_else(|| state.thread_service_tier.clone());
+                        .or_else(|| state.thread_service_tier.clone())
+                        .map(crate::sessions::SharedStr::from);
                     message.duration_ms = duration_ms;
                     state.turn_coverage.record(state.current_turn_id.as_deref());
                     // The announced turn has produced usage, so it is under
@@ -1921,9 +1922,9 @@ fn new_codex_usage_message(
     tokens: TokenBreakdown,
 ) -> UnifiedMessage {
     let agent = if state.session_is_headless {
-        Some(CODEX_HEADLESS_AGENT.to_string())
+        Some(CODEX_HEADLESS_AGENT)
     } else {
-        state.session_agent.clone()
+        state.session_agent.as_deref()
     };
 
     let provider = state
@@ -1945,9 +1946,9 @@ fn new_codex_usage_message(
     };
     UnifiedMessage::new_with_agent(
         client,
-        model.unwrap_or("unknown").to_string(),
+        model.unwrap_or("unknown"),
         provider,
-        message_session_id.to_string(),
+        message_session_id,
         timestamp,
         tokens,
         0.0,
@@ -1993,7 +1994,8 @@ fn emit_unconfirmed_usage_record(
         .service_tier
         .clone()
         .or_else(|| state.request_service_tier.clone())
-        .or_else(|| state.thread_service_tier.clone());
+        .or_else(|| state.thread_service_tier.clone())
+        .map(crate::sessions::SharedStr::from);
     // The record names its response, which is the identity sibling fork
     // replays share; without one, the record's time and counters stand in.
     let dedup_scope_id = state
@@ -2299,7 +2301,7 @@ fn flush_pending_model_messages(
             let upstream_session_id = message.session_id.clone();
             set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
         }
-        message.model_id = model.to_string();
+        message.model_id = model.into();
         messages.push(message);
         if used_fallback_timestamp {
             fallback_timestamp_indices.push(messages.len() - 1);
@@ -2593,9 +2595,9 @@ fn parse_codex_headless_line(
         .or_else(|| inferred_provider_from_model(&model))
         .unwrap_or("openai");
     let agent = if state.session_is_headless {
-        Some(CODEX_HEADLESS_AGENT.to_string())
+        Some(CODEX_HEADLESS_AGENT)
     } else {
-        state.session_agent.clone()
+        state.session_agent.as_deref()
     };
 
     let used_fallback_timestamp = usage.timestamp_ms.is_none();
@@ -2603,7 +2605,7 @@ fn parse_codex_headless_line(
         "codex",
         model.clone(),
         provider,
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: usage.input.max(0),
@@ -4462,7 +4464,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        messages[0].agent.clone()
+        messages[0].agent.as_ref().map(ToString::to_string)
     }
 
     #[test]

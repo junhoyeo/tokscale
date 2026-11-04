@@ -38,7 +38,7 @@ pub use sessionize::{
     compute_daily_active_time, compute_daily_active_time_in, compute_time_metrics, sessionize,
     SessionInterval, TimeMetrics, DEFAULT_IDLE_GAP_MS,
 };
-pub use sessions::{CostSource, UnifiedMessage};
+pub use sessions::{CostSource, SharedStr, UnifiedMessage};
 
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -385,15 +385,15 @@ impl ModelPerformance {
 pub struct ParsedMessage {
     pub estimate_status: sessions::EstimateStatus,
     pub billing_identity: sessions::BillingIdentity,
-    pub pricing_model_id: Option<String>,
-    pub client: String,
-    pub model_id: String,
-    pub provider_id: String,
-    pub session_id: String,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
+    pub pricing_model_id: Option<SharedStr>,
+    pub client: SharedStr,
+    pub model_id: SharedStr,
+    pub provider_id: SharedStr,
+    pub session_id: SharedStr,
+    pub workspace_key: Option<SharedStr>,
+    pub workspace_label: Option<SharedStr>,
     pub timestamp: i64,
-    pub date: String,
+    pub date: SharedStr,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
@@ -404,7 +404,7 @@ pub struct ParsedMessage {
     pub reasoning: i64,
     pub duration_ms: Option<i64>,
     pub message_count: i32,
-    pub agent: Option<String>,
+    pub agent: Option<SharedStr>,
     /// Cost in USD as the parser reported it. This lane applies no pricing, so
     /// the figure is only meaningful when `cost_source` is
     /// [`CostSource::ProviderReported`]; consumers price every other row from
@@ -412,7 +412,7 @@ pub struct ParsedMessage {
     /// authoritative cost.
     pub cost: f64,
     pub cost_source: CostSource,
-    pub service_tier: Option<String>,
+    pub service_tier: Option<SharedStr>,
 }
 
 pub struct ParsedMessages {
@@ -1178,11 +1178,13 @@ fn flushed_message_identity(
     {
         return None;
     }
-    let mut model_id = message.model_id.clone();
-    let mut provider_id = message.provider_id.clone();
-    if context.include_synthetic {
-        sessions::synthetic::normalize_synthetic_gateway_fields(&mut model_id, &mut provider_id);
-    }
+    let normalized_model = context
+        .include_synthetic
+        .then(|| {
+            sessions::synthetic::synthetic_gateway_fields(&message.model_id, &message.provider_id)
+        })
+        .flatten()
+        .map(|fields| fields.model_id);
     let date = match &context.timezone {
         Some(timezone) => {
             let mut rebucketed = message.clone();
@@ -1191,7 +1193,14 @@ fn flushed_message_identity(
         }
         None => message.date.clone(),
     };
-    Some((date, canonical_model_id(&model_id)))
+    Some((
+        date.to_string(),
+        canonical_model_id(
+            normalized_model
+                .as_deref()
+                .unwrap_or(message.model_id.as_str()),
+        ),
+    ))
 }
 
 fn parse_all_messages_with_pricing_with_env_strategy(
@@ -1403,12 +1412,7 @@ fn flush_retained_message<S: MessageSink>(
     estimate_source: Option<EstimateSource>,
 ) {
     if context.include_synthetic {
-        let raw_model = message.model_id.clone();
-        sessions::synthetic::normalize_synthetic_gateway_fields(
-            &mut message.model_id,
-            &mut message.provider_id,
-        );
-        message.preserve_pricing_model(&raw_model);
+        message.normalize_synthetic_gateway();
     }
 
     if let Some(timezone) = &context.timezone {
@@ -1416,7 +1420,7 @@ fn flush_retained_message<S: MessageSink>(
     }
 
     if let (None, Some(local)) = (&message.machine_label, context.local_machine_label) {
-        message.machine_label = Some(local.to_string());
+        message.machine_label = Some(SharedStr::from(local));
     }
 
     sink.accept_with_estimate_source(message, estimate_source);
@@ -3156,7 +3160,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         for message in messages {
             if let Some(key) = message.dedup_key.as_ref() {
                 opencode_sqlite_locations
-                    .entry(message.session_id.clone())
+                    .entry(message.session_id.to_string())
                     .or_default()
                     .insert(key.clone());
                 if !opencode_seen.insert(key.clone()) {
@@ -3431,7 +3435,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         for message in outcome.messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
                 if owned_thread.is_none() {
-                    owned_thread = Some(message.session_id.clone());
+                    owned_thread = Some(message.session_id.to_string());
                 }
                 openclaw_owned_rollouts.push(message);
             } else if should_keep_deduped_message(&mut codex_seen, &message) {
@@ -3492,7 +3496,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     for message in &mut all_messages {
         apply_pricing_if_available(message, pricing);
     }
-    let copilot_otel_sessions: HashSet<String> = all_messages
+    let copilot_otel_sessions: HashSet<SharedStr> = all_messages
         .iter()
         .filter(|message| message.client == "copilot")
         .map(|message| message.session_id.clone())
@@ -3533,7 +3537,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let mut existing_copilot_session_timestamps: HashMap<String, HashSet<i64>> = HashMap::new();
         for message in all_messages.iter().filter(|m| m.client == "copilot") {
             existing_copilot_session_timestamps
-                .entry(message.session_id.clone())
+                .entry(message.session_id.to_string())
                 .or_default()
                 .insert(message.timestamp);
         }
@@ -3569,7 +3573,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                     .get(path)
                     .copied()
                     .flatten()
-                    .map(str::to_string);
+                    .map(SharedStr::from);
                 apply_pricing_if_available(&mut message, pricing);
                 flush_message(message, &flush_context, sink);
             },
@@ -3905,13 +3909,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
                     // The location says whose usage this is even when an older
                     // OpenClaw did not announce itself as the originator.
-                    message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                    message.client = sessions::codex::OPENCLAW_CLIENT_ID.into();
                     if let Some(thread) = &thread_from_name {
-                        message.session_id = thread.clone();
+                        message.session_id = thread.clone().into();
                     }
                 }
                 if recorded_thread.is_none() {
-                    recorded_thread = Some(message.session_id.clone());
+                    recorded_thread = Some(message.session_id.to_string());
                 }
                 rollout_messages.push(message);
             }
@@ -3981,7 +3985,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 {
                     mirrored_thread_sessions
                         .entry(mirror.thread.to_string())
-                        .or_insert_with(|| message.session_id.clone());
+                        .or_insert_with(|| message.session_id.to_string());
                     if recorded_codex_turns.covers(mirror.thread, mirror.turn) {
                         continue;
                     }
@@ -3997,8 +4001,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
         for mut message in rollout_messages {
-            if let Some(session_id) = mirrored_thread_sessions.get(&message.session_id).cloned() {
-                message.session_id = session_id;
+            if let Some(session_id) = mirrored_thread_sessions
+                .get(message.session_id.as_str())
+                .cloned()
+            {
+                message.session_id = session_id.into();
             }
             if should_keep_deduped_message(&mut openclaw_seen, &message) {
                 all_messages.push(message);
@@ -4791,7 +4798,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 if !kept {
                     continue;
                 }
-                devin_cli_session_ids.insert(message.session_id.clone());
+                devin_cli_session_ids.insert(message.session_id.to_string());
                 all_messages.push(message);
             }
             if let Some(entry) = outcome.cache_entry {
@@ -4989,7 +4996,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 outcome
                     .messages
                     .into_iter()
-                    .filter(|message| !devin_cli_session_ids.contains(&message.session_id)),
+                    .filter(|message| !devin_cli_session_ids.contains(message.session_id.as_str())),
             );
             if let Some(entry) = outcome.cache_entry {
                 source_cache.insert(entry);
@@ -5085,7 +5092,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut latest_by_session: HashMap<String, UnifiedMessage> = HashMap::new();
+    let mut latest_by_session: HashMap<SharedStr, UnifiedMessage> = HashMap::new();
 
     for message in messages.drain(..) {
         let session_id = message.session_id.clone();
@@ -5138,7 +5145,7 @@ fn merge_workbuddy_messages(
     // session that merely shares a day with unrelated detailed activity. Both
     // parsers derive `session_id` from the same WorkBuddy session identifier, so
     // the keys are directly comparable.
-    let detailed_sessions: HashSet<String> = detailed_messages
+    let detailed_sessions: HashSet<SharedStr> = detailed_messages
         .iter()
         .filter(|message| !message.session_id.is_empty())
         .map(|message| message.session_id.clone())
@@ -5551,9 +5558,9 @@ fn aggregate_model_usage_entries_with_rollup(
         );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
-            client: msg.client.clone(),
+            client: msg.client.to_string(),
             merged_clients: if merge_clients {
-                Some(msg.client.clone())
+                Some(msg.client.to_string())
             } else {
                 None
             },
@@ -5568,7 +5575,7 @@ fn aggregate_model_usage_entries_with_rollup(
                 None
             },
             session_id: if session_grouped {
-                Some(msg.session_id.clone())
+                Some(msg.session_id.to_string())
             } else {
                 None
             },
@@ -5578,7 +5585,7 @@ fn aggregate_model_usage_entries_with_rollup(
                 None
             },
             model: normalized.clone(),
-            provider: msg.provider_id.clone(),
+            provider: msg.provider_id.to_string(),
             input: 0,
             output: 0,
             cache_read: 0,
@@ -5895,7 +5902,7 @@ fn aggregate_hourly_usage_entries(
         };
 
         let entry = hour_map.entry(hour_key).or_default();
-        entry.clients.insert(msg.client.clone());
+        entry.clients.insert(msg.client.to_string());
         entry.models.insert(model_name_for_grouping(
             &msg.client,
             &msg.provider_id,
@@ -6465,7 +6472,10 @@ fn prepare_submission_pricing(
                 MISSING_MODEL_PRICING_REASON
             };
             let entry = unpriced_usage
-                .entry((message.provider_id.clone(), message.model_id.clone()))
+                .entry((
+                    message.provider_id.to_string(),
+                    message.model_id.to_string(),
+                ))
                 .or_insert((0, 0, reason));
             entry.0 = entry
                 .0
@@ -6474,7 +6484,7 @@ fn prepare_submission_pricing(
             if entry.2 != reason {
                 entry.2 = MULTIPLE_MODEL_PRICING_REASONS;
             }
-            incomplete_cost_dates.insert(message.date.clone());
+            incomplete_cost_dates.insert(message.date.to_string());
             // An unsafe estimate must not cross the submission boundary. Keep
             // the usage, but represent the unknown part honestly as zero and
             // let `costIsComplete: false` make the server preserve any higher
@@ -6676,7 +6686,7 @@ fn validate_priced_messages(
         }
 
         let id = if message.provider_id.is_empty() {
-            message.model_id.clone()
+            message.model_id.to_string()
         } else {
             format!("{}/{}", message.provider_id, message.model_id)
         };
@@ -6768,9 +6778,9 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
         // A capture under the headless root is a `codex exec` run even when its
         // `session_meta` omits `source: "exec"` and the parser bucketed it as
         // an interactive or subagent thread, so the path wins.
-        message.agent = Some(sessions::codex::CODEX_HEADLESS_AGENT.to_string());
+        message.agent = Some(sessions::codex::CODEX_HEADLESS_AGENT.into());
     } else if message.agent.is_none() {
-        message.agent = Some("headless".to_string());
+        message.agent = Some("headless".into());
     }
 }
 
@@ -6997,8 +7007,8 @@ fn hermes_candidate_day_coverage(messages: &[UnifiedMessage]) -> usize {
 /// model differs, so normalize the first database's count onto exactly one of
 /// the selected messages after choosing every group.
 fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec<UnifiedMessage> {
-    let mut group_order: Vec<(String, String, String)> = Vec::new();
-    let mut group_candidates: HashMap<(String, String, String), Vec<Vec<UnifiedMessage>>> =
+    let mut group_order: Vec<(SharedStr, SharedStr, SharedStr)> = Vec::new();
+    let mut group_candidates: HashMap<(SharedStr, SharedStr, SharedStr), Vec<Vec<UnifiedMessage>>> =
         HashMap::new();
     let mut session_message_counts: HashMap<String, i32> = HashMap::new();
 
@@ -7006,7 +7016,7 @@ fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec
         let mut database_session_counts: HashMap<String, i32> = HashMap::new();
         for message in &messages {
             database_session_counts
-                .entry(message.session_id.clone())
+                .entry(message.session_id.to_string())
                 .and_modify(|count| *count = (*count).max(message.message_count))
                 .or_insert(message.message_count);
         }
@@ -7014,9 +7024,9 @@ fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec
             session_message_counts.entry(session_id).or_insert(count);
         }
 
-        let mut database_groups: HashMap<(String, String, String), Vec<UnifiedMessage>> =
+        let mut database_groups: HashMap<(SharedStr, SharedStr, SharedStr), Vec<UnifiedMessage>> =
             HashMap::new();
-        let mut database_group_order: Vec<(String, String, String)> = Vec::new();
+        let mut database_group_order: Vec<(SharedStr, SharedStr, SharedStr)> = Vec::new();
         for message in messages {
             let group = (
                 message.session_id.clone(),
@@ -7067,7 +7077,7 @@ fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec
     for message in &mut selected {
         message.message_count = if counted_sessions.insert(message.session_id.clone()) {
             session_message_counts
-                .get(&message.session_id)
+                .get(message.session_id.as_str())
                 .copied()
                 .unwrap_or(0)
         } else {
@@ -7225,7 +7235,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                         let key = msg.dedup_key.clone().unwrap_or_default();
                         if !key.is_empty() {
                             sqlite_locations
-                                .entry(msg.session_id.clone())
+                                .entry(msg.session_id.to_string())
                                 .or_default()
                                 .insert(key.clone());
                         }
@@ -7415,7 +7425,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         for message in file_messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
                 if owned_thread.is_none() {
-                    owned_thread = Some(message.session_id.clone());
+                    owned_thread = Some(message.session_id.to_string());
                 }
                 openclaw_owned_rollouts.push(message);
             } else if should_keep_deduped_message(&mut codex_seen, &message)
@@ -7453,7 +7463,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         })
         .collect();
     copilot_unified_msgs = sessions::copilot::merge_copilot_messages(copilot_unified_msgs);
-    let copilot_otel_sessions: HashSet<String> = copilot_unified_msgs
+    let copilot_otel_sessions: HashSet<SharedStr> = copilot_unified_msgs
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
@@ -7476,7 +7486,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .iter()
             .filter_map(|m| m.dedup_key.clone())
             .collect();
-        let existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
+        let existing_copilot_session_timestamps: HashSet<(SharedStr, i64)> = copilot_unified_msgs
             .iter()
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
@@ -7629,9 +7639,9 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                     .into_iter()
                     .map(|mut message| {
                         if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
-                            message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                            message.client = sessions::codex::OPENCLAW_CLIENT_ID.into();
                             if let Some(thread) = &thread_from_name {
-                                message.session_id = thread.clone();
+                                message.session_id = thread.clone().into();
                             }
                         }
                         message
@@ -7670,7 +7680,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             {
                 mirrored_thread_sessions
                     .entry(mirror.thread.to_string())
-                    .or_insert_with(|| message.session_id.clone());
+                    .or_insert_with(|| message.session_id.to_string());
                 if recorded_codex_turns.covers(mirror.thread, mirror.turn) {
                     continue;
                 }
@@ -7680,8 +7690,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
         for mut message in rollout_messages {
-            if let Some(session_id) = mirrored_thread_sessions.get(&message.session_id).cloned() {
-                message.session_id = session_id;
+            if let Some(session_id) = mirrored_thread_sessions
+                .get(message.session_id.as_str())
+                .cloned()
+            {
+                message.session_id = session_id.into();
             }
             if should_keep_deduped_message(&mut seen, &message) {
                 kept.push(message);
@@ -8359,7 +8372,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     } else {
         Vec::new()
     };
-    let cli_session_ids: HashSet<String> = devin_cli_messages
+    let cli_session_ids: HashSet<SharedStr> = devin_cli_messages
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
@@ -8491,14 +8504,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     if include_synthetic {
         for msg in &mut messages {
-            let raw_model = msg.model_id.clone();
-            sessions::synthetic::normalize_synthetic_gateway_fields(
+            sessions::synthetic::normalize_synthetic_gateway_identity(
                 &mut msg.model_id,
                 &mut msg.provider_id,
+                &mut msg.pricing_model_id,
             );
-            if raw_model != msg.model_id && msg.pricing_model_id.is_none() {
-                msg.pricing_model_id = Some(raw_model);
-            }
         }
     }
 
@@ -8540,7 +8550,7 @@ fn rebucket_parsed_days(
         }
         let key = timezone.day_key(message.timestamp);
         if !key.is_empty() {
-            message.date = key;
+            message.date = SharedStr::from(key);
         }
     }
 }
@@ -9997,7 +10007,7 @@ mod tests {
                 },
                 0.0,
             );
-            msg.date = date.to_string();
+            msg.date = date.to_string().into();
             msg
         };
         let tz = crate::BucketTimezone::default();
@@ -10055,7 +10065,7 @@ mod tests {
                 },
                 0.0,
             );
-            message.date = date.to_string();
+            message.date = date.to_string().into();
             message
         };
 
@@ -11690,7 +11700,7 @@ mod tests {
         let labeled = |client: &str, session: &str, machine: Option<&str>| {
             let mut message =
                 make_workspace_message(client, "gpt-5.4", "openai", session, 1.0, None, None);
-            message.machine_label = machine.map(str::to_string);
+            message.machine_label = machine.map(super::SharedStr::from);
             message
         };
         let messages = vec![
@@ -11724,7 +11734,7 @@ mod tests {
     fn test_machine_model_rows_serialize_machine_only_when_set() {
         let mut message =
             make_workspace_message("codex", "gpt-5.4", "openai", "s1", 1.0, None, None);
-        message.machine_label = Some("steven".to_string());
+        message.machine_label = Some("steven".to_string().into());
         let machine_rows =
             aggregate_model_usage_entries(vec![message.clone()], &GroupBy::MachineModel);
         let value = serde_json::to_value(&machine_rows[0]).unwrap();
@@ -12507,6 +12517,17 @@ mod tests {
         );
         assert_eq!(round_tripped.cost, 2.5);
         assert_eq!(round_tripped.duration_ms, Some(2500));
+        assert!(parsed.client.shares_allocation_with(&unified.client));
+        assert!(parsed
+            .workspace_key
+            .as_ref()
+            .unwrap()
+            .shares_allocation_with(unified.workspace_key.as_ref().unwrap()));
+        assert!(round_tripped
+            .workspace_label
+            .as_ref()
+            .unwrap()
+            .shares_allocation_with(unified.workspace_label.as_ref().unwrap()));
     }
 
     #[test]
@@ -12741,8 +12762,8 @@ mod tests {
 
         // A physical target can have different gateway identity, but the
         // client filter must retain the selected source Codex row.
-        message.model_id = "served-model-fixture".to_string();
-        message.provider_id = "openai".to_string();
+        message.model_id = "served-model-fixture".to_string().into();
+        message.provider_id = "openai".to_string().into();
         assert!(!matches_flush_filter(&message, &context));
 
         let mut buffer = vec![message];
@@ -12853,7 +12874,7 @@ mod tests {
         for message in messages {
             cells
                 .entry((
-                    message.date.clone(),
+                    message.date.to_string(),
                     super::canonical_model_id(&message.model_id),
                 ))
                 .or_insert_with(super::RecountProofCell::default)
@@ -12945,17 +12966,17 @@ mod tests {
         }
 
         let date = &messages[0].date;
-        let gpt = &proof[date]["gpt-5"];
+        let gpt = &proof[date.as_str()]["gpt-5"];
         assert_eq!(gpt.previous.tokens.input, 380);
         assert_eq!(gpt.corrected.tokens.input, 330);
         assert_eq!(gpt.previous.messages, 4);
         assert_eq!(gpt.corrected.messages, 3);
-        let claude = &proof[date]["claude-3-7-sonnet"];
+        let claude = &proof[date.as_str()]["claude-3-7-sonnet"];
         assert_eq!(claude.previous.tokens.input, 100);
         assert_eq!(claude.corrected.tokens.input, 60);
         assert_eq!(claude.previous.messages, 2);
         assert_eq!(claude.corrected.messages, 1);
-        let legacy = &proof[date]["legacy-cursor-model"];
+        let legacy = &proof[date.as_str()]["legacy-cursor-model"];
         assert_eq!(legacy.previous, legacy.corrected);
         assert_eq!(legacy.corrected.tokens.input, 11);
         assert_eq!(legacy.corrected.tokens.cache_write, 7);
@@ -13016,7 +13037,7 @@ mod tests {
         kept_inputs.sort_unstable();
         assert_eq!(kept_inputs, vec![20, 40]);
         let date = &messages[0].date;
-        let entry = &outcome.recount_proofs["cursor"][date]["gpt-5"];
+        let entry = &outcome.recount_proofs["cursor"][date.as_str()]["gpt-5"];
         assert_eq!(entry.previous.tokens.input, 100);
         assert_eq!(entry.corrected.tokens.input, 60);
         assert_eq!(entry.previous.messages, 4);
@@ -15860,7 +15881,7 @@ mod tests {
             "the matching year must keep the fx row"
         );
         assert_eq!(
-            fx_rows(Some(expected_date.clone()), None, None).len(),
+            fx_rows(Some(expected_date.to_string()), None, None).len(),
             1,
             "a since cutoff on the row's own day must keep it"
         );
@@ -15954,7 +15975,7 @@ mod tests {
                 },
                 0.0,
             );
-            stale_message.date = "1900-01-01".to_string();
+            stale_message.date = "1900-01-01".to_string().into();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -16906,8 +16927,8 @@ mod tests {
             .iter()
             .map(|message| {
                 (
-                    message.client.clone(),
-                    message.session_id.clone(),
+                    message.client.to_string(),
+                    message.session_id.to_string(),
                     message.tokens.input,
                     message.tokens.cache_read,
                     message.tokens.output,
@@ -17015,7 +17036,7 @@ mod tests {
         let mut uncached: Vec<(String, i64, i64)> = parsed
             .messages
             .iter()
-            .map(|m| (m.session_id.clone(), m.input, m.output))
+            .map(|m| (m.session_id.to_string(), m.input, m.output))
             .collect();
         uncached.sort();
         assert_eq!(
@@ -19569,7 +19590,7 @@ mod tests {
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut stale_message = expected[0].clone();
             stale_message.timestamp = 0;
-            stale_message.date = "1900-01-01".to_string();
+            stale_message.date = "1900-01-01".to_string().into();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -19894,7 +19915,7 @@ mod tests {
                 reasoning: 0,
             },
             0.42,
-            Some("planner".to_string()),
+            Some("planner"),
         );
 
         apply_pricing_if_available(&mut msg, None);
@@ -20319,7 +20340,7 @@ mod tests {
             },
             9.0,
         );
-        unpriced.date = "2026-01-01".to_string();
+        unpriced.date = "2026-01-01".to_string().into();
         unpriced.mark_estimated_cost();
 
         let mut complete = UnifiedMessage::new(
@@ -20334,7 +20355,7 @@ mod tests {
             },
             2.0,
         );
-        complete.date = "2026-01-02".to_string();
+        complete.date = "2026-01-02".to_string().into();
         complete.mark_provider_reported_cost();
 
         let graph = build_graph_from_messages(
@@ -21455,7 +21476,7 @@ mod tests {
             },
             0.0,
         );
-        old.date = "2020-01-01".to_string();
+        old.date = "2020-01-01".to_string().into();
         let filtered = filter_messages_for_report(
             vec![old],
             &ReportOptions {
@@ -21619,7 +21640,7 @@ mod tests {
             tokens.clone(),
             0.0,
         );
-        fast.service_tier = Some("priority".to_string());
+        fast.service_tier = Some("priority".to_string().into());
         apply_pricing_if_available(&mut fast, Some(&pricing));
 
         let mut standard = UnifiedMessage::new(
@@ -21631,7 +21652,7 @@ mod tests {
             tokens.clone(),
             0.0,
         );
-        standard.service_tier = Some("default".to_string());
+        standard.service_tier = Some("default".to_string().into());
         apply_pricing_if_available(&mut standard, Some(&pricing));
 
         let mut non_openai = UnifiedMessage::new(
@@ -21643,7 +21664,7 @@ mod tests {
             tokens,
             0.0,
         );
-        non_openai.service_tier = Some("fast".to_string());
+        non_openai.service_tier = Some("fast".to_string().into());
         apply_pricing_if_available(&mut non_openai, Some(&pricing));
 
         assert!((fast.cost - 0.0468).abs() < 1e-12);
@@ -21768,7 +21789,7 @@ mod tests {
             tokens.clone(),
             0.0,
         );
-        suffix_and_tier.service_tier = Some("fast".to_string());
+        suffix_and_tier.service_tier = Some("fast".to_string().into());
         apply_pricing_if_available(&mut suffix_and_tier, Some(&pricing));
 
         let mut standard = UnifiedMessage::new(
@@ -23247,7 +23268,7 @@ mod tests {
             .expect("devin-cli recount proof");
         let date = messages[0].date.clone();
         assert!(messages.iter().all(|message| message.date == date));
-        let entry = &proof[&date]["gpt-5"];
+        let entry = &proof[date.as_str()]["gpt-5"];
         assert_eq!(entry.corrected.tokens.input, 67 + 10 + 20);
         assert_eq!(entry.corrected.tokens.output, 103 + 5 + 5);
         assert_eq!(entry.corrected.messages, 3);
@@ -24477,7 +24498,11 @@ mod tests {
         assert_eq!(parsed.counts.get(ClientId::Amp), 2);
         assert_eq!(parsed.messages.len(), 2);
 
-        let dates: HashSet<String> = parsed.messages.iter().map(|msg| msg.date.clone()).collect();
+        let dates: HashSet<String> = parsed
+            .messages
+            .iter()
+            .map(|msg| msg.date.to_string())
+            .collect();
         let local_date = |timestamp_ms: i64| {
             chrono::Local
                 .timestamp_millis_opt(timestamp_ms)
@@ -25374,7 +25399,7 @@ mod tests {
             let mut per_model: std::collections::HashMap<String, i64> =
                 std::collections::HashMap::new();
             for message in &messages {
-                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+                *per_model.entry(message.model_id.to_string()).or_default() += message.tokens.input;
             }
             assert_eq!(per_model.get("model-a").copied(), Some(150));
             assert_eq!(per_model.get("model-b").copied(), Some(100));
@@ -25506,7 +25531,7 @@ mod tests {
                 TokenBreakdown::default(),
                 0.0,
             );
-            message.date = date.to_string();
+            message.date = date.to_string().into();
             message
         };
 
@@ -25585,7 +25610,7 @@ mod tests {
                 0,
                 TokenBreakdown::default(),
                 0.0,
-                agent.map(str::to_string),
+                agent,
             )
         };
 

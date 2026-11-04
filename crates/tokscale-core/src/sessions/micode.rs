@@ -170,8 +170,8 @@ impl UsageFingerprint {
         Some(Self {
             created_bits: timing.created_bits,
             completed_bits: timing.completed_bits,
-            model: message.model_id.clone(),
-            provider: message.provider_id.clone(),
+            model: message.model_id.to_string(),
+            provider: message.provider_id.to_string(),
             billing_provider: message.billing_identity.id().map(str::to_string),
             tokens: [
                 message.tokens.input,
@@ -181,7 +181,7 @@ impl UsageFingerprint {
                 message.tokens.reasoning,
             ],
             cost: message.cost.to_bits(),
-            agent: message.agent.clone(),
+            agent: message.agent.as_ref().map(ToString::to_string),
         })
     }
 }
@@ -371,7 +371,7 @@ impl MiMoMessages {
                     fingerprint.clone(),
                     HashSet::from([(
                         origin.database.clone(),
-                        message.client.clone(),
+                        message.client.to_string(),
                         origin.owns_turn(),
                     )]),
                 );
@@ -394,7 +394,7 @@ impl MiMoMessages {
                 .or_default()
                 .insert((
                     origin.database.clone(),
-                    incoming.client.clone(),
+                    incoming.client.to_string(),
                     origin.owns_turn(),
                 ));
             let indices = self.fingerprints.entry(observed).or_default();
@@ -462,7 +462,7 @@ fn merge_workspace(retained: &mut UnifiedMessage, incoming: &UnifiedMessage, con
             && incoming.workspace_key.is_some()
             && retained.workspace_key != incoming.workspace_key)
     {
-        retained.set_workspace(None, None);
+        retained.set_workspace(None::<&str>, None::<&str>);
     } else if retained.workspace_key.is_none() {
         retained.set_workspace(
             incoming.workspace_key.clone(),
@@ -499,7 +499,7 @@ pub(crate) fn parse_micode_source(db_path: &Path) -> MiMoSource {
         .zip(rows)
         .map(|(message, row)| MiMoRowMetadata {
             session_created_bits: sessions
-                .get(&message.session_id)
+                .get(message.session_id.as_str())
                 .and_then(|session| session.created_at)
                 .map(f64::to_bits),
             row,
@@ -1130,7 +1130,10 @@ mod tests {
 
         let messages = parse_micode_sqlite(&db_path);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent, Some("Build".to_string()));
+        assert_eq!(
+            messages[0].agent,
+            Some(crate::sessions::SharedStr::from("Build"))
+        );
     }
 
     /// Regression for PR #710: `time.created` was hard-assumed to be epoch

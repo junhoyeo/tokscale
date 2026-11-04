@@ -24,8 +24,8 @@ pub fn enabled() -> bool {
 }
 fn key(m: &UnifiedMessage) -> (String, String, String) {
     (
-        m.client.clone(),
-        m.date.clone(),
+        m.client.to_string(),
+        m.date.to_string(),
         crate::model_name_for_grouping(&m.client, &m.provider_id, &m.model_id),
     )
 }
@@ -71,7 +71,19 @@ fn finite(m: &UnifiedMessage) -> bool {
         && m.message_count >= 0
         && chrono::NaiveDate::parse_from_str(&m.date, "%Y-%m-%d").is_ok()
 }
-fn signature(m: &UnifiedMessage) -> (String, String, String, i64, i64, i64, i64, i64, i64) {
+fn signature(
+    m: &UnifiedMessage,
+) -> (
+    crate::sessions::SharedStr,
+    crate::sessions::SharedStr,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+) {
     (
         m.client.clone(),
         m.session_id.clone(),
@@ -367,7 +379,7 @@ pub fn merge<F: Fn(&UnifiedMessage) -> bool>(
 ) {
     // Reapplying the overlay is idempotent, including on an already merged vector.
     native.retain(|m| !m.dedup_key.as_deref().unwrap_or("").starts_with(KEY_PREFIX));
-    let sessions: HashSet<(String, String)> = native
+    let sessions: HashSet<(crate::sessions::SharedStr, crate::sessions::SharedStr)> = native
         .iter()
         .map(|m| (m.client.clone(), m.session_id.clone()))
         .collect();
@@ -490,9 +502,9 @@ pub fn merge<F: Fn(&UnifiedMessage) -> bool>(
             let k = key(&m);
             // session_id deliberately equals dedup_key: that equality is the
             // structural marker `is_daily` relies on (see its doc comment).
-            m.session_id = format!("{KEY_PREFIX}{DAILY_INFIX}{}:{}:{}", k.0, k.1, k.2);
+            m.session_id = format!("{KEY_PREFIX}{DAILY_INFIX}{}:{}:{}", k.0, k.1, k.2).into();
             m.session_title = Some("Recovered daily usage; original sessions unavailable".into());
-            m.dedup_key = Some(m.session_id.clone());
+            m.dedup_key = Some(m.session_id.to_string());
             m.is_turn_start = false;
             m.duration_ms = None;
             m.timestamp = 0;
