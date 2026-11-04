@@ -18,7 +18,9 @@ async function resolveUser(request: Request): Promise<{ id: string; username: st
     return null;
   }
 
-  const session = await getSessionFromRequest(request);
+  const session = await getSessionFromRequest(request, {
+    allowAuthorizationHeader: false,
+  });
   if (session) {
     return { id: session.id, username: session.username };
   }

@@ -326,4 +326,31 @@ describe("DELETE /api/settings/submitted-data", () => {
       right: "user-2",
     });
   });
+
+  it("does not fall back to getSessionFromHeader when Authorization header is not Bearer", async () => {
+    mockState.getSession.mockResolvedValue(null);
+    mockState.getSessionFromHeader.mockResolvedValue({
+      id: "user-2",
+      username: "bob",
+      displayName: "Bob",
+      avatarUrl: null,
+    });
+
+    const response = await DELETE(
+      new Request("http://localhost/api/settings/submitted-data", {
+        method: "DELETE",
+        headers: {
+          Authorization: "tt_raw_without_bearer",
+          Origin: "https://attacker.example",
+        },
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.authenticatePersonalToken).not.toHaveBeenCalled();
+    expect(mockState.getSessionFromHeader).not.toHaveBeenCalled();
+    expect(mockState.getSession).not.toHaveBeenCalled();
+    expect(mockState.db.delete).not.toHaveBeenCalled();
+  });
 });
