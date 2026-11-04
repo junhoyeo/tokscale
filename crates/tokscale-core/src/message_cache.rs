@@ -7009,6 +7009,15 @@ mod tests {
     }
 
     #[test]
+    fn test_tencent_buddy_parser_version_invalidates_v2_entries() {
+        // Extension logs and JSONL transcripts are append-only and keep their
+        // fingerprints forever, so only the family version retires the v2 rows
+        // that were cached before either duration source was read.
+        assert_eq!(parser_version(ClientId::CodeBuddy), 3);
+        assert_eq!(parser_version(ClientId::WorkBuddy), 3);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn grok_v7_shard_reparses_unchanged_cost_and_call_count() {
         let cache_home = TempDir::new().unwrap();
