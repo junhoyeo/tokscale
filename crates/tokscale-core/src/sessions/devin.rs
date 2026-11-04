@@ -6,7 +6,7 @@
 
 use super::utils::{
     back_anchor_timestamp, file_modified_timestamp_ms, for_each_json_line,
-    open_readonly_sqlite_opt, sqlite_for_each_row_on,
+    open_readonly_sqlite_opt, sqlite_for_each_row_on, sqlite_for_each_row_on_with_params,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
@@ -185,6 +185,109 @@ const DEVIN_CLI_MESSAGE_QUERY: &str = r#"
         ORDER BY m.row_id
     "#;
 
+/// [`DEVIN_CLI_MESSAGE_QUERY`] limited to rows appended after a resume
+/// watermark. `?1` binds the last `row_id` the cache already parsed, so a
+/// rescan reads only the new `chat_message` blobs.
+const DEVIN_CLI_MESSAGE_QUERY_AFTER: &str = r#"
+        SELECT
+            m.row_id,
+            m.session_id,
+            m.chat_message,
+            m.created_at * 1000 AS created_at_ms,
+            s.model,
+            s.working_directory
+        FROM message_nodes m
+        JOIN sessions s ON m.session_id = s.id
+        WHERE m.row_id > ?1
+        ORDER BY m.row_id
+    "#;
+
+/// Row stats used as the Devin CLI source fingerprint and the incremental
+/// resume watermark. `row_count` and `row_id_sum` detect deletions a
+/// `row_id`-after scan cannot see — any removed row changes their sum —
+/// and `max_row_id` is the mark new rows append past. All three walk the
+/// rowid b-tree's leaf cells; the `chat_message` payloads live on overflow
+/// pages this query never touches.
+pub(crate) struct DevinCliRowStats {
+    pub row_count: i64,
+    pub max_row_id: i64,
+    pub row_id_sum: i64,
+}
+
+pub(crate) fn devin_cli_row_stats(db_path: &Path) -> Option<DevinCliRowStats> {
+    let conn = open_readonly_sqlite_opt(db_path)?;
+    let mut stats = None;
+    sqlite_for_each_row_on(
+        &conn,
+        db_path,
+        "SELECT COUNT(*), COALESCE(MAX(row_id), 0), COALESCE(SUM(row_id), 0) FROM message_nodes",
+        None,
+        &mut |row| {
+            stats = Some(DevinCliRowStats {
+                row_count: row.get(0)?,
+                max_row_id: row.get(1)?,
+                row_id_sum: row.get(2)?,
+            });
+            Ok(())
+        },
+    );
+    stats
+}
+
+/// Hash over the `sessions` fields the message query joins (`model`,
+/// `working_directory`) plus `title`. The table is small — a few dozen rows —
+/// so reading and hashing it costs nothing, and any in-place edit to a joined
+/// field flips the fingerprint where row stats alone see no change.
+pub(crate) fn devin_cli_sessions_hash(db_path: &Path) -> Option<u64> {
+    let conn = open_readonly_sqlite_opt(db_path)?;
+    let mut hash = 0u64;
+    sqlite_for_each_row_on(
+        &conn,
+        db_path,
+        "SELECT id, COALESCE(model,''), COALESCE(working_directory,''), \
+         COALESCE(title,'') FROM sessions ORDER BY id",
+        None,
+        &mut |row| {
+            let id: String = row.get(0)?;
+            let model: String = row.get(1)?;
+            let working_directory: String = row.get(2)?;
+            let title: String = row.get(3)?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&id, &mut hasher);
+            std::hash::Hash::hash(&model, &mut hasher);
+            std::hash::Hash::hash(&working_directory, &mut hasher);
+            std::hash::Hash::hash(&title, &mut hasher);
+            hash ^= std::hash::Hasher::finish(&hasher);
+            Ok(())
+        },
+    );
+    Some(hash)
+}
+
+/// `(count, sum)` of just the rows past `after_row_id`, range-scanned on the
+/// rowid index. Compared against the deltas between two fingerprints this
+/// proves a diff was pure append; any deletion or id reuse below the mark
+/// makes the identities fail.
+pub(crate) fn devin_cli_appended_stats(
+    db_path: &Path,
+    after_row_id: i64,
+) -> Option<(i64, i64)> {
+    let conn = open_readonly_sqlite_opt(db_path)?;
+    let mut stats = None;
+    sqlite_for_each_row_on_with_params(
+        &conn,
+        db_path,
+        "SELECT COUNT(*), COALESCE(SUM(row_id), 0) FROM message_nodes WHERE row_id > ?1",
+        &[&after_row_id],
+        None,
+        &mut |row| {
+            stats = Some((row.get(0)?, row.get(1)?));
+            Ok(())
+        },
+    );
+    stats
+}
+
 /// Whether a discovered Devin CLI database can actually be read end to end.
 ///
 /// [`parse_devin_cli_sqlite`] deliberately swallows open, prepare and step
@@ -233,18 +336,33 @@ pub fn devin_cli_source_is_readable(db_path: &Path) -> bool {
 }
 
 pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
+    parse_devin_cli_sqlite_inner(db_path, None)
+}
+
+/// Incremental variant for the cache's resume path: parses only rows appended
+/// after `after_row_id`, so rescanning a large database reads just the new
+/// `chat_message` blobs instead of every row in `message_nodes`.
+pub fn parse_devin_cli_sqlite_after(db_path: &Path, after_row_id: i64) -> Vec<UnifiedMessage> {
+    parse_devin_cli_sqlite_inner(db_path, Some(after_row_id))
+}
+
+fn parse_devin_cli_sqlite_inner(db_path: &Path, after_row_id: Option<i64>) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
     let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return Vec::new();
     };
 
-    let query = DEVIN_CLI_MESSAGE_QUERY;
+    let after = after_row_id.unwrap_or(0);
+    let (query, params): (&str, Vec<&dyn rusqlite::ToSql>) = match after_row_id {
+        Some(_) => (DEVIN_CLI_MESSAGE_QUERY_AFTER, vec![&after]),
+        None => (DEVIN_CLI_MESSAGE_QUERY, Vec::new()),
+    };
 
     let mut messages = Vec::new();
 
     // Quiet: a Devin CLI database that predates `message_nodes` simply has no
     // rows to offer, which is not a fault worth logging.
-    sqlite_for_each_row_on(&conn, db_path, query, None, &mut |row| {
+    sqlite_for_each_row_on_with_params(&conn, db_path, query, &params, None, &mut |row| {
         let row_id: i64 = row.get(0)?;
         let session_id: String = row.get(1)?;
         let chat_json: String = row.get(2)?;
