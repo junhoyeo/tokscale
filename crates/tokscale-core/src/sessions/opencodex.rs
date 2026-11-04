@@ -99,7 +99,7 @@ struct CandidateMatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BoundedLine {
+pub(crate) enum BoundedLine {
     Eof,
     Line,
     Oversized,
@@ -107,7 +107,10 @@ enum BoundedLine {
 
 /// Read and consume one JSONL row without allocating beyond the row cap. An
 /// oversized row is discarded through its newline and parsing continues.
-fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> io::Result<BoundedLine> {
+pub(crate) fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> io::Result<BoundedLine> {
     line.clear();
     let mut consumed = 0usize;
     let mut oversized = false;
@@ -556,18 +559,27 @@ fn unique_claim(
 /// must line up. Each ledger row may serve at most one Codex usage row.
 /// Ambiguity retains the original selector. A strict end-time match is tried
 /// first; the late window only fills in what the strict pass left unmatched.
+#[cfg(test)]
 pub(crate) fn attribute_codex_messages(
     home_dir: &str,
     use_env_roots: bool,
     messages: &mut [UnifiedMessage],
 ) -> usize {
+    attribute_codex_messages_with_claims(home_dir, use_env_roots, messages).0
+}
+
+pub(crate) fn attribute_codex_messages_with_claims(
+    home_dir: &str,
+    use_env_roots: bool,
+    messages: &mut [UnifiedMessage],
+) -> (usize, HashSet<usize>) {
     if !messages.iter().any(|message| message.client == "codex") {
-        return 0;
+        return (0, HashSet::new());
     }
 
     let path = usage_log_path(home_dir, use_env_roots);
     let Some(index) = load_attribution_index(&path) else {
-        return 0;
+        return (0, HashSet::new());
     };
 
     // Pass 1 uses the strict window, so it keeps every attribution that
@@ -602,6 +614,14 @@ pub(crate) fn attribute_codex_messages(
             resolved[message_index].is_none() && !reserved.contains(&(model_id, row_index))
         },
     );
+    let claims = strict
+        .iter()
+        .zip(&late)
+        .enumerate()
+        .filter_map(|(index, (strict, late))| {
+            (!strict.is_empty() || !late.is_empty()).then_some(index)
+        })
+        .collect();
     let late_claims = count_claims(messages, &late);
     for (message_index, message) in messages.iter().enumerate() {
         if resolved[message_index].is_none() && strict[message_index].is_empty() {
@@ -639,7 +659,7 @@ pub(crate) fn attribute_codex_messages(
         attributed += 1;
     }
 
-    attributed
+    (attributed, claims)
 }
 
 #[cfg(test)]
