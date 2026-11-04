@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use super::opencodex::{read_bounded_line, BoundedLine};
-use super::{CostSource, UnifiedMessage};
+use super::{CostSource, SharedStr, UnifiedMessage};
 
 #[derive(Deserialize)]
 struct LedgerRow {
@@ -183,15 +183,15 @@ pub(crate) fn attribute_codex_responses(
         let changed_tier = row
             .tier_served
             .as_ref()
-            .is_some_and(|tier| message.service_tier.as_ref() != Some(tier));
+            .is_some_and(|tier| message.service_tier.as_deref() != Some(tier.as_str()));
         if !changed_model && message.provider_id == provider && !changed_tier {
             continue;
         }
-        message.model_id = served.to_string();
-        message.provider_id = provider.to_string();
+        message.model_id = served.into();
+        message.provider_id = provider.into();
         message.pricing_model_id = None;
         if changed_model || row.tier_served.is_some() {
-            message.service_tier = row.tier_served;
+            message.service_tier = row.tier_served.map(SharedStr::from);
         }
         if !message.has_authoritative_cost() {
             message.cost = 0.0;

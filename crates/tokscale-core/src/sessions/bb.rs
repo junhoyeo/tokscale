@@ -39,7 +39,7 @@
 use super::utils::{
     file_modified_timestamp_ms, open_readonly_sqlite, parse_json_line, sqlite_for_each_row_on,
 };
-use super::UnifiedMessage;
+use super::{SharedStr, UnifiedMessage};
 use crate::{provider_identity, CostSource, TokenBreakdown};
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -488,14 +488,14 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
             0.0,
             Some(dedup_key),
         );
-        msg.workspace_key = workspace_key;
-        msg.workspace_label = workspace_label;
-        msg.service_tier = service_tier;
-        msg.session_title = session_title;
-        msg.parent_session_id = parent_session_id;
+        msg.workspace_key = workspace_key.map(SharedStr::from);
+        msg.workspace_label = workspace_label.map(SharedStr::from);
+        msg.service_tier = service_tier.map(SharedStr::from);
+        msg.session_title = session_title.map(SharedStr::from);
+        msg.parent_session_id = parent_session_id.map(SharedStr::from);
         msg.is_turn_start = is_turn_start;
         msg.cost_source = CostSource::Estimated;
-        msg.agent = Some("BB".to_string());
+        msg.agent = Some("BB".into());
 
         if msg
             .dedup_key
