@@ -302,7 +302,7 @@ fn shutdown_to_message(
         .attributed_model
         .clone()
         .filter(|m| !m.is_empty() && m != "auto")
-        .unwrap_or(delta.model);
+        .unwrap_or_else(|| delta.model.clone());
 
     let provider_id = inferred_provider_from_model(&model_id)
         .unwrap_or("github-copilot")
@@ -327,9 +327,13 @@ fn shutdown_to_message(
         return None;
     }
 
+    // The tracker (`modelMetrics`) counts `auto` as its own counter, so the
+    // key must name the tracker model, not the resolved attribution — keying
+    // by the resolved model collides a shutdown that carries both and drops
+    // a row (mirrors the desktop parser's keying).
     let dedup_key = format!(
         "copilot-session-event:{}:shutdown:{}:{}",
-        session_id, delta.event_id, model_id
+        session_id, delta.event_id, delta.model
     );
 
     let mut message = UnifiedMessage::new_with_dedup(
@@ -449,6 +453,37 @@ mod tests {
         assert_eq!(msgs[0].tokens.output, 100);
         assert_eq!(msgs[0].tokens.cache_read, 500);
         assert_eq!(msgs[0].tokens.reasoning, 10);
+    }
+
+    /// A shutdown under an `auto` tracker key that also names the concrete
+    /// attributed model must be keyed by the tracker model — the desktop
+    /// parser convention. Keying by the resolved model would collide the two
+    /// counter identities and drop a row.
+    #[test]
+    fn shutdown_dedup_key_names_the_tracker_model_not_the_resolved_one() {
+        let message = shutdown_to_message(
+            "sess-auto",
+            None,
+            None,
+            ShutdownUsage {
+                event_id: "shut-auto-1".to_string(),
+                timestamp_ms: 1_762_000_000_000,
+                model: "auto".to_string(),
+                attributed_model: Some("gpt-5.2".to_string()),
+                input: 100,
+                output: 10,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        )
+        .expect("the shutdown carries usage");
+
+        assert_eq!(message.model_id, "gpt-5.2");
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("copilot-session-event:sess-auto:shutdown:shut-auto-1:auto")
+        );
     }
 
     #[test]

@@ -2760,26 +2760,33 @@ fn parse_all_messages_streaming<S: MessageSink>(
         {
             return None;
         }
-        let mut seen = std::collections::HashSet::new();
-        let mut messages = Vec::with_capacity(
-            entry.messages.len() + appended_count.max(0) as usize,
-        );
-        for message in entry
-            .messages
-            .iter()
-            .cloned()
-            .chain(sessions::devin::parse_devin_cli_sqlite_after(
-                path,
-                after_row_id,
-            ))
-        {
-            let identity = (
+        // Cached rows are the authority and pass through untouched: the cold
+        // parse keeps distinct rows that share a `request_id` dedup key, and
+        // re-filtering them here would collapse the very rows the raw
+        // recount must still see. The identity set seeds from the cache and
+        // only appended rows are filtered, which drops exactly the replay
+        // copies past the watermark.
+        let identity_of = |message: &UnifiedMessage| {
+            (
                 message.session_id.clone(),
                 message.dedup_key.clone(),
                 message.timestamp,
                 message.tokens.total(),
-            );
-            if seen.insert(identity) {
+            )
+        };
+        let mut seen = entry
+            .messages
+            .iter()
+            .map(|message| identity_of(message))
+            .collect::<std::collections::HashSet<_>>();
+        let mut messages = Vec::with_capacity(
+            entry.messages.len() + appended_count.max(0) as usize,
+        );
+        for message in entry.messages.iter().cloned() {
+            messages.push(message);
+        }
+        for message in sessions::devin::parse_devin_cli_sqlite_after(path, after_row_id) {
+            if seen.insert(identity_of(&message)) {
                 messages.push(message);
             }
         }
@@ -3708,10 +3715,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
                     continue;
                 }
             }
-            copilot_cli_turn_timestamps
-                .entry(message.session_id.clone())
-                .or_default()
-                .push(message.timestamp);
+            // Store rows must not feed the overlap map: it exists to collapse
+            // the CLI-session-state lane against the store lane, and kept
+            // store turns feeding it would collapse distinct store turns
+            // under 20ms apart. Cross-lane replay dedup happens below via
+            // the dedup-key and session-timestamp sets.
             apply_pricing_if_available(&mut message, pricing);
             all_messages.push(message);
         }
@@ -7724,10 +7732,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                     continue;
                 }
             }
-            copilot_cli_turn_timestamps
-                .entry(message.session_id.clone())
-                .or_default()
-                .push(message.timestamp);
+            // Store rows must not feed the overlap map: it collapses the
+            // CLI-session-state lane against the store lane, and kept store
+            // turns feeding it would collapse distinct store turns under
+            // 20ms apart.
             copilot_unified_msgs.push(message);
         }
     }

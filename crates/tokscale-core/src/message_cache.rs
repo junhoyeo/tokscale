@@ -1642,6 +1642,11 @@ pub fn parser_generation() -> u64 {
     // The Magpie overlay changes derived attribution, not source-cache rows.
     acc ^= 1;
     acc = acc.wrapping_mul(FNV_PRIME);
+    // Model-name folding (#1603) changes derived grouping keys, not
+    // source-cache rows. Without a bump, warm aggregate caches replay
+    // pre-fold split rows until an unrelated parser bump.
+    acc ^= 1;
+    acc = acc.wrapping_mul(FNV_PRIME);
     acc
 }
 
