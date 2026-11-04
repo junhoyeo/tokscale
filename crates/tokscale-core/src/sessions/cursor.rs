@@ -567,7 +567,8 @@ fn assign_cursor_event_dedup_keys(
     messages: &mut [UnifiedMessage],
     snapshot_ids: &[Option<String>],
 ) {
-    let mut identified_by_fallback: HashMap<(String, String, i64), String> = HashMap::new();
+    let mut identified_by_fallback: HashMap<(super::SharedStr, super::SharedStr, i64), String> =
+        HashMap::new();
     for (message, snapshot_id) in messages.iter().zip(snapshot_ids) {
         let Some(snapshot_id) = snapshot_id.as_ref() else {
             continue;

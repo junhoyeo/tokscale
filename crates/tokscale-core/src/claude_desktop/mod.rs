@@ -261,6 +261,10 @@ fn parse_tree(value: &Value, coverage: &mut Coverage) -> Conversation {
     };
     let mut previous: BTreeMap<String, TokenBreakdown> = BTreeMap::new();
     let mut messages = HashMap::new();
+    let agent = crate::sessions::SharedStr::from(format!(
+        "Claude Desktop {}",
+        value["product"].as_str().unwrap_or("chat")
+    ));
     for collection in ["events", "messages", "chat_messages"] {
         for event in tree[collection].as_array().into_iter().flatten() {
             let payload = event.get("payload").unwrap_or(event);
@@ -358,10 +362,7 @@ fn parse_tree(value: &Value, coverage: &mut Coverage) -> Conversation {
             if ts == 0 {
                 msg.date = UNKNOWN_DATE.into();
             }
-            msg.agent = Some(format!(
-                "Claude Desktop {}",
-                value["product"].as_str().unwrap_or("chat")
-            ));
+            msg.agent = Some(agent.clone());
             // Reuse the transcript parser's advisor identities and accounting:
             // advisor iterations add tokens, but never another turn or duration.
             let advisor_usage = serde_json::from_value::<crate::sessions::claudecode::ClaudeUsage>(
@@ -431,11 +432,11 @@ impl DesktopUsage {
                     continue;
                 };
                 if let Some(index) = ids.get(&id).copied() {
-                    overlap_sessions.insert(existing[index].session_id.clone());
+                    overlap_sessions.insert(existing[index].session_id.to_string());
                     merge_message(&mut existing[index], &msg);
                 } else {
                     ids.insert(id, existing.len());
-                    overlap_sessions.insert(msg.session_id.clone());
+                    overlap_sessions.insert(msg.session_id.to_string());
                     existing.push(msg);
                 }
             }
@@ -467,7 +468,9 @@ impl DesktopUsage {
                     .dedup_key
                     .as_deref()
                     .is_some_and(|key| key.starts_with("claude-desktop-total:"))
-                    && conversation.session_ids.contains(&message.session_id)
+                    && conversation
+                        .session_ids
+                        .contains(message.session_id.as_str())
                     && (conversation.last_snapshot == 0
                         || message.timestamp <= conversation.last_snapshot)
                 {

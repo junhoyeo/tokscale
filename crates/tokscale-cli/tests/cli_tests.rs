@@ -6631,6 +6631,238 @@ fn test_submit_stealth_preview_shorthands_upload_without_warnings() {
     );
 }
 
+#[test]
+fn test_submit_compacts_repeated_daily_regression_warnings_without_losing_details() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = create_temp_fixture_dir();
+    write_fake_credentials(tmp.path());
+    let warnings: Vec<String> = (1..=9)
+        .map(|day| format!("Day 2026-05-{day:02}: Preserved hermes because this same-device resubmit would reduce 1,000 tokens to {day}00."))
+        .chain([
+            "Ignored Amp changes because this snapshot cannot advance the device high-water.".to_string(),
+            "Day 2026-06-01: Preserved workbuddy because this same-device resubmit would reduce 90 tokens to 80.".to_string(),
+            "Day 2026-06-02: Preserved unrelated warning with a different format.".to_string(),
+        ])
+        .collect();
+    let body = serde_json::json!({"success":true,"warnings":warnings}).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("submit did not reach the fixture server: {error}"),
+            }
+        };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; content_length];
+            reader.read_exact(&mut request).unwrap();
+        }
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_URL", api)
+        .env("TOKSCALE_API_TOKEN", "fixture-token")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--no-spinner", "submit", "--client", "opencode"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Preserved hermes: 9 daily token decreases"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-05-01: Preserved hermes because"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=9 {
+        assert!(
+            stdout.contains(&format!("2026-05-{day:02}: 1,000 -> {day}00")),
+            "{stdout}"
+        );
+    }
+    assert!(stdout.contains("Ignored Amp changes"), "{stdout}");
+    assert!(
+        stdout.contains("Day 2026-06-01: Preserved workbuddy because"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Day 2026-06-02: Preserved unrelated warning"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn test_submit_compacts_missing_client_and_active_time_preservation_warnings() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = create_temp_fixture_dir();
+    write_fake_credentials(tmp.path());
+    let mut warnings: Vec<String> = (1..=4)
+        .map(|day| {
+            format!("Day 2026-03-{day:02}: Preserved codex because it disappeared from this same-device resubmit; kept {day},154,188,083 tokens.")
+        })
+        .collect();
+    warnings.push("Day 2026-03-27: Preserved opencode because it disappeared from this same-device resubmit; kept 58,503,692 tokens.".to_string());
+    warnings.push("Day 2026-04-01: Preserved zcode because this same-device resubmit would reduce 500 tokens to 400.".to_string());
+    for day in 1..=4 {
+        warnings.push(format!("Day 2026-10-{day:02}: Preserved {day}16300880ms active time because this same-device resubmit reported only {day}0206166ms."));
+    }
+    warnings.push(
+        "Ignored Amp changes because this snapshot cannot advance the device high-water."
+            .to_string(),
+    );
+
+    let body = serde_json::json!({"success":true,"warnings":warnings}).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("submit did not reach the fixture server: {error}"),
+            }
+        };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; content_length];
+            reader.read_exact(&mut request).unwrap();
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_URL", api)
+        .env("TOKSCALE_API_TOKEN", "fixture-token")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--no-spinner", "submit", "--client", "opencode"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Preserved codex: 4 days missing from this device's resubmit"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-03-01: Preserved codex because it disappeared"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=4 {
+        assert!(
+            stdout.contains(&format!("2026-03-{day:02}: {day},154,188,083")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Preserved active time: 4 daily decreases on this device"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-10-01: Preserved 116300880ms active time because"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=4 {
+        assert!(
+            stdout.contains(&format!("2026-10-{day:02}: {day}16300880 -> {day}0206166")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Day 2026-03-27: Preserved opencode because it disappeared from this same-device resubmit; kept 58,503,692 tokens."),
+        "uncompacted single disappeared warning must be printed verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains("Day 2026-04-01: Preserved zcode because this same-device resubmit would reduce 500 tokens to 400."),
+        "uncompacted single decrease warning must be printed verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Ignored Amp changes because this snapshot cannot advance the device high-water."
+        ),
+        "unrecognized warning must be printed verbatim: {stdout}"
+    );
+}
+
 /// Regression: a long proxy-model history fans out to one warning row per
 /// provider/model pair and used to bury the submittable summary. Detail rows
 /// are capped (mirroring the tokenless-row reporter) with an aggregate total.
@@ -8165,6 +8397,61 @@ fn create_request_tier_pricing_explain_fixture() -> TempDir {
 }
 
 #[test]
+fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
+    let tmp = TempDir::new().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let empty = format!(r#"{{"timestamp":{now},"data":{{}}}}"#);
+    let openrouter = serde_json::json!({
+        "timestamp": now,
+        "data": {"vendor/atlas-chat": {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002
+        }}
+    })
+    .to_string();
+    write_canonical_pricing_cache_files(tmp.path(), &empty, &openrouter, &empty);
+    let session = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/safety");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("message.json"),
+        serde_json::json!({
+            "id": "message", "sessionID": "safety", "role": "assistant",
+            "modelID": "atlas-chat", "providerID": "gateway",
+            "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1780000000000u64}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = cmd_with_home(tmp.path())
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["coverage"], false);
+    assert_eq!(
+        rows[0]["submissionSafetyGap"],
+        "unverified_provider_identity"
+    );
+    cmd_with_home(tmp.path())
+        .args(["pricing", "explain", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "submission_safety_gap=unverified_provider_identity",
+        ));
+}
+
+#[test]
 fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
     let tmp = create_request_tier_pricing_explain_fixture();
     let output = cmd_with_home(tmp.path())
@@ -8185,6 +8472,7 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         .find(|row| row["rawModelId"] == "claude-haiku-5-5")
         .expect("long-context explanation");
     assert_eq!(long["coverage"], false);
+    assert!(long.get("submissionSafetyGap").is_none());
     assert_eq!(
         long["uncoveredBuckets"],
         serde_json::json!(["input_long_context_tier", "output_long_context_tier"])
@@ -8195,6 +8483,7 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         .find(|row| row["rawModelId"] == "claude-haiku-5.5")
         .expect("1-hour cache-write explanation");
     assert_eq!(hourly["coverage"], false);
+    assert!(hourly.get("submissionSafetyGap").is_none());
     assert_eq!(
         hourly["uncoveredBuckets"],
         serde_json::json!(["cache_write_1h_tier"])
@@ -8795,4 +9084,118 @@ fn test_proma_native_display_and_fork_usage_count_once_cold_and_warm() {
         assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(30));
         assert_eq!(json["entries"][0]["cacheWrite"].as_i64(), Some(10));
     }
+}
+
+#[test]
+fn test_bb_client_e2e_cold_and_warm() {
+    let tmp = create_empty_fixture_dir();
+    let bb_dir = tmp.path().join(".bb");
+    fs::create_dir_all(&bb_dir).unwrap();
+    let db_path = bb_dir.join("bb.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT,
+            provider_id TEXT NOT NULL,
+            model_override TEXT,
+            title TEXT,
+            parent_thread_id TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE events (
+            id TEXT PRIMARY KEY NOT NULL,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT,
+            sequence INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        INSERT INTO projects (id, name) VALUES ('prj_test', 'cli-project');
+        INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at)
+        VALUES ('thr_test', 'prj_test', 'claude-code', 'claude-3-7-sonnet', 'CLI Test Thread', NULL, 1787275000000);
+        INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+        VALUES (
+            'evt_1', 'thr_test', 'turn_1', 1, 'thread/tokenUsage/updated',
+            '{"tokenUsage":{"last":{"totalTokens":1200,"inputTokens":1000,"cachedInputTokens":200,"cacheReadInputTokens":200,"cacheWriteInputTokens":0,"outputTokens":200,"reasoningOutputTokens":0}}}',
+            1787275010000
+        );
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    // Cold pass
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cold: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1), "cold");
+    assert_eq!(json["totalInput"].as_i64(), Some(800), "cold");
+    assert_eq!(json["totalOutput"].as_i64(), Some(200), "cold");
+    assert_eq!(json["entries"][0]["client"].as_str(), Some("bb"));
+    assert_eq!(
+        json["entries"][0]["model"].as_str(),
+        Some("claude-3-7-sonnet")
+    );
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+
+    // Warm pass: unchanged database verifies warm cache replay
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "warm: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1), "warm");
+    assert_eq!(json["totalInput"].as_i64(), Some(800), "warm");
+    assert_eq!(json["totalOutput"].as_i64(), Some(200), "warm");
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+
+    // Mutate the database: insert a second event to verify incremental detection and update
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+        VALUES (
+            'evt_2', 'thr_test', 'turn_2', 2, 'thread/tokenUsage/updated',
+            '{"tokenUsage":{"last":{"totalTokens":700,"inputTokens":500,"cachedInputTokens":100,"cacheReadInputTokens":100,"cacheWriteInputTokens":0,"outputTokens":200,"reasoningOutputTokens":0}}}',
+            1787275020000
+        )
+        "#,
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mutated: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(2), "mutated");
+    assert_eq!(json["totalInput"].as_i64(), Some(1200), "mutated");
+    assert_eq!(json["totalOutput"].as_i64(), Some(400), "mutated");
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(300));
 }

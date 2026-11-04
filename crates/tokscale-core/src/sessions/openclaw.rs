@@ -420,7 +420,7 @@ fn ingest_openclaw_entry(
                 "openclaw",
                 model,
                 provider,
-                ctx.session_id.to_string(),
+                ctx.session_id,
                 timestamp,
                 tokens,
                 cost.max(0.0),

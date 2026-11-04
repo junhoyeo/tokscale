@@ -68,7 +68,16 @@ const API_CALL_LOG_MARKER: &str = " agent.conversation_loop: API call #";
 /// rows (vision, compression, title generation, …) SUM into the same row as the
 /// main loop's, which is what keeps one log-evidence lookup per key
 /// unambiguous.
-const PER_MODEL_QUERY: &str = r#"
+///
+/// `sessions.title` is selected only when that column exists. Older Hermes
+/// databases omit it; selecting it unconditionally would fail to prepare and
+/// drop the usage those builds still record. Column order matches
+/// [`session_totals_query`].
+fn per_model_query(with_title: bool) -> String {
+    let title_expr = if with_title { "s.title" } else { "NULL" };
+    let title_group = if with_title { ", s.title" } else { "" };
+    format!(
+        r#"
         SELECT
             smu.session_id,
             smu.model,
@@ -80,12 +89,13 @@ const PER_MODEL_QUERY: &str = r#"
             SUM(smu.cache_read_tokens)   AS cache_read_tokens,
             SUM(smu.cache_write_tokens)  AS cache_write_tokens,
             SUM(smu.reasoning_tokens)    AS reasoning_tokens,
-            SUM(COALESCE(NULLIF(smu.actual_cost_usd, 0), smu.estimated_cost_usd, 0)) AS cost_usd
+            SUM(COALESCE(NULLIF(smu.actual_cost_usd, 0), smu.estimated_cost_usd, 0)) AS cost_usd,
+            {title_expr} AS session_title
         FROM session_model_usage smu
         JOIN sessions s ON s.id = smu.session_id
         WHERE smu.model IS NOT NULL
           AND TRIM(smu.model) != ''
-        GROUP BY smu.session_id, smu.model, smu.billing_provider, s.started_at, s.message_count
+        GROUP BY smu.session_id, smu.model, smu.billing_provider, s.started_at, s.message_count{title_group}
         HAVING SUM(smu.input_tokens) > 0
             OR SUM(smu.output_tokens) > 0
             OR SUM(smu.cache_read_tokens) > 0
@@ -96,12 +106,17 @@ const PER_MODEL_QUERY: &str = r#"
                  CASE WHEN smu.model = s.model THEN 0 ELSE 1 END,
                  smu.model,
                  smu.billing_provider
-"#;
+"#
+    )
+}
 
 /// Session-level totals credited to `sessions.model`. Covers Hermes builds that
 /// predate `session_model_usage` and, on builds that have it, sessions with no
-/// child rows in it; column order matches `PER_MODEL_QUERY`.
-const SESSION_TOTALS_QUERY: &str = r#"
+/// child rows in it; column order matches [`per_model_query`].
+fn session_totals_query(with_title: bool) -> String {
+    let title_expr = if with_title { "title" } else { "NULL" };
+    format!(
+        r#"
         SELECT
             id,
             model,
@@ -113,7 +128,8 @@ const SESSION_TOTALS_QUERY: &str = r#"
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
-            COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost_usd
+            COALESCE(actual_cost_usd, estimated_cost_usd, 0) AS cost_usd,
+            {title_expr} AS session_title
         FROM sessions
         WHERE model IS NOT NULL
           AND TRIM(model) != ''
@@ -125,7 +141,19 @@ const SESSION_TOTALS_QUERY: &str = r#"
             COALESCE(reasoning_tokens, 0) > 0 OR
             COALESCE(actual_cost_usd, estimated_cost_usd, 0) > 0
           )
-"#;
+"#
+    )
+}
+
+fn sessions_have_title(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'title'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
 
 /// One usage row, decoded from either query — both project the same columns.
 struct HermesUsageRow {
@@ -140,6 +168,7 @@ struct HermesUsageRow {
     cache_write: i64,
     reasoning: i64,
     cost: f64,
+    title: Option<String>,
 }
 
 impl HermesUsageRow {
@@ -163,6 +192,7 @@ fn decode_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HermesUsageRow>
         cache_write: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
         reasoning: row.get::<_, Option<i64>>(9)?.unwrap_or(0),
         cost: row.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
+        title: row.get(11)?,
     })
 }
 
@@ -620,7 +650,7 @@ fn message_from_parts(
         timestamp_ms,
         tokens,
         cost,
-        Some(HERMES_AGENT_NAME.to_string()),
+        Some(HERMES_AGENT_NAME),
     )
     .with_billing(
         row.billing_provider.as_deref(),
@@ -628,6 +658,14 @@ fn message_from_parts(
     );
     msg.message_count = row.message_count.max(0);
     msg.dedup_key = Some(dedup_key);
+    if let Some(title) = row
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        msg.session_title = Some(title.into());
+    }
     msg
 }
 
@@ -741,14 +779,15 @@ pub fn parse_hermes_sqlite_in(
     // `session_model_usage` without `reasoning_tokens` — `query_usage_rows`
     // returns None and the session totals below carry the whole database, so
     // drift degrades to coarser data instead of losing all of it.
+    let with_title = sessions_have_title(&conn);
     let per_model_rows = if has_session_model_usage(db_path, &conn) {
-        query_usage_rows(db_path, &conn, PER_MODEL_QUERY)
+        query_usage_rows(db_path, &conn, &per_model_query(with_title))
     } else {
         None
     };
     let per_model_rows = per_model_rows.unwrap_or_default();
     let session_total_rows =
-        query_usage_rows(db_path, &conn, SESSION_TOTALS_QUERY).unwrap_or_default();
+        query_usage_rows(db_path, &conn, &session_totals_query(with_title)).unwrap_or_default();
 
     let covered_sessions: HashSet<String> = per_model_rows
         .iter()

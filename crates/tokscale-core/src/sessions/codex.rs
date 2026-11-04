@@ -118,6 +118,11 @@ pub struct CodexPayload {
     pub message: Option<String>,
     /// Turn-item payload (e.g. `EnteredReviewMode` on an `item_completed` event).
     pub item: Option<Value>,
+    /// `world_state` snapshot (`{"full":true,"state":{"model":...}}`). Some
+    /// Codex 0.147 rollouts name the model only here, before any
+    /// `turn_context` or with none at all. Kept as a raw value so another
+    /// entry type's `state` field of a different shape cannot fail the line.
+    pub state: Option<Value>,
 }
 
 /// Lenient `Option<i64>` deserializer for `CodexPayload::started_at`. Coerces
@@ -1387,6 +1392,21 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                     state.request_service_tier = Some(service_tier);
                 }
 
+                // A `world_state` snapshot names the model only until a
+                // `turn_context` (or a usage event) has set one; it never
+                // overrides a model the rollout already reported.
+                if entry.entry_type == "world_state" && state.current_model.is_none() {
+                    if let Some(model) = extract_world_state_model(&payload) {
+                        flush_pending_model_messages(
+                            &mut pending_model_messages,
+                            &mut messages,
+                            &mut fallback_timestamp_indices,
+                            &model,
+                        );
+                        state.current_model = Some(model);
+                    }
+                }
+
                 if !pending_model_messages.is_empty()
                     && event_model.is_none()
                     && !is_token_count
@@ -1727,7 +1747,8 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                     message.service_tier = state
                         .request_service_tier
                         .clone()
-                        .or_else(|| state.thread_service_tier.clone());
+                        .or_else(|| state.thread_service_tier.clone())
+                        .map(crate::sessions::SharedStr::from);
                     message.duration_ms = duration_ms;
                     state.turn_coverage.record(state.current_turn_id.as_deref());
                     // The announced turn has produced usage, so it is under
@@ -1901,9 +1922,9 @@ fn new_codex_usage_message(
     tokens: TokenBreakdown,
 ) -> UnifiedMessage {
     let agent = if state.session_is_headless {
-        Some(CODEX_HEADLESS_AGENT.to_string())
+        Some(CODEX_HEADLESS_AGENT)
     } else {
-        state.session_agent.clone()
+        state.session_agent.as_deref()
     };
 
     let provider = state
@@ -1925,9 +1946,9 @@ fn new_codex_usage_message(
     };
     UnifiedMessage::new_with_agent(
         client,
-        model.unwrap_or("unknown").to_string(),
+        model.unwrap_or("unknown"),
         provider,
-        message_session_id.to_string(),
+        message_session_id,
         timestamp,
         tokens,
         0.0,
@@ -1973,7 +1994,8 @@ fn emit_unconfirmed_usage_record(
         .service_tier
         .clone()
         .or_else(|| state.request_service_tier.clone())
-        .or_else(|| state.thread_service_tier.clone());
+        .or_else(|| state.thread_service_tier.clone())
+        .map(crate::sessions::SharedStr::from);
     // The record names its response, which is the identity sibling fork
     // replays share; without one, the record's time and counters stand in.
     let dedup_scope_id = state
@@ -2279,7 +2301,7 @@ fn flush_pending_model_messages(
             let upstream_session_id = message.session_id.clone();
             set_codex_dedup_key(&mut message, model, &upstream_session_id, None);
         }
-        message.model_id = model.to_string();
+        message.model_id = model.into();
         messages.push(message);
         if used_fallback_timestamp {
             fallback_timestamp_indices.push(messages.len() - 1);
@@ -2463,6 +2485,11 @@ fn extract_model(payload: &CodexPayload) -> Option<String> {
         .or(payload.info.as_ref().and_then(extract_model_from_info))
 }
 
+fn extract_world_state_model(payload: &CodexPayload) -> Option<String> {
+    extract_string(payload.state.as_ref().and_then(|state| state.get("model")))
+        .filter(|model| !model.is_empty())
+}
+
 fn extract_model_from_info(info: &CodexInfo) -> Option<String> {
     info.model
         .clone()
@@ -2568,9 +2595,9 @@ fn parse_codex_headless_line(
         .or_else(|| inferred_provider_from_model(&model))
         .unwrap_or("openai");
     let agent = if state.session_is_headless {
-        Some(CODEX_HEADLESS_AGENT.to_string())
+        Some(CODEX_HEADLESS_AGENT)
     } else {
-        state.session_agent.clone()
+        state.session_agent.as_deref()
     };
 
     let used_fallback_timestamp = usage.timestamp_ms.is_none();
@@ -2578,7 +2605,7 @@ fn parse_codex_headless_line(
         "codex",
         model.clone(),
         provider,
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: usage.input.max(0),
@@ -3601,6 +3628,50 @@ mod tests {
     }
 
     #[test]
+    fn test_world_state_model_used_until_turn_context() {
+        let usage = |input: i64| {
+            format!(
+                r#"{{"timestamp":"2026-08-18T10:00:0{input}Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{total},"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}},"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}}}}}}}"#,
+                total = input * 10,
+            )
+        };
+        let reply = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#;
+
+        // No turn_context at all: the world_state model is the only one.
+        let file = create_test_file(&format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"session_meta","payload":{"source":"cli","model_provider":"openai"}}"#,
+            r#"{"type":"world_state","payload":{"full":true,"state":{"model":"gpt-5.6-luna"}}}"#,
+            usage(1),
+            reply,
+        ));
+        let parsed = parse_codex_file_incremental(file.path(), 0, CodexParseState::default());
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].model_id, "gpt-5.6-luna");
+        assert!(!parsed.unresolved_model_events);
+
+        // A later turn_context takes over, and a later world_state does not
+        // override the turn_context model.
+        let file = create_test_file(&format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
+            r#"{"type":"world_state","payload":{"full":true,"state":{"model":"gpt-5.6-sol"}}}"#,
+            usage(1),
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            usage(2),
+            r#"{"type":"world_state","payload":{"full":true,"state":{"model":"gpt-5.6-sol"}}}"#,
+            usage(3),
+        ));
+        let messages = parse_codex_file(file.path());
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.model_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol", "gpt-5.5", "gpt-5.5"]
+        );
+    }
+
+    #[test]
     fn test_token_count_without_model_stays_unknown_but_is_not_cacheable() {
         let file = create_test_file(concat!(
             r#"{"type":"session_meta","payload":{"source":"interactive","model_provider":"openai"}}"#,
@@ -4393,7 +4464,7 @@ mod tests {
         let messages = parse_codex_file(file.path());
 
         assert_eq!(messages.len(), 1);
-        messages[0].agent.clone()
+        messages[0].agent.as_ref().map(ToString::to_string)
     }
 
     #[test]

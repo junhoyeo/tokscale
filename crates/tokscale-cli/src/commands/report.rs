@@ -12,7 +12,7 @@ use tokscale_core::content_extractor::SessionContent;
 use tokscale_core::content_extractor::{extract_session_content, metadata_only_content};
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
-use tokscale_core::{parse_local_clients, CostSource, LocalParseOptions, ParsedMessage};
+use tokscale_core::{parse_local_clients, CostSource, LocalParseOptions, ParsedMessage, SharedStr};
 
 pub struct ReportOptions {
     pub json: bool,
@@ -145,7 +145,7 @@ fn record_new_sessions(
         .get_existing_session_ids()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let mut session_map: HashMap<String, SessionAgg> = HashMap::new();
+    let mut session_map: HashMap<SharedStr, SessionAgg> = HashMap::new();
 
     for msg in messages {
         let agg = session_map
@@ -187,15 +187,15 @@ fn record_new_sessions(
 
     let mut new_count = 0;
     for (session_id, agg) in &session_map {
-        let is_new = !existing.contains(session_id);
-        let models_used: Vec<String> = agg.models.keys().cloned().collect();
+        let is_new = !existing.contains(session_id.as_str());
+        let models_used: Vec<String> = agg.models.keys().map(ToString::to_string).collect();
         let duration_minutes = (agg.last_active - agg.created_at) / 60;
 
         let entry = WikiEntry {
-            session_id: session_id.clone(),
-            client: agg.client.clone(),
-            workspace: agg.workspace.clone(),
-            workspace_label: agg.workspace_label.clone(),
+            session_id: session_id.to_string(),
+            client: agg.client.to_string(),
+            workspace: agg.workspace.as_ref().map(ToString::to_string),
+            workspace_label: agg.workspace_label.as_ref().map(ToString::to_string),
             created_at: agg.created_at,
             last_active: agg.last_active,
             title: None,
@@ -1686,16 +1686,16 @@ fn format_tokens(tokens: i64) -> String {
 }
 
 struct SessionAgg {
-    client: String,
-    workspace: Option<String>,
-    workspace_label: Option<String>,
+    client: SharedStr,
+    workspace: Option<SharedStr>,
+    workspace_label: Option<SharedStr>,
     created_at: i64,
     last_active: i64,
     total_input: i64,
     total_output: i64,
     total_cache_read: i64,
     total_cost: f64,
-    models: HashMap<String, i32>,
+    models: HashMap<SharedStr, i32>,
     message_count: i32,
 }
 
@@ -1754,14 +1754,14 @@ mod tests {
             estimate_status: tokscale_core::sessions::EstimateStatus::Unpriced,
             billing_identity: tokscale_core::sessions::BillingIdentity::Unknown,
             pricing_model_id: None,
-            client: "claude".to_string(),
-            model_id: model_id.to_string(),
-            provider_id: "anthropic".to_string(),
-            session_id: "s1".to_string(),
+            client: "claude".into(),
+            model_id: model_id.into(),
+            provider_id: "anthropic".into(),
+            session_id: "s1".into(),
             workspace_key: None,
             workspace_label: None,
             timestamp: 0,
-            date: "2026-01-01".to_string(),
+            date: "2026-01-01".into(),
             input: 1_000,
             output: 500,
             cache_read: 2_000,
@@ -1809,8 +1809,8 @@ mod tests {
     fn compute_msg_cost_skips_xai_request_tier_for_grok_multi_call_aggregate() {
         let pricing = test_pricing_service();
         let mut aggregate = parsed_message("grok-4.5");
-        aggregate.client = "grok".to_string();
-        aggregate.provider_id = "xai".to_string();
+        aggregate.client = "grok".into();
+        aggregate.provider_id = "xai".into();
         aggregate.input = 58_682;
         aggregate.output = 3_877;
         aggregate.cache_read = 314_112;
@@ -1859,14 +1859,14 @@ mod tests {
     fn compute_msg_cost_applies_openai_fast_and_priority_tiers() {
         let pricing = test_pricing_service();
         let mut standard = parsed_message("gpt-5.6-terra");
-        standard.provider_id = "openai".to_string();
+        standard.provider_id = "openai".into();
         let standard_cost = compute_msg_cost(&standard, Some(&pricing));
         assert!(standard_cost > 0.0);
 
         for tier in ["priority", "FaSt"] {
             let mut fast = parsed_message("gpt-5.6-terra");
-            fast.provider_id = "openai".to_string();
-            fast.service_tier = Some(tier.to_string());
+            fast.provider_id = "openai".into();
+            fast.service_tier = Some(tier.into());
             assert_eq!(compute_msg_cost(&fast, Some(&pricing)), standard_cost * 2.0);
         }
     }
@@ -1997,7 +1997,7 @@ mod tests {
 
         msg.cost = 0.42;
         msg.cost_source = CostSource::ProviderReported;
-        msg.service_tier = Some("priority".to_string());
+        msg.service_tier = Some("priority".into());
         assert_eq!(compute_msg_cost(&msg, Some(&pricing)), 0.42);
         // An authoritative figure does not need a pricing dataset at all.
         assert_eq!(compute_msg_cost(&msg, None), 0.42);
@@ -2078,8 +2078,8 @@ mod tests {
         db.upsert_entry(&stored).unwrap();
 
         let mut message = parsed_message("grok-4.5");
-        message.client = "grok".to_string();
-        message.provider_id = "xai".to_string();
+        message.client = "grok".into();
+        message.provider_id = "xai".into();
         message.input = 100;
         message.output = 20;
         message.cache_read = 30;

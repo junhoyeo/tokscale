@@ -253,8 +253,14 @@ mod tests {
         assert_eq!(m.tokens.cache_write, 5);
         assert_eq!(m.tokens.reasoning, 0);
         assert_eq!(m.timestamp, 1767225601000);
-        assert_eq!(m.workspace_key, Some("/work/pi".to_string()));
-        assert_eq!(m.workspace_label, Some("pi".to_string()));
+        assert_eq!(
+            m.workspace_key,
+            Some(crate::sessions::SharedStr::from("/work/pi"))
+        );
+        assert_eq!(
+            m.workspace_label,
+            Some(crate::sessions::SharedStr::from("pi"))
+        );
     }
 
     #[test]

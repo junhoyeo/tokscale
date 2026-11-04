@@ -100,7 +100,7 @@ impl AmpUsageRecord {
             "amp",
             &self.model,
             get_provider_from_model(&self.model),
-            thread_id.to_string(),
+            thread_id,
             self.timestamp,
             self.tokens,
             self.cost,

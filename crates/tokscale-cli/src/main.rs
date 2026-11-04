@@ -8,6 +8,7 @@ mod device;
 mod hindsight;
 mod paths;
 mod process_liveness;
+mod submission_warnings;
 mod trae;
 mod tui;
 mod ui_glyphs;
@@ -1237,6 +1238,7 @@ pub enum ClientFilter {
     Aside,
     Vibe,
     Proma,
+    Bb,
     Synthetic,
 }
 
@@ -1306,6 +1308,7 @@ impl ClientFilter {
             Self::Aside => "aside",
             Self::Vibe => "vibe",
             Self::Proma => "proma",
+            Self::Bb => "bb",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1378,6 +1381,7 @@ impl ClientFilter {
             Self::Aside => Some(ClientId::Aside),
             Self::Vibe => Some(ClientId::Vibe),
             Self::Proma => Some(ClientId::Proma),
+            Self::Bb => Some(ClientId::Bb),
             Self::Synthetic => None,
         }
     }
@@ -1446,6 +1450,7 @@ impl ClientFilter {
             ClientId::Aside => Self::Aside,
             ClientId::Vibe => Self::Vibe,
             ClientId::Proma => Self::Proma,
+            ClientId::Bb => Self::Bb,
         }
     }
 
@@ -2112,25 +2117,38 @@ impl LightSpinner {
     const FRAME_MS: u64 = 40;
 
     fn start(message: &'static str) -> Self {
+        Self::start_with_ready(message, None)
+    }
+
+    fn start_with_ready(message: &'static str, ready: Option<std::sync::mpsc::Sender<()>>) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let running_thread = Arc::clone(&running);
         let message = message.to_string();
 
         let handle = thread::spawn(move || {
             let mut frame = 0usize;
-            let mut stderr = io::stderr().lock();
-
-            let _ = write!(stderr, "\x1b[?25l");
-            let _ = stderr.flush();
+            let mut ready = ready;
+            {
+                let mut stderr = io::stderr().lock();
+                let _ = write!(stderr, "\x1b[?25l");
+                let _ = stderr.flush();
+            }
 
             while running_thread.load(Ordering::Relaxed) {
                 let spinner = Self::frame(frame);
-                let _ = write!(stderr, "\r\x1b[K  {} {}", spinner, message);
-                let _ = stderr.flush();
+                {
+                    let mut stderr = io::stderr().lock();
+                    let _ = write!(stderr, "\r\x1b[K  {} {}", spinner, message);
+                    let _ = stderr.flush();
+                }
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(());
+                }
                 frame = frame.wrapping_add(1);
                 thread::sleep(Duration::from_millis(Self::FRAME_MS));
             }
 
+            let mut stderr = io::stderr().lock();
             let _ = write!(stderr, "\r\x1b[K\x1b[?25h");
             let _ = stderr.flush();
         });
@@ -4017,6 +4035,9 @@ fn run_pricing_lookup(
                 if !row.coverage && !row.uncovered_buckets.is_empty() {
                     print!(" uncovered={}", row.uncovered_buckets.join(","));
                 }
+                if let Some(gap) = row.submission_safety_gap {
+                    print!(" submission_safety_gap={}", gap.as_str());
+                }
                 println!();
             }
         }
@@ -4764,6 +4785,18 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                 additional_paths.push(AdditionalPath {
                     path: roots[1].to_string_lossy().into_owned(),
                     exists: roots[1].exists(),
+                });
+            }
+            if client == ClientId::Copilot {
+                let session_state = home_dir.join(".copilot/session-state");
+                additional_paths.push(AdditionalPath {
+                    path: session_state.to_string_lossy().to_string(),
+                    exists: session_state.exists(),
+                });
+                let session_store = home_dir.join(".copilot/session-store.db");
+                additional_paths.push(AdditionalPath {
+                    path: session_store.to_string_lossy().to_string(),
+                    exists: session_store.exists(),
                 });
             }
             if client == ClientId::Zcode {
@@ -7619,8 +7652,8 @@ fn post_submission(
             if let Some(warnings) = body.warnings {
                 if !warnings.is_empty() {
                     println!("{}", "  Warnings:".yellow());
-                    for warning in warnings {
-                        println!("{}", format!("    - {}", warning).bright_black());
+                    for line in submission_warnings::compact(&warnings) {
+                        println!("{}", format!("    {line}").bright_black());
                     }
                     println!();
                 }
@@ -9907,6 +9940,30 @@ mod tests {
             chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap(),
         );
         assert_eq!(label, None);
+    }
+
+    #[test]
+    fn test_light_spinner_releases_stderr_between_frames() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let spinner = LightSpinner::start_with_ready("Testing stderr locking...", Some(ready_tx));
+        assert!(
+            ready_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "spinner must render a frame before testing stderr access"
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = thread::spawn(move || {
+            let _stderr = io::stderr().lock();
+            tx.send(()).unwrap();
+        });
+
+        let acquired_while_running = rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        spinner.stop();
+        writer.join().unwrap();
+        assert!(
+            acquired_while_running,
+            "spinner must not hold stderr locked while idle"
+        );
     }
 
     #[test]

@@ -1141,6 +1141,20 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Bb = 59 => {
+        id: "bb",
+        display: "BB",
+        logo: Some("https://github.com/get-bb.png"),
+        root: PathRoot::EnvVar {
+            var: "BB_DATA_DIR",
+            fallback_relative: ".bb",
+        },
+        relative: "bb.db",
+        pattern: "bb.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1256,7 +1270,17 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 59);
+        assert_eq!(ClientId::COUNT, 60);
+    }
+
+    #[test]
+    fn test_bb_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("bb").expect("bb client should be registered");
+        assert_eq!(client.data().relative_path, "bb.db");
+        assert_eq!(client.data().pattern, "bb.db");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]

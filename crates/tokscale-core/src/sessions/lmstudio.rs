@@ -547,7 +547,7 @@ fn message_from_record(
         "lmstudio",
         model,
         "lmstudio",
-        session_id.to_string(),
+        session_id,
         timestamp,
         tokens,
         0.0,

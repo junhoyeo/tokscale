@@ -894,10 +894,10 @@ impl PricingService {
                 .unwrap_or_default()
         };
         PricingExplanation {
-            client: message.client.clone(),
-            model_id: message.model_id.clone(),
+            client: message.client.to_string(),
+            model_id: message.model_id.to_string(),
             raw_model_id: message.pricing_context().raw_model.to_string(),
-            provider_id: message.provider_id.clone(),
+            provider_id: message.provider_id.to_string(),
             billing_identity: message.billing_identity.clone(),
             billing_provider_id: message.billing_identity.id().map(str::to_string),
             price_source: if authoritative {
@@ -935,6 +935,7 @@ impl PricingService {
             },
             coverage: authoritative || estimate.coverage,
             uncovered_buckets,
+            submission_safety_gap: selected.and_then(|row| row.evidence.submission_safety_gap()),
             estimate_status: status,
         }
     }
@@ -2988,7 +2989,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_from_cached_datasets_returns_none_when_both_sources_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut env = crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_CONFIG_DIR"]);
+        env.set("TOKSCALE_CONFIG_DIR", temp.path());
         assert!(PricingService::from_cached_datasets(None, None, None).is_none());
     }
 
@@ -3577,6 +3582,8 @@ pub struct PricingExplanation {
     pub coverage: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uncovered_buckets: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submission_safety_gap: Option<lookup::SubmissionSafetyGap>,
     pub estimate_status: crate::sessions::EstimateStatus,
 }
 
