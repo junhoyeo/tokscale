@@ -283,20 +283,19 @@ fn scan_devin_cli_snapshot(
     let mut messages = Vec::new();
     let mut rows_complete = true;
     // Quiet: older Devin databases may not yet have message_nodes.
-    let scan =
-        sqlite_for_each_row_on_with_params(&conn, db_path, query, params, None, &mut |row| {
-            match parse_devin_cli_row(row, fallback_timestamp) {
-                Ok(Some(message)) => {
-                    messages.push(message);
-                    Ok(())
-                }
-                Ok(None) => Ok(()),
-                Err(error) => {
-                    rows_complete = false;
-                    Err(error)
-                }
+    let scan = sqlite_for_each_row_on_with_params(conn, db_path, query, params, None, &mut |row| {
+        match parse_devin_cli_row(row, fallback_timestamp) {
+            Ok(Some(message)) => {
+                messages.push(message);
+                Ok(())
             }
-        });
+            Ok(None) => Ok(()),
+            Err(error) => {
+                rows_complete = false;
+                Err(error)
+            }
+        }
+    });
     (messages, scan.completed() && rows_complete)
 }
 
