@@ -2693,108 +2693,36 @@ fn parse_all_messages_streaming<S: MessageSink>(
         )
     }
 
-    /// Devin CLI databases sit on a WAL whose file metadata changes on every
-    /// write, so `check_sqlite_path` can never reach `Unchanged` for an active
-    /// database — every scan would re-parse the whole `message_nodes` table.
-    /// The row-stats fingerprint instead moves only when usage rows appear or
-    /// disappear: `size` carries the row count, `modified_ns` the max
-    /// `row_id`, and `content_hash`'s first 8 bytes the `row_id` sum —
-    /// together the count and sum detect deletions, not just appends. The
-    /// next 8 bytes hash the joined `sessions` fields, so an in-place
-    /// model/title/workspace edit also moves the fingerprint.
-    fn devin_cli_fingerprint(
+    /// A request dedup key is not a SQLite row identity. Cached messages do
+    /// not retain row ids, and count/sum watermarks cannot detect in-place
+    /// edits. Reparse changed databases rather than merging an ambiguous
+    /// suffix: the raw recount must retain every persisted request copy.
+    fn load_or_parse_devin_cli_source(
         path: &Path,
-        cached: Option<&message_cache::SourceFingerprint>,
-    ) -> Option<message_cache::FingerprintStatus> {
-        let stats = sessions::devin::devin_cli_row_stats(path)?;
-        let sessions_hash = sessions::devin::devin_cli_sessions_hash(path).unwrap_or(0);
-        let mut content_hash = [0u8; 32];
-        content_hash[..8].copy_from_slice(&stats.row_id_sum.to_le_bytes());
-        content_hash[8..16].copy_from_slice(&sessions_hash.to_le_bytes());
-        let fingerprint = message_cache::SourceFingerprint {
-            size: stats.row_count.max(0) as u64,
-            modified_ns: stats.max_row_id.max(0) as u64,
-            sample_hashes: Vec::new(),
-            content_hash,
-            related_files: Vec::new(),
-        };
-        Some(if cached == Some(&fingerprint) {
-            message_cache::FingerprintStatus::Unchanged
-        } else {
-            message_cache::FingerprintStatus::Changed(fingerprint)
-        })
-    }
-
-    /// Merges an entry's cached messages with rows appended since its
-    /// watermark, or returns `None` to force the full parse. A changed
-    /// `sessions` hash means joined fields were edited in place and cached
-    /// messages are stale. The delta identity — count and `row_id` sum
-    /// between the two fingerprints must equal the stats of rows past the
-    /// mark — proves the rest was pure append; a delete paired with an
-    /// insert, or any id reuse, breaks it. Rows written between the
-    /// fingerprint and the parse get replayed by the next scan, so the merge
-    /// drops exact replay copies while keeping distinct rows that share a
-    /// `request_id` dedup key (they collapse downstream, but must stay
-    /// visible to the raw recount).
-    fn devin_cli_resume(
-        path: &Path,
-        entry: &message_cache::CachedSourceEntry,
-        fingerprint: &message_cache::SourceFingerprint,
-    ) -> Option<SourceParse> {
-        let old_sessions =
-            u64::from_le_bytes(entry.fingerprint.content_hash[8..16].try_into().ok()?);
-        let new_sessions =
-            u64::from_le_bytes(fingerprint.content_hash[8..16].try_into().ok()?);
-        if old_sessions != new_sessions {
-            return None;
-        }
-        let after_row_id = entry.fingerprint.modified_ns as i64;
-        let (appended_count, appended_sum) = sessions::devin::devin_cli_appended_stats(
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> CachedParseOutcome {
+        load_or_parse_source_with_fingerprint_and_policy(
+            message_cache::CacheIdentity::for_client(ClientId::DevinCli),
             path,
-            after_row_id,
-        )?;
-        let old_sum = i64::from_le_bytes(entry.fingerprint.content_hash[..8].try_into().ok()?);
-        let new_sum = i64::from_le_bytes(fingerprint.content_hash[..8].try_into().ok()?);
-        if fingerprint.size as i64 - entry.fingerprint.size as i64 != appended_count
-            || new_sum - old_sum != appended_sum
-        {
-            return None;
-        }
-        // Cached rows are the authority and pass through untouched: the cold
-        // parse keeps distinct rows that share a `request_id` dedup key, and
-        // re-filtering them here would collapse the very rows the raw
-        // recount must still see. The identity set seeds from the cache and
-        // only appended rows are filtered, which drops exactly the replay
-        // copies past the watermark.
-        let identity_of = |message: &UnifiedMessage| {
-            (
-                message.session_id.clone(),
-                message.dedup_key.clone(),
-                message.timestamp,
-                message.tokens.total(),
-            )
-        };
-        let mut seen = entry
-            .messages
-            .iter()
-            .map(|message| identity_of(message))
-            .collect::<std::collections::HashSet<_>>();
-        let mut messages = Vec::with_capacity(
-            entry.messages.len() + appended_count.max(0) as usize,
-        );
-        for message in entry.messages.iter().cloned() {
-            messages.push(message);
-        }
-        for message in sessions::devin::parse_devin_cli_sqlite_after(path, after_row_id) {
-            if seen.insert(identity_of(&message)) {
-                messages.push(message);
-            }
-        }
-        Some(SourceParse {
-            messages,
-            cacheable: true,
-            claude_checkpoint: None,
-        })
+            source_cache,
+            pricing,
+            HistoryRetention::LiveFileOnly,
+            message_cache::SourceFingerprint::check_sqlite_path,
+            |path, before| {
+                let (messages, complete) = sessions::devin::scan_devin_cli_sqlite(path);
+                // The SELECT joins messages and sessions in one SQLite read
+                // snapshot. Only cache it if the DB and WAL stayed unchanged
+                // around that read; otherwise the next scan must start fresh.
+                let stable = before.is_some_and(|before| {
+                    matches!(
+                        message_cache::SourceFingerprint::check_sqlite_path(path, Some(before)),
+                        Some(message_cache::FingerprintStatus::Unchanged)
+                    )
+                });
+                (messages, complete && stable)
+            },
+        )
     }
 
     /// MiMo rows and exact provenance are one cache payload. A warm hit never
@@ -4952,20 +4880,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             .devin_dbs
             .par_iter()
             .map(|db_path| {
-                let mut outcome = load_or_parse_resumable_source(
-                    message_cache::CacheIdentity::for_client(ClientId::DevinCli),
-                    db_path,
-                    &source_cache,
-                    pricing,
-                    HistoryRetention::LiveFileOnly,
-                    devin_cli_fingerprint,
-                    |path, _| SourceParse {
-                        messages: sessions::devin::parse_devin_cli_sqlite(path),
-                        cacheable: true,
-                        claude_checkpoint: None,
-                    },
-                    Some(&devin_cli_resume),
-                );
+                let mut outcome = load_or_parse_devin_cli_source(db_path, &source_cache, pricing);
                 machine_labeler.label_messages(db_path, &mut outcome.messages);
                 outcome
             })
@@ -24098,6 +24013,317 @@ mod tests {
         assert_eq!(reads.discovered, 2);
         assert_eq!(reads.unreadable, 1);
         assert!(!reads.complete());
+    }
+
+    mod devin_cache_tests {
+        use super::*;
+        use std::path::{Path, PathBuf};
+
+        fn database(home: &Path) -> (PathBuf, rusqlite::Connection) {
+            let path = home.join(".local/share/devin/cli/sessions.db");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT, working_directory TEXT, title TEXT);
+                 CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT, created_at INTEGER);
+                 INSERT INTO sessions VALUES ('sess', 'gpt-5', '/tmp/project', 'Task');",
+            ).unwrap();
+            (path, conn)
+        }
+
+        fn append(conn: &rusqlite::Connection, request: &str, input: i64, output: i64) {
+            conn.execute(
+                "INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('sess', ?1, 1700000000)",
+                [serde_json::json!({"role":"assistant", "metadata": {
+                    "request_id":request, "metrics":{"input_tokens":input,"output_tokens":output}
+                }}).to_string()],
+            ).unwrap();
+        }
+
+        fn scan(
+            home: &Path,
+            policy: SourceCachePolicy,
+        ) -> (Vec<UnifiedMessage>, crate::StreamingParseOutcome) {
+            let mut messages = Vec::new();
+            let outcome = crate::parse_all_messages_streaming(
+                home.to_str().unwrap(),
+                &["devin-cli".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                policy,
+                &mut messages,
+            );
+            (messages, outcome)
+        }
+
+        fn cached(path: &Path) -> Option<message_cache::CachedSourceEntry> {
+            message_cache::SourceMessageCache::load().get(
+                message_cache::CacheIdentity::for_client(ClientId::DevinCli),
+                path,
+            )
+        }
+
+        fn assert_warm_matches_cold(home: &Path, path: &Path, raw_rows: usize) {
+            let (warm, warm_outcome) = scan(home, SourceCachePolicy::Persistent);
+            let (cold, cold_outcome) = scan(home, SourceCachePolicy::InMemory);
+            assert_eq!(
+                serde_json::to_value(&warm).unwrap(),
+                serde_json::to_value(&cold).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&warm_outcome.recount_proofs).unwrap(),
+                serde_json::to_value(&cold_outcome.recount_proofs).unwrap()
+            );
+            let entry = cached(path).expect("stable scan writes an entry");
+            assert_eq!(entry.messages.len(), raw_rows);
+            assert_eq!(
+                serde_json::to_value(&entry.messages).unwrap(),
+                serde_json::to_value(crate::sessions::devin::parse_devin_cli_sqlite(path)).unwrap()
+            );
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_preserves_cached_and_appended_request_multiplicities() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            assert_warm_matches_cold(home.path(), &path, 2);
+            // Cached duplicates survive, and a third distinct row must survive
+            // even though request, time, and every token bucket are identical.
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-2", 10, 5);
+            assert_warm_matches_cold(home.path(), &path, 4);
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(messages.len(), 2);
+            let proof = &outcome.recount_proofs["devin-cli"][messages[0].date.as_str()]["gpt-5"];
+            assert_eq!(proof.previous.messages, 4);
+            assert_eq!(proof.previous.tokens.input, 67 * 3 + 10);
+            assert_eq!(proof.corrected.tokens.input, 67 + 10);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_preserves_equal_totals_with_different_token_buckets() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            assert_warm_matches_cold(home.path(), &path, 1);
+            append(&conn, "req-1", 103, 67);
+            assert_warm_matches_cold(home.path(), &path, 2);
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            let proof = &outcome.recount_proofs["devin-cli"][messages[0].date.as_str()]["gpt-5"];
+            assert_eq!(proof.previous.tokens.input, 170);
+            assert_eq!(proof.previous.tokens.output, 170);
+            assert_eq!(proof.corrected.tokens.input, 67);
+            assert_eq!(proof.corrected.tokens.output, 103);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_unchanged_hit_and_live_edits() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 1);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(
+                probe.reads(),
+                1,
+                "unchanged cache hit must not decode SQLite rows"
+            );
+
+            let edits = [
+                "UPDATE message_nodes SET chat_message = '{\"role\":\"assistant\",\"metadata\":{\"request_id\":\"req-1\",\"metrics\":{\"input_tokens\":103,\"output_tokens\":67}}}' WHERE row_id = 2",
+                "UPDATE message_nodes SET created_at = 1700086400 WHERE row_id = 2",
+                "UPDATE sessions SET model = 'gpt-4o'",
+                "UPDATE sessions SET working_directory = '/tmp/other'",
+                "UPDATE sessions SET title = 'Edited task'",
+            ];
+            for sql in edits {
+                conn.execute_batch(sql).unwrap();
+                let before = probe.reads();
+                scan(home.path(), SourceCachePolicy::Persistent);
+                assert_eq!(
+                    probe.reads(),
+                    before + 1,
+                    "edit requires a full read: {sql}"
+                );
+                assert_warm_matches_cold(home.path(), &path, 2);
+            }
+            conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 2")
+                .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            // Same count, sum, max id and sessions as the cached source, but
+            // replacement row contents: row stats never proved pure append.
+            conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 1")
+                .unwrap();
+            append(&conn, "replacement", 20, 30);
+            assert_warm_matches_cold(home.path(), &path, 1);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_retries_watermark_races_without_replaying_rows() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            // Append after the pre-read fingerprint, before SELECT. The old
+            // watermark design cached this extra row under an earlier mark.
+            append(&conn, "req-2", 10, 5);
+            probe.before_read_sql("INSERT INTO message_nodes (session_id, chat_message, created_at) SELECT session_id, chat_message, created_at FROM message_nodes WHERE row_id = 1");
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(
+                cached(&path).is_none(),
+                "racing read must not publish a stale fingerprint"
+            );
+            assert_warm_matches_cold(home.path(), &path, 3);
+            // Append after SELECT, before fingerprint revalidation. Do not
+            // tag the old read with the newer database fingerprint either.
+            append(&conn, "req-3", 20, 5);
+            probe.after_read_sql("INSERT INTO message_nodes (session_id, chat_message, created_at) SELECT session_id, chat_message, created_at FROM message_nodes WHERE row_id = 1");
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(cached(&path).is_none());
+            assert_warm_matches_cold(home.path(), &path, 5);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_does_not_cache_failed_or_partial_reads() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            // The usage SELECT does not need title. A missing title must not
+            // be mistaken for a successful zero-valued sessions hash.
+            conn.execute_batch(
+                "ALTER TABLE sessions DROP COLUMN title; UPDATE sessions SET model = 'gpt-4o'",
+            )
+            .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            // SQLite accepts a blob in this TEXT column, but row decoding
+            // fails. Keep readable rows for local output, not for the cache.
+            conn.execute_batch("INSERT INTO message_nodes VALUES (2, 'sess', X'FF', 1700000000)")
+                .unwrap();
+            let (messages, _) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(messages.len(), 1);
+            assert!(cached(&path).is_none());
+            conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 2")
+                .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            conn.execute_batch("ALTER TABLE sessions RENAME TO unavailable_sessions")
+                .unwrap();
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(messages.is_empty());
+            assert_eq!(outcome.source_reads["devin-cli"].unreadable, 1);
+            assert!(cached(&path).is_none());
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_handles_row_ids_whose_sum_overflows() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 103, 67);
+            conn.execute(
+                "UPDATE message_nodes SET row_id = ?1 WHERE row_id = 2",
+                [i64::MAX],
+            )
+            .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 2);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert_warm_matches_cold(home.path(), &path, 2);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_rejects_literal_v5_entry_with_unchanged_fingerprint() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            let mut stale = cached(&path).unwrap();
+            stale.messages.truncate(1);
+
+            // Positive control: these are loadable persisted bytes with the
+            // exact live fingerprint, not an accidentally unreadable fixture.
+            let mut cache = message_cache::SourceMessageCache::load();
+            cache.insert(stale.clone());
+            cache.save_if_dirty();
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 1);
+            assert_eq!(
+                outcome.recount_proofs["devin-cli"].values().next().unwrap()["gpt-5"]
+                    .previous
+                    .messages,
+                1
+            );
+
+            // Freeze the old producer version literally. The old row-stats
+            // resume could persist this lossy raw vector; changing only its
+            // parser version must force a fresh read even with matching bytes.
+            let mut serialized = serde_json::to_value(stale).unwrap();
+            serialized["parser_version"] = serde_json::json!(5);
+            let old_entry: message_cache::CachedSourceEntry =
+                serde_json::from_value(serialized).unwrap();
+            // Freeze the v5 envelope as well as its entry. Writing a v5 entry
+            // inside a current-version envelope would only test corruption.
+            use bincode::Options;
+            let parser_dir = cache_home
+                .path()
+                .join(".config/tokscale/cache/source-message-cache-v2/devin-cli");
+            let shards: Vec<_> = std::fs::read_dir(parser_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "bin"))
+                .collect();
+            assert_eq!(shards.len(), 1);
+            // Bincode encodes this struct positionally: format, namespace,
+            // parser version, payload. Keep the existing format and bytes.
+            let (format, namespace, _, _): (u32, String, u32, Vec<u8>) = bincode::options()
+                .deserialize(&std::fs::read(&shards[0]).unwrap())
+                .unwrap();
+            assert_eq!(format, 11);
+            let payload = bincode::options().serialize(&vec![old_entry]).unwrap();
+            let v5_envelope = bincode::options()
+                .serialize(&(format, namespace, 5u32, payload))
+                .unwrap();
+            std::fs::write(&shards[0], v5_envelope).unwrap();
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 2, "v5 entries must not be served unchanged");
+            assert_eq!(
+                outcome.recount_proofs["devin-cli"].values().next().unwrap()["gpt-5"]
+                    .previous
+                    .messages,
+                2
+            );
+            assert_warm_matches_cold(home.path(), &path, 2);
+        }
     }
 
     #[test]

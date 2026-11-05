@@ -186,8 +186,8 @@ const DEVIN_CLI_MESSAGE_QUERY: &str = r#"
     "#;
 
 /// [`DEVIN_CLI_MESSAGE_QUERY`] limited to rows appended after a resume
-/// watermark. `?1` binds the last `row_id` the cache already parsed, so a
-/// rescan reads only the new `chat_message` blobs.
+/// row id. This public parser convenience is not a safe cache-resume
+/// protocol: existing rows may change or disappear between calls.
 const DEVIN_CLI_MESSAGE_QUERY_AFTER: &str = r#"
         SELECT
             m.row_id,
@@ -201,92 +201,6 @@ const DEVIN_CLI_MESSAGE_QUERY_AFTER: &str = r#"
         WHERE m.row_id > ?1
         ORDER BY m.row_id
     "#;
-
-/// Row stats used as the Devin CLI source fingerprint and the incremental
-/// resume watermark. `row_count` and `row_id_sum` detect deletions a
-/// `row_id`-after scan cannot see — any removed row changes their sum —
-/// and `max_row_id` is the mark new rows append past. All three walk the
-/// rowid b-tree's leaf cells; the `chat_message` payloads live on overflow
-/// pages this query never touches.
-pub(crate) struct DevinCliRowStats {
-    pub row_count: i64,
-    pub max_row_id: i64,
-    pub row_id_sum: i64,
-}
-
-pub(crate) fn devin_cli_row_stats(db_path: &Path) -> Option<DevinCliRowStats> {
-    let conn = open_readonly_sqlite_opt(db_path)?;
-    let mut stats = None;
-    sqlite_for_each_row_on(
-        &conn,
-        db_path,
-        "SELECT COUNT(*), COALESCE(MAX(row_id), 0), COALESCE(SUM(row_id), 0) FROM message_nodes",
-        None,
-        &mut |row| {
-            stats = Some(DevinCliRowStats {
-                row_count: row.get(0)?,
-                max_row_id: row.get(1)?,
-                row_id_sum: row.get(2)?,
-            });
-            Ok(())
-        },
-    );
-    stats
-}
-
-/// Hash over the `sessions` fields the message query joins (`model`,
-/// `working_directory`) plus `title`. The table is small — a few dozen rows —
-/// so reading and hashing it costs nothing, and any in-place edit to a joined
-/// field flips the fingerprint where row stats alone see no change.
-pub(crate) fn devin_cli_sessions_hash(db_path: &Path) -> Option<u64> {
-    let conn = open_readonly_sqlite_opt(db_path)?;
-    let mut hash = 0u64;
-    sqlite_for_each_row_on(
-        &conn,
-        db_path,
-        "SELECT id, COALESCE(model,''), COALESCE(working_directory,''), \
-         COALESCE(title,'') FROM sessions ORDER BY id",
-        None,
-        &mut |row| {
-            let id: String = row.get(0)?;
-            let model: String = row.get(1)?;
-            let working_directory: String = row.get(2)?;
-            let title: String = row.get(3)?;
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&id, &mut hasher);
-            std::hash::Hash::hash(&model, &mut hasher);
-            std::hash::Hash::hash(&working_directory, &mut hasher);
-            std::hash::Hash::hash(&title, &mut hasher);
-            hash ^= std::hash::Hasher::finish(&hasher);
-            Ok(())
-        },
-    );
-    Some(hash)
-}
-
-/// `(count, sum)` of just the rows past `after_row_id`, range-scanned on the
-/// rowid index. Compared against the deltas between two fingerprints this
-/// proves a diff was pure append; any deletion or id reuse below the mark
-/// makes the identities fail.
-pub(crate) fn devin_cli_appended_stats(
-    db_path: &Path,
-    after_row_id: i64,
-) -> Option<(i64, i64)> {
-    let conn = open_readonly_sqlite_opt(db_path)?;
-    let mut stats = None;
-    sqlite_for_each_row_on_with_params(
-        &conn,
-        db_path,
-        "SELECT COUNT(*), COALESCE(SUM(row_id), 0) FROM message_nodes WHERE row_id > ?1",
-        &[&after_row_id],
-        None,
-        &mut |row| {
-            stats = Some((row.get(0)?, row.get(1)?));
-            Ok(())
-        },
-    );
-    stats
-}
 
 /// Whether a discovered Devin CLI database can actually be read end to end.
 ///
@@ -336,166 +250,267 @@ pub fn devin_cli_source_is_readable(db_path: &Path) -> bool {
 }
 
 pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
-    parse_devin_cli_sqlite_inner(db_path, None)
+    scan_devin_cli_sqlite(db_path).0
 }
 
-/// Incremental variant for the cache's resume path: parses only rows appended
-/// after `after_row_id`, so rescanning a large database reads just the new
-/// `chat_message` blobs instead of every row in `message_nodes`.
+/// Parse rows after a caller-supplied row id. This does not prove earlier rows
+/// are unchanged, and must not be used alone to resume a persistent cache.
 pub fn parse_devin_cli_sqlite_after(db_path: &Path, after_row_id: i64) -> Vec<UnifiedMessage> {
-    parse_devin_cli_sqlite_inner(db_path, Some(after_row_id))
+    scan_devin_cli_sqlite_inner(db_path, Some(after_row_id)).0
 }
 
-fn parse_devin_cli_sqlite_inner(db_path: &Path, after_row_id: Option<i64>) -> Vec<UnifiedMessage> {
+/// Read all raw rows in one statement/snapshot. The completion bit prevents a
+/// partial SQLite read from becoming an apparently complete persistent cache.
+pub(crate) fn scan_devin_cli_sqlite(db_path: &Path) -> (Vec<UnifiedMessage>, bool) {
+    scan_devin_cli_sqlite_inner(db_path, None)
+}
+
+fn scan_devin_cli_sqlite_inner(
+    db_path: &Path,
+    after_row_id: Option<i64>,
+) -> (Vec<UnifiedMessage>, bool) {
+    #[cfg(test)]
+    cache_test_hooks::before_read(db_path);
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
     let Some(conn) = open_readonly_sqlite_opt(db_path) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-
     let after = after_row_id.unwrap_or(0);
-    let (query, params): (&str, Vec<&dyn rusqlite::ToSql>) = match after_row_id {
-        Some(_) => (DEVIN_CLI_MESSAGE_QUERY_AFTER, vec![&after]),
-        None => (DEVIN_CLI_MESSAGE_QUERY, Vec::new()),
+    let (query, params): (&str, &[&dyn rusqlite::ToSql]) = match after_row_id {
+        Some(_) => (DEVIN_CLI_MESSAGE_QUERY_AFTER, &[&after]),
+        None => (DEVIN_CLI_MESSAGE_QUERY, &[]),
+    };
+    let mut messages = Vec::new();
+    let mut rows_complete = true;
+    // Quiet: older Devin databases may not yet have message_nodes.
+    let scan =
+        sqlite_for_each_row_on_with_params(&conn, db_path, query, params, None, &mut |row| {
+            match parse_devin_cli_row(row, fallback_timestamp) {
+                Ok(Some(message)) => {
+                    messages.push(message);
+                    Ok(())
+                }
+                Ok(None) => Ok(()),
+                Err(error) => {
+                    rows_complete = false;
+                    Err(error)
+                }
+            }
+        });
+    #[cfg(test)]
+    cache_test_hooks::after_read(db_path);
+    (messages, scan.completed() && rows_complete)
+}
+
+fn parse_devin_cli_row(
+    row: &rusqlite::Row<'_>,
+    fallback_timestamp: i64,
+) -> rusqlite::Result<Option<UnifiedMessage>> {
+    let row_id: i64 = row.get(0)?;
+    let session_id: String = row.get(1)?;
+    let chat_json: String = row.get(2)?;
+    let created_at_ms: Option<i64> = row.get(3)?;
+    let session_model: Option<String> = row.get(4)?;
+    let workspace: Option<String> = row.get(5)?;
+
+    // Non-assistant and malformed JSON rows do not carry attributable usage.
+    let chat_msg: DevinChatMessage = match serde_json::from_str(&chat_json) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    if chat_msg.role != "assistant" {
+        return Ok(None);
+    }
+
+    let metadata = chat_msg.metadata;
+    let metrics = metadata.as_ref().and_then(|m| m.metrics.as_ref());
+
+    // Prefer the per-message generation_model over sessions.model, which can
+    // be "adaptive" (a routing mode) or empty — neither is a real model id.
+    let model_id = metadata
+        .as_ref()
+        .and_then(|m| m.generation_model.as_deref())
+        .filter(|s| !s.is_empty())
+        .or(session_model.as_deref())
+        .filter(|s| !s.is_empty() && !is_devin_routing_mode(s))
+        .unwrap_or_default()
+        .to_string();
+    if model_id.is_empty() {
+        return Ok(None);
+    }
+
+    let provider = provider_identity::inferred_provider_from_model(&model_id)
+        .map(str::to_string)
+        .unwrap_or_else(|| "devin".to_string());
+
+    let tokens = match metrics {
+        Some(m) => TokenBreakdown {
+            input: m.input_tokens.unwrap_or(0).max(0),
+            output: m.output_tokens.unwrap_or(0).max(0),
+            cache_read: m.cache_read_tokens.unwrap_or(0).max(0),
+            cache_write: m.cache_creation_tokens.unwrap_or(0).max(0),
+            cache_write_1h: 0,
+            reasoning: 0,
+        },
+        None => TokenBreakdown::default(),
     };
 
-    let mut messages = Vec::new();
-
-    // Quiet: a Devin CLI database that predates `message_nodes` simply has no
-    // rows to offer, which is not a fault worth logging.
-    sqlite_for_each_row_on_with_params(&conn, db_path, query, &params, None, &mut |row| {
-        let row_id: i64 = row.get(0)?;
-        let session_id: String = row.get(1)?;
-        let chat_json: String = row.get(2)?;
-        let created_at_ms: Option<i64> = row.get(3)?;
-        let session_model: Option<String> = row.get(4)?;
-        let workspace: Option<String> = row.get(5)?;
-
-        // Confirm role == assistant (the SQL filter should already guarantee this,
-        // but parsing lets us skip corrupt rows cleanly).
-        let chat_msg: DevinChatMessage = match serde_json::from_str(&chat_json) {
-            Ok(m) => m,
-            Err(_) => return Ok(()),
-        };
-        if chat_msg.role != "assistant" {
-            return Ok(());
-        }
-
-        let metadata = chat_msg.metadata;
-        let metrics = metadata.as_ref().and_then(|m| m.metrics.as_ref());
-
-        // Prefer the per-message generation_model over sessions.model, which can
-        // be "adaptive" (a routing mode) or empty — neither is a real model id.
-        let model_id = metadata
-            .as_ref()
-            .and_then(|m| m.generation_model.as_deref())
-            .filter(|s| !s.is_empty())
-            .or(session_model.as_deref())
-            .filter(|s| !s.is_empty() && !is_devin_routing_mode(s))
-            .unwrap_or_default()
-            .to_string();
-        if model_id.is_empty() {
-            return Ok(());
-        }
-
-        let provider = provider_identity::inferred_provider_from_model(&model_id)
-            .map(str::to_string)
-            .unwrap_or_else(|| "devin".to_string());
-
-        let tokens = match metrics {
-            Some(m) => TokenBreakdown {
-                input: m.input_tokens.unwrap_or(0).max(0),
-                output: m.output_tokens.unwrap_or(0).max(0),
-                cache_read: m.cache_read_tokens.unwrap_or(0).max(0),
-                cache_write: m.cache_creation_tokens.unwrap_or(0).max(0),
-                cache_write_1h: 0,
-                reasoning: 0,
-            },
-            None => TokenBreakdown::default(),
-        };
-
-        // Fallback: if metrics are missing but num_tokens is present, attribute
-        // everything to output so the message is still counted.
-        let tokens = if tokens.total() == 0 {
-            if let Some(num_tokens) = metadata.as_ref().and_then(|m| m.num_tokens) {
-                TokenBreakdown {
-                    output: num_tokens.max(0),
-                    ..TokenBreakdown::default()
-                }
-            } else {
-                tokens
+    // Fallback: if metrics are missing but num_tokens is present, attribute
+    // everything to output so the message is still counted.
+    let tokens = if tokens.total() == 0 {
+        if let Some(num_tokens) = metadata.as_ref().and_then(|m| m.num_tokens) {
+            TokenBreakdown {
+                output: num_tokens.max(0),
+                ..TokenBreakdown::default()
             }
         } else {
             tokens
-        };
-        // Assistant rows without any attributable usage must not become
-        // precedence markers for a matching Desktop ACP session. Otherwise a
-        // zero-metric CLI row could suppress the only real usage record.
-        if tokens.total() == 0 {
-            return Ok(());
+        }
+    } else {
+        tokens
+    };
+    // Assistant rows without any attributable usage must not become
+    // precedence markers for a matching Desktop ACP session. Otherwise a
+    // zero-metric CLI row could suppress the only real usage record.
+    if tokens.total() == 0 {
+        return Ok(None);
+    }
+
+    let recorded_timestamp = created_at_ms.unwrap_or(fallback_timestamp);
+    // `message_nodes.created_at` is stamped when the row is written, which
+    // happens once the assistant message (including `metrics`) is
+    // finalized, i.e. the turn's *end*, not its start. `total_time_ms` is
+    // that turn's elapsed generation time, so sessionize()'s
+    // `[timestamp, timestamp + duration_ms]` span would otherwise project
+    // forward past the actual completion into phantom idle time.
+    // Back-calculate the start anchor the same way #890 did for
+    // Copilot's `endTime`-only records.
+    let duration_ms = metrics
+        .and_then(|m| m.total_time_ms)
+        .map(|total_time_ms| total_time_ms.max(0));
+    // Only back-calculate when `created_at_ms` is this row's own recorded
+    // completion time: when it's absent, `recorded_timestamp` is
+    // `fallback_timestamp` (the database file's mtime), not this
+    // message's own end time, and subtracting `total_time_ms` from it
+    // would shift the message into the wrong day rather than anchor it
+    // correctly.
+    let timestamp = match (created_at_ms, duration_ms.filter(|duration| *duration > 0)) {
+        (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
+        _ => recorded_timestamp,
+    };
+    // Devin CLI can persist the same assistant response in multiple
+    // message_nodes rows (for example, a transcript row with and without
+    // UI-only tool-call metadata). `row_id` differs between those copies,
+    // while `metadata.request_id` identifies the underlying API request.
+    // Keep row_id as a fallback for older records that lack that id.
+    let request_id = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.request_id.as_deref())
+        .map(str::trim)
+        .filter(|request_id| !request_id.is_empty());
+    let dedup_key = match request_id {
+        Some(request_id) => {
+            format!("devin-cli:{session_id}:request:{request_id}")
+        }
+        None => format!("devin-cli:{session_id}:row:{row_id}"),
+    };
+    let mut unified = UnifiedMessage::new_with_dedup(
+        "devin-cli",
+        model_id,
+        provider,
+        session_id,
+        timestamp,
+        tokens,
+        0.0,
+        Some(dedup_key),
+    );
+
+    unified.duration_ms = duration_ms;
+
+    if let Some(ws) = workspace {
+        let workspace_key = normalize_workspace_key(&ws);
+        let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
+        unified.set_workspace(workspace_key, workspace_label);
+    }
+
+    Ok(Some(unified))
+}
+
+#[cfg(test)]
+pub(crate) mod cache_test_hooks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Default)]
+    struct State {
+        reads: usize,
+        before_sql: Option<String>,
+        after_sql: Option<String>,
+    }
+
+    static STATES: LazyLock<Mutex<HashMap<PathBuf, State>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Path-scoped hooks keep parallel parser tests independent of cache tests.
+    pub(crate) struct Probe(PathBuf);
+
+    pub(crate) fn watch(path: &Path) -> Probe {
+        STATES
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), State::default());
+        Probe(path.to_path_buf())
+    }
+
+    impl Probe {
+        pub(crate) fn reads(&self) -> usize {
+            STATES.lock().unwrap()[&self.0].reads
         }
 
-        let recorded_timestamp = created_at_ms.unwrap_or(fallback_timestamp);
-        // `message_nodes.created_at` is stamped when the row is written, which
-        // happens once the assistant message (including `metrics`) is
-        // finalized, i.e. the turn's *end*, not its start. `total_time_ms` is
-        // that turn's elapsed generation time, so sessionize()'s
-        // `[timestamp, timestamp + duration_ms]` span would otherwise project
-        // forward past the actual completion into phantom idle time.
-        // Back-calculate the start anchor the same way #890 did for
-        // Copilot's `endTime`-only records.
-        let duration_ms = metrics
-            .and_then(|m| m.total_time_ms)
-            .map(|total_time_ms| total_time_ms.max(0));
-        // Only back-calculate when `created_at_ms` is this row's own recorded
-        // completion time: when it's absent, `recorded_timestamp` is
-        // `fallback_timestamp` (the database file's mtime), not this
-        // message's own end time, and subtracting `total_time_ms` from it
-        // would shift the message into the wrong day rather than anchor it
-        // correctly.
-        let timestamp = match (created_at_ms, duration_ms.filter(|duration| *duration > 0)) {
-            (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
-            _ => recorded_timestamp,
-        };
-        // Devin CLI can persist the same assistant response in multiple
-        // message_nodes rows (for example, a transcript row with and without
-        // UI-only tool-call metadata). `row_id` differs between those copies,
-        // while `metadata.request_id` identifies the underlying API request.
-        // Keep row_id as a fallback for older records that lack that id.
-        let request_id = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.request_id.as_deref())
-            .map(str::trim)
-            .filter(|request_id| !request_id.is_empty());
-        let dedup_key = match request_id {
-            Some(request_id) => {
-                format!("devin-cli:{session_id}:request:{request_id}")
+        pub(crate) fn before_read_sql(&self, sql: &str) {
+            STATES.lock().unwrap().get_mut(&self.0).unwrap().before_sql = Some(sql.to_string());
+        }
+
+        pub(crate) fn after_read_sql(&self, sql: &str) {
+            STATES.lock().unwrap().get_mut(&self.0).unwrap().after_sql = Some(sql.to_string());
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            STATES.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    pub(super) fn before_read(path: &Path) {
+        run(path, true);
+    }
+
+    pub(super) fn after_read(path: &Path) {
+        run(path, false);
+    }
+
+    fn run(path: &Path, before: bool) {
+        let sql = {
+            let mut states = STATES.lock().unwrap();
+            let Some(state) = states.get_mut(path) else {
+                return;
+            };
+            if before {
+                state.reads += 1;
+                state.before_sql.take()
+            } else {
+                state.after_sql.take()
             }
-            None => format!("devin-cli:{session_id}:row:{row_id}"),
         };
-        let mut unified = UnifiedMessage::new_with_dedup(
-            "devin-cli",
-            model_id,
-            provider,
-            session_id,
-            timestamp,
-            tokens,
-            0.0,
-            Some(dedup_key),
-        );
-
-        unified.duration_ms = duration_ms;
-
-        if let Some(ws) = workspace {
-            let workspace_key = normalize_workspace_key(&ws);
-            let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
-            unified.set_workspace(workspace_key, workspace_label);
+        if let Some(sql) = sql {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute_batch(&sql)
+                .unwrap();
         }
-
-        messages.push(unified);
-        Ok(())
-    });
-
-    messages
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +873,22 @@ mod tests {
     )
     .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn test_parse_devin_cli_after_keeps_distinct_request_rows() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_devin_cli_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        insert_session(&conn, "sess-1", "/tmp/project", "gpt-5");
+        let chat = r#"{"role":"assistant","metadata":{"request_id":"req-1","metrics":{"input_tokens":10,"output_tokens":5}}}"#;
+        let first = insert_message(&conn, "sess-1", chat, 1_700_000_000);
+        insert_message(&conn, "sess-1", chat, 1_700_000_000);
+        insert_message(&conn, "sess-1", chat, 1_700_000_000);
+        let suffix = parse_devin_cli_sqlite_after(&db_path, first);
+        assert_eq!(suffix.len(), 2);
+        assert_eq!(suffix[0].dedup_key, suffix[1].dedup_key);
+        assert!(parse_devin_cli_sqlite_after(&db_path, i64::MAX).is_empty());
     }
 
     #[test]
