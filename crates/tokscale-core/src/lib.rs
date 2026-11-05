@@ -5498,24 +5498,50 @@ pub fn workspace_label_overrides<'a>(
     rollup: WorktreeRollup,
     labeler: &mut WorkspaceLabeler,
 ) -> HashMap<String, String> {
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    let mut labels = WorkspaceLabelCollector::default();
     for msg in messages {
+        labels.observe(msg, rollup, labeler);
+    }
+    labels.overrides(labeler)
+}
+
+/// [`workspace_label_overrides`] fed one message at a time, for a caller that
+/// folds messages as they arrive and cannot walk them a second time.
+#[derive(Default)]
+struct WorkspaceLabelCollector {
+    /// Workspace keys already bucketed: only the first message of each key
+    /// contributes a label.
+    seen: HashSet<String>,
+    /// Grouping key -> base label of the first message that reached it.
+    base: BTreeMap<String, String>,
+}
+
+impl WorkspaceLabelCollector {
+    fn observe(
+        &mut self,
+        msg: &UnifiedMessage,
+        rollup: WorktreeRollup,
+        labeler: &mut WorkspaceLabeler,
+    ) {
         let Some(key) = msg.workspace_key.as_deref() else {
-            continue;
+            return;
         };
-        if !seen.insert(key) {
-            continue;
+        if self.seen.contains(key) {
+            return;
         }
+        self.seen.insert(key.to_string());
         let (group_key, _, label) = workspace_bucket(msg, rollup, labeler);
-        base.entry(group_key).or_insert(label);
+        self.base.entry(group_key).or_insert(label);
     }
 
-    disambiguate_workspace_labels(
-        base.iter()
-            .map(|(key, label)| (key.as_str(), label.as_str())),
-        labeler,
-    )
+    fn overrides(self, labeler: &mut WorkspaceLabeler) -> HashMap<String, String> {
+        disambiguate_workspace_labels(
+            self.base
+                .iter()
+                .map(|(key, label)| (key.as_str(), label.as_str())),
+            labeler,
+        )
+    }
 }
 
 /// Rewrite `labeled` — (grouping key, base label) pairs — so no two keys share a
@@ -5646,30 +5672,72 @@ fn aggregate_model_usage_entries(
     aggregate_model_usage_entries_with_rollup(messages, group_by, WorktreeRollup::default())
 }
 
+/// Collecting form of [`ModelUsageFold`], kept as the test surface for its
+/// aggregation rules. The model report folds messages as the parse emits them
+/// and never collects them; see [`ModelReportSink`].
+#[cfg(test)]
 fn aggregate_model_usage_entries_with_rollup(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
     rollup: WorktreeRollup,
 ) -> Vec<ModelUsage> {
-    let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let mut labeler = WorkspaceLabeler::default();
+    let mut fold = ModelUsageFold::new(group_by, rollup);
+    for msg in &messages {
+        fold.add(msg);
+    }
+    fold.finish()
+}
 
-    // Bucketing a workspace resolves its label, which reads the filesystem. Every
-    // other grouping discards that label a few lines below, so skip the work rather
-    // than paying it on `tokscale --light`, `monthly`, and every TUI refresh.
-    let needs_workspace = matches!(group_by, GroupBy::WorkspaceModel);
-    let label_overrides = if needs_workspace {
-        workspace_label_overrides(&messages, rollup, &mut labeler)
-    } else {
-        HashMap::new()
-    };
+/// A model-report row while messages are still being folded into it.
+struct ModelUsageRow {
+    usage: ModelUsage,
+    /// Workspace grouping key of the message that opened the row. Its
+    /// disambiguated label is only known once every message has been seen.
+    workspace_group_key: String,
+}
 
-    for msg in messages {
+/// Folds messages into model-report rows one message at a time.
+///
+/// A row only keeps running sums, so a caller fed by the parse can drop each
+/// message as soon as it is folded instead of holding the whole history first.
+/// The one rule that looks across messages, workspace label disambiguation,
+/// depends only on the first message seen for each workspace key. It is
+/// collected on the way and applied in [`Self::finish`], which gives the same
+/// labels as resolving it before the fold: a row's label depends only on its
+/// grouping key.
+///
+/// Messages must arrive in the order the collecting path would have held them.
+/// Costs are `f64` sums, so a different order could change their last bits.
+struct ModelUsageFold {
+    group_by: GroupBy,
+    rollup: WorktreeRollup,
+    labeler: WorkspaceLabeler,
+    workspace_labels: WorkspaceLabelCollector,
+    rows: HashMap<String, ModelUsageRow>,
+}
+
+impl ModelUsageFold {
+    fn new(group_by: &GroupBy, rollup: WorktreeRollup) -> Self {
+        Self {
+            group_by: group_by.clone(),
+            rollup,
+            labeler: WorkspaceLabeler::default(),
+            workspace_labels: WorkspaceLabelCollector::default(),
+            rows: HashMap::new(),
+        }
+    }
+
+    fn add(&mut self, msg: &UnifiedMessage) {
+        let group_by = &self.group_by;
+        // Bucketing a workspace resolves its label, which reads the filesystem. Every
+        // other grouping discards that label a few lines below, so skip the work rather
+        // than paying it on `tokscale --light`, `monthly`, and every TUI refresh.
+        let needs_workspace = matches!(group_by, GroupBy::WorkspaceModel);
         let normalized = model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
         let (workspace_group_key, workspace_key, workspace_label) = if needs_workspace {
-            let (group_key, key, label) = workspace_bucket(&msg, rollup, &mut labeler);
-            let label = label_overrides.get(&group_key).cloned().unwrap_or(label);
-            (group_key, key, label)
+            self.workspace_labels
+                .observe(msg, self.rollup, &mut self.labeler);
+            workspace_bucket(msg, self.rollup, &mut self.labeler)
         } else {
             (String::new(), None, String::new())
         };
@@ -5685,7 +5753,7 @@ fn aggregate_model_usage_entries_with_rollup(
                 format!("{}:{}:{}", msg.client, msg.session_id, normalized)
             }
             GroupBy::MachineModel => {
-                let machine = message_machine_label(&msg);
+                let machine = message_machine_label(msg);
                 format!("{}:{}:{}", machine.len(), machine, normalized)
             }
         };
@@ -5694,44 +5762,48 @@ fn aggregate_model_usage_entries_with_rollup(
             GroupBy::Model | GroupBy::WorkspaceModel | GroupBy::MachineModel
         );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
-        let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
-            client: msg.client.to_string(),
-            merged_clients: if merge_clients {
-                Some(msg.client.to_string())
-            } else {
-                None
+        let row = self.rows.entry(key).or_insert_with(|| ModelUsageRow {
+            usage: ModelUsage {
+                client: msg.client.to_string(),
+                merged_clients: if merge_clients {
+                    Some(msg.client.to_string())
+                } else {
+                    None
+                },
+                workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
+                    workspace_key.clone()
+                } else {
+                    None
+                },
+                workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
+                    Some(workspace_label.clone())
+                } else {
+                    None
+                },
+                session_id: if session_grouped {
+                    Some(msg.session_id.to_string())
+                } else {
+                    None
+                },
+                machine: if matches!(group_by, GroupBy::MachineModel) {
+                    Some(message_machine_label(msg).to_string())
+                } else {
+                    None
+                },
+                model: normalized.clone(),
+                provider: msg.provider_id.to_string(),
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+                message_count: 0,
+                cost: 0.0,
+                performance: ModelPerformance::default(),
             },
-            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
-                workspace_key.clone()
-            } else {
-                None
-            },
-            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
-                Some(workspace_label.clone())
-            } else {
-                None
-            },
-            session_id: if session_grouped {
-                Some(msg.session_id.to_string())
-            } else {
-                None
-            },
-            machine: if matches!(group_by, GroupBy::MachineModel) {
-                Some(message_machine_label(&msg).to_string())
-            } else {
-                None
-            },
-            model: normalized.clone(),
-            provider: msg.provider_id.to_string(),
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-            message_count: 0,
-            cost: 0.0,
-            performance: ModelPerformance::default(),
+            workspace_group_key: workspace_group_key.clone(),
         });
+        let entry = &mut row.usage;
 
         if merge_clients {
             if !entry.client.split(", ").any(|s| s == msg.client) {
@@ -5765,35 +5837,48 @@ fn aggregate_model_usage_entries_with_rollup(
             .record_message(positive_token_total(&msg.tokens), msg.duration_ms);
     }
 
-    let mut entries: Vec<ModelUsage> = model_map
-        .into_values()
-        .map(|mut entry| {
-            let total_tokens = entry
-                .input
-                .max(0)
-                .saturating_add(entry.output.max(0))
-                .saturating_add(entry.cache_read.max(0))
-                .saturating_add(entry.cache_write.max(0))
-                .saturating_add(entry.reasoning.max(0));
-            entry.performance.finalize(total_tokens);
-            let mut providers: Vec<&str> = entry.provider.split(", ").collect();
-            providers.sort_unstable();
-            providers.dedup();
-            entry.provider = providers.join(", ");
-            entry
-        })
-        .collect();
-    entries.sort_by(|a, b| match (a.cost.is_nan(), b.cost.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => b
-            .cost
-            .partial_cmp(&a.cost)
-            .unwrap_or(std::cmp::Ordering::Equal),
-    });
+    fn finish(mut self) -> Vec<ModelUsage> {
+        let label_overrides = if matches!(self.group_by, GroupBy::WorkspaceModel) {
+            std::mem::take(&mut self.workspace_labels).overrides(&mut self.labeler)
+        } else {
+            HashMap::new()
+        };
 
-    entries
+        let mut entries: Vec<ModelUsage> = self
+            .rows
+            .into_values()
+            .map(|row| {
+                let mut entry = row.usage;
+                if let Some(label) = label_overrides.get(&row.workspace_group_key) {
+                    entry.workspace_label = Some(label.clone());
+                }
+                let total_tokens = entry
+                    .input
+                    .max(0)
+                    .saturating_add(entry.output.max(0))
+                    .saturating_add(entry.cache_read.max(0))
+                    .saturating_add(entry.cache_write.max(0))
+                    .saturating_add(entry.reasoning.max(0));
+                entry.performance.finalize(total_tokens);
+                let mut providers: Vec<&str> = entry.provider.split(", ").collect();
+                providers.sort_unstable();
+                providers.dedup();
+                entry.provider = providers.join(", ");
+                entry
+            })
+            .collect();
+        entries.sort_by(|a, b| match (a.cost.is_nan(), b.cost.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b
+                .cost
+                .partial_cmp(&a.cost)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        });
+
+        entries
+    }
 }
 
 /// A message's machine label. An unlabeled message is local: either no
@@ -5834,6 +5919,45 @@ fn model_report_token_totals(entries: &[ModelUsage]) -> (i64, i64, i64, i64) {
     )
 }
 
+/// Streams the model report out of the parse.
+///
+/// Collecting the parse before applying the date filter held every message the
+/// selected clients ever recorded, so a one-day report peaked as high as an
+/// all-time one. The report filter and [`ModelUsageFold`] both work one message
+/// at a time, so each message is dropped as soon as it is counted.
+struct ModelReportSink<'a> {
+    options: &'a ReportOptions,
+    fold: ModelUsageFold,
+    undated_tokens: TokenBreakdown,
+}
+
+impl<'a> ModelReportSink<'a> {
+    fn new(options: &'a ReportOptions) -> Self {
+        Self {
+            options,
+            fold: ModelUsageFold::new(&options.group_by, options.worktree_rollup),
+            undated_tokens: TokenBreakdown::default(),
+        }
+    }
+
+    /// The report rows, and the Claude Desktop usage that has no known date.
+    fn finish(self) -> (Vec<ModelUsage>, TokenBreakdown) {
+        (self.fold.finish(), self.undated_tokens)
+    }
+}
+
+impl MessageSink for ModelReportSink<'_> {
+    fn accept(&mut self, message: UnifiedMessage) {
+        if !message_passes_report_filter(&message, self.options) {
+            return;
+        }
+        if claude_desktop::is_undated_balance(&message) {
+            self.undated_tokens.add_assign_saturating(&message.tokens);
+        }
+        self.fold.add(&message);
+    }
+}
+
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
     Ok(get_model_report_v2(options).await?.report)
 }
@@ -5854,27 +5978,35 @@ pub async fn get_model_report_v2(options: ReportOptions) -> Result<ModelReportV2
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let (all_messages, claude_desktop_cache) = parse_all_messages_with_coverage(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-        SourceCachePolicy::Persistent,
-    );
-
-    let filtered = filter_messages_for_report(all_messages, &options);
-    let mut undated_tokens = TokenBreakdown::default();
-    for message in &filtered {
-        if claude_desktop::is_undated_balance(message) {
-            undated_tokens.add_assign_saturating(&message.tokens);
+    let mut sink = ModelReportSink::new(&options);
+    let claude_desktop_cache = if recovery::applicable(&home_dir) {
+        // The recovery overlay reconciles its ledger against the whole native
+        // parse at once (which sessions are still on disk, how far each day
+        // already reaches), so only this case collects before folding.
+        let (all_messages, claude_desktop_cache) = parse_all_messages_with_coverage(
+            &home_dir,
+            &clients,
+            pricing.as_deref(),
+            options.use_env_roots,
+            &options.scanner_settings,
+            SourceCachePolicy::Persistent,
+        );
+        for message in all_messages {
+            sink.accept(message);
         }
-    }
-    let entries = aggregate_model_usage_entries_with_rollup(
-        filtered,
-        &options.group_by,
-        options.worktree_rollup,
-    );
+        claude_desktop_cache
+    } else {
+        parse_all_messages_streaming_with_env_strategy(
+            &home_dir,
+            &clients,
+            pricing.as_deref(),
+            options.use_env_roots,
+            &options.scanner_settings,
+            &mut sink,
+        )
+        .coverage
+    };
+    let (entries, undated_tokens) = sink.finish();
 
     let (total_input, total_output, total_cache_read, total_cache_write) =
         model_report_token_totals(&entries);
@@ -28023,6 +28155,554 @@ mod tests {
                     existing.billing_identity,
                     sessions::BillingIdentity::Unknown
                 );
+            }
+        }
+    }
+
+    /// The model report folds rows straight out of the parse instead of
+    /// collecting every message first. These pin it to the collecting path it
+    /// replaced: same rows, totals and undated tokens for every grouping and
+    /// date range, including the recovery-ledger case that still collects.
+    mod model_report_streaming {
+        use super::super::{
+            claude_desktop, get_model_report_v2, load_pricing_for_local_parse,
+            model_report_token_totals, parse_all_messages_with_coverage, recovery, ModelReportSink,
+            ModelReportV2, ModelUsage,
+        };
+        use super::*;
+
+        /// One Claude Code assistant response at `timestamp` (UTC).
+        fn claude_line(timestamp: &str, id: &str, model: &str, input: i64, output: i64) -> String {
+            format!(
+                concat!(
+                    r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"req_{id}","#,
+                    r#""message":{{"id":"msg_{id}","model":"{model}","#,
+                    r#""usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#,
+                    "\n"
+                ),
+                timestamp = timestamp,
+                id = id,
+                model = model,
+                input = input,
+                output = output,
+            )
+        }
+
+        /// One Codex rollout with a single response at `timestamp` (UTC).
+        fn codex_rollout(session: &str, timestamp: &str, input: i64, output: i64) -> String {
+            let total = input + output;
+            format!(
+                concat!(
+                    r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{session}","source":"interactive","model_provider":"openai","cwd":"/repo"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{ts}","type":"turn_context","payload":{{"model":"gpt-5.5"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input},"output_tokens":{output},"total_tokens":{total}}},"last_token_usage":{{"input_tokens":{input},"output_tokens":{output},"total_tokens":{total}}}}}}}}}"#,
+                    "\n"
+                ),
+                ts = timestamp,
+                session = session,
+                input = input,
+                output = output,
+                total = total,
+            )
+        }
+
+        /// Claude and Codex usage on both sides of the Asia/Seoul midnight at
+        /// 2026-05-01T15:00:00Z, with one copy of each client's usage in two
+        /// sources. Each copy must count once.
+        fn write_fixture(home: &Path) {
+            let projects = client_scan_root(home, ClientId::Claude);
+            let project_a = projects.join("-tmp-stream-a");
+            let project_b = projects.join("-tmp-stream-b");
+            std::fs::create_dir_all(&project_a).unwrap();
+            std::fs::create_dir_all(&project_b).unwrap();
+            std::fs::write(
+                project_a.join("a.jsonl"),
+                [
+                    claude_line(
+                        "2026-05-01T14:59:59.000Z",
+                        "late",
+                        "claude-sonnet-4-5",
+                        100,
+                        10,
+                    ),
+                    claude_line(
+                        "2026-05-01T15:00:00.000Z",
+                        "dup",
+                        "claude-sonnet-4-5",
+                        200,
+                        20,
+                    ),
+                    claude_line(
+                        "2026-05-02T03:00:00.000Z",
+                        "noon",
+                        "claude-opus-4-1",
+                        300,
+                        30,
+                    ),
+                ]
+                .concat(),
+            )
+            .unwrap();
+            std::fs::write(
+                project_b.join("b.jsonl"),
+                [
+                    claude_line(
+                        "2026-05-01T15:00:00.000Z",
+                        "dup",
+                        "claude-sonnet-4-5",
+                        200,
+                        20,
+                    ),
+                    claude_line(
+                        "2026-05-03T01:00:00.000Z",
+                        "next",
+                        "claude-sonnet-4-5",
+                        400,
+                        40,
+                    ),
+                ]
+                .concat(),
+            )
+            .unwrap();
+
+            let sessions = home.join(".codex/sessions");
+            let archived = home.join(".codex/archived_sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::create_dir_all(&archived).unwrap();
+            std::fs::write(
+                sessions.join("late.jsonl"),
+                codex_rollout(
+                    "11111111-1111-7111-8111-111111111111",
+                    "2026-05-01T14:59:59Z",
+                    50,
+                    5,
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                sessions.join("early.jsonl"),
+                codex_rollout(
+                    "22222222-2222-7222-8222-222222222222",
+                    "2026-05-01T15:00:01Z",
+                    60,
+                    6,
+                ),
+            )
+            .unwrap();
+            let shared = codex_rollout(
+                "33333333-3333-7333-8333-333333333333",
+                "2026-05-02T02:00:00Z",
+                70,
+                7,
+            );
+            std::fs::write(sessions.join("shared.jsonl"), &shared).unwrap();
+            std::fs::write(archived.join("shared-archived.jsonl"), &shared).unwrap();
+        }
+
+        fn options(
+            home: &Path,
+            zone: &str,
+            group_by: GroupBy,
+            rollup: WorktreeRollup,
+            range: (Option<&str>, Option<&str>, Option<&str>),
+        ) -> ReportOptions {
+            let (since, until, year) = range;
+            ReportOptions {
+                home_dir: Some(home.to_string_lossy().into_owned()),
+                use_env_roots: false,
+                clients: Some(vec!["claude".to_string(), "codex".to_string()]),
+                since: since.map(str::to_string),
+                until: until.map(str::to_string),
+                year: year.map(str::to_string),
+                group_by,
+                worktree_rollup: rollup,
+                scanner_settings: scanner::ScannerSettings {
+                    bucket_timezone: Some(zone.into()),
+                    ..Default::default()
+                },
+            }
+        }
+
+        /// What the report computed before it streamed: the whole parse with
+        /// the recovery overlay applied, then the date filter, the undated
+        /// tally and the aggregation, each over the collected messages.
+        async fn collected_report(options: &ReportOptions) -> ModelReportV2 {
+            let home = options.home_dir.clone().unwrap();
+            let clients = options.clients.clone().unwrap();
+            let pricing = load_pricing_for_local_parse().await;
+            let (messages, claude_desktop_cache) = parse_all_messages_with_coverage(
+                &home,
+                &clients,
+                pricing.as_deref(),
+                options.use_env_roots,
+                &options.scanner_settings,
+                SourceCachePolicy::Persistent,
+            );
+            let filtered = filter_messages_for_report(messages, options);
+            let mut undated_tokens = TokenBreakdown::default();
+            for message in &filtered {
+                if claude_desktop::is_undated_balance(message) {
+                    undated_tokens.add_assign_saturating(&message.tokens);
+                }
+            }
+            let entries = aggregate_model_usage_entries_with_rollup(
+                filtered,
+                &options.group_by,
+                options.worktree_rollup,
+            );
+            let (total_input, total_output, total_cache_read, total_cache_write) =
+                model_report_token_totals(&entries);
+            ModelReportV2 {
+                undated_tokens,
+                claude_desktop_cache,
+                report: crate::ModelReport {
+                    total_messages: entries.iter().map(|e| e.message_count).sum(),
+                    total_cost: entries.iter().map(|e| e.cost).sum::<f64>() + 0.0,
+                    entries,
+                    total_input,
+                    total_output,
+                    total_cache_read,
+                    total_cache_write,
+                    processing_time_ms: 0,
+                },
+            }
+        }
+
+        /// Rows in a fixed order. Rows that tie on cost come out in hash-map
+        /// order, which differs between two folds of the same messages.
+        fn canonical_rows(entries: &[ModelUsage]) -> Vec<String> {
+            let mut rows: Vec<String> = entries
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap())
+                .collect();
+            rows.sort();
+            rows
+        }
+
+        fn assert_same_report(streamed: &ModelReportV2, collected: &ModelReportV2, label: &str) {
+            assert_eq!(
+                canonical_rows(&streamed.report.entries),
+                canonical_rows(&collected.report.entries),
+                "{label}"
+            );
+            let totals = |report: &ModelReportV2| {
+                (
+                    report.report.total_input,
+                    report.report.total_output,
+                    report.report.total_cache_read,
+                    report.report.total_cache_write,
+                    report.report.total_messages,
+                    report.report.total_cost.to_bits(),
+                )
+            };
+            assert_eq!(totals(streamed), totals(collected), "{label}");
+            assert_eq!(streamed.undated_tokens, collected.undated_tokens, "{label}");
+            assert_eq!(
+                serde_json::to_value(&streamed.claude_desktop_cache).unwrap(),
+                serde_json::to_value(&collected.claude_desktop_cache).unwrap(),
+                "{label}"
+            );
+        }
+
+        const GROUPINGS: [GroupBy; 7] = [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+            GroupBy::MachineModel,
+        ];
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        fn day_totals(report: &ModelReportV2) -> (i64, i64, i32) {
+            (
+                report.report.total_input,
+                report.report.total_output,
+                report.report.total_messages,
+            )
+        }
+
+        #[test]
+        #[serial]
+        fn streamed_model_report_matches_collected_report_for_every_grouping_and_range() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let mut cache_env = redirect_cache_home(cache_home.path());
+            cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            let mut recovery_env =
+                crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_RECOVERY_DISABLE"]);
+            recovery_env.remove("TOKSCALE_RECOVERY_DISABLE");
+            write_fixture(source_home.path());
+            assert!(!recovery::applicable(&source_home.path().to_string_lossy()));
+            let runtime = runtime();
+
+            let ranges = [
+                (None, None, None),
+                (Some("2026-05-01"), Some("2026-05-01"), None),
+                (Some("2026-05-02"), Some("2026-05-02"), None),
+                (Some("2026-05-02"), None, None),
+                (None, Some("2026-05-01"), None),
+                (Some("2026-05-01"), Some("2026-05-03"), None),
+                (None, None, Some("2026")),
+                (Some("2027-01-01"), Some("2027-01-31"), None),
+            ];
+            for zone in ["Asia/Seoul", "UTC"] {
+                for group_by in GROUPINGS {
+                    // Only `workspace,model` consults the worktree rollup.
+                    let rollups = if group_by == GroupBy::WorkspaceModel {
+                        vec![WorktreeRollup::Separate, WorktreeRollup::MergeIntoRepo]
+                    } else {
+                        vec![WorktreeRollup::Separate]
+                    };
+                    for rollup in rollups {
+                        for range in ranges {
+                            let options =
+                                options(source_home.path(), zone, group_by.clone(), rollup, range);
+                            let streamed = runtime
+                                .block_on(get_model_report_v2(options.clone()))
+                                .unwrap();
+                            let collected = runtime.block_on(collected_report(&options));
+                            let label = format!("{zone} {group_by} {rollup:?} {range:?}");
+                            assert_same_report(&streamed, &collected, &label);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn streamed_model_report_buckets_days_in_the_pinned_zone_and_counts_copies_once() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let mut cache_env = redirect_cache_home(cache_home.path());
+            cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            write_fixture(source_home.path());
+            let runtime = runtime();
+            let report = |zone: &str, day: &str| {
+                let options = options(
+                    source_home.path(),
+                    zone,
+                    GroupBy::ClientModel,
+                    WorktreeRollup::Separate,
+                    (Some(day), Some(day), None),
+                );
+                runtime.block_on(get_model_report_v2(options)).unwrap()
+            };
+
+            // Seoul: the last second before its midnight stays on 05-01.
+            assert_eq!(
+                day_totals(&report("Asia/Seoul", "2026-05-01")),
+                (150, 15, 2)
+            );
+            // Seoul 05-02 opens at exactly 15:00:00Z. The Claude response copied
+            // into two transcripts and the Codex rollout kept in both
+            // sessions/ and archived_sessions/ count once each.
+            let seoul_second_day = report("Asia/Seoul", "2026-05-02");
+            assert_eq!(day_totals(&seoul_second_day), (630, 63, 4));
+            let codex_row = seoul_second_day
+                .report
+                .entries
+                .iter()
+                .find(|entry| entry.client == "codex")
+                .unwrap();
+            assert_eq!((codex_row.input, codex_row.message_count), (130, 2));
+            // The same instants on the UTC calendar all fall on 05-01.
+            assert_eq!(day_totals(&report("UTC", "2026-05-01")), (410, 41, 4));
+            assert_eq!(day_totals(&report("UTC", "2026-05-02")), (370, 37, 2));
+            assert_eq!(
+                day_totals(&report("Asia/Seoul", "2026-05-03")),
+                (400, 40, 1)
+            );
+
+            let empty = report("Asia/Seoul", "2027-01-01");
+            assert!(empty.report.entries.is_empty());
+            assert_eq!(day_totals(&empty), (0, 0, 0));
+            assert_eq!(empty.report.total_cost.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(empty.undated_tokens, TokenBreakdown::default());
+        }
+
+        #[test]
+        #[serial]
+        fn model_report_with_a_recovery_ledger_still_applies_the_overlay() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let mut cache_env = redirect_cache_home(cache_home.path());
+            cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            let mut recovery_env =
+                crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_RECOVERY_DISABLE"]);
+            recovery_env.remove("TOKSCALE_RECOVERY_DISABLE");
+            write_fixture(source_home.path());
+            let home = source_home.path().to_string_lossy().into_owned();
+            let write_ledger = |ledger_home: &str| {
+                let ledger = serde_json::json!({
+                    "version": 1,
+                    "home": ledger_home,
+                    "messages": [{
+                        "client": "codex",
+                        "model_id": "gpt-5.5",
+                        "provider_id": "openai",
+                        "session_id": "wiped-session",
+                        "workspace_key": null,
+                        "workspace_label": null,
+                        // 2026-05-02T03:00:00Z, noon in Seoul.
+                        "timestamp": 1_777_690_800_000_i64,
+                        "date": "2026-05-02",
+                        "tokens": {
+                            "input": 150,
+                            "output": 0,
+                            "cache_read": 0,
+                            "cache_write": 0,
+                            "reasoning": 0
+                        },
+                        "cost": 0.0,
+                        "agent": null,
+                        "dedup_key": "wiped-session-row"
+                    }]
+                });
+                let path = recovery::path();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, serde_json::to_string(&ledger).unwrap()).unwrap();
+            };
+            let runtime = runtime();
+            let codex_input = |report: &ModelReportV2| {
+                report
+                    .report
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.client == "codex")
+                    .map(|entry| entry.input)
+                    .sum::<i64>()
+            };
+
+            for (ledger_home, applies) in [(home.as_str(), true), ("/not/this/home", false)] {
+                write_ledger(ledger_home);
+                assert_eq!(recovery::applicable(&home), applies);
+                for group_by in [GroupBy::ClientModel, GroupBy::Model] {
+                    for range in [
+                        (Some("2026-05-02"), Some("2026-05-02"), None),
+                        (None, None, None),
+                    ] {
+                        let options = options(
+                            source_home.path(),
+                            "Asia/Seoul",
+                            group_by.clone(),
+                            WorktreeRollup::Separate,
+                            range,
+                        );
+                        let streamed = runtime
+                            .block_on(get_model_report_v2(options.clone()))
+                            .unwrap();
+                        let collected = runtime.block_on(collected_report(&options));
+                        let label = format!("{ledger_home} {group_by} {range:?}");
+                        assert_same_report(&streamed, &collected, &label);
+                        let native_codex = if range.0.is_some() { 130 } else { 180 };
+                        let recovered = if applies { 150 } else { 0 };
+                        assert_eq!(codex_input(&streamed), native_codex + recovered, "{label}");
+                    }
+                }
+            }
+        }
+
+        fn message(
+            client: &str,
+            model: &str,
+            session: &str,
+            date: &str,
+            input: i64,
+            cost: f64,
+        ) -> UnifiedMessage {
+            let mut message = UnifiedMessage::new(
+                client,
+                model,
+                "anthropic",
+                session,
+                1_777_690_800_000,
+                TokenBreakdown {
+                    input,
+                    output: 1,
+                    ..Default::default()
+                },
+                cost,
+            );
+            message.date = date.into();
+            message
+        }
+
+        #[test]
+        fn model_report_sink_matches_collected_fold_for_undated_and_dated_messages() {
+            let mut undated = message("claude", "claude-opus-4-1", "desktop", "", 1_000, 0.5);
+            undated.timestamp = 0;
+            undated.date = claude_desktop::UNKNOWN_DATE.into();
+            assert!(claude_desktop::is_undated_balance(&undated));
+            // Costs whose f64 sum depends on the order they are added in.
+            let messages = vec![
+                message("claude", "claude-opus-4-1", "s1", "2026-05-01", 10, 0.1),
+                undated,
+                message("claude", "claude-opus-4-1", "s1", "2026-05-02", 20, 0.2),
+                message("codex", "claude-opus-4-1", "s2", "2026-05-02", 30, 0.3),
+                message("claude", "claude-opus-4-1", "s2", "2026-05-02", 40, 1e-17),
+                message("claude", "claude-sonnet-4-5", "s3", "2026-05-03", 50, 3.3),
+                message("claude", "claude-opus-4-1", "s1", "2026-05-03", 60, 0.7),
+            ];
+            let ranges = [
+                (None, None, None),
+                (Some("2026-05-02"), Some("2026-05-02"), None),
+                (Some("2026-05-02"), None, None),
+                (None, Some("2026-05-02"), None),
+                (None, None, Some("2026")),
+                (Some("2027-01-01"), Some("2027-01-01"), None),
+            ];
+            for group_by in GROUPINGS {
+                for (since, until, year) in ranges {
+                    let options = ReportOptions {
+                        since: since.map(str::to_string),
+                        until: until.map(str::to_string),
+                        year: year.map(str::to_string),
+                        group_by: group_by.clone(),
+                        ..Default::default()
+                    };
+                    let mut sink = ModelReportSink::new(&options);
+                    for message in messages.clone() {
+                        sink.accept(message);
+                    }
+                    let (entries, undated_tokens) = sink.finish();
+
+                    let filtered = filter_messages_for_report(messages.clone(), &options);
+                    let mut expected_undated = TokenBreakdown::default();
+                    for message in &filtered {
+                        if claude_desktop::is_undated_balance(message) {
+                            expected_undated.add_assign_saturating(&message.tokens);
+                        }
+                    }
+                    let expected = aggregate_model_usage_entries_with_rollup(
+                        filtered,
+                        &group_by,
+                        WorktreeRollup::Separate,
+                    );
+                    let label = format!("{group_by} {since:?} {until:?} {year:?}");
+                    assert_eq!(
+                        canonical_rows(&entries),
+                        canonical_rows(&expected),
+                        "{label}"
+                    );
+                    assert_eq!(undated_tokens, expected_undated, "{label}");
+                    let dated = since.is_some() || until.is_some() || year.is_some();
+                    assert_eq!(
+                        undated_tokens.input,
+                        if dated { 0 } else { 1_000 },
+                        "{label}"
+                    );
+                }
             }
         }
     }

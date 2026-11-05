@@ -17,6 +17,7 @@ use super::utils::{for_each_json_line_with_bytes, parse_json_line, parse_timesta
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -988,6 +989,13 @@ pub(crate) fn reconcile_prime_agent_messages(
             }
         }
     }
+    // Everything above only decides which attributions are represented, and it
+    // grows with the attribution history. Release it before the messages are
+    // regrouped below so the two never peak together.
+    drop(eligible);
+    drop(attribution_keys);
+    drop(unique_attributions);
+    drop(available_children);
 
     let mut adjustment_groups: HashMap<String, Vec<(PathBuf, &PrimeUsageAdjustment)>> =
         HashMap::new();
@@ -1020,10 +1028,16 @@ pub(crate) fn reconcile_prime_agent_messages(
                     .to_string()
             },
         );
-        if !grouped.contains_key(&identity) {
-            group_order.push(identity.clone());
+        match grouped.entry(identity) {
+            Entry::Occupied(mut group) => group.get_mut().push(message),
+            // Nearly every identity holds a single message. Growing its group
+            // with `push` would reserve room for four, holding the whole Prime
+            // history four times over; `vec![message]` reserves exactly one.
+            Entry::Vacant(slot) => {
+                group_order.push(slot.key().clone());
+                slot.insert(vec![message]);
+            }
         }
-        grouped.entry(identity).or_default().push(message);
     }
 
     let mut deduped = Vec::with_capacity(group_order.len());
