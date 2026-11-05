@@ -150,6 +150,7 @@ function makeAwaitableBuilder(result: unknown) {
     where: vi.fn(() => builder),
     for: vi.fn(() => builder),
     limit: vi.fn(() => builder),
+    orderBy: vi.fn(() => builder),
     then: (resolve: (value: unknown) => unknown) =>
       Promise.resolve(resolve(result)),
   };
@@ -323,6 +324,10 @@ function buildTx(initialDays: PersistedDay[]) {
         return persistedDays.map(({ sourceBreakdown }) => ({
           sourceBreakdown,
         }));
+      case 5:
+        return [{ leaderboardHidden: false }];
+      case 6:
+        return [];
       default:
         throw new Error(`unexpected SELECT #${selectNumber}`);
     }
@@ -336,7 +341,13 @@ function buildTx(initialDays: PersistedDay[]) {
       };
       return builder;
     }),
-    select: vi.fn(() => makeAwaitableBuilder(nextSelectResult())),
+    select: vi.fn((columns: Record<string, unknown>) =>
+      makeAwaitableBuilder(
+        "leaderboardHidden" in columns
+          ? [{ leaderboardHidden: false }]
+          : nextSelectResult()
+      ),
+    ),
     insert: vi.fn(() => {
       const builder = {
         values: vi.fn(() => builder),

@@ -1,12 +1,19 @@
 import { NextResponse, after } from "next/server";
+import * as nextCache from "next/cache";
 import { revalidateTag } from "next/cache";
 import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
-import { and, eq, sql } from "drizzle-orm";
+import { users, moderationActions } from "@/lib/db/schema";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
   type SubmissionData,
 } from "@/lib/validation/submission";
+import {
+  evaluateSubmissionForWithholding,
+  getWithholdingUsageTotals,
+  hasAdminUnhideOverride,
+} from "@/lib/moderation/withholding";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
@@ -494,6 +501,8 @@ async function recordRatchetCensus(params: {
   }
 }
 
+class SubmissionUserMissingError extends Error {}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -614,6 +623,19 @@ export async function POST(request: Request) {
       isBackfill ? "backfill" : "cli"
     );
     const result = await db.transaction(async (tx) => {
+      // Account deletion locks the parent before cascading to tokens and
+      // submissions. Match that order and keep manual moderation serialized
+      // through commit. NO KEY UPDATE still allows unrelated FK checks.
+      const [currentUser] = await tx
+        .select({ leaderboardHidden: users.leaderboardHidden })
+        .from(users)
+        .where(eq(users.id, tokenRecord.userId))
+        .for("no key update")
+        .limit(1);
+      if (!currentUser) {
+        throw new SubmissionUserMissingError();
+      }
+
       await tx
         .update(apiTokens)
         .set({ lastUsedAt: new Date() })
@@ -1670,6 +1692,9 @@ export async function POST(request: Request) {
 
       const allDays = await tx
         .select({
+          date: dailyBreakdown.date,
+          tokens: dailyBreakdown.tokens,
+          outputTokens: dailyBreakdown.outputTokens,
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
         })
         .from(dailyBreakdown)
@@ -1691,7 +1716,8 @@ export async function POST(request: Request) {
               for (const modelId of Object.keys(cd.models)) {
                 allModels.add(modelId);
               }
-            } else if (cd.modelId) {
+            }
+            if (cd.modelId) {
               allModels.add(cd.modelId);
             }
             totalCacheRead += cd.cacheRead || 0;
@@ -1700,6 +1726,23 @@ export async function POST(request: Request) {
           }
         }
       }
+
+      const mergedActiveTimeMs = Math.max(
+        deviceTotals?.totalActiveTimeMs ?? 0,
+        storedSessionMetrics?.totalActiveTimeMs ?? 0,
+      );
+      const mergedLongestContinuousMs = Math.max(
+        deviceTotals?.longestContinuousMs ?? 0,
+        storedSessionMetrics?.longestContinuousMs ?? 0,
+      );
+      const mergedMaxConcurrentSessions = Math.max(
+        deviceTotals?.maxConcurrentSessions ?? 0,
+        storedSessionMetrics?.maxConcurrentSessions ?? 0,
+      );
+      const mergedSessionCount = Math.max(
+        deviceTotals?.sessionCount ?? 0,
+        storedSessionMetrics?.sessionCount ?? 0,
+      );
 
       // ------------------------------------------
       // STEP 3e: Update submission record
@@ -1744,26 +1787,80 @@ export async function POST(request: Request) {
           // pre-migration TZ re-split stays frozen at the inflated value; the
           // floor can only hold it, never correct it down. New inflation is
           // prevented, historical inflation is not repaired.
-          totalActiveTimeMs: Math.max(
-            deviceTotals?.totalActiveTimeMs ?? 0,
-            storedSessionMetrics?.totalActiveTimeMs ?? 0,
-          ),
-          longestContinuousMs: Math.max(
-            deviceTotals?.longestContinuousMs ?? 0,
-            storedSessionMetrics?.longestContinuousMs ?? 0,
-          ),
-          maxConcurrentSessions: Math.max(
-            deviceTotals?.maxConcurrentSessions ?? 0,
-            storedSessionMetrics?.maxConcurrentSessions ?? 0,
-          ),
-          sessionCount: Math.max(
-            deviceTotals?.sessionCount ?? 0,
-            storedSessionMetrics?.sessionCount ?? 0,
-          ),
+          totalActiveTimeMs: mergedActiveTimeMs,
+          longestContinuousMs: mergedLongestContinuousMs,
+          maxConcurrentSessions: mergedMaxConcurrentSessions,
+          sessionCount: mergedSessionCount,
           mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
+
+      // Only final ledger volume can change account state.
+      const withholdingUsage = getWithholdingUsageTotals(allDays);
+      const withholdingResult = evaluateSubmissionForWithholding(withholdingUsage);
+      let autoWithheld = false;
+      if (withholdingResult.shouldWithhold) {
+        if (!currentUser.leaderboardHidden) {
+          const [latestModAction] = await tx
+            .select({
+              action: moderationActions.action,
+              actorUserId: moderationActions.actorUserId,
+              actorUsername: moderationActions.actorUsername,
+            })
+            .from(moderationActions)
+            .where(eq(moderationActions.targetUserId, tokenRecord.userId))
+            .orderBy(desc(moderationActions.createdAt), desc(moderationActions.id))
+            .limit(1);
+
+          const isAdminApproved = hasAdminUnhideOverride(latestModAction);
+
+          if (!isAdminApproved) {
+            const updatedRows = await tx
+              .update(users)
+              .set({ leaderboardHidden: true, updatedAt: new Date() })
+              .where(
+                and(
+                  eq(users.id, tokenRecord.userId),
+                  eq(users.leaderboardHidden, false),
+                  sql`NOT EXISTS (
+                    SELECT 1 FROM (
+                      SELECT action, actor_user_id, actor_username
+                      FROM ${moderationActions}
+                      WHERE ${moderationActions.targetUserId} = ${tokenRecord.userId}
+                      ORDER BY ${moderationActions.createdAt} DESC, ${moderationActions.id} DESC
+                      LIMIT 1
+                    ) AS latest_mod
+                    WHERE latest_mod.action = 'unhide'
+                      AND (
+                        latest_mod.actor_user_id IS NOT NULL
+                        OR (
+                          LENGTH(TRIM(COALESCE(latest_mod.actor_username, ''))) > 0
+                          AND LOWER(TRIM(latest_mod.actor_username)) <> 'system'
+                        )
+                      )
+                  )`,
+                ),
+              )
+              .returning({ id: users.id });
+
+            if (updatedRows.length > 0) {
+              autoWithheld = true;
+              await tx.insert(moderationActions).values({
+                targetUserId: tokenRecord.userId,
+                targetUsername: tokenRecord.username,
+                actorUserId: null,
+                actorUsername: "system",
+                action: "hide",
+                reason: "Under investigation",
+                // Match manual decisions: timestamp the change under the user
+                // lock rather than the submission transaction's BEGIN time.
+                createdAt: sql`clock_timestamp()`,
+              });
+            }
+          }
+        }
+      }
 
       // Register durable post-commit work before the transaction exposes its
       // daily rows. If this invocation is interrupted after commit, a later
@@ -1782,6 +1879,9 @@ export async function POST(request: Request) {
       return {
         submissionId,
         isNewSubmission,
+        autoWithheld,
+        withholdingResult,
+        withholdingUsage,
         metrics: {
           totalTokens:
             aggregates.totalTokens >= 9007199254740991
@@ -1797,6 +1897,17 @@ export async function POST(request: Request) {
         },
       };
     });
+
+    // Log after commit so failed submissions never look like accepted
+    // observations. Include clean decisions to preserve the denominator.
+    console.warn(`[moderation] ${JSON.stringify({
+      event: "submission_withholding_evaluated",
+      ruleVersion: 1,
+      userId: tokenRecord.userId,
+      ...result.withholdingResult,
+      usage: result.withholdingUsage,
+      applied: result.autoWithheld,
+    })}`);
 
     // Phase 1 / 1.5 census. Deliberately after the transaction commits, and
     // deliberately unable to affect the response below.
@@ -1814,6 +1925,10 @@ export async function POST(request: Request) {
       revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
       revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+      if (result.autoWithheld && "revalidatePath" in nextCache && typeof nextCache.revalidatePath === "function") {
+        nextCache.revalidatePath("/");
+        nextCache.revalidatePath("/leaderboard");
+      }
     } catch (e) {
       console.error("Public cache invalidation failed:", e);
     }
@@ -1853,6 +1968,9 @@ export async function POST(request: Request) {
       warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {
+    if (error instanceof SubmissionUserMissingError) {
+      return NextResponse.json({ error: "Invalid API token" }, { status: 401 });
+    }
     console.error("Submit error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
