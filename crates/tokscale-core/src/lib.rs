@@ -3697,6 +3697,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 }),
         );
     }
+    let copilot_cli_turn_index =
+        sessions::copilot_session_state::SessionStateTurnIndex::new(copilot_cli_turn_timestamps);
     if let Some(db_path) = &scan_result.copilot_session_store_db {
         let mut session_store_msgs =
             sessions::copilot_session_store::parse_copilot_session_store_db(db_path);
@@ -3707,19 +3709,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
             {
                 continue;
             }
-            if let Some(existing_ts) = copilot_cli_turn_timestamps.get(&message.session_id) {
-                if existing_ts
-                    .iter()
-                    .any(|ts| (ts - message.timestamp).abs() <= 20)
-                {
-                    continue;
-                }
+            if copilot_cli_turn_index.overlaps(&message.session_id, message.timestamp) {
+                continue;
             }
-            // Store rows must not feed the overlap map: it exists to collapse
-            // the CLI-session-state lane against the store lane, and kept
-            // store turns feeding it would collapse distinct store turns
-            // under 20ms apart. Cross-lane replay dedup happens below via
-            // the dedup-key and session-timestamp sets.
             apply_pricing_if_available(&mut message, pricing);
             all_messages.push(message);
         }
@@ -7715,6 +7707,8 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             copilot_unified_msgs.push(message);
         }
     }
+    let copilot_cli_turn_index =
+        sessions::copilot_session_state::SessionStateTurnIndex::new(copilot_cli_turn_timestamps);
     if let Some(db_path) = &scan_result.copilot_session_store_db {
         let session_store_msgs =
             sessions::copilot_session_store::parse_copilot_session_store_db(db_path);
@@ -7724,18 +7718,9 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             {
                 continue;
             }
-            if let Some(existing_ts) = copilot_cli_turn_timestamps.get(&message.session_id) {
-                if existing_ts
-                    .iter()
-                    .any(|ts| (ts - message.timestamp).abs() <= 20)
-                {
-                    continue;
-                }
+            if copilot_cli_turn_index.overlaps(&message.session_id, message.timestamp) {
+                continue;
             }
-            // Store rows must not feed the overlap map: it collapses the
-            // CLI-session-state lane against the store lane, and kept store
-            // turns feeding it would collapse distinct store turns under
-            // 20ms apart.
             copilot_unified_msgs.push(message);
         }
     }
@@ -9891,6 +9876,180 @@ mod tests {
         direct_rows.sort_unstable();
         assert_eq!(direct_rows, streamed_rows);
         assert_eq!(direct.counts.get(ClientId::Copilot), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn copilot_store_turns_only_overlap_file_turns_in_both_scan_paths() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let copilot_dir = source_home.path().join(".copilot");
+        let event_dir = copilot_dir.join("session-state/mixed");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        // Deliberately out of timestamp order: the shared index must sort it.
+        std::fs::write(
+            event_dir.join("events.jsonl"),
+            concat!(
+                "{\"type\":\"session.start\",\"data\":{\"sessionId\":\"mixed\"},\"timestamp\":\"2026-11-01T11:59:00.000Z\"}\n",
+                "{\"type\":\"session.usage_record\",\"id\":\"later\",\"data\":{\"usage\":{\"model\":\"gpt-4o\",\"inputTokens\":50}},\"timestamp\":\"2026-11-01T12:01:00.000Z\"}\n",
+                "{\"type\":\"session.usage_record\",\"id\":\"earlier\",\"data\":{\"usage\":{\"model\":\"gpt-4o\",\"inputTokens\":40}},\"timestamp\":\"2026-11-01T12:00:00.000Z\"}\n",
+            ),
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(copilot_dir.join("session-store.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, created_at TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER PRIMARY KEY, session_id TEXT, turn_index INTEGER,
+                 model TEXT, copilot_usage_model TEXT, input_tokens INTEGER,
+                 output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                 reasoning_tokens INTEGER, total_nano_aiu INTEGER, duration_ms INTEGER,
+                 created_at TEXT
+             );",
+        )
+        .unwrap();
+        for (session, timestamp, input) in [
+            ("db-only", "2026-11-01T12:00:00.000Z", 100),
+            ("db-only", "2026-11-01T12:00:00.000Z", 100),
+            ("db-only", "2026-11-01T12:00:00.010Z", 100),
+            ("db-only", "2026-11-01T12:00:00.020Z", 100),
+            ("db-only", "2026-11-01T12:00:00.021Z", 100),
+            ("mixed", "2026-11-01T12:00:00.000Z", 999),
+            ("mixed", "2026-11-01T12:00:00.019Z", 999),
+            ("mixed", "2026-11-01T12:00:00.020Z", 999),
+            ("mixed", "2026-11-01T12:00:00.021Z", 30),
+            ("mixed", "2026-11-01T12:00:00.030Z", 31),
+            ("mixed", "2026-11-01T12:01:00.000Z", 999),
+        ] {
+            conn.execute(
+                "INSERT INTO assistant_usage_events
+                 (session_id, turn_index, model, input_tokens, created_at)
+                 VALUES (?1, 0, 'gpt-4o', ?2, ?3)",
+                rusqlite::params![session, input, timestamp],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let clients = ["copilot".to_string()];
+        for pass in ["first", "repeat"] {
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(
+                messages.len(),
+                9,
+                "{pass}: every independent store ID survives"
+            );
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 651);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|m| m.session_id == "db-only")
+                    .count(),
+                5,
+                "a file from another session must not suppress these DB turns"
+            );
+            let mut mixed_inputs = messages
+                .iter()
+                .filter(|m| m.session_id == "mixed")
+                .map(|m| m.tokens.input)
+                .collect::<Vec<_>>();
+            mixed_inputs.sort_unstable();
+            assert_eq!(mixed_inputs, vec![30, 31, 40, 50]);
+            let mut streamed_rows = messages
+                .iter()
+                .map(|m| (m.session_id.clone(), m.timestamp, m.tokens.input))
+                .collect::<Vec<_>>();
+            streamed_rows.sort_unstable();
+            let direct = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(clients.to_vec()),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            assert_eq!(direct.counts.get(ClientId::Copilot), 9, "{pass}");
+            let mut direct_rows = direct
+                .messages
+                .iter()
+                .map(|m| (m.session_id.clone(), m.timestamp, m.input))
+                .collect::<Vec<_>>();
+            direct_rows.sort_unstable();
+            assert_eq!(direct_rows, streamed_rows, "{pass}: scan paths agree");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn copilot_shutdown_tracker_keys_survive_both_scan_paths() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let event_dir = source_home
+            .path()
+            .join(".copilot/session-state/auto-session");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        std::fs::write(
+            event_dir.join("events.jsonl"),
+            concat!(
+                "{\"type\":\"session.start\",\"data\":{\"sessionId\":\"auto-session\"},\"id\":\"start\",\"timestamp\":\"2026-11-01T12:00:00.000Z\"}\n",
+                "{\"type\":\"session.shutdown\",\"id\":\"shutdown\",\"timestamp\":\"2026-11-01T12:01:00.000Z\",\"data\":{\"currentModel\":\"gpt-5.2\",\"modelMetrics\":{\"auto\":{\"usage\":{\"inputTokens\":100,\"outputTokens\":10}},\"gpt-5.2\":{\"usage\":{\"inputTokens\":200,\"outputTokens\":20}}}}}\n",
+            ),
+        )
+        .unwrap();
+        let clients = ["copilot".to_string()];
+        for pass in ["first", "repeat"] {
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(
+                messages.len(),
+                2,
+                "{pass}: tracker counters are independent"
+            );
+            assert!(messages.iter().all(|m| m.model_id == "gpt-5.2"));
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 300);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 30);
+            let keys = messages
+                .iter()
+                .map(|m| m.dedup_key.as_deref().unwrap())
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                keys,
+                HashSet::from([
+                    "copilot-session-event:auto-session:shutdown:shutdown:auto",
+                    "copilot-session-event:auto-session:shutdown:shutdown:gpt-5.2",
+                ])
+            );
+
+            let direct = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(clients.to_vec()),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            assert_eq!(direct.counts.get(ClientId::Copilot), 2, "{pass}");
+            assert!(direct.messages.iter().all(|m| m.model_id == "gpt-5.2"));
+            assert_eq!(direct.messages.iter().map(|m| m.input).sum::<i64>(), 300);
+            assert_eq!(direct.messages.iter().map(|m| m.output).sum::<i64>(), 30);
+        }
     }
 
     #[test]
