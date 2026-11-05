@@ -1986,7 +1986,10 @@ fn parser_version(client: ClientId) -> u32 {
         // request_id instead of database row id. v4->v5 entries switch to the
         // message_nodes row-stats fingerprint, which file-metadata entries
         // cannot drive — they take one cold scan to acquire the new mark.
-        ClientId::DevinCli => 5,
+        // v5->v6 retires the row-stats cache: in-place usage edits and parent
+        // changes could leave stale rows even when those statistics matched.
+        // Rebuild once using the DB+WAL fingerprint and full-snapshot parser.
+        ClientId::DevinCli => 6,
         // Desktop v1 parsed a non-ACP shape and did not track its CLI title
         // lookup; its timestamp handling is unaffected by the #890 follow-up.
         ClientId::DevinDesktop => 2,
@@ -6274,8 +6277,8 @@ mod tests {
     }
 
     #[test]
-    fn test_devin_parser_versions_invalidate_v4_entries() {
-        assert_eq!(parser_version(ClientId::DevinCli), 5);
+    fn test_devin_parser_versions_invalidate_v5_row_stats_entries() {
+        assert_eq!(parser_version(ClientId::DevinCli), 6);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }
 
@@ -6577,7 +6580,7 @@ mod tests {
         // cache entries are also invalidated.
         assert_eq!(parser_version(ClientId::Junie), 3);
         assert_eq!(parser_version(ClientId::Jcode), 8);
-        assert_eq!(parser_version(ClientId::DevinCli), 5);
+        assert_eq!(parser_version(ClientId::DevinCli), 6);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 3);
         assert_eq!(parser_version(ClientId::Kiro), 3);
