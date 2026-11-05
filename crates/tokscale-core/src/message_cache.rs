@@ -1618,12 +1618,24 @@ impl CacheIdentity {
 /// FNV-1a rather than `DefaultHasher`: this value is persisted, and
 /// `DefaultHasher`'s output is explicitly not stable across Rust releases.
 pub fn parser_generation() -> u64 {
+    parser_generation_for_versions(
+        ClientId::ALL.iter().copied().map(parser_version),
+        CLAUDE_RETAINED_PARSE_GENERATION,
+    )
+}
+
+// Keep the inputs separate so regression fixtures can freeze the source-parser
+// roster without unrelated parser bumps masking a derived-cache invalidation.
+fn parser_generation_for_versions(
+    versions: impl IntoIterator<Item = u32>,
+    claude_retained_generation: u32,
+) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
     let mut acc = FNV_OFFSET_BASIS;
-    for client in ClientId::ALL {
-        for byte in parser_version(client).to_le_bytes() {
+    for version in versions {
+        for byte in version.to_le_bytes() {
             acc ^= u64::from(byte);
             acc = acc.wrapping_mul(FNV_PRIME);
         }
@@ -1631,7 +1643,7 @@ pub fn parser_generation() -> u64 {
     // Claude's retention-preserving rebuilds do not bump its source-cache
     // version: doing so would discard compacted history. Derived totals must
     // still refresh when those live transcripts are reparsed.
-    for byte in CLAUDE_RETAINED_PARSE_GENERATION.to_le_bytes() {
+    for byte in claude_retained_generation.to_le_bytes() {
         acc ^= u64::from(byte);
         acc = acc.wrapping_mul(FNV_PRIME);
     }
@@ -1640,6 +1652,11 @@ pub fn parser_generation() -> u64 {
     acc ^= 2; // Claude Desktop parser generation: preserve full request identities
     acc = acc.wrapping_mul(FNV_PRIME);
     // The Magpie overlay changes derived attribution, not source-cache rows.
+    acc ^= 1;
+    acc = acc.wrapping_mul(FNV_PRIME);
+    // Model-name folding (#1603) changes derived grouping keys, not
+    // source-cache rows. Without a bump, warm aggregate caches replay
+    // pre-fold split rows until an unrelated parser bump.
     acc ^= 1;
     acc = acc.wrapping_mul(FNV_PRIME);
     acc
@@ -1981,7 +1998,12 @@ fn parser_version(client: ClientId) -> u32 {
         // request_id instead of database row id. v4->v5 entries switch to the
         // message_nodes row-stats fingerprint, which file-metadata entries
         // cannot drive — they take one cold scan to acquire the new mark.
-        ClientId::DevinCli => 5,
+        // v5->v6 retires the row-stats cache: in-place usage edits and parent
+        // changes could leave stale rows even when those statistics matched.
+        // Rebuild once using the DB+WAL fingerprint and full-snapshot parser.
+        // v6->v7 also treats malformed assistant JSON as an incomplete read;
+        // v6 could cache a valid prefix while silently skipping corrupt rows.
+        ClientId::DevinCli => 7,
         // Desktop v1 parsed a non-ACP shape and did not track its CLI title
         // lookup; its timestamp handling is unaffected by the #890 follow-up.
         ClientId::DevinDesktop => 2,
@@ -6269,8 +6291,8 @@ mod tests {
     }
 
     #[test]
-    fn test_devin_parser_versions_invalidate_v4_entries() {
-        assert_eq!(parser_version(ClientId::DevinCli), 5);
+    fn test_devin_parser_versions_invalidate_v5_row_stats_entries() {
+        assert_eq!(parser_version(ClientId::DevinCli), 7);
         assert_eq!(parser_version(ClientId::DevinDesktop), 2);
     }
 
@@ -6572,7 +6594,7 @@ mod tests {
         // cache entries are also invalidated.
         assert_eq!(parser_version(ClientId::Junie), 3);
         assert_eq!(parser_version(ClientId::Jcode), 8);
-        assert_eq!(parser_version(ClientId::DevinCli), 5);
+        assert_eq!(parser_version(ClientId::DevinCli), 7);
         assert_eq!(parser_version(ClientId::Zcode), 3);
         assert_eq!(parser_version(ClientId::OpenCodeReview), 3);
         assert_eq!(parser_version(ClientId::Kiro), 3);
@@ -10134,6 +10156,84 @@ mod tests {
                 "the {attempt} Codebuff scan must not claim a Freebuff chat, got {scanned:?}"
             );
         }
+    }
+
+    #[test]
+    fn model_prefix_folding_generation_fixture() {
+        // Captured at main 4b5581bf before the folding suffix was added:
+        // parser_generation() == 13_118_109_051_034_715_285. Freeze its input
+        // roster, not today's parser_version() values: an unrelated bump
+        // (such as Devin's) must not hide removal of the folding byte.
+        const PRE_FOLD_GENERATION: u64 = 13_118_109_051_034_715_285;
+        const POST_FOLD_GENERATION: u64 = 1_921_279_416_654_366_588;
+        const PRE_FOLD_VERSIONS: &[u32] = &[
+            3,  // OpenCode
+            2,  // Claude
+            20, // Codex
+            6,  // Cursor
+            1,  // Gemini
+            2,  // Amp
+            10, // Droid
+            8,  // OpenClaw
+            8,  // Pi
+            5,  // Kimi
+            3,  // Qwen
+            3,  // RooCode
+            3,  // KiloCode
+            1,  // Mux
+            2,  // Kilo
+            1,  // Crush
+            4,  // Hermes
+            12, // Copilot
+            1,  // Goose
+            2,  // Codebuff
+            1,  // Antigravity
+            1,  // Zed
+            3,  // Kiro
+            1,  // Trae
+            1,  // Warp
+            7,  // Cline
+            1,  // Gjc
+            9,  // Grok
+            8,  // Jcode
+            1,  // CommandCode
+            6,  // MiMoCode
+            1,  // AntigravityCli
+            3,  // Junie
+            3,  // Zcode
+            3,  // OpenCodeReview
+            3,  // CodeBuddy
+            3,  // WorkBuddy
+            5,  // DevinCli
+            2,  // DevinDesktop
+            7,  // Senpi
+            2,  // Augment
+            7,  // Kimchi
+            4,  // Reasonix
+            9,  // PrimeAgent
+            2,  // Freebuff
+            2,  // CherryStudio
+            10, // Dsh
+            1,  // Mcode
+            3,  // Fx
+            7,  // Omp
+            1,  // LmStudio
+            2,  // Unsloth
+            2,  // Hindsight
+            6,  // MiMoDesktop
+            3,  // Muse
+            1,  // AntigravityExtension
+            1,  // Aside
+            1,  // Vibe
+            5,  // Proma
+            2,  // Bb
+        ];
+        let generation = parser_generation_for_versions(PRE_FOLD_VERSIONS.iter().copied(), 4);
+        assert_ne!(generation, PRE_FOLD_GENERATION);
+        assert_eq!(
+            generation, POST_FOLD_GENERATION,
+            "the folding suffix must invalidate this fixed pre-fold parser roster"
+        );
     }
 
     /// The bump is what makes the fix visible to a warm TUI. Its aggregate
