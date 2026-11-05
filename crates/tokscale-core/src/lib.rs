@@ -2743,16 +2743,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
     ) -> Option<SourceParse> {
         let old_sessions =
             u64::from_le_bytes(entry.fingerprint.content_hash[8..16].try_into().ok()?);
-        let new_sessions =
-            u64::from_le_bytes(fingerprint.content_hash[8..16].try_into().ok()?);
+        let new_sessions = u64::from_le_bytes(fingerprint.content_hash[8..16].try_into().ok()?);
         if old_sessions != new_sessions {
             return None;
         }
         let after_row_id = entry.fingerprint.modified_ns as i64;
-        let (appended_count, appended_sum) = sessions::devin::devin_cli_appended_stats(
-            path,
-            after_row_id,
-        )?;
+        let (appended_count, appended_sum) =
+            sessions::devin::devin_cli_appended_stats(path, after_row_id)?;
         let old_sum = i64::from_le_bytes(entry.fingerprint.content_hash[..8].try_into().ok()?);
         let new_sum = i64::from_le_bytes(fingerprint.content_hash[..8].try_into().ok()?);
         if fingerprint.size as i64 - entry.fingerprint.size as i64 != appended_count
@@ -2761,17 +2758,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
             return None;
         }
         let mut seen = std::collections::HashSet::new();
-        let mut messages = Vec::with_capacity(
-            entry.messages.len() + appended_count.max(0) as usize,
-        );
-        for message in entry
-            .messages
-            .iter()
-            .cloned()
-            .chain(sessions::devin::parse_devin_cli_sqlite_after(
-                path,
-                after_row_id,
-            ))
+        let mut messages =
+            Vec::with_capacity(entry.messages.len() + appended_count.max(0) as usize);
+        for message in
+            entry
+                .messages
+                .iter()
+                .cloned()
+                .chain(sessions::devin::parse_devin_cli_sqlite_after(
+                    path,
+                    after_row_id,
+                ))
         {
             let identity = (
                 message.session_id.clone(),

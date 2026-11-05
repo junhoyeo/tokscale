@@ -268,10 +268,7 @@ pub(crate) fn devin_cli_sessions_hash(db_path: &Path) -> Option<u64> {
 /// rowid index. Compared against the deltas between two fingerprints this
 /// proves a diff was pure append; any deletion or id reuse below the mark
 /// makes the identities fail.
-pub(crate) fn devin_cli_appended_stats(
-    db_path: &Path,
-    after_row_id: i64,
-) -> Option<(i64, i64)> {
+pub(crate) fn devin_cli_appended_stats(db_path: &Path, after_row_id: i64) -> Option<(i64, i64)> {
     let conn = open_readonly_sqlite_opt(db_path)?;
     let mut stats = None;
     sqlite_for_each_row_on_with_params(
