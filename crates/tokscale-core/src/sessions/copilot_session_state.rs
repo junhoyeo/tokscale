@@ -7,15 +7,46 @@
 
 use super::copilot_desktop::{collect_shutdown_usage, shutdown_deltas, ShutdownUsage};
 use super::utils::{lossy_lines, parse_timestamp_str};
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, SharedStr, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
 const NANO_AIU_PER_USD: f64 = 1e11;
+
+/// File-recorded turns take precedence over copies in the session-store DB.
+/// Freeze the file timestamps before filtering DB rows so distinct store rows
+/// never suppress each other. Sorting once avoids a full per-session scan for
+/// every store row, including when event files are not in timestamp order.
+pub(crate) struct SessionStateTurnIndex {
+    timestamps: HashMap<SharedStr, Vec<i64>>,
+}
+
+impl SessionStateTurnIndex {
+    pub(crate) fn new(mut timestamps: HashMap<SharedStr, Vec<i64>>) -> Self {
+        for values in timestamps.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        Self { timestamps }
+    }
+
+    pub(crate) fn overlaps(&self, session_id: &str, timestamp: i64) -> bool {
+        const MAX_TIMESTAMP_JITTER_MS: u64 = 20;
+        let Some(timestamps) = self.timestamps.get(session_id) else {
+            return false;
+        };
+        let lower_bound = timestamp.saturating_sub(MAX_TIMESTAMP_JITTER_MS as i64);
+        let candidate = timestamps.partition_point(|value| *value < lower_bound);
+        timestamps
+            .get(candidate)
+            .is_some_and(|value| value.abs_diff(timestamp) <= MAX_TIMESTAMP_JITTER_MS)
+    }
+}
 
 pub fn parse_copilot_session_state_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut messages = Vec::new();
@@ -134,8 +165,8 @@ pub(crate) fn parse_copilot_session_state_file_into(
                 for delta in attribution.deltas {
                     let msg = shutdown_to_message(
                         &session_id,
-                        workspace_key.clone(),
-                        workspace_label.clone(),
+                        workspace_key.as_deref(),
+                        workspace_label.as_deref(),
                         delta,
                     );
                     if let Some(msg) = msg {
@@ -147,7 +178,7 @@ pub(crate) fn parse_copilot_session_state_file_into(
 
         for mut msg in usage_records {
             if msg.workspace_key.is_none() && workspace_key.is_some() {
-                msg.set_workspace(workspace_key.clone(), workspace_label.clone());
+                msg.set_workspace(workspace_key.as_deref(), workspace_label.as_deref());
             }
             sink(path, msg);
         }
@@ -159,8 +190,8 @@ pub(crate) fn parse_copilot_session_state_file_into(
         for delta in attribution.deltas {
             let msg = shutdown_to_message(
                 &session_id,
-                workspace_key.clone(),
-                workspace_label.clone(),
+                workspace_key.as_deref(),
+                workspace_label.as_deref(),
                 delta,
             );
             if let Some(msg) = msg {
@@ -189,14 +220,10 @@ fn parse_usage_record(
         .or_else(|| usage.get("modelDisplayName"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .map(str::to_string)
-        .or_else(|| current_model.map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let provider_id = inferred_provider_from_model(&model_id)
-        .unwrap_or("github-copilot")
-        .to_string();
+        .filter(|model| !model.is_empty())
+        .or(current_model)
+        .unwrap_or("unknown");
+    let provider_id = inferred_provider_from_model(model_id).unwrap_or("github-copilot");
 
     let input_tokens = usage
         .get("inputTokens")
@@ -294,19 +321,16 @@ fn parse_usage_record(
 
 fn shutdown_to_message(
     session_id: &str,
-    workspace_key: Option<String>,
-    workspace_label: Option<String>,
+    workspace_key: Option<&str>,
+    workspace_label: Option<&str>,
     delta: ShutdownUsage,
 ) -> Option<UnifiedMessage> {
     let model_id = delta
         .attributed_model
-        .clone()
-        .filter(|m| !m.is_empty() && m != "auto")
-        .unwrap_or(delta.model);
-
-    let provider_id = inferred_provider_from_model(&model_id)
-        .unwrap_or("github-copilot")
-        .to_string();
+        .as_deref()
+        .filter(|model| !model.is_empty() && *model != "auto")
+        .unwrap_or(&delta.model);
+    let provider_id = inferred_provider_from_model(model_id).unwrap_or("github-copilot");
 
     let cache_read = delta.cache_read.max(0);
     let cache_write = delta.cache_write.max(0);
@@ -327,9 +351,13 @@ fn shutdown_to_message(
         return None;
     }
 
+    // The tracker (`modelMetrics`) counts `auto` as its own counter, so the
+    // key must name the tracker model, not the resolved attribution — keying
+    // by the resolved model collides a shutdown that carries both and drops
+    // a row (mirrors the desktop parser's keying).
     let dedup_key = format!(
         "copilot-session-event:{}:shutdown:{}:{}",
-        session_id, delta.event_id, model_id
+        session_id, delta.event_id, delta.model
     );
 
     let mut message = UnifiedMessage::new_with_dedup(
@@ -386,6 +414,46 @@ fn read_sidecar_workspace_cwd(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn turn_index_sorts_file_timestamps_and_applies_only_cross_lane_jitter() {
+        let index = SessionStateTurnIndex::new(HashMap::from([
+            ("session-a".into(), vec![3_000, 1_000, 1_000]),
+            ("session-empty".into(), Vec::new()),
+        ]));
+
+        for timestamp in [980, 981, 1_000, 1_019, 1_020, 2_980, 3_020] {
+            assert!(index.overlaps("session-a", timestamp), "{timestamp}");
+        }
+        for timestamp in [979, 1_021, 2_000, 2_979, 3_021] {
+            assert!(!index.overlaps("session-a", timestamp), "{timestamp}");
+        }
+        assert!(!index.overlaps("another-session", 1_000));
+        assert!(!index.overlaps("session-empty", 1_000));
+        // Checking a retained DB row must not cause the next nearby DB row
+        // to disappear when neither has a counterpart in the event file.
+        assert!(!index.overlaps("session-a", 2_000));
+        assert!(!index.overlaps("session-a", 2_010));
+    }
+
+    #[test]
+    fn turn_index_handles_timestamp_extremes_without_overflow() {
+        let index = SessionStateTurnIndex::new(HashMap::from([
+            ("earliest".into(), vec![i64::MIN]),
+            ("latest".into(), vec![i64::MAX]),
+            ("pre-epoch".into(), vec![-1]),
+        ]));
+
+        assert!(index.overlaps("earliest", i64::MIN));
+        assert!(index.overlaps("earliest", i64::MIN + 20));
+        assert!(!index.overlaps("earliest", i64::MIN + 21));
+        assert!(index.overlaps("latest", i64::MAX));
+        assert!(index.overlaps("latest", i64::MAX - 20));
+        assert!(!index.overlaps("latest", i64::MAX - 21));
+        assert!(!index.overlaps("earliest", i64::MAX));
+        assert!(!index.overlaps("latest", i64::MIN));
+        assert!(!index.overlaps("pre-epoch", i64::MAX));
+    }
 
     #[test]
     fn parses_usage_record_event_file_with_exact_fields() {
@@ -449,6 +517,37 @@ mod tests {
         assert_eq!(msgs[0].tokens.output, 100);
         assert_eq!(msgs[0].tokens.cache_read, 500);
         assert_eq!(msgs[0].tokens.reasoning, 10);
+    }
+
+    /// A shutdown under an `auto` tracker key that also names the concrete
+    /// attributed model must be keyed by the tracker model — the desktop
+    /// parser convention. Keying by the resolved model would collide the two
+    /// counter identities and drop a row.
+    #[test]
+    fn shutdown_dedup_key_names_the_tracker_model_not_the_resolved_one() {
+        let message = shutdown_to_message(
+            "sess-auto",
+            None,
+            None,
+            ShutdownUsage {
+                event_id: "shut-auto-1".to_string(),
+                timestamp_ms: 1_762_000_000_000,
+                model: "auto".to_string(),
+                attributed_model: Some("gpt-5.2".to_string()),
+                input: 100,
+                output: 10,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+        )
+        .expect("the shutdown carries usage");
+
+        assert_eq!(message.model_id, "gpt-5.2");
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("copilot-session-event:sess-auto:shutdown:shut-auto-1:auto")
+        );
     }
 
     #[test]

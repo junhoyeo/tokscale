@@ -1377,6 +1377,83 @@ mod tests {
         );
     }
 
+    /// An otherwise matching warm aggregate from before model-prefix folding
+    /// must not paint the old split rows. The core generation fixture separately
+    /// freezes the parser roster so unrelated bumps cannot mask a removed fold
+    /// byte; this test exercises the actual persisted-cache admission path.
+    #[test]
+    #[serial]
+    fn model_prefix_folding_rejects_pre_fold_warm_cache() {
+        // Measured at main 4b5581bf; also pinned with its complete parser
+        // roster by message_cache::tests::model_prefix_folding_generation_fixture.
+        const PRE_FOLD_GENERATION: u64 = 13_118_109_051_034_715_285;
+        let temp_dir = TempDir::new().unwrap();
+        let _env = CacheEnv::redirect(temp_dir.path());
+        let clients = make_filters(&[ClientFilter::Claude], false);
+        let scope = CacheReportScope::default();
+        let data = UsageData {
+            models: ["anthropic/claude-sonnet-4", "claude-sonnet-4"]
+                .into_iter()
+                .map(|model| ModelUsage {
+                    model: model.to_string(),
+                    color_key: model.to_string(),
+                    provider: "anthropic".to_string(),
+                    client: "claude".to_string(),
+                    workspace_key: None,
+                    workspace_label: None,
+                    machine: None,
+                    tokens: TokenBreakdown {
+                        input: 10,
+                        ..TokenBreakdown::default()
+                    },
+                    cost: 0.0,
+                    performance: ModelPerformance::default(),
+                    session_count: 1,
+                    group_key: model.to_string(),
+                    daily: Vec::new(),
+                })
+                .collect(),
+            total_tokens: 20,
+            ..UsageData::default()
+        };
+        save_cached_data(&data, &clients, &TUI_DEFAULT_GROUP_BY, &scope);
+        let path = cache_file().unwrap();
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let current_generation = saved["parserGeneration"].clone();
+        assert_eq!(
+            current_generation,
+            serde_json::json!(tokscale_core::parser_generation())
+        );
+
+        // Preserve the real writer's schema, timestamp, scope, clients and
+        // archive limit. Only the historical generation differs.
+        saved["parserGeneration"] = serde_json::json!(PRE_FOLD_GENERATION);
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let result = load_cache(&clients, &TUI_DEFAULT_GROUP_BY, &scope);
+        assert!(
+            matches!(result, CacheResult::Miss),
+            "pre-fold split rows must Miss, not Stale; got {}",
+            other_variant_name(&result)
+        );
+
+        // A generation-only control proves no other load gate caused the miss.
+        saved["parserGeneration"] = current_generation;
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        match load_cache(&clients, &TUI_DEFAULT_GROUP_BY, &scope) {
+            CacheResult::Fresh(restored) => {
+                assert_eq!(restored.total_tokens, 20);
+                assert_eq!(restored.models.len(), 2);
+                assert_eq!(restored.models[0].model, "anthropic/claude-sonnet-4");
+                assert_eq!(restored.models[1].model, "claude-sonnet-4");
+            }
+            other => panic!(
+                "current generation must be Fresh, got {}",
+                other_variant_name(&other)
+            ),
+        }
+    }
+
     #[test]
     fn a_cache_written_before_the_generation_field_misses() {
         // Migration path. Files written before the field existed deserialize to

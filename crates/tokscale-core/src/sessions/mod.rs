@@ -555,8 +555,9 @@ impl UnifiedMessage {
         // not an instant before 1970. Re-keying it would move garbage between
         // two equally wrong days, and it is also what bounds the window the
         // auto-pin agreement check has to cover: leaving these alone is what
-        // makes `AGREEMENT_WINDOW_START_MS` a real lower bound rather than a
-        // convenient one.
+        // keeps the epoch start of `AGREEMENT_WINDOW_START_MS` a real lower
+        // bound rather than a convenient one. Windows starts later, at a
+        // chosen floor — see `WINDOWS_AGREEMENT_WINDOW_START_MS`.
         if self.timestamp <= 0 {
             return;
         }
