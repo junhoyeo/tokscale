@@ -27,10 +27,16 @@ fn is_devin_routing_mode(s: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct DevinChatMessage {
-    role: String,
-    #[serde(default)]
-    metadata: Option<DevinNodeMetadata>,
+#[serde(tag = "role")]
+enum DevinChatMessage {
+    #[serde(rename = "assistant")]
+    Assistant {
+        #[serde(default)]
+        metadata: Option<DevinNodeMetadata>,
+    },
+    // User/tool metadata need not follow the assistant usage schema.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -204,49 +210,16 @@ const DEVIN_CLI_MESSAGE_QUERY_AFTER: &str = r#"
 
 /// Whether a discovered Devin CLI database can actually be read end to end.
 ///
-/// [`parse_devin_cli_sqlite`] deliberately swallows open, prepare and step
-/// failures: a database that cannot be opened and one with no usage both
-/// produce no rows. That is right for a local report, but a submission that
-/// rewrites server history on the strength of a "complete" scan needs to know
-/// the difference. A database without a `message_nodes` table is
-/// readable-and-empty here, since no generation ever counted rows from it.
-/// Once that table exists, the parser's own statement must prepare and run:
-/// a missing `sessions` table or a missing column is a schema the parser
-/// cannot read, not an empty history.
+/// This validates the same SQL row types and assistant JSON as the parser,
+/// not merely COUNT(*). A missing `message_nodes` table is readable-and-empty
+/// because no parser generation counted it. Once the table exists, query,
+/// stepping and decoding failures all mean incomplete history. The schema
+/// check and usage read share one SQLite snapshot.
+///
+/// Cached scans propagate their own read verdict instead of calling this API
+/// again: a second read cannot certify the snapshot that supplied their rows.
 pub fn devin_cli_source_is_readable(db_path: &Path) -> bool {
-    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
-        return false;
-    };
-    let mut has_message_nodes = false;
-    let listed = sqlite_for_each_row_on(
-        &conn,
-        db_path,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_nodes'",
-        None,
-        &mut |_row| {
-            has_message_nodes = true;
-            Ok(())
-        },
-    );
-    if !listed.completed() {
-        return false;
-    }
-    if !has_message_nodes {
-        return true;
-    }
-    let mut counted = false;
-    let scan = sqlite_for_each_row_on(
-        &conn,
-        db_path,
-        &format!("SELECT COUNT(*) FROM ({DEVIN_CLI_MESSAGE_QUERY})"),
-        None,
-        &mut |row| {
-            let _count: i64 = row.get(0)?;
-            counted = true;
-            Ok(())
-        },
-    );
-    scan.completed() && counted
+    scan_devin_cli_sqlite(db_path).1
 }
 
 pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
@@ -272,9 +245,36 @@ fn scan_devin_cli_sqlite_inner(
     #[cfg(test)]
     cache_test_hooks::before_read(db_path);
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
-    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
+    let Some(mut conn) = open_readonly_sqlite_opt(db_path) else {
         return (Vec::new(), false);
     };
+    // The legacy-table check and message SELECT must observe one schema and
+    // data snapshot. An absent table is empty history, not a query failure.
+    let result = match conn.transaction() {
+        Ok(tx) => scan_devin_cli_snapshot(&tx, db_path, after_row_id, fallback_timestamp),
+        Err(_) => (Vec::new(), false),
+    };
+    #[cfg(test)]
+    cache_test_hooks::after_read(db_path);
+    result
+}
+
+fn scan_devin_cli_snapshot(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    after_row_id: Option<i64>,
+    fallback_timestamp: i64,
+) -> (Vec<UnifiedMessage>, bool) {
+    let has_messages: rusqlite::Result<bool> = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = 'message_nodes' COLLATE NOCASE)",
+        [],
+        |row| row.get(0),
+    );
+    match has_messages {
+        Ok(true) => {}
+        Ok(false) => return (Vec::new(), true),
+        Err(_) => return (Vec::new(), false),
+    }
     let after = after_row_id.unwrap_or(0);
     let (query, params): (&str, &[&dyn rusqlite::ToSql]) = match after_row_id {
         Some(_) => (DEVIN_CLI_MESSAGE_QUERY_AFTER, &[&after]),
@@ -297,8 +297,6 @@ fn scan_devin_cli_sqlite_inner(
                 }
             }
         });
-    #[cfg(test)]
-    cache_test_hooks::after_read(db_path);
     (messages, scan.completed() && rows_complete)
 }
 
@@ -313,16 +311,17 @@ fn parse_devin_cli_row(
     let session_model: Option<String> = row.get(4)?;
     let workspace: Option<String> = row.get(5)?;
 
-    // Non-assistant and malformed JSON rows do not carry attributable usage.
-    let chat_msg: DevinChatMessage = match serde_json::from_str(&chat_json) {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
+    // Keep local skip behavior for corrupt JSON, but report the decode
+    // failure to the scan so omitted rows cannot certify complete history.
+    let decode_error = |error: serde_json::Error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error))
     };
-    if chat_msg.role != "assistant" {
+    let DevinChatMessage::Assistant { metadata } =
+        serde_json::from_str(&chat_json).map_err(decode_error)?
+    else {
         return Ok(None);
-    }
+    };
 
-    let metadata = chat_msg.metadata;
     let metrics = metadata.as_ref().and_then(|m| m.metrics.as_ref());
 
     // Prefer the per-message generation_model over sessions.model, which can
@@ -447,6 +446,7 @@ pub(crate) mod cache_test_hooks {
         reads: usize,
         before_sql: Option<String>,
         after_sql: Option<String>,
+        remove_before_read: bool,
     }
 
     static STATES: LazyLock<Mutex<HashMap<PathBuf, State>>> =
@@ -466,6 +466,15 @@ pub(crate) mod cache_test_hooks {
     impl Probe {
         pub(crate) fn reads(&self) -> usize {
             STATES.lock().unwrap()[&self.0].reads
+        }
+
+        pub(crate) fn remove_before_read(&self) {
+            STATES
+                .lock()
+                .unwrap()
+                .get_mut(&self.0)
+                .unwrap()
+                .remove_before_read = true;
         }
 
         pub(crate) fn before_read_sql(&self, sql: &str) {
@@ -499,6 +508,9 @@ pub(crate) mod cache_test_hooks {
             };
             if before {
                 state.reads += 1;
+                if std::mem::take(&mut state.remove_before_read) {
+                    std::fs::remove_file(path).unwrap();
+                }
                 state.before_sql.take()
             } else {
                 state.after_sql.take()
