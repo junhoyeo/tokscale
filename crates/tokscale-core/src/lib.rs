@@ -9187,6 +9187,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         pricing_model_id: msg.pricing_model_id.clone(),
         estimate_status: msg.estimate_status,
         copilot_context: None,
+        claude_entry_uuid: Default::default(),
         machine_label: None,
     }
 }

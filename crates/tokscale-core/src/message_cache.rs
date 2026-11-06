@@ -61,7 +61,12 @@ const LEGACY_CACHE_FORMAT_VERSION_V10: u32 = 10;
 const LEGACY_MICODE_CACHE_FORMAT_VERSION_V11: u32 = 11;
 // Claude checkpoints are a namespace-specific sidecar. Billing changes the
 // entry layout and persisted parser state, so retain a decoder for main's v12.
-const CLAUDE_CACHE_FORMAT_VERSION: u32 = 13;
+// v14 adds each message's transcript entry uuid beside the entry. A v13 shard
+// still loads as current (not migrated): its rows may be the only record of
+// turns Claude Code rewrote out of their transcripts, so they must never be
+// rebuilt for this; they load with `ClaudeEntryUuid::Unknown`.
+const CLAUDE_CACHE_FORMAT_VERSION: u32 = 14;
+const LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13: u32 = 13;
 const LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V12: u32 = 12;
 // Billing fields change CachedSourceEntry's positional layout. Copilot's
 // released v12 envelope must reparse rather than decode it as the new layout.
@@ -2532,6 +2537,7 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
             session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
@@ -2624,6 +2630,7 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
             session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
@@ -2714,6 +2721,7 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
             session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
@@ -2879,6 +2887,7 @@ impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
             pricing_model_id: None,
@@ -4337,10 +4346,46 @@ fn read_shard_with_limit_unchecked(
         type ClaudeWireEntry = (
             CachedSourceEntry,
             Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+            Vec<crate::sessions::ClaudeEntryUuid>,
         );
         return match bincode::options()
             .with_limit(max_shard_bytes)
             .deserialize::<Vec<ClaudeWireEntry>>(&envelope.payload)
+        {
+            Ok(entries) => {
+                let mut restored = Vec::with_capacity(entries.len());
+                for (mut entry, checkpoint, entry_uuids) in entries {
+                    if entry.messages.len() != entry_uuids.len() {
+                        return ShardReadStatus::Invalid(
+                            "Claude entry uuid length mismatch".into(),
+                        );
+                    }
+                    for (message, entry_uuid) in entry.messages.iter_mut().zip(entry_uuids) {
+                        message.claude_entry_uuid = entry_uuid;
+                    }
+                    let checkpoint =
+                        checkpoint.filter(|checkpoint| checkpoint.has_valid_integrity());
+                    restored.push(entry.with_claude_checkpoint(checkpoint));
+                }
+                ShardReadStatus::Loaded(restored)
+            }
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+
+    if envelope.format_version == LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13
+        && identity.namespace == ClientId::Claude.as_str()
+    {
+        // Same entries and checkpoints as v14, without entry uuids. Loaded,
+        // not migrated: nothing about the rows is stale, and a rebuild would
+        // drop history the transcripts no longer hold.
+        type ClaudeWireEntryV13 = (
+            CachedSourceEntry,
+            Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+        );
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<ClaudeWireEntryV13>>(&envelope.payload)
         {
             Ok(entries) => ShardReadStatus::Loaded(
                 entries
@@ -4645,7 +4690,14 @@ fn write_shard_with_limit(
     } else if is_claude {
         let entries: Vec<_> = entries
             .iter()
-            .map(|entry| (entry, &entry.claude_checkpoint))
+            .map(|entry| {
+                let entry_uuids: Vec<_> = entry
+                    .messages
+                    .iter()
+                    .map(|message| message.claude_entry_uuid)
+                    .collect();
+                (entry, &entry.claude_checkpoint, entry_uuids)
+            })
             .collect();
         bincode::options()
             .with_limit(max_shard_bytes)
@@ -5278,6 +5330,8 @@ mod tests {
         for message in &mut resumed {
             message.billing_identity = crate::sessions::BillingIdentity::Unknown;
             message.pricing_model_id = None;
+            // Not part of the frozen layout (a Claude envelope sidecar).
+            message.claude_entry_uuid = Default::default();
         }
         let mut expected = expected;
         expected.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
@@ -5287,6 +5341,8 @@ mod tests {
         for message in &mut warm {
             message.billing_identity = crate::sessions::BillingIdentity::Unknown;
             message.pricing_model_id = None;
+            // Not part of the frozen layout (a Claude envelope sidecar).
+            message.claude_entry_uuid = Default::default();
         }
         warm.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
         assert_eq!(
@@ -5338,6 +5394,8 @@ mod tests {
         for message in &mut messages {
             message.billing_identity = crate::sessions::BillingIdentity::Unknown;
             message.pricing_model_id = None;
+            // Not part of the frozen layout (a Claude envelope sidecar).
+            message.claude_entry_uuid = Default::default();
         }
         expected.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
         messages.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
@@ -10622,7 +10680,40 @@ mod tests {
             session: ContextOrigin::Trace,
             agent: ContextOrigin::Record,
         });
-        assert_eq!(CLAUDE_CACHE_FORMAT_VERSION, COPILOT_CACHE_FORMAT_VERSION);
+        // Claude's v13 decoder still shares Copilot's current number.
+        assert_eq!(
+            LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+            COPILOT_CACHE_FORMAT_VERSION
+        );
+        let legacy_claude = dir.path().join("claude-v13.bin");
+        let legacy_envelope = CachedShardEnvelope {
+            format_version: LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+            parser_namespace: claude.namespace.to_string(),
+            parser_version: claude.parser_version,
+            payload: bincode::options()
+                .serialize(&vec![(&claude_entry, &claude_entry.claude_checkpoint)])
+                .unwrap(),
+        };
+        fs::write(
+            &legacy_claude,
+            bincode::options().serialize(&legacy_envelope).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_shard(&legacy_claude, copilot),
+            ShardReadStatus::Stale
+        ));
+        let ShardReadStatus::Loaded(restored) = read_shard(&legacy_claude, claude) else {
+            panic!("a v13 Claude envelope must load as current");
+        };
+        assert_eq!(
+            restored[0].claude_checkpoint,
+            claude_entry.claude_checkpoint
+        );
+        assert!(restored[0]
+            .messages
+            .iter()
+            .all(|message| message.claude_entry_uuid == crate::sessions::ClaudeEntryUuid::Unknown));
         for (identity, other, entry) in [
             (claude, copilot, claude_entry),
             (copilot, claude, copilot_entry),
@@ -10716,7 +10807,12 @@ mod tests {
             panic!("a format-{CACHE_FORMAT_VERSION} Claude shard still loads");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].messages, entry.messages);
+        // The layout predates entry uuids, so the rows load without them.
+        let mut expected_messages = entry.messages.clone();
+        for message in &mut expected_messages {
+            message.claude_entry_uuid = crate::sessions::ClaudeEntryUuid::Unknown;
+        }
+        assert_eq!(entries[0].messages, expected_messages);
         assert_eq!(
             entries[0].fallback_timestamp_indices, entry.fallback_timestamp_indices,
             "retention provenance survives"
