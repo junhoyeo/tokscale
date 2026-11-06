@@ -216,6 +216,7 @@ fn names_provider_session(message: &UnifiedMessage) -> bool {
 /// provider session (BB clears `provider_thread_id` on copied rows, and an
 /// older copy may lack `providerThreadId` in its data), that copy replaces it,
 /// so the lanes can still match the event against the provider's own log.
+/// Either way the kept row is a turn start when any copy was.
 pub(crate) fn dedup_bb_messages(
     messages: impl IntoIterator<Item = UnifiedMessage>,
 ) -> Vec<UnifiedMessage> {
@@ -228,9 +229,14 @@ pub(crate) fn dedup_bb_messages(
         };
         match index_by_identity.get(identity) {
             Some(&index) => {
+                // The scan marks a turn's start on the first row it reads for
+                // that turn id, across threads, so the start may be on the
+                // copy that is dropped. The kept row inherits it.
+                let is_turn_start = kept[index].is_turn_start || message.is_turn_start;
                 if !names_provider_session(&kept[index]) && names_provider_session(&message) {
                     kept[index] = message;
                 }
+                kept[index].is_turn_start = is_turn_start;
             }
             None => {
                 index_by_identity.insert(identity.to_string(), kept.len());
@@ -1472,6 +1478,17 @@ mod tests {
             let mirror =
                 provider_mirror_from_dedup_key(messages[0].dedup_key.as_deref().unwrap()).unwrap();
             assert_eq!(mirror.session, "sess-1");
+            assert!(
+                messages[0].is_turn_start,
+                "{original_thread} first: the turn keeps its one start"
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.is_turn_start)
+                    .count(),
+                1
+            );
         }
     }
 
