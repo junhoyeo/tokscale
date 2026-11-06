@@ -24,6 +24,8 @@ export const WITHHOLDING_MAX_TOKENS_PER_MESSAGE = 100_000_000;
  * single fragment while sibling fragments carry `messages = 0` (`droid`,
  * `copilot`, `hermes`). Codex can emit a retained cumulative total as one
  * message when only total usage is available, and Trae exports session totals.
+ * BB falls back to the cumulative `tokenUsage.total` when `last` is absent or
+ * zero, so its first such snapshot is one message carrying accumulated tokens.
  * Claude and cc-mirror variants merge count-neutral advisor/tool-result tokens
  * into model buckets that can also contain counted assistant messages. Once
  * aggregated, those supplementary tokens cannot be subtracted reliably.
@@ -33,6 +35,7 @@ export const WITHHOLDING_MAX_TOKENS_PER_MESSAGE = 100_000_000;
  * context window.
  */
 export const NON_PER_INFERENCE_MESSAGE_CLIENTS = [
+  "bb",
   "claude",
   "codebuddy",
   "codex",
