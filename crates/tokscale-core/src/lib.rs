@@ -28460,30 +28460,55 @@ mod tests {
             checkpoint: Option<&str>,
             usage: &str,
         ) {
+            bb_turn_at(
+                conn,
+                thread,
+                turn,
+                session,
+                column,
+                checkpoint,
+                usage,
+                1790762405010,
+            );
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn bb_turn_at(
+            conn: &rusqlite::Connection,
+            thread: &str,
+            turn: &str,
+            session: &str,
+            column: bool,
+            checkpoint: Option<&str>,
+            usage: &str,
+            created_at: i64,
+        ) {
             let column = column.then_some(session);
             let next: i64 = conn
                 .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
                 .unwrap();
             conn.execute(
-                "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 1, 'thread/tokenUsage/updated', ?5, 1790762405010)",
+                "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 1, 'thread/tokenUsage/updated', ?5, ?6)",
                 (
                     format!("evt_{next}"),
                     thread,
                     turn,
                     column,
                     format!(r#"{{"providerThreadId":"{session}","tokenUsage":{{"total":{usage},"last":{usage}}}}}"#),
+                    created_at,
                 ),
             )
             .unwrap();
             if let Some(checkpoint) = checkpoint {
                 conn.execute(
-                    "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 2, 'turn/completed', ?5, 1790762405011)",
+                    "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 2, 'turn/completed', ?5, ?6)",
                     (
                         format!("evt_{next}_done"),
                         thread,
                         turn,
                         column,
                         format!(r#"{{"providerThreadId":"{session}","status":"completed","providerCheckpointId":"{checkpoint}"}}"#),
+                        created_at + 1,
                     ),
                 )
                 .unwrap();
@@ -28969,6 +28994,352 @@ mod tests {
 
             assert_eq!(collected(home, &[]), totals(&[("claude", 1_000, 1)]));
             assert_eq!(direct(home, None).0, totals(&[("claude", 1_000, 1)]));
+        }
+
+        /// The graph (submission pricing) for one date range, per day and
+        /// client, with days bucketed in UTC.
+        fn graph_days(
+            home: &Path,
+            clients: Vec<String>,
+            since: &str,
+            until: &str,
+        ) -> BTreeMap<(String, String), (i64, i32)> {
+            let pricing = pricing::PricingService::new(
+                HashMap::from(["claude-sonnet-4-5", "gpt-5.2-codex"].map(|model| {
+                    (
+                        model.to_string(),
+                        pricing::ModelPricing {
+                            input_cost_per_token: Some(0.000001),
+                            output_cost_per_token: Some(0.000002),
+                            cache_read_input_token_cost: Some(0.0000001),
+                            ..Default::default()
+                        },
+                    )
+                })),
+                HashMap::new(),
+            );
+            let graph = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(generate_graph_with_loaded_pricing(
+                    ReportOptions {
+                        home_dir: Some(home.to_str().unwrap().to_string()),
+                        clients: Some(clients),
+                        since: Some(since.to_string()),
+                        until: Some(until.to_string()),
+                        scanner_settings: scanner::ScannerSettings {
+                            bucket_timezone: Some("UTC".to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Some(&pricing),
+                    GraphPricingRequirement::Submission,
+                    None,
+                ))
+                .unwrap();
+            let mut days = BTreeMap::new();
+            for day in &graph.contributions {
+                for row in &day.clients {
+                    let entry: &mut (i64, i32) = days
+                        .entry((day.date.clone(), row.client.clone()))
+                        .or_default();
+                    entry.0 += row.tokens.input
+                        + row.tokens.output
+                        + row.tokens.cache_read
+                        + row.tokens.cache_write
+                        + row.tokens.reasoning;
+                    entry.1 += row.messages;
+                }
+            }
+            days
+        }
+
+        /// The direct lane for one date range, per day and client (UTC days).
+        fn direct_days(
+            home: &Path,
+            since: &str,
+            until: &str,
+        ) -> BTreeMap<(String, String), (i64, i32)> {
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(home.to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: None,
+                since: Some(since.to_string()),
+                until: Some(until.to_string()),
+                year: None,
+                scanner_settings: scanner::ScannerSettings {
+                    bucket_timezone: Some("UTC".to_string()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+            let mut days = BTreeMap::new();
+            for message in &parsed.messages {
+                let entry: &mut (i64, i32) = days
+                    .entry((message.date.to_string(), message.client.to_string()))
+                    .or_default();
+                entry.0 += message.input
+                    + message.output
+                    + message.cache_read
+                    + message.cache_write
+                    + message.reasoning;
+                entry.1 += message.message_count;
+            }
+            days
+        }
+
+        fn merged(
+            mut left: BTreeMap<(String, String), (i64, i32)>,
+            right: BTreeMap<(String, String), (i64, i32)>,
+        ) -> BTreeMap<(String, String), (i64, i32)> {
+            for (key, (tokens, messages)) in right {
+                let entry = left.entry(key).or_default();
+                entry.0 += tokens;
+                entry.1 += messages;
+            }
+            left
+        }
+
+        /// 2026-09-21T23:59:59Z: the provider's record of the response.
+        const LATE_ON_D_MINUS_1: &str = "2026-09-21T23:59:59";
+        /// 2026-09-22T00:00:01Z: BB's row for the same response.
+        const BB_ROW_ON_D: i64 = 1_790_035_201_000;
+
+        /// Which response a report counts must not depend on its date range.
+        /// The mirrored turn's native record is on D-1 and BB's row on D, so it
+        /// belongs to D-1 under the provider in every report: a D-1 report
+        /// plus a D report equals the D-1..D report, and nothing is counted
+        /// twice when daily reports are summed or submitted one day at a time.
+        fn assert_day_reports_add_up(home: &Path, provider: &str, tokens: i64) {
+            let expected = BTreeMap::from([(
+                ("2026-09-21".to_string(), provider.to_string()),
+                (tokens, 1),
+            )]);
+            for phase in ["cold", "warm"] {
+                let clients = submit_default_clients();
+                let both = graph_days(home, clients.clone(), "2026-09-21", "2026-09-22");
+                let split = merged(
+                    graph_days(home, clients.clone(), "2026-09-21", "2026-09-21"),
+                    graph_days(home, clients, "2026-09-22", "2026-09-22"),
+                );
+                assert_eq!(both, expected, "{phase} D-1..D graph");
+                assert_eq!(split, both, "{phase} D-1 + D graph");
+                let both = direct_days(home, "2026-09-21", "2026-09-22");
+                let split = merged(
+                    direct_days(home, "2026-09-21", "2026-09-21"),
+                    direct_days(home, "2026-09-22", "2026-09-22"),
+                );
+                assert_eq!(both, expected, "{phase} D-1..D direct");
+                assert_eq!(split, both, "{phase} D-1 + D direct");
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn bb_claude_mirror_across_a_day_boundary_counts_once_on_the_native_day() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let uuid = "abababab-0000-4000-8000-000000000001";
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{SHARED_SESSION}.jsonl")),
+                format!(
+                    concat!(
+                        r#"{{"type":"user","uuid":"u1","sessionId":"{s}","timestamp":"{t}.000Z","message":{{"role":"user","content":"hi"}}}}"#,
+                        "\n",
+                        r#"{{"type":"assistant","uuid":"{u}","sessionId":"{s}","timestamp":"{t}.500Z","requestId":"req_late","message":{{"id":"msg_late","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":800,"output_tokens":200}}}}}}"#,
+                        "\n",
+                    ),
+                    s = SHARED_SESSION,
+                    t = LATE_ON_D_MINUS_1,
+                    u = uuid,
+                ),
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_late", "claude-code", "claude-sonnet-4-5", None);
+            bb_turn_at(
+                &conn,
+                "thr_late",
+                "turn_late",
+                SHARED_SESSION,
+                true,
+                Some(uuid),
+                &plain_usage(800, 200),
+                BB_ROW_ON_D,
+            );
+            assert_day_reports_add_up(home, "claude", 1_000);
+        }
+
+        #[test]
+        #[serial]
+        fn bb_codex_mirror_across_a_day_boundary_counts_once_on_the_native_day() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let dir = home.join(".codex/sessions/2026/09/21");
+            std::fs::create_dir_all(&dir).unwrap();
+            let lines = [
+                format!(
+                    r#"{{"timestamp":"{LATE_ON_D_MINUS_1}Z","type":"session_meta","payload":{{"id":"{CODEX_THREAD}","originator":"bb","cli_version":"0.150.0","source":"vscode","model_provider":"openai","cwd":"/work/bbrepro"}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"{LATE_ON_D_MINUS_1}Z","type":"turn_context","payload":{{"turn_id":"{CODEX_TURN}","model":"gpt-5.2-codex"}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"{LATE_ON_D_MINUS_1}.500Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":800,"cached_input_tokens":0,"output_tokens":200}},"last_token_usage":{{"input_tokens":800,"cached_input_tokens":0,"output_tokens":200}}}}}}}}"#
+                ),
+            ];
+            std::fs::write(
+                dir.join(format!("rollout-2026-09-21T23-59-59-{CODEX_THREAD}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_late", "codex", "gpt-5.2-codex", None);
+            bb_turn_at(
+                &conn,
+                "thr_late",
+                "turn_late",
+                CODEX_THREAD,
+                true,
+                Some(CODEX_TURN),
+                &plain_usage(800, 200),
+                BB_ROW_ON_D,
+            );
+            assert_day_reports_add_up(home, "codex", 1_000);
+        }
+
+        /// A session whose main transcript is gone on a cold cache while a
+        /// subagent transcript of it remains: the subagent rows carry the
+        /// session id, but they are not the main turns BB recorded, so those
+        /// BB rows stay counted.
+        #[test]
+        #[serial]
+        fn bb_main_turns_stay_counted_when_only_a_subagent_transcript_remains() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let subagents = home
+                .join(".claude/projects/-work-bbrepro")
+                .join(SHARED_SESSION)
+                .join("subagents");
+            std::fs::create_dir_all(&subagents).unwrap();
+            std::fs::write(
+                subagents.join("agent-a1.jsonl"),
+                format!(
+                    concat!(
+                        r#"{{"type":"user","uuid":"s0","isSidechain":true,"agentId":"a1","sessionId":"{s}","timestamp":"2026-09-21T10:00:01.000Z","message":{{"role":"user","content":"task"}}}}"#,
+                        "\n",
+                        r#"{{"type":"assistant","uuid":"cdcdcdcd-0000-4000-8000-000000000009","isSidechain":true,"agentId":"a1","sessionId":"{s}","timestamp":"2026-09-21T10:00:02.000Z","requestId":"req_sub","message":{{"id":"msg_sub","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"done"}}],"usage":{{"input_tokens":300,"output_tokens":100}}}}}}"#,
+                        "\n",
+                    ),
+                    s = SHARED_SESSION,
+                ),
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_main", "claude-code", "claude-sonnet-4-5", None);
+            bb_turn(
+                &conn,
+                "thr_main",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some("cdcdcdcd-0000-4000-8000-000000000001"),
+                &plain_usage(800, 200),
+            );
+            bb_turn(
+                &conn,
+                "thr_main",
+                "turn_2",
+                SHARED_SESSION,
+                true,
+                Some("cdcdcdcd-0000-4000-8000-000000000002"),
+                &plain_usage(600, 100),
+            );
+
+            assert_every_lane(
+                home,
+                &totals(&[("bb", 1_700, 2), ("claude", 400, 1)]),
+                &totals(&[("claude", 400, 1)]),
+                &totals(&[("bb", 1_700, 2)]),
+            );
+        }
+
+        /// BB marks a turn's start on the first row it reads for the turn id,
+        /// across threads. When that row is a fork copy without provider
+        /// identity and the original replaces it, the turn still has its one
+        /// start, so hourly and TUI turn counts do not change.
+        #[test]
+        #[serial]
+        fn bb_fork_copy_replacement_keeps_the_turn_start() {
+            for (copy, original) in [("thr_a", "thr_b"), ("thr_b", "thr_a")] {
+                let cache_home = tempfile::TempDir::new().unwrap();
+                let source_home = tempfile::TempDir::new().unwrap();
+                let _cache_env = redirect_cache_home(cache_home.path());
+                let home = source_home.path();
+                let conn = bb_db(home);
+                bb_thread(&conn, original, "claude-code", "claude-sonnet-4-5", None);
+                bb_thread(
+                    &conn,
+                    copy,
+                    "claude-code",
+                    "claude-sonnet-4-5",
+                    Some(original),
+                );
+                bb_turn(
+                    &conn,
+                    original,
+                    "turn_1",
+                    SHARED_SESSION,
+                    true,
+                    None,
+                    &plain_usage(800, 200),
+                );
+                conn.execute(
+                    "INSERT INTO events VALUES ('copy', ?1, 'turn_1', NULL, 1, 'thread/tokenUsage/updated', ?2, 1790762405010)",
+                    (
+                        copy,
+                        format!(r#"{{"tokenUsage":{{"total":{u},"last":{u}}}}}"#, u = plain_usage(800, 200)),
+                    ),
+                )
+                .unwrap();
+                for phase in ["cold", "warm"] {
+                    let messages = parse_all_messages_with_pricing_with_env_strategy(
+                        home.to_str().unwrap(),
+                        &clients(&["bb"]),
+                        None,
+                        false,
+                        &scanner::ScannerSettings::default(),
+                    );
+                    assert_eq!(messages.len(), 1, "{copy} first, {phase}");
+                    assert_eq!(
+                        messages
+                            .iter()
+                            .filter(|message| message.is_turn_start)
+                            .count(),
+                        1,
+                        "{copy} first, {phase}: TUI turn count"
+                    );
+                    let hourly = aggregate_hourly_usage_entries(
+                        messages,
+                        crate::bucket_tz::BucketTimezone::from_scanner_settings(
+                            &scanner::ScannerSettings::default(),
+                        ),
+                    );
+                    assert_eq!(
+                        hourly.iter().map(|hour| hour.turn_count).sum::<i32>(),
+                        1,
+                        "{copy} first, {phase}: hourly turn count"
+                    );
+                }
+            }
         }
 
         #[test]
