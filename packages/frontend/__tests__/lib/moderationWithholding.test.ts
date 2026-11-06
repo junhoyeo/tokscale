@@ -226,6 +226,33 @@ describe("ledger volume withholding", () => {
     expect(evaluateSubmissionForWithholding(usage)).toEqual({ shouldWithhold: false, reason: "" });
   });
 
+  it("does not treat a 200M-token BB cumulative total fallback record (messages = 1) as a single inference", () => {
+    // BB's parser turns a total-only `tokenUsage` snapshot into one message
+    // that carries the accumulated session tokens. A session total does not
+    // establish the size of one inference, so it must not trip the
+    // per-message limit (daily and lifetime ceilings still apply).
+    const breakdown = foldIncomingClientContributions([
+      {
+        client: "bb",
+        modelId: "claude-sonnet-4-5",
+        tokens: { input: 200_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        cost: 10,
+        messages: 1,
+      },
+    ]);
+    const dayTotals = recalculateDayTotals(breakdown);
+    const usage = getWithholdingUsageTotals([
+      {
+        date: "2026-04-30",
+        tokens: dayTotals.tokens,
+        outputTokens: dayTotals.outputTokens,
+        sourceBreakdown: breakdown,
+      },
+    ]);
+    expect(usage.maxTokensPerMessage).toBeUndefined();
+    expect(evaluateSubmissionForWithholding(usage)).toEqual({ shouldWithhold: false, reason: "" });
+  });
+
   it("does not mix a count-neutral model fragment into a sibling model's message count under the same per-inference client", () => {
     // A count-neutral model bucket must not borrow a sibling model's message count.
     const breakdown = foldIncomingClientContributions([
