@@ -9057,6 +9057,158 @@ mod tests {
         }
     }
 
+    /// Rewrite the Claude shard holding `source` in the v13 envelope, which
+    /// has no entry uuids: what every cache written before them holds.
+    fn downgrade_claude_shard_to_v13(source: &Path) {
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let shard = cache_shard_path(identity, source);
+        let mut envelope: CachedShardEnvelope = bincode::options()
+            .deserialize(&fs::read(&shard).unwrap())
+            .unwrap();
+        assert_eq!(envelope.format_version, CLAUDE_CACHE_FORMAT_VERSION);
+        let entries: Vec<(
+            CachedSourceEntry,
+            Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+            Vec<crate::sessions::ClaudeEntryUuid>,
+        )> = bincode::options().deserialize(&envelope.payload).unwrap();
+        let legacy: Vec<_> = entries
+            .iter()
+            .map(|(entry, checkpoint, _)| (entry, checkpoint))
+            .collect();
+        envelope.format_version = LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13;
+        envelope.payload = bincode::options().serialize(&legacy).unwrap();
+        fs::write(&shard, bincode::options().serialize(&envelope).unwrap()).unwrap();
+    }
+
+    fn claude_shard_format(source: &Path) -> u32 {
+        let shard = cache_shard_path(CacheIdentity::for_client(ClientId::Claude), source);
+        bincode::options()
+            .deserialize::<CachedShardEnvelope>(&fs::read(shard).unwrap())
+            .unwrap()
+            .format_version
+    }
+
+    /// A Claude cache written before rows kept their transcript entry uuid
+    /// must keep loading as it is (it can hold history the transcript lost),
+    /// and BB rows must still be matched per turn wherever the transcript
+    /// still has the entry.
+    #[test]
+    #[serial_test::serial]
+    fn test_legacy_claude_cache_without_entry_uuids_matches_bb_turns() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let home = source_home.path();
+        let session = "33333333-2222-4333-8444-555555555555";
+        let source = home.join(format!(".claude/projects/-work-legacy/{session}.jsonl"));
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let line = |uuid: &str, id: &str, input: i64, output: i64, minute: u32| {
+            format!(
+                concat!(
+                    r#"{{"type":"user","uuid":"{uuid}-user","sessionId":"{session}","timestamp":"2026-09-21T10:{minute:02}:00.000Z","message":{{"role":"user","content":"hi"}}}}"#,
+                    "\n",
+                    r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"{session}","timestamp":"2026-09-21T10:{minute:02}:05.000Z","requestId":"req_{id}","message":{{"id":"msg_{id}","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#,
+                    "\n"
+                ),
+                uuid = uuid,
+                session = session,
+                minute = minute,
+                id = id,
+                input = input,
+                output = output,
+            )
+        };
+        let old_uuid = "44444444-0000-4000-8000-000000000000";
+        let new_uuid = "44444444-0000-4000-8000-000000000001";
+        let old_turn = line(old_uuid, "old", 400, 100, 0);
+        let new_turn = line(new_uuid, "new", 800, 200, 1);
+        fs::write(&source, format!("{old_turn}{new_turn}")).unwrap();
+
+        let bb_dir = home.join(".bb");
+        fs::create_dir_all(&bb_dir).unwrap();
+        let conn = rusqlite::Connection::open(bb_dir.join("bb.db")).unwrap();
+        conn.execute_batch(&format!(
+            r#"
+            CREATE TABLE threads (id TEXT PRIMARY KEY NOT NULL, project_id TEXT, provider_id TEXT NOT NULL,
+                model_override TEXT, title TEXT, parent_thread_id TEXT, created_at INTEGER NOT NULL);
+            CREATE TABLE events (id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT,
+                provider_thread_id TEXT, sequence INTEGER NOT NULL, type TEXT NOT NULL,
+                data TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL);
+            INSERT INTO threads VALUES ('thr_c', NULL, 'claude-code', 'claude-sonnet-4-5', NULL, NULL, 1000);
+            INSERT INTO threads VALUES ('thr_pi', NULL, 'pi', 'claude-sonnet-4-5', NULL, NULL, 1000);
+            INSERT INTO events VALUES ('u0', 'thr_c', 't0', '{session}', 1, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":500,"inputTokens":400,"outputTokens":100}}}}}}', 1790762400000);
+            INSERT INTO events VALUES ('c0', 'thr_c', 't0', '{session}', 2, 'turn/completed',
+                '{{"status":"completed","providerCheckpointId":"{old_uuid}"}}', 1790762400001);
+            INSERT INTO events VALUES ('u1', 'thr_c', 't1', '{session}', 3, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":1000,"inputTokens":800,"outputTokens":200}}}}}}', 1790762460000);
+            INSERT INTO events VALUES ('c1', 'thr_c', 't1', '{session}', 4, 'turn/completed',
+                '{{"status":"completed","providerCheckpointId":"{new_uuid}"}}', 1790762460001);
+            INSERT INTO events VALUES ('u2', 'thr_c', 't2', '{session}', 5, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":700,"inputTokens":600,"outputTokens":100}}}}}}', 1790762520000);
+            INSERT INTO events VALUES ('c2', 'thr_c', 't2', '{session}', 6, 'turn/completed',
+                '{{"status":"completed","providerCheckpointId":"44444444-0000-4000-8000-0000000000b2"}}', 1790762520001);
+            INSERT INTO events VALUES ('u3', 'thr_pi', 't3', 'pi-session', 1, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":333,"inputTokens":233,"outputTokens":100}}}}}}', 1790762520000);
+            "#
+        ))
+        .unwrap();
+        drop(conn);
+
+        let totals = || {
+            let mut totals = std::collections::BTreeMap::<String, (i64, i32)>::new();
+            for message in crate::parse_all_messages_with_pricing_with_env_strategy(
+                home.to_str().unwrap(),
+                &[],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            ) {
+                let entry = totals.entry(message.client.to_string()).or_default();
+                entry.0 += message.tokens.total();
+                entry.1 += message.message_count;
+            }
+            totals.into_iter().collect::<Vec<_>>()
+        };
+        let both_matched = vec![
+            ("bb".to_string(), (1_033, 2)),
+            ("claude".to_string(), (1_500, 2)),
+        ];
+        assert_eq!(totals(), both_matched, "cold");
+
+        // A cache from before entry uuids, for an unchanged transcript: it
+        // loads as current and is not rewritten, and the rows are matched by
+        // reading the uuids back from the transcript.
+        downgrade_claude_shard_to_v13(&source);
+        for phase in ["legacy", "legacy warm"] {
+            assert_eq!(totals(), both_matched, "{phase}");
+            assert_eq!(
+                claude_shard_format(&source),
+                LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+                "{phase}: an unchanged legacy entry must not be rebuilt"
+            );
+        }
+
+        // Claude Code then compacts the transcript, dropping the old turn.
+        // The cache still holds that row without its uuid, so it cannot be
+        // matched to BB's turn: the documented fallback takes every
+        // unmatched BB turn of this session as counted. The old row survives
+        // (500 still under claude), and the BB-only 700 is the cost.
+        fs::write(&source, &new_turn).unwrap();
+        for phase in ["compacted", "compacted warm"] {
+            assert_eq!(
+                totals(),
+                vec![
+                    ("bb".to_string(), (333, 1)),
+                    ("claude".to_string(), (1_500, 2)),
+                ],
+                "{phase}"
+            );
+        }
+        assert_eq!(claude_shard_format(&source), CLAUDE_CACHE_FORMAT_VERSION);
+    }
+
     #[test]
     fn test_cursor_parser_version_retains_rows_needed_for_recount_proofs() {
         assert_eq!(parser_version(ClientId::Cursor), 6);

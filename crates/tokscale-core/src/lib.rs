@@ -1385,17 +1385,126 @@ impl RecordedCodexTurns {
     }
 }
 
-/// The Claude sessions whose usage the Claude lane counts in this report:
-/// every session id among `messages` that `counted` keeps.
-fn claude_sessions_counted(
-    messages: &[UnifiedMessage],
-    counted: impl Fn(&UnifiedMessage) -> bool,
-) -> HashSet<String> {
-    messages
-        .iter()
-        .filter(|message| counted(message))
-        .map(|message| message.session_id.to_string())
-        .collect()
+/// The Claude turns the Claude lane counts in this report, by the transcript
+/// entry `uuid` BB records as a turn's `providerCheckpointId`.
+///
+/// Only rows of sessions BB names are collected, so a report without BB
+/// mirror rows keeps nothing here. Rows are taken before the cross-file merge:
+/// a forked transcript's copy of a response may be the one the merge keeps,
+/// and either copy's entry stands for the same counted response.
+#[derive(Debug, Default)]
+struct ClaudeTurnCoverage {
+    /// Entry uuids of counted rows (see [`sessions::ClaudeEntryUuid`]).
+    entry_uuids: HashSet<[u8; 16]>,
+    /// Counted rows loaded from a cache written before rows kept their entry
+    /// uuid, by session, keyed by their dedup key.
+    unresolved: HashMap<String, HashSet<String>>,
+    /// Dedup keys of counted rows whose entry uuid state is recorded. A row
+    /// in `unresolved` with one of these keys is the same response.
+    resolved_keys: HashSet<String>,
+    /// Sessions still holding counted rows whose entry cannot be identified.
+    /// See [`Self::covers`].
+    legacy_sessions: HashSet<String>,
+}
+
+impl ClaudeTurnCoverage {
+    /// Note a Claude row the lane counts in this report.
+    fn observe(&mut self, message: &UnifiedMessage, bb_sessions: &HashSet<String>) {
+        if !bb_sessions.contains(message.session_id.as_str()) {
+            return;
+        }
+        match message.claude_entry_uuid {
+            sessions::ClaudeEntryUuid::Known(uuid) => {
+                self.entry_uuids.insert(uuid);
+                if let Some(key) = &message.dedup_key {
+                    self.resolved_keys.insert(key.clone());
+                }
+            }
+            sessions::ClaudeEntryUuid::Absent => {
+                if let Some(key) = &message.dedup_key {
+                    self.resolved_keys.insert(key.clone());
+                }
+            }
+            sessions::ClaudeEntryUuid::Unknown => match &message.dedup_key {
+                Some(key) => {
+                    self.unresolved
+                        .entry(message.session_id.to_string())
+                        .or_default()
+                        .insert(key.clone());
+                }
+                None => {
+                    self.legacy_sessions.insert(message.session_id.to_string());
+                }
+            },
+        }
+    }
+
+    /// Resolve the rows a legacy cache served without entry uuids.
+    ///
+    /// Where the transcript still holds the response, a fresh parse of that
+    /// session's files (the transcript and its subagent files, among the
+    /// paths this scan counts) gives its entry uuid. Only sessions BB names
+    /// and that still have such rows are read, and only once per scan. What
+    /// is left is history Claude Code already rewrote out of the transcript,
+    /// which marks the session for the fallback in [`Self::covers`].
+    fn resolve_legacy_rows(&mut self, claude_paths: &[PathBuf], home_dir: &Path) {
+        for (session, keys) in std::mem::take(&mut self.unresolved) {
+            let mut keys: HashSet<String> = keys
+                .into_iter()
+                .filter(|key| !self.resolved_keys.contains(key))
+                .collect();
+            if keys.is_empty() {
+                continue;
+            }
+            for path in claude_paths.iter().filter(|path| {
+                path.file_stem()
+                    .is_some_and(|stem| stem == session.as_str())
+                    || path
+                        .parent()
+                        .is_some_and(|dir| dir.iter().any(|part| part == session.as_str()))
+            }) {
+                for message in
+                    sessions::claudecode::parse_claude_file_with_home(path, Some(home_dir))
+                {
+                    let Some(key) = message.dedup_key.as_ref() else {
+                        continue;
+                    };
+                    if keys.remove(key) {
+                        if let Some(uuid) = message.claude_entry_uuid.known() {
+                            self.entry_uuids.insert(uuid);
+                        }
+                    }
+                }
+                if keys.is_empty() {
+                    break;
+                }
+            }
+            if !keys.is_empty() {
+                self.legacy_sessions.insert(session);
+            }
+        }
+    }
+
+    /// True when the Claude lane counted the turn a BB row mirrors.
+    ///
+    /// Per turn: the turn's checkpoint is the entry uuid of a counted row.
+    ///
+    /// One bounded fallback, for sessions that still hold counted rows from
+    /// a cache written before this rule, whose transcript no longer has their
+    /// entries: there an unmatched BB row of that session is taken as
+    /// counted too. Those rows are history the cache kept after Claude Code
+    /// compacted or deleted the transcript, and the BB turns they mirror
+    /// cannot be matched to them, so keeping those BB rows would count that
+    /// history twice. The cost is a BB-only turn in such a session (one the
+    /// transcript lost before Tokscale ever read it). Every row parsed from
+    /// now on keeps its entry uuid in the cache, so no other session is
+    /// affected and the set of such sessions does not grow.
+    fn covers(&self, session: &str, checkpoint: Option<&str>) -> bool {
+        checkpoint
+            .and_then(|checkpoint| sessions::ClaudeEntryUuid::from_entry_uuid(checkpoint).known())
+            .is_some_and(|uuid| self.entry_uuids.contains(&uuid))
+            || self.legacy_sessions.contains(session)
+    }
 }
 
 /// True when the provider's own log of a BB row's response is counted in this
@@ -1408,27 +1517,25 @@ fn claude_sessions_counted(
 /// wins: it is per request with the exact model and usage, while BB keeps a
 /// Claude turn as one aggregate of the SDK result and prunes older
 /// `thread/tokenUsage/updated` rows. Its usage is reported under `claude` or
-/// `codex`, as it was before BB support, and the BB row stays only where it is
-/// the one record of that work in the report.
+/// `codex`, as it was before BB support, and the BB row stays wherever it is
+/// the one record of that turn in the report.
 ///
-/// The match uses the exact provider identity BB stores on the row (see the
-/// `sessions::bb` module docs), never time or token counts:
+/// The match is per turn, on the exact provider identity BB stores on the
+/// row (see the `sessions::bb` module docs), never on time or token counts:
 ///
-/// - Codex, per turn: the rollout recorded usage under the thread id and the
-///   turn's `providerCheckpointId` ([`RecordedCodexTurns`], which only holds
+/// - Codex: the rollout recorded usage under the thread id and the turn's
+///   `providerCheckpointId` ([`RecordedCodexTurns`], which only holds
 ///   threads counted under codex in this report).
-/// - Claude, per session: the Claude lane counted a message of that session.
-///   BB's checkpoint is a transcript line `uuid`, which the Claude rows do not
-///   keep, and the Claude lane keeps rows a rewritten or deleted transcript no
-///   longer holds, so a per-line match could miss rows that are still counted.
-///   Every turn BB runs in a session goes into that session's transcript.
+/// - Claude: the `providerCheckpointId` is the entry uuid of a counted Claude
+///   row ([`ClaudeTurnCoverage`], including its legacy-cache fallback).
 ///
+/// A BB row whose turn has no checkpoint yet (still running) stays counted.
 /// A client filter that leaves out the provider keeps the BB rows: `--bb`
 /// alone reports everything BB recorded, `--claude` alone reports the
 /// transcripts, and any report that includes both counts each response once.
 fn bb_row_recorded_by_provider(
     message: &UnifiedMessage,
-    claude_counted_sessions: &HashSet<String>,
+    claude_turns: &ClaudeTurnCoverage,
     recorded_codex_turns: &RecordedCodexTurns,
 ) -> bool {
     let Some(mirror) = message
@@ -1439,7 +1546,7 @@ fn bb_row_recorded_by_provider(
         return false;
     };
     match mirror.provider {
-        sessions::bb::BbMirrorProvider::Claude => claude_counted_sessions.contains(mirror.session),
+        sessions::bb::BbMirrorProvider::Claude => claude_turns.covers(mirror.session, mirror.turn),
         sessions::bb::BbMirrorProvider::Codex => {
             recorded_codex_turns.covers(mirror.session, mirror.turn)
         }
@@ -3388,6 +3495,24 @@ fn parse_all_messages_streaming<S: MessageSink>(
         flush_message(message, &flush_context, sink);
     }
 
+    // BB is read ahead of the Claude lane so that lane knows which sessions
+    // BB mirrors (see `ClaudeTurnCoverage`); its rows are emitted further down.
+    let mut bb_messages: Vec<UnifiedMessage> = Vec::new();
+    for db_path in &scan_result.bb_dbs {
+        let CachedParseOutcome {
+            mut messages,
+            cache_entry,
+            ..
+        } = load_or_parse_bb_sqlite_source(db_path, &source_cache, pricing);
+        machine_labeler.label_messages(db_path, &mut messages);
+        bb_messages.extend(messages);
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    let bb_messages = sessions::bb::dedup_bb_messages(bb_messages);
+    let bb_claude_sessions = sessions::bb::claude_sessions_named(&bb_messages);
+
     let claude_home = PathBuf::from(home_dir);
     let mut claude_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Claude)
@@ -3488,8 +3613,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
     let mut claude_messages: Vec<(bool, bool, UnifiedMessage)> = Vec::new();
     let mut claude_keyed_indices: HashMap<String, usize> = HashMap::new();
+    let mut claude_turns = ClaudeTurnCoverage::default();
     for outcome in claude_outcomes {
         for message in outcome.messages {
+            if !bb_claude_sessions.is_empty() && matches_flush_filter(&message, &flush_context) {
+                claude_turns.observe(&message, &bb_claude_sessions);
+            }
             let Some(key) = message.dedup_key.clone().filter(|key| !key.is_empty()) else {
                 claude_messages.push((false, false, message));
                 continue;
@@ -3534,13 +3663,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     for index in sessions::claudecode::reconcile_advisor_billing(&mut claude_messages) {
         apply_pricing_if_available(&mut claude_messages[index], pricing);
     }
-    let claude_counted_sessions = if scan_result.bb_dbs.is_empty() {
-        HashSet::new()
-    } else {
-        claude_sessions_counted(&claude_messages, |message| {
-            matches_flush_filter(message, &flush_context)
-        })
-    };
+    claude_turns.resolve_legacy_rows(scan_result.get(ClientId::Claude), &claude_home);
     all_messages.extend(claude_messages);
     flush_lane(&mut all_messages, &flush_context, sink);
 
@@ -4547,33 +4670,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    // BB (get-bb/bb) SQLite database sessions. A row whose response the
-    // Claude or Codex lane above counted is dropped here; see
+    // BB (get-bb/bb) rows, read before the Claude lane. A row whose turn the
+    // Claude or Codex lane above counted is dropped; see
     // `bb_row_recorded_by_provider`.
-    let mut bb_messages: Vec<UnifiedMessage> = Vec::new();
-    for db_path in &scan_result.bb_dbs {
-        let CachedParseOutcome {
-            mut messages,
-            cache_entry,
-            ..
-        } = load_or_parse_bb_sqlite_source(db_path, &source_cache, pricing);
-        machine_labeler.label_messages(db_path, &mut messages);
-        bb_messages.extend(messages);
-        if let Some(entry) = cache_entry {
-            source_cache.insert(entry);
-        }
-    }
-    all_messages.extend(
-        sessions::bb::dedup_bb_messages(bb_messages)
-            .into_iter()
-            .filter(|message| {
-                !bb_row_recorded_by_provider(
-                    message,
-                    &claude_counted_sessions,
-                    &recorded_codex_turns,
-                )
-            }),
-    );
+    all_messages.extend(bb_messages.into_iter().filter(|message| {
+        !bb_row_recorded_by_provider(message, &claude_turns, &recorded_codex_turns)
+    }));
 
     // Keep the whole source's accounting state while streaming its records.
     // Partial input must not become a warm cache that suppresses future retries.
@@ -7662,6 +7764,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::MiMoDesktop, micode_desktop_count);
     messages.extend(micode_msgs);
 
+    // Read ahead of the Claude lane, as in the cached lane, so the Claude
+    // lane knows which sessions BB mirrors.
+    let bb_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .bb_dbs
+        .par_iter()
+        .flat_map(|db_path| sessions::bb::parse_bb_sqlite(db_path))
+        .collect();
+    let bb_msgs_raw = sessions::bb::dedup_bb_messages(bb_msgs_raw);
+    let bb_claude_sessions = sessions::bb::claude_sessions_named(&bb_msgs_raw);
+
     let claude_home = PathBuf::from(&home_dir);
     let claude_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Claude)
@@ -7678,7 +7790,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut claude_messages = Vec::new();
     let mut billing_conflicts = Vec::new();
     let mut indices = HashMap::new();
+    let mut claude_turns = ClaudeTurnCoverage::default();
     for message in claude_raw {
+        if !bb_claude_sessions.is_empty()
+            && (include_all
+                || retain_for_requested_clients(
+                    &message.client,
+                    &message.model_id,
+                    &message.provider_id,
+                    &requested,
+                ))
+        {
+            claude_turns.observe(&message, &bb_claude_sessions);
+        }
         if let Some(key) = &message.dedup_key {
             if let Some(index) = indices.get(key).copied() {
                 merge_claude_cross_file_duplicate(
@@ -7700,19 +7824,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         claude_desktop::read(Path::new(&home_dir)).merge_into(&mut claude_messages);
     }
     sessions::claudecode::reconcile_advisor_billing(&mut claude_messages);
-    let claude_counted_sessions = if scan_result.bb_dbs.is_empty() {
-        HashSet::new()
-    } else {
-        claude_sessions_counted(&claude_messages, |message| {
-            include_all
-                || retain_for_requested_clients(
-                    &message.client,
-                    &message.model_id,
-                    &message.provider_id,
-                    &requested,
-                )
-        })
-    };
+    claude_turns.resolve_legacy_rows(scan_result.get(ClientId::Claude), &claude_home);
     let claude_msgs: Vec<_> = claude_messages.iter().map(unified_to_parsed).collect();
     // Advisor calls and undated Desktop balances add usage, not extra replies.
     counts.set(ClientId::Claude, summed_parsed_message_count(&claude_msgs));
@@ -8357,15 +8469,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(cherrystudio_msgs);
 
     // Same reconciliation as the cached lane: see `bb_row_recorded_by_provider`.
-    let bb_msgs_raw: Vec<UnifiedMessage> = scan_result
-        .bb_dbs
-        .par_iter()
-        .flat_map(|db_path| sessions::bb::parse_bb_sqlite(db_path))
-        .collect();
-    let bb_msgs: Vec<ParsedMessage> = sessions::bb::dedup_bb_messages(bb_msgs_raw)
+    let bb_msgs: Vec<ParsedMessage> = bb_msgs_raw
         .into_iter()
         .filter(|message| {
-            !bb_row_recorded_by_provider(message, &claude_counted_sessions, &recorded_codex_turns)
+            !bb_row_recorded_by_provider(message, &claude_turns, &recorded_codex_turns)
         })
         .map(|message| unified_to_parsed(&message))
         .collect();
@@ -28608,6 +28715,260 @@ mod tests {
                 }
             }
             totals
+        }
+
+        /// A transcript of several responses, one assistant entry each:
+        /// `(entry uuid, response id, input, output)`.
+        fn claude_transcript_rows(home: &Path, session: &str, rows: &[(&str, &str, i64, i64)]) {
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut lines = String::new();
+            for (index, (uuid, id, input, output)) in rows.iter().enumerate() {
+                lines.push_str(&format!(
+                    r#"{{"type":"user","uuid":"{uuid}-user","sessionId":"{session}","timestamp":"2026-09-21T10:0{index}:00.000Z","message":{{"role":"user","content":"hi"}}}}"#
+                ));
+                lines.push('\n');
+                lines.push_str(&format!(
+                    r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"{session}","timestamp":"2026-09-21T10:0{index}:05.000Z","requestId":"req_{id}","message":{{"id":"msg_{id}","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
+                ));
+                lines.push('\n');
+            }
+            std::fs::write(dir.join(format!("{session}.jsonl")), lines).unwrap();
+        }
+
+        fn plain_usage(input: i64, output: i64) -> String {
+            format!(
+                r#"{{"totalTokens":{},"inputTokens":{input},"outputTokens":{output}}}"#,
+                input + output
+            )
+        }
+
+        /// Every lane, on a cold and then a warm source cache.
+        fn assert_every_lane(
+            home: &Path,
+            everything: &Totals,
+            claude_only: &Totals,
+            bb_only: &Totals,
+        ) {
+            for phase in ["cold", "warm"] {
+                assert_eq!(&collected(home, &[]), everything, "{phase} default");
+                assert_eq!(
+                    &collected(home, &clients(&["claude", "bb"])),
+                    everything,
+                    "{phase} claude+bb"
+                );
+                assert_eq!(
+                    &graph(
+                        home,
+                        submit_default_clients(),
+                        GraphPricingRequirement::Submission
+                    ),
+                    everything,
+                    "{phase} submission graph"
+                );
+                assert_eq!(
+                    &graph(
+                        home,
+                        clients(&["claude", "bb"]),
+                        GraphPricingRequirement::Lenient
+                    ),
+                    everything,
+                    "{phase} graph"
+                );
+                assert_eq!(
+                    &collected(home, &clients(&["claude"])),
+                    claude_only,
+                    "{phase} claude"
+                );
+                assert_eq!(&collected(home, &clients(&["bb"])), bb_only, "{phase} bb");
+            }
+            assert_eq!(&direct(home, None).0, everything, "direct default");
+            assert_eq!(
+                &direct(home, Some(clients(&["claude"]))).0,
+                claude_only,
+                "direct claude"
+            );
+            assert_eq!(
+                &direct(home, Some(clients(&["bb"]))).0,
+                bb_only,
+                "direct bb"
+            );
+        }
+
+        const SHARED_SESSION: &str = "22222222-2222-4333-8444-555555555555";
+
+        /// A Claude session whose rewritten transcript keeps only an
+        /// unrelated 2,000-token response, while BB recorded two other turns
+        /// of that session (1,000 and 700) the transcript no longer holds,
+        /// plus a 333-token turn on another provider. Nothing is mirrored, so
+        /// every row counts: 4,033 tokens in 4 messages.
+        #[test]
+        #[serial]
+        fn bb_turns_the_transcript_lacks_stay_counted_in_a_shared_session() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            claude_transcript_rows(
+                home,
+                SHARED_SESSION,
+                &[("dddddddd-0000-4000-8000-000000000001", "kept", 1_500, 500)],
+            );
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_shared",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_thread(&conn, "thr_pi", "pi", "claude-sonnet-4-5", None);
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some("dddddddd-0000-4000-8000-0000000000a1"),
+                &plain_usage(800, 200),
+            );
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_2",
+                SHARED_SESSION,
+                true,
+                Some("dddddddd-0000-4000-8000-0000000000a2"),
+                &plain_usage(600, 100),
+            );
+            bb_turn(
+                &conn,
+                "thr_pi",
+                "turn_p",
+                "pi-session",
+                true,
+                None,
+                &plain_usage(233, 100),
+            );
+
+            assert_every_lane(
+                home,
+                &totals(&[("bb", 2_033, 3), ("claude", 2_000, 1)]),
+                &totals(&[("claude", 2_000, 1)]),
+                &totals(&[("bb", 2_033, 3)]),
+            );
+        }
+
+        /// The same session where the transcript also holds the 1,000-token
+        /// turn BB recorded: only that duplicate goes, so the 700-token
+        /// BB-only turn of the same session stays. 4,033 tokens in 4 messages.
+        #[test]
+        #[serial]
+        fn bb_drops_only_the_turn_the_transcript_holds_in_a_shared_session() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let mirrored = "eeeeeeee-0000-4000-8000-000000000001";
+            claude_transcript_rows(
+                home,
+                SHARED_SESSION,
+                &[
+                    (mirrored, "mirrored", 800, 200),
+                    ("eeeeeeee-0000-4000-8000-000000000002", "native", 1_500, 500),
+                ],
+            );
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_shared",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_thread(&conn, "thr_pi", "pi", "claude-sonnet-4-5", None);
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some(mirrored),
+                &plain_usage(800, 200),
+            );
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_3",
+                SHARED_SESSION,
+                true,
+                Some("eeeeeeee-0000-4000-8000-0000000000a3"),
+                &plain_usage(600, 100),
+            );
+            bb_turn(
+                &conn,
+                "thr_pi",
+                "turn_p",
+                "pi-session",
+                true,
+                None,
+                &plain_usage(233, 100),
+            );
+
+            assert_every_lane(
+                home,
+                &totals(&[("bb", 1_033, 2), ("claude", 3_000, 2)]),
+                &totals(&[("claude", 3_000, 2)]),
+                &totals(&[("bb", 2_033, 3)]),
+            );
+        }
+
+        /// The checkpoint is the turn's last assistant entry. A `<synthetic>`
+        /// notice that ends the turn adds no row, but it is still the entry BB
+        /// names, so the response before it must match it.
+        #[test]
+        #[serial]
+        fn bb_turn_ending_on_a_synthetic_entry_still_matches_its_response() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            let synthetic = "ffffffff-0000-4000-8000-000000000002";
+            std::fs::write(
+                dir.join(format!("{SHARED_SESSION}.jsonl")),
+                format!(
+                    concat!(
+                        r#"{{"type":"user","uuid":"u1","sessionId":"{s}","timestamp":"2026-09-21T10:00:00.000Z","message":{{"role":"user","content":"hi"}}}}"#, "\n",
+                        r#"{{"type":"assistant","uuid":"ffffffff-0000-4000-8000-000000000001","sessionId":"{s}","timestamp":"2026-09-21T10:00:05.000Z","requestId":"req_a","message":{{"id":"msg_a","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":800,"output_tokens":200}}}}}}"#, "\n",
+                        r#"{{"type":"assistant","uuid":"{synthetic}","sessionId":"{s}","timestamp":"2026-09-21T10:00:06.000Z","message":{{"id":"msg_syn","role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"No response requested."}}],"usage":{{"input_tokens":0,"output_tokens":0}}}}}}"#, "\n",
+                    ),
+                    s = SHARED_SESSION,
+                    synthetic = synthetic,
+                ),
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_shared",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some(synthetic),
+                &plain_usage(800, 200),
+            );
+
+            assert_eq!(collected(home, &[]), totals(&[("claude", 1_000, 1)]));
+            assert_eq!(direct(home, None).0, totals(&[("claude", 1_000, 1)]));
         }
 
         #[test]

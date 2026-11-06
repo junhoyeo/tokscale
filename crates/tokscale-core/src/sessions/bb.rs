@@ -64,7 +64,7 @@ use super::{SharedStr, UnifiedMessage};
 use crate::{provider_identity, CostSource, TokenBreakdown};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -239,6 +239,18 @@ pub(crate) fn dedup_bb_messages(
         }
     }
     kept
+}
+
+/// The Claude sessions BB rows name: the sessions whose transcript rows the
+/// Claude lane has to match turn by turn.
+pub(crate) fn claude_sessions_named(messages: &[UnifiedMessage]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter_map(|message| message.dedup_key.as_deref())
+        .filter_map(provider_mirror_from_dedup_key)
+        .filter(|mirror| mirror.provider == BbMirrorProvider::Claude)
+        .map(|mirror| mirror.session.to_string())
+        .collect()
 }
 
 /// What a `turn/completed` row says about the provider side of a BB turn.
