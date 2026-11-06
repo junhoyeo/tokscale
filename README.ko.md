@@ -1589,7 +1589,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 계정별 네이티브 브라우저 사용량; `messages.jsonl`만 읽고 artifacts, memory, passwords 제외. |
 | Mistral Vibe | `$VIBE_HOME/logs/session/` (기본값: `~/.vibe/logs/session/`) | `%VIBE_HOME%\logs\session\` (기본값: `%USERPROFILE%\.vibe\logs\session\`) | 전 플랫폼 공통 `~/.vibe` 루트; 각 세션 디렉터리의 `meta.json` 누적 `stats`만 읽고 `messages.jsonl` 대화 내용은 읽지 않음 |
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | Pi SDK 사용량을 표시용 사본보다 우선하며, 이전 Claude SDK 기록과 단독 표시 로그도 지원합니다. [집계 방식과 제한](docs/proma.md)을 참고하세요. |
-| BB | `$BB_DATA_DIR` (기본값: `~/.bb/`), `~/.bb-dev/` | `%BB_DATA_DIR%` (기본값: `%USERPROFILE%\.bb\`), `%USERPROFILE%\.bb-dev\` | `bb.db` SQLite 데이터베이스(`threads`, `events` 테이블) 파싱. 오케스트레이션된 에이전트 하네스 전반의 프롬프트 캐시 및 추론 토큰 분석을 정확히 추출. |
+| BB | `$BB_DATA_DIR` (기본값: `~/.bb/`), `~/.bb-dev/` | `%BB_DATA_DIR%` (기본값: `%USERPROFILE%\.bb\`), `%USERPROFILE%\.bb-dev\` | `bb.db` SQLite 데이터베이스(`threads`, `events` 테이블) 파싱. 오케스트레이션된 에이전트 하네스 전반의 프롬프트 캐시 및 추론 토큰 분석을 정확히 추출. BB는 Claude Code와 Codex를 평소 홈에서 실행하므로, 두 도구가 함께 기록한 응답은 `claude` 또는 `codex` 아래에 한 번만 집계됩니다. `--client bb`만 지정하면 BB가 기록한 내역을 모두 보여 줍니다. |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 일부 도구는 크로스 플랫폼 일관성을 위해 Unix 스타일 경로(`.local/share` 등)를 사용하고, Goose를 포함한 다른 도구는 위 표의 Windows 기본 경로(`%APPDATA%` 등)를 사용합니다.
 
