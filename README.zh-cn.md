@@ -1589,7 +1589,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 按账户读取原生浏览器用量；仅扫描 `messages.jsonl`，排除 artifacts、memory 和 passwords。 |
 | Mistral Vibe | `$VIBE_HOME/logs/session/`（默认：`~/.vibe/logs/session/`） | `%VIBE_HOME%\logs\session\`（默认：`%USERPROFILE%\.vibe\logs\session\`） | 全平台通用 `~/.vibe` 根目录；仅读取各会话目录的 `meta.json` 累计 `stats`，不读取 `messages.jsonl` 对话内容 |
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | 优先使用 Pi SDK 用量，避免重复计算界面副本；同时支持旧版 Claude SDK 记录及独立界面日志。详见[统计规则与限制](docs/proma.md)。 |
-| BB | `$BB_DATA_DIR`（默认：`~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（默认：`%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | 解析 `bb.db` SQLite 数据库（`threads` 和 `events` 表）。准确提取编排代理 Harness 中的 Prompt 缓存和推理 Token 分解。 |
+| BB | `$BB_DATA_DIR`（默认：`~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（默认：`%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | 解析 `bb.db` SQLite 数据库（`threads` 和 `events` 表）。准确提取编排代理 Harness 中的 Prompt 缓存和推理 Token 分解。BB 在常规主目录下运行 Claude Code 和 Codex，因此两边都记录的响应只在 `claude` 或 `codex` 下统计一次；仅指定 `--client bb` 时仍显示 BB 记录的全部内容。 |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 

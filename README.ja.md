@@ -1590,7 +1590,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | アカウント別のブラウザ使用量。`messages.jsonl` のみを読み、artifacts、memory、passwords は除外。 |
 | Mistral Vibe | `$VIBE_HOME/logs/session/`（既定: `~/.vibe/logs/session/`） | `%VIBE_HOME%\logs\session\`（既定: `%USERPROFILE%\.vibe\logs\session\`） | 全プラットフォーム共通の `~/.vibe` ルート。各セッションディレクトリの `meta.json` の累積 `stats` のみを読み取り、`messages.jsonl` の会話内容は読み取りません |
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | Pi SDK の使用量を表示用コピーより優先し、旧 Claude SDK の履歴と単独の表示ログも読み取ります。[集計方法と制約](docs/proma.md)を参照してください。 |
-| BB | `$BB_DATA_DIR`（既定: `~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（既定: `%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | `bb.db` SQLite データベース（`threads`、`events` テーブル）を解析。オーケストレーションされたエージェントハーネス全体のプロンプトキャッシュおよび推論トークンの内訳を正確に抽出。 |
+| BB | `$BB_DATA_DIR`（既定: `~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（既定: `%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | `bb.db` SQLite データベース（`threads`、`events` テーブル）を解析。オーケストレーションされたエージェントハーネス全体のプロンプトキャッシュおよび推論トークンの内訳を正確に抽出。BB は Claude Code と Codex を通常のホームで実行するため、両方に記録された応答は `claude` または `codex` の下で 1 回だけ集計されます。`--client bb` のみを指定すると BB が記録した内容をすべて表示します。 |
 
 > **Devin Desktop のエージェント対応**: ローカル使用量の解析は、NDJSON ストリームで `usage_update` イベントを出力する ACP 接続エージェント（例: Cascade/Windsurf、claude-code、opencode）で機能します。既定の **devin-cloud** エージェントはローカルの `usage_update` を出力しないため、使用量はサーバー側にとどまり、アカウントレベルの API なしには tokscale で追跡できません。
 

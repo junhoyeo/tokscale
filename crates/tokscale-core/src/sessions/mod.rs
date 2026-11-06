@@ -201,6 +201,76 @@ pub struct UnifiedMessage {
     /// never part of the source-cache layout.
     #[serde(skip)]
     pub machine_label: Option<SharedStr>,
+    /// Claude-only: the transcript entry this row ends on. Stored in the
+    /// Claude cache envelope beside the entry (like `copilot_context`), so it
+    /// does not change any client's message layout or the Claude checkpoint
+    /// digest. See [`ClaudeEntryUuid`].
+    #[serde(skip)]
+    pub claude_entry_uuid: ClaudeEntryUuid,
+}
+
+/// The `uuid` of the last Claude Code transcript entry a Claude row covers.
+///
+/// A Claude row is one API response (`message.id` + `requestId`), written as
+/// one transcript entry per content block. The row keeps the `uuid` of the
+/// last top-level assistant entry seen for it before the next response or
+/// user prompt, which is the entry an Agent SDK host records as the turn's
+/// checkpoint (BB's `providerCheckpointId`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClaudeEntryUuid {
+    /// Not recorded: a row from a cache written before this field existed,
+    /// or a row from another client.
+    #[default]
+    Unknown,
+    /// Parsed, and no transcript entry `uuid` belongs to the row (tool-result
+    /// estimates, advisor rows, headless output, entries without a `uuid`).
+    Absent,
+    /// The entry's `uuid`: its 16 bytes when it is a canonical UUID, else the
+    /// first 16 bytes of its SHA-256.
+    Known([u8; 16]),
+}
+
+impl ClaudeEntryUuid {
+    /// The identity of a transcript entry `uuid` as stored on a row. BB's
+    /// checkpoint ids go through the same function, so equal strings always
+    /// compare equal.
+    pub fn from_entry_uuid(raw: &str) -> Self {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Self::Absent;
+        }
+        let hex: Vec<u8> = raw.bytes().filter(|byte| *byte != b'-').collect();
+        let canonical = raw.len() == 36
+            && hex.len() == 32
+            && [8, 13, 18, 23]
+                .iter()
+                .all(|&index| raw.as_bytes()[index] == b'-');
+        if canonical {
+            let mut bytes = [0u8; 16];
+            let parsed = hex.chunks(2).zip(bytes.iter_mut()).all(|(pair, out)| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    .map(|value| *out = value)
+                    .is_some()
+            });
+            if parsed {
+                return Self::Known(bytes);
+            }
+        }
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(raw.as_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        Self::Known(bytes)
+    }
+
+    pub fn known(self) -> Option<[u8; 16]> {
+        match self {
+            Self::Known(bytes) => Some(bytes),
+            Self::Unknown | Self::Absent => None,
+        }
+    }
 }
 
 const fn default_message_count() -> i32 {
@@ -483,6 +553,7 @@ impl UnifiedMessage {
             model_attribution_conflicted: false,
             copilot_context: None,
             machine_label: None,
+            claude_entry_uuid: ClaudeEntryUuid::Unknown,
             billing_identity: BillingIdentity::Unknown,
             pricing_model_id: None,
             estimate_status: EstimateStatus::Unpriced,
