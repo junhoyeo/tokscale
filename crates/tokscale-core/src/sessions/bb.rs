@@ -35,6 +35,27 @@
 //! OpenAI/Codex conventions (cached tokens reported inside `inputTokens`, reasoning
 //! reported inside `outputTokens`) are detected and normalized to additive
 //! [`TokenBreakdown`] buckets without double-counting.
+//!
+//! ### Provider Session Identity
+//! BB does not call a model itself. A `claude-code` thread runs the Claude
+//! Agent SDK with `persistSession: true` and the user's normal Claude
+//! environment, and a `codex` thread runs Codex app-server with
+//! `ephemeral: false` and the user's `CODEX_HOME`. Each response is therefore
+//! recorded twice: once in BB's `events` table and once in the provider's own
+//! log (`~/.claude/projects/**/<session id>.jsonl`, or a rollout under
+//! `~/.codex/sessions`). BB stores the link on its rows:
+//!
+//! - `events.provider_thread_id` (and `providerThreadId` in `data`): the Claude
+//!   session id (the transcript's file stem and `sessionId`), or the Codex
+//!   thread id (the rollout's `session_meta.id`). Forked threads copy their
+//!   history rows with this column cleared, so `data` is the fallback.
+//! - `providerCheckpointId` on the turn's `turn/completed` row: the `uuid` of
+//!   the turn's last top-level Claude assistant entry, or the Codex turn id
+//!   (the rollout's `turn_context.turn_id`).
+//!
+//! The parser carries that identity in the row's dedup key (see
+//! `provider_mirror_from_dedup_key`) so the lanes can drop a BB row when the
+//! provider's own record of the same work is counted in the same report.
 
 use super::utils::{
     file_modified_timestamp_ms, open_readonly_sqlite, parse_json_line, sqlite_for_each_row_on,
@@ -43,7 +64,7 @@ use super::{SharedStr, UnifiedMessage};
 use crate::{provider_identity, CostSource, TokenBreakdown};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -72,6 +93,159 @@ struct BbEventData {
     token_usage: Option<BbTokenUsageContainer>,
     #[serde(rename = "fallbackModel")]
     fallback_model: Option<String>,
+    /// Provider session the event was recorded under. Duplicates the
+    /// `events.provider_thread_id` column, and survives in a fork's copied
+    /// rows where that column is cleared.
+    #[serde(rename = "providerThreadId")]
+    provider_thread_id: Option<String>,
+    /// On `turn/completed`: the provider's own id for the finished turn.
+    #[serde(rename = "providerCheckpointId")]
+    provider_checkpoint_id: Option<String>,
+}
+
+/// The provider whose own log also records the usage of a BB thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BbMirrorProvider {
+    /// `claude-code` threads: Claude Code transcripts.
+    Claude,
+    /// `codex` threads: Codex rollouts.
+    Codex,
+}
+
+impl BbMirrorProvider {
+    fn for_thread_provider(provider_id: &str) -> Option<Self> {
+        match provider_id.trim() {
+            "claude-code" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn from_key_segment(segment: &str) -> Option<Self> {
+        match segment {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+}
+
+/// The provider session (and turn, when BB recorded one) a BB usage row
+/// mirrors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BbProviderMirror<'a> {
+    pub provider: BbMirrorProvider,
+    /// Claude session id, or Codex thread id.
+    pub session: &'a str,
+    /// The turn's `providerCheckpointId`: the last Claude assistant entry's
+    /// `uuid`, or the Codex turn id.
+    pub turn: Option<&'a str>,
+}
+
+/// Dedup-key namespace of a BB row that names its provider session:
+/// `bb:mirror:<provider>:<session>:<turn>:` followed by the row's own
+/// identity (`bb:<turn id>:<sequence>:<input>:<output>`). The turn segment is
+/// empty when BB recorded no checkpoint for the turn. The identity is kept
+/// last so fork copies still collapse on it (see [`dedup_bb_messages`]).
+pub(crate) const BB_MIRROR_DEDUP_PREFIX: &str = "bb:mirror:";
+
+fn mirror_dedup_key(mirror: Option<BbProviderMirror<'_>>, identity: String) -> String {
+    match mirror {
+        // The segments are `:`-separated, so an id holding one cannot be
+        // read back; such a row keeps its plain key and stays counted.
+        Some(mirror)
+            if !mirror.session.contains(':')
+                && !mirror.turn.is_some_and(|turn| turn.contains(':')) =>
+        {
+            format!(
+                "{BB_MIRROR_DEDUP_PREFIX}{}:{}:{}:{identity}",
+                mirror.provider.as_str(),
+                mirror.session,
+                mirror.turn.unwrap_or_default(),
+            )
+        }
+        _ => identity,
+    }
+}
+
+/// The provider session a BB row's dedup key names, if any.
+pub(crate) fn provider_mirror_from_dedup_key(dedup_key: &str) -> Option<BbProviderMirror<'_>> {
+    let mut segments = dedup_key
+        .strip_prefix(BB_MIRROR_DEDUP_PREFIX)?
+        .splitn(4, ':');
+    let provider = BbMirrorProvider::from_key_segment(segments.next()?)?;
+    let session = segments.next().filter(|session| !session.is_empty())?;
+    let turn = segments.next()?;
+    segments.next()?;
+    Some(BbProviderMirror {
+        provider,
+        session,
+        turn: (!turn.is_empty()).then_some(turn),
+    })
+}
+
+/// The part of a BB dedup key that identifies the event itself, without the
+/// provider identity in front of it.
+fn bb_event_identity(dedup_key: &str) -> &str {
+    dedup_key
+        .strip_prefix(BB_MIRROR_DEDUP_PREFIX)
+        .and_then(|rest| rest.splitn(4, ':').nth(3))
+        .unwrap_or(dedup_key)
+}
+
+fn names_provider_session(message: &UnifiedMessage) -> bool {
+    message
+        .dedup_key
+        .as_deref()
+        .and_then(provider_mirror_from_dedup_key)
+        .is_some()
+}
+
+/// Collapse BB rows that record the same event: a forked thread copies its
+/// parent's history with the same turn ids and sequence numbers (see
+/// [`scan_bb_sqlite`]), and several databases can hold one thread.
+///
+/// The copy keeps the first row's position. When only a later copy names the
+/// provider session (BB clears `provider_thread_id` on copied rows, and an
+/// older copy may lack `providerThreadId` in its data), that copy replaces it,
+/// so the lanes can still match the event against the provider's own log.
+pub(crate) fn dedup_bb_messages(
+    messages: impl IntoIterator<Item = UnifiedMessage>,
+) -> Vec<UnifiedMessage> {
+    let mut kept: Vec<UnifiedMessage> = Vec::new();
+    let mut index_by_identity: HashMap<String, usize> = HashMap::new();
+    for message in messages {
+        let Some(identity) = message.dedup_key.as_deref().map(bb_event_identity) else {
+            kept.push(message);
+            continue;
+        };
+        match index_by_identity.get(identity) {
+            Some(&index) => {
+                if !names_provider_session(&kept[index]) && names_provider_session(&message) {
+                    kept[index] = message;
+                }
+            }
+            None => {
+                index_by_identity.insert(identity.to_string(), kept.len());
+                kept.push(message);
+            }
+        }
+    }
+    kept
+}
+
+/// What a `turn/completed` row says about the provider side of a BB turn.
+#[derive(Debug, Default)]
+struct BbTurnCompletion {
+    checkpoint: Option<String>,
+    provider_thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +349,62 @@ fn has_required_tables(conn: &Connection) -> rusqlite::Result<bool> {
     )?;
     let count: i64 = stmt.query_row([], |row| row.get(0))?;
     Ok(count >= 2)
+}
+
+/// Whether `events` has the `provider_thread_id` column (current BB schema).
+fn events_has_provider_thread_column(conn: &Connection) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('events')")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(0)? == "provider_thread_id" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The provider identity of every finished turn, keyed by `(thread id, turn
+/// id)`. Usage rows come before their turn's `turn/completed` row, so this is
+/// read up front rather than in the event pass.
+fn load_turn_completions(
+    conn: &Connection,
+    has_provider_thread_column: bool,
+    buffer: &mut Vec<u8>,
+) -> rusqlite::Result<HashMap<(String, String), BbTurnCompletion>> {
+    let query = if has_provider_thread_column {
+        "SELECT thread_id, turn_id, provider_thread_id, data FROM events \
+         WHERE type = 'turn/completed' AND turn_id IS NOT NULL"
+    } else {
+        "SELECT thread_id, turn_id, NULL, data FROM events \
+         WHERE type = 'turn/completed' AND turn_id IS NOT NULL"
+    };
+    let mut stmt = conn.prepare(query)?;
+    let mut rows = stmt.query([])?;
+    let mut completions = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let thread_id: String = row.get(0)?;
+        let turn_id: String = row.get(1)?;
+        let column_thread: Option<String> = row.get(2)?;
+        let data_json: String = row.get(3)?;
+        let data = parse_json_line::<BbEventData>(&data_json, buffer);
+        let (checkpoint, data_thread) = data
+            .map(|data| (data.provider_checkpoint_id, data.provider_thread_id))
+            .unwrap_or_default();
+        completions.insert(
+            (thread_id, turn_id),
+            BbTurnCompletion {
+                checkpoint: non_empty(checkpoint),
+                provider_thread_id: non_empty(column_thread).or_else(|| non_empty(data_thread)),
+            },
+        );
+    }
+    Ok(completions)
 }
 
 /// Load thread metadata indexed by thread ID.
@@ -342,20 +572,48 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
         }
     };
 
+    let mut buffer: Vec<u8> = Vec::with_capacity(4096);
+    let provider_identity = events_has_provider_thread_column(&conn).and_then(|has_column| {
+        load_turn_completions(&conn, has_column, &mut buffer)
+            .map(|completions| (has_column, completions))
+    });
+    let (has_provider_thread_column, turn_completions) = match provider_identity {
+        Ok(identity) => identity,
+        Err(err) => {
+            // Without the provider identity every row would be counted on
+            // top of the provider's own log, so do not report a partial
+            // answer as a finished one.
+            warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "Failed to load BB provider turn identity"
+            );
+            return BbSqliteScan {
+                messages: Vec::new(),
+                complete: false,
+            };
+        }
+    };
+
     let db_mtime_ms = file_modified_timestamp_ms(db_path);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
-    let mut buffer: Vec<u8> = Vec::with_capacity(4096);
     let mut malformed_rows = 0;
     let mut current_thread_id: Option<String> = None;
     let mut active_fallback_model: Option<String> = None;
     let mut turn_first_message_seen: HashMap<String, bool> = HashMap::new();
-    let mut internal_seen: HashSet<String> = HashSet::new();
     let mut thread_totals: HashMap<String, TokenBreakdown> = HashMap::new();
 
-    let query = "SELECT id, thread_id, turn_id, sequence, type, data, created_at \
-                 FROM events \
-                 WHERE type IN ('thread/tokenUsage/updated', 'provider/modelFallback') \
-                 ORDER BY thread_id, sequence ASC";
+    let query = if has_provider_thread_column {
+        "SELECT id, thread_id, turn_id, sequence, type, data, created_at, provider_thread_id \
+         FROM events \
+         WHERE type IN ('thread/tokenUsage/updated', 'provider/modelFallback') \
+         ORDER BY thread_id, sequence ASC"
+    } else {
+        "SELECT id, thread_id, turn_id, sequence, type, data, created_at, NULL \
+         FROM events \
+         WHERE type IN ('thread/tokenUsage/updated', 'provider/modelFallback') \
+         ORDER BY thread_id, sequence ASC"
+    };
 
     let scan = sqlite_for_each_row_on(&conn, db_path, query, Some("BB event"), &mut |row| {
         let _event_id: String = row.get(0)?;
@@ -365,6 +623,7 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
         let event_type: String = row.get(4)?;
         let data_json: String = row.get(5)?;
         let created_at_ms: Option<i64> = row.get(6)?;
+        let column_provider_thread: Option<String> = row.get(7)?;
 
         if current_thread_id.as_deref() != Some(thread_id.as_str()) {
             current_thread_id = Some(thread_id.clone());
@@ -469,7 +728,7 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
 
         // Deduplication key: forked threads replicate past turns with new event IDs
         // but matching `turn_id` and sequence within turn.
-        let dedup_key = if let Some(turn) = &turn_id {
+        let identity = if let Some(turn) = &turn_id {
             format!("bb:{turn}:{sequence}:{}:{}", tokens.input, tokens.output)
         } else {
             format!(
@@ -477,6 +736,22 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
                 tokens.input, tokens.output
             )
         };
+        let completion = turn_id
+            .as_ref()
+            .and_then(|turn| turn_completions.get(&(thread_id.clone(), turn.clone())));
+        let provider_session = non_empty(column_provider_thread)
+            .or_else(|| non_empty(event_data.provider_thread_id.clone()))
+            .or_else(|| completion.and_then(|done| done.provider_thread_id.clone()));
+        let mirror = thread_metas
+            .get(&thread_id)
+            .and_then(|thread| BbMirrorProvider::for_thread_provider(&thread.provider_id))
+            .zip(provider_session.as_deref())
+            .map(|(provider, session)| BbProviderMirror {
+                provider,
+                session,
+                turn: completion.and_then(|done| done.checkpoint.as_deref()),
+            });
+        let dedup_key = mirror_dedup_key(mirror, identity);
 
         let mut msg = UnifiedMessage::new_with_dedup(
             "bb",
@@ -496,17 +771,11 @@ pub fn scan_bb_sqlite(db_path: &Path) -> BbSqliteScan {
         msg.is_turn_start = is_turn_start;
         msg.cost_source = CostSource::Estimated;
         msg.agent = Some("BB".into());
-
-        if msg
-            .dedup_key
-            .as_ref()
-            .is_none_or(|key| internal_seen.insert(key.clone()))
-        {
-            messages.push(msg);
-        }
+        messages.push(msg);
 
         Ok(())
     });
+    let messages = dedup_bb_messages(messages);
 
     if malformed_rows > 0 {
         debug!(
@@ -938,6 +1207,280 @@ mod tests {
         let msg = &messages[0];
         assert_eq!(msg.provider_id, "custom_proxy");
         assert_eq!(msg.model_id, "myclaudex-1");
+    }
+
+    /// Current BB schema: `events` carries `provider_thread_id`.
+    fn create_current_schema_bb_db(path: &Path) -> Connection {
+        let conn = create_test_bb_db(path);
+        conn.execute_batch("ALTER TABLE events ADD COLUMN provider_thread_id TEXT;")
+            .unwrap();
+        conn
+    }
+
+    fn insert_thread(conn: &Connection, id: &str, provider: &str, parent: Option<&str>) {
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES (?1, NULL, ?2, 'claude-sonnet-4-5', NULL, ?3, 1000)",
+            (id, provider, parent),
+        )
+        .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_event(
+        conn: &Connection,
+        id: &str,
+        thread: &str,
+        turn: &str,
+        sequence: i64,
+        kind: &str,
+        column_session: Option<&str>,
+        data: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at, provider_thread_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1100, ?7)",
+            (id, thread, turn, sequence, kind, data, column_session),
+        )
+        .unwrap();
+    }
+
+    const USAGE_DATA: &str = r#"{"providerThreadId":"sess-1","tokenUsage":{"last":{"totalTokens":150,"inputTokens":100,"outputTokens":50}}}"#;
+
+    #[test]
+    fn test_scan_bb_sqlite_names_the_provider_session_and_turn() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_current_schema_bb_db(&db_path);
+        insert_thread(&conn, "thr_claude", "claude-code", None);
+        insert_thread(&conn, "thr_codex", "codex", None);
+        insert_thread(&conn, "thr_pi", "pi", None);
+        insert_event(
+            &conn,
+            "e1",
+            "thr_claude",
+            "turn_1",
+            1,
+            "thread/tokenUsage/updated",
+            Some("sess-1"),
+            USAGE_DATA,
+        );
+        insert_event(
+            &conn,
+            "e2",
+            "thr_claude",
+            "turn_1",
+            2,
+            "turn/completed",
+            Some("sess-1"),
+            r#"{"providerThreadId":"sess-1","status":"completed","providerCheckpointId":"uuid-last"}"#,
+        );
+        // Codex: the checkpoint is the provider's turn id.
+        insert_event(
+            &conn,
+            "e3",
+            "thr_codex",
+            "turn_2",
+            1,
+            "thread/tokenUsage/updated",
+            Some("thread-9"),
+            r#"{"providerThreadId":"thread-9","tokenUsage":{"last":{"totalTokens":30,"inputTokens":20,"outputTokens":10}}}"#,
+        );
+        insert_event(
+            &conn,
+            "e4",
+            "thr_codex",
+            "turn_2",
+            2,
+            "turn/completed",
+            Some("thread-9"),
+            r#"{"providerThreadId":"thread-9","status":"completed","providerCheckpointId":"codex-turn-2"}"#,
+        );
+        // A turn still running has no `turn/completed` row yet.
+        insert_event(
+            &conn,
+            "e5",
+            "thr_codex",
+            "turn_3",
+            3,
+            "thread/tokenUsage/updated",
+            Some("thread-9"),
+            r#"{"providerThreadId":"thread-9","tokenUsage":{"last":{"totalTokens":12,"inputTokens":8,"outputTokens":4}}}"#,
+        );
+        // Not a provider with a log of its own that Tokscale reads.
+        insert_event(
+            &conn,
+            "e6",
+            "thr_pi",
+            "turn_4",
+            1,
+            "thread/tokenUsage/updated",
+            Some("pi-1"),
+            USAGE_DATA,
+        );
+
+        let messages = parse_bb_sqlite(&db_path);
+        let mirrors: Vec<_> = messages
+            .iter()
+            .map(|message| provider_mirror_from_dedup_key(message.dedup_key.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            mirrors,
+            vec![
+                Some(BbProviderMirror {
+                    provider: BbMirrorProvider::Claude,
+                    session: "sess-1",
+                    turn: Some("uuid-last"),
+                }),
+                Some(BbProviderMirror {
+                    provider: BbMirrorProvider::Codex,
+                    session: "thread-9",
+                    turn: Some("codex-turn-2"),
+                }),
+                Some(BbProviderMirror {
+                    provider: BbMirrorProvider::Codex,
+                    session: "thread-9",
+                    turn: None,
+                }),
+                None,
+            ]
+        );
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("bb:mirror:claude:sess-1:uuid-last:bb:turn_1:1:100:50")
+        );
+        assert_eq!(
+            bb_event_identity(messages[0].dedup_key.as_deref().unwrap()),
+            "bb:turn_1:1:100:50"
+        );
+        // Accounting is unchanged: the identity only rides on the key.
+        assert_eq!(messages[0].session_id, "thr_claude");
+        assert_eq!(messages[0].tokens.total(), 150);
+    }
+
+    #[test]
+    fn test_scan_bb_sqlite_reads_the_session_from_data_without_the_column() {
+        // Databases from before `events.provider_thread_id` (and fork copies,
+        // where BB clears the column) still carry `providerThreadId` in `data`.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+        insert_thread_without_column(&conn);
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('e1', 'thr_old', 'turn_1', 1, 'thread/tokenUsage/updated', ?1, 1100)",
+            [USAGE_DATA],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('e2', 'thr_old', 'turn_1', 2, 'turn/completed', \
+             '{\"status\":\"completed\",\"providerCheckpointId\":\"uuid-last\"}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        let scan = scan_bb_sqlite(&db_path);
+        assert!(scan.complete);
+        assert_eq!(
+            provider_mirror_from_dedup_key(scan.messages[0].dedup_key.as_deref().unwrap()),
+            Some(BbProviderMirror {
+                provider: BbMirrorProvider::Claude,
+                session: "sess-1",
+                turn: Some("uuid-last"),
+            })
+        );
+    }
+
+    fn insert_thread_without_column(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at) \
+             VALUES ('thr_old', NULL, 'claude-code', 'claude-sonnet-4-5', NULL, NULL, 1000)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_scan_bb_sqlite_without_provider_session_keeps_the_plain_key() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_test_bb_db(&db_path);
+        insert_thread_without_column(&conn);
+        conn.execute(
+            "INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at) \
+             VALUES ('e1', 'thr_old', 'turn_1', 1, 'thread/tokenUsage/updated', \
+             '{\"tokenUsage\":{\"last\":{\"totalTokens\":150,\"inputTokens\":100,\"outputTokens\":50}}}', 1100)",
+            [],
+        )
+        .unwrap();
+
+        let messages = parse_bb_sqlite(&db_path);
+        assert_eq!(messages[0].dedup_key.as_deref(), Some("bb:turn_1:1:100:50"));
+        assert_eq!(
+            provider_mirror_from_dedup_key(messages[0].dedup_key.as_deref().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_fork_copy_collapses_and_keeps_the_provider_identity() {
+        // BB copies a forked thread's history with `provider_thread_id`
+        // cleared. Whichever copy is read first, the kept row must still
+        // name the provider session, or it could not yield to the transcript.
+        for (original_thread, copy_thread) in [("thr_a", "thr_b"), ("thr_b", "thr_a")] {
+            let dir = TempDir::new().unwrap();
+            let db_path = dir.path().join("bb.db");
+            let conn = create_current_schema_bb_db(&db_path);
+            insert_thread(&conn, original_thread, "claude-code", None);
+            insert_thread(&conn, copy_thread, "claude-code", Some(original_thread));
+            insert_event(
+                &conn,
+                "e1",
+                original_thread,
+                "turn_1",
+                1,
+                "thread/tokenUsage/updated",
+                Some("sess-1"),
+                USAGE_DATA,
+            );
+            insert_event(
+                &conn,
+                "e2",
+                copy_thread,
+                "turn_1",
+                1,
+                "thread/tokenUsage/updated",
+                None,
+                r#"{"tokenUsage":{"last":{"totalTokens":150,"inputTokens":100,"outputTokens":50}}}"#,
+            );
+
+            let messages = parse_bb_sqlite(&db_path);
+            assert_eq!(messages.len(), 1, "fork copy must collapse");
+            let mirror =
+                provider_mirror_from_dedup_key(messages[0].dedup_key.as_deref().unwrap()).unwrap();
+            assert_eq!(mirror.session, "sess-1");
+        }
+    }
+
+    #[test]
+    fn test_mirror_dedup_key_rejects_unreadable_ids() {
+        let identity = "bb:turn_1:1:100:50".to_string();
+        let mirror = BbProviderMirror {
+            provider: BbMirrorProvider::Claude,
+            session: "a:b",
+            turn: None,
+        };
+        assert_eq!(mirror_dedup_key(Some(mirror), identity.clone()), identity);
+        assert_eq!(
+            provider_mirror_from_dedup_key("bb:mirror:claude::x:bb:t:1:1:1"),
+            None
+        );
+        assert_eq!(
+            provider_mirror_from_dedup_key("bb:mirror:pi:s:x:bb:t:1:1:1"),
+            None
+        );
+        assert_eq!(provider_mirror_from_dedup_key("bb:turn_1:1:100:50"), None);
     }
 
     #[test]

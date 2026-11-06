@@ -2264,7 +2264,9 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Muse => 3,
         ClientId::Vibe => 1,
         // v1->v2: cumulative total differencing and fork deduplication.
-        ClientId::Bb => 2,
+        // v2->v3: dedup keys name the provider session and turn, so a row
+        // mirrored from a Claude transcript or Codex rollout can yield to it.
+        ClientId::Bb => 3,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -8888,12 +8890,12 @@ mod tests {
 
     #[test]
     fn test_bb_parser_version() {
-        assert_eq!(parser_version(ClientId::Bb), 2);
+        assert_eq!(parser_version(ClientId::Bb), 3);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_bb_v1_shard_invalidates_and_reparses_to_v2() {
+    fn test_bb_stale_shards_invalidate_and_reparse() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -8936,60 +8938,65 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let current_identity = CacheIdentity::for_client(ClientId::Bb);
-        let stale_identity = CacheIdentity {
-            namespace: current_identity.namespace,
-            parser_version: 1,
-        };
-        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
-        let stale_message = UnifiedMessage::new(
-            "bb",
-            "stale-model",
-            "stale-provider",
-            "thr_test",
-            1000,
-            crate::TokenBreakdown {
-                input: 9999,
-                output: 9999,
-                ..Default::default()
-            },
-            0.0,
-        );
-        let stale_entry = CachedSourceEntry::new(
-            stale_identity,
-            &source,
-            fingerprint.clone(),
-            vec![stale_message],
-            Vec::new(),
-            None,
-        );
-        let stale_path = cache_shard_path(current_identity, &source);
-        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
-        write_shard_with_limit(
-            &stale_path,
-            stale_identity,
-            &[stale_entry],
-            MAX_CACHE_SHARD_BYTES,
-        )
-        .unwrap();
+        // v1 predates fork dedup; v2 predates the provider identity in the
+        // dedup key, without which a mirrored row cannot yield to the
+        // provider's own record.
+        for stale_version in [1, 2] {
+            let current_identity = CacheIdentity::for_client(ClientId::Bb);
+            let stale_identity = CacheIdentity {
+                namespace: current_identity.namespace,
+                parser_version: stale_version,
+            };
+            let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+            let stale_message = UnifiedMessage::new(
+                "bb",
+                "stale-model",
+                "stale-provider",
+                "thr_test",
+                1000,
+                crate::TokenBreakdown {
+                    input: 9999,
+                    output: 9999,
+                    ..Default::default()
+                },
+                0.0,
+            );
+            let stale_entry = CachedSourceEntry::new(
+                stale_identity,
+                &source,
+                fingerprint.clone(),
+                vec![stale_message],
+                Vec::new(),
+                None,
+            );
+            let stale_path = cache_shard_path(current_identity, &source);
+            ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+            write_shard_with_limit(
+                &stale_path,
+                stale_identity,
+                &[stale_entry],
+                MAX_CACHE_SHARD_BYTES,
+            )
+            .unwrap();
 
-        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
-            source_home.path().to_str().unwrap(),
-            &["bb".to_string()],
-            None,
-            false,
-            &crate::scanner::ScannerSettings::default(),
-        );
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3-7-sonnet");
-        assert_eq!(messages[0].tokens.input, 1000);
-        assert_eq!(messages[0].tokens.output, 200);
+            let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["bb".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].model_id, "claude-3-7-sonnet");
+            assert_eq!(messages[0].tokens.input, 1000);
+            assert_eq!(messages[0].tokens.output, 200);
 
-        let cache = SourceMessageCache::load();
-        let rebuilt = cache
-            .get(current_identity, &source)
-            .expect("the v2 parse must replace the stale v1 row");
-        assert_eq!(rebuilt.parser_version, 2);
+            let cache = SourceMessageCache::load();
+            let rebuilt = cache
+                .get(current_identity, &source)
+                .expect("the current parse must replace the stale row");
+            assert_eq!(rebuilt.parser_version, 3);
+        }
     }
 
     #[test]

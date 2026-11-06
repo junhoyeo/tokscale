@@ -1385,6 +1385,67 @@ impl RecordedCodexTurns {
     }
 }
 
+/// The Claude sessions whose usage the Claude lane counts in this report:
+/// every session id among `messages` that `counted` keeps.
+fn claude_sessions_counted(
+    messages: &[UnifiedMessage],
+    counted: impl Fn(&UnifiedMessage) -> bool,
+) -> HashSet<String> {
+    messages
+        .iter()
+        .filter(|message| counted(message))
+        .map(|message| message.session_id.to_string())
+        .collect()
+}
+
+/// True when the provider's own log of a BB row's response is counted in this
+/// report, so the BB row must not be counted again.
+///
+/// BB runs Claude through the Agent SDK with `persistSession: true` and Codex
+/// through app-server with `ephemeral: false`, both under the user's normal
+/// homes, so each response it drives is also in a Claude transcript or a
+/// Codex rollout that the claude or codex lane reads. The provider's record
+/// wins: it is per request with the exact model and usage, while BB keeps a
+/// Claude turn as one aggregate of the SDK result and prunes older
+/// `thread/tokenUsage/updated` rows. Its usage is reported under `claude` or
+/// `codex`, as it was before BB support, and the BB row stays only where it is
+/// the one record of that work in the report.
+///
+/// The match uses the exact provider identity BB stores on the row (see the
+/// `sessions::bb` module docs), never time or token counts:
+///
+/// - Codex, per turn: the rollout recorded usage under the thread id and the
+///   turn's `providerCheckpointId` ([`RecordedCodexTurns`], which only holds
+///   threads counted under codex in this report).
+/// - Claude, per session: the Claude lane counted a message of that session.
+///   BB's checkpoint is a transcript line `uuid`, which the Claude rows do not
+///   keep, and the Claude lane keeps rows a rewritten or deleted transcript no
+///   longer holds, so a per-line match could miss rows that are still counted.
+///   Every turn BB runs in a session goes into that session's transcript.
+///
+/// A client filter that leaves out the provider keeps the BB rows: `--bb`
+/// alone reports everything BB recorded, `--claude` alone reports the
+/// transcripts, and any report that includes both counts each response once.
+fn bb_row_recorded_by_provider(
+    message: &UnifiedMessage,
+    claude_counted_sessions: &HashSet<String>,
+    recorded_codex_turns: &RecordedCodexTurns,
+) -> bool {
+    let Some(mirror) = message
+        .dedup_key
+        .as_deref()
+        .and_then(sessions::bb::provider_mirror_from_dedup_key)
+    else {
+        return false;
+    };
+    match mirror.provider {
+        sessions::bb::BbMirrorProvider::Claude => claude_counted_sessions.contains(mirror.session),
+        sessions::bb::BbMirrorProvider::Codex => {
+            recorded_codex_turns.covers(mirror.session, mirror.turn)
+        }
+    }
+}
+
 struct FlushContext<'a> {
     pricing: Option<&'a pricing::PricingService>,
     include_all: bool,
@@ -3473,6 +3534,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
     for index in sessions::claudecode::reconcile_advisor_billing(&mut claude_messages) {
         apply_pricing_if_available(&mut claude_messages[index], pricing);
     }
+    let claude_counted_sessions = if scan_result.bb_dbs.is_empty() {
+        HashSet::new()
+    } else {
+        claude_sessions_counted(&claude_messages, |message| {
+            matches_flush_filter(message, &flush_context)
+        })
+    };
     all_messages.extend(claude_messages);
     flush_lane(&mut all_messages, &flush_context, sink);
 
@@ -4479,8 +4547,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    // BB (get-bb/bb) SQLite database sessions.
-    let mut bb_seen: HashSet<String> = HashSet::new();
+    // BB (get-bb/bb) SQLite database sessions. A row whose response the
+    // Claude or Codex lane above counted is dropped here; see
+    // `bb_row_recorded_by_provider`.
+    let mut bb_messages: Vec<UnifiedMessage> = Vec::new();
     for db_path in &scan_result.bb_dbs {
         let CachedParseOutcome {
             mut messages,
@@ -4488,15 +4558,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
             ..
         } = load_or_parse_bb_sqlite_source(db_path, &source_cache, pricing);
         machine_labeler.label_messages(db_path, &mut messages);
-        all_messages.extend(
-            messages
-                .into_iter()
-                .filter(|message| should_keep_deduped_message(&mut bb_seen, message)),
-        );
+        bb_messages.extend(messages);
         if let Some(entry) = cache_entry {
             source_cache.insert(entry);
         }
     }
+    all_messages.extend(
+        sessions::bb::dedup_bb_messages(bb_messages)
+            .into_iter()
+            .filter(|message| {
+                !bb_row_recorded_by_provider(
+                    message,
+                    &claude_counted_sessions,
+                    &recorded_codex_turns,
+                )
+            }),
+    );
 
     // Keep the whole source's accounting state while streaming its records.
     // Partial input must not become a warm cache that suppresses future retries.
@@ -7623,6 +7700,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         claude_desktop::read(Path::new(&home_dir)).merge_into(&mut claude_messages);
     }
     sessions::claudecode::reconcile_advisor_billing(&mut claude_messages);
+    let claude_counted_sessions = if scan_result.bb_dbs.is_empty() {
+        HashSet::new()
+    } else {
+        claude_sessions_counted(&claude_messages, |message| {
+            include_all
+                || retain_for_requested_clients(
+                    &message.client,
+                    &message.model_id,
+                    &message.provider_id,
+                    &requested,
+                )
+        })
+    };
     let claude_msgs: Vec<_> = claude_messages.iter().map(unified_to_parsed).collect();
     // Advisor calls and undated Desktop balances add usage, not extra replies.
     counts.set(ClientId::Claude, summed_parsed_message_count(&claude_msgs));
@@ -8266,15 +8356,17 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
 
+    // Same reconciliation as the cached lane: see `bb_row_recorded_by_provider`.
     let bb_msgs_raw: Vec<UnifiedMessage> = scan_result
         .bb_dbs
         .par_iter()
         .flat_map(|db_path| sessions::bb::parse_bb_sqlite(db_path))
         .collect();
-    let mut bb_seen: HashSet<String> = HashSet::new();
-    let bb_msgs: Vec<ParsedMessage> = bb_msgs_raw
+    let bb_msgs: Vec<ParsedMessage> = sessions::bb::dedup_bb_messages(bb_msgs_raw)
         .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut bb_seen, message))
+        .filter(|message| {
+            !bb_row_recorded_by_provider(message, &claude_counted_sessions, &recorded_codex_turns)
+        })
         .map(|message| unified_to_parsed(&message))
         .collect();
     let bb_count = summed_parsed_message_count(&bb_msgs);
@@ -28156,6 +28248,476 @@ mod tests {
                     sessions::BillingIdentity::Unknown
                 );
             }
+        }
+    }
+
+    /// BB runs Claude and Codex under the user's normal homes, so each
+    /// response it drives is in BB's database and in the provider's own log.
+    /// These pin that every report counts such a response once, under the
+    /// provider, on every lane and on cold and warm source caches.
+    mod bb_provider_mirror {
+        use super::*;
+        use std::collections::BTreeMap;
+
+        const MIRRORED_SESSION: &str = "11111111-2222-4333-8444-555555555555";
+        const STANDALONE_SESSION: &str = "11111111-2222-4333-8444-777777777777";
+        /// A session BB recorded whose transcript is gone.
+        const DELETED_SESSION: &str = "11111111-2222-4333-8444-666666666666";
+        const MIRRORED_UUID: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+        const CODEX_THREAD: &str = "01a02208-6c1e-7411-af9d-5af46a1fd384";
+        const CODEX_TURN: &str = "01a02208-6d00-7e60-9054-4e1c6068de0f";
+        /// A Codex turn BB recorded that the rollout does not hold.
+        const CODEX_MISSING_TURN: &str = "01a02208-b4f8-73e3-ae6c-7231a43e3974";
+
+        fn claude_transcript(home: &Path, session: &str, uuid: &str, id: &str, usage: &str) {
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            let user = serde_json::json!({
+                "type": "user", "uuid": format!("{uuid}-user"), "sessionId": session,
+                "timestamp": "2026-09-21T10:00:00.000Z",
+                "message": {"role": "user", "content": "hi"}
+            });
+            let assistant = format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"{session}","timestamp":"2026-09-21T10:00:05.000Z","requestId":"req_{id}","message":{{"id":"msg_{id}","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{usage}}}}}"#
+            );
+            std::fs::write(
+                dir.join(format!("{session}.jsonl")),
+                format!("{user}\n{assistant}\n"),
+            )
+            .unwrap();
+        }
+
+        fn codex_rollout(home: &Path) {
+            let dir = home.join(".codex/sessions/2026/09/21");
+            std::fs::create_dir_all(&dir).unwrap();
+            let lines = [
+                format!(r#"{{"timestamp":"2026-09-21T10:00:00Z","type":"session_meta","payload":{{"id":"{CODEX_THREAD}","originator":"bb","cli_version":"0.150.0","source":"vscode","model_provider":"openai","cwd":"/work/bbrepro"}}}}"#),
+                format!(r#"{{"timestamp":"2026-09-21T10:00:00Z","type":"event_msg","payload":{{"type":"task_started","turn_id":"{CODEX_TURN}","started_at":1790000000}}}}"#),
+                format!(r#"{{"timestamp":"2026-09-21T10:00:00Z","type":"turn_context","payload":{{"turn_id":"{CODEX_TURN}","model":"gpt-5.2-codex"}}}}"#),
+                r#"{"timestamp":"2026-09-21T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5600,"cached_input_tokens":5000,"output_tokens":500},"last_token_usage":{"input_tokens":5600,"cached_input_tokens":5000,"output_tokens":500}}}}"#.to_string(),
+            ];
+            std::fs::write(
+                dir.join(format!("rollout-2026-09-21T10-00-00-{CODEX_THREAD}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+        }
+
+        /// A BB database in the current schema (`events.provider_thread_id`).
+        fn bb_db(home: &Path) -> rusqlite::Connection {
+            let dir = home.join(".bb");
+            std::fs::create_dir_all(&dir).unwrap();
+            let conn = rusqlite::Connection::open(dir.join("bb.db")).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY NOT NULL, project_id TEXT, provider_id TEXT NOT NULL,
+                    model_override TEXT, title TEXT, parent_thread_id TEXT, created_at INTEGER NOT NULL
+                );
+                CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL);
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT,
+                    provider_thread_id TEXT, sequence INTEGER NOT NULL, type TEXT NOT NULL,
+                    data TEXT NOT NULL, created_at INTEGER NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+            conn
+        }
+
+        fn bb_thread(
+            conn: &rusqlite::Connection,
+            id: &str,
+            provider: &str,
+            model: &str,
+            parent: Option<&str>,
+        ) {
+            conn.execute(
+                "INSERT INTO threads VALUES (?1, NULL, ?2, ?3, NULL, ?4, 1790000000000)",
+                (id, provider, model, parent),
+            )
+            .unwrap();
+        }
+
+        /// One BB turn: its usage row and, when `checkpoint` is set, the
+        /// `turn/completed` row naming the provider's id for the turn.
+        /// `column` is false for a fork's copied rows, whose column BB clears.
+        fn bb_turn(
+            conn: &rusqlite::Connection,
+            thread: &str,
+            turn: &str,
+            session: &str,
+            column: bool,
+            checkpoint: Option<&str>,
+            usage: &str,
+        ) {
+            let column = column.then_some(session);
+            let next: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 1, 'thread/tokenUsage/updated', ?5, 1790762405010)",
+                (
+                    format!("evt_{next}"),
+                    thread,
+                    turn,
+                    column,
+                    format!(r#"{{"providerThreadId":"{session}","tokenUsage":{{"total":{usage},"last":{usage}}}}}"#),
+                ),
+            )
+            .unwrap();
+            if let Some(checkpoint) = checkpoint {
+                conn.execute(
+                    "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 2, 'turn/completed', ?5, 1790762405011)",
+                    (
+                        format!("evt_{next}_done"),
+                        thread,
+                        turn,
+                        column,
+                        format!(r#"{{"providerThreadId":"{session}","status":"completed","providerCheckpointId":"{checkpoint}"}}"#),
+                    ),
+                )
+                .unwrap();
+            }
+        }
+
+        /// The reported reproduction plus the usage that exists in one store
+        /// only: the mirrored response (6,100 tokens) is in the Claude
+        /// transcript and in BB; a standalone Claude session (500) is only in
+        /// Claude; a BB turn whose transcript is gone (700) and a BB turn on
+        /// another provider (300) are only in BB.
+        fn claude_fixture(home: &Path) {
+            claude_transcript(
+                home,
+                MIRRORED_SESSION,
+                MIRRORED_UUID,
+                "mirrored",
+                r#"{"input_tokens":100,"output_tokens":500,"cache_read_input_tokens":5000,"cache_creation_input_tokens":500}"#,
+            );
+            claude_transcript(
+                home,
+                STANDALONE_SESSION,
+                "bbbbbbbb-0000-4000-8000-000000000002",
+                "standalone",
+                r#"{"input_tokens":400,"output_tokens":100}"#,
+            );
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_mirror",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            // A fork of it: BB copied the mirrored turn with the column cleared.
+            bb_thread(
+                &conn,
+                "thr_fork",
+                "claude-code",
+                "claude-sonnet-4-5",
+                Some("thr_mirror"),
+            );
+            bb_thread(
+                &conn,
+                "thr_deleted",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_thread(&conn, "thr_pi", "pi", "claude-sonnet-4-5", None);
+            let mirrored = r#"{"totalTokens":6100,"inputTokens":100,"cachedInputTokens":5500,"cacheReadInputTokens":5000,"cacheWriteInputTokens":500,"outputTokens":500,"reasoningOutputTokens":0}"#;
+            bb_turn(
+                &conn,
+                "thr_mirror",
+                "turn_m",
+                MIRRORED_SESSION,
+                true,
+                Some(MIRRORED_UUID),
+                mirrored,
+            );
+            bb_turn(
+                &conn,
+                "thr_fork",
+                "turn_m",
+                MIRRORED_SESSION,
+                false,
+                Some(MIRRORED_UUID),
+                mirrored,
+            );
+            bb_turn(
+                &conn,
+                "thr_deleted",
+                "turn_d",
+                DELETED_SESSION,
+                true,
+                Some("cccccccc-0000-4000-8000-000000000003"),
+                r#"{"totalTokens":700,"inputTokens":600,"outputTokens":100}"#,
+            );
+            bb_turn(
+                &conn,
+                "thr_pi",
+                "turn_p",
+                "pi-session",
+                true,
+                None,
+                r#"{"totalTokens":300,"inputTokens":200,"outputTokens":100}"#,
+            );
+        }
+
+        fn codex_fixture(home: &Path) {
+            codex_rollout(home);
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_codex", "codex", "gpt-5.2-codex", None);
+            bb_turn(
+                &conn,
+                "thr_codex",
+                "turn_c1",
+                CODEX_THREAD,
+                true,
+                Some(CODEX_TURN),
+                r#"{"totalTokens":6100,"inputTokens":5600,"cachedInputTokens":5000,"cacheReadInputTokens":5000,"cacheWriteInputTokens":0,"outputTokens":500,"reasoningOutputTokens":0}"#,
+            );
+            bb_turn(
+                &conn,
+                "thr_codex",
+                "turn_c2",
+                CODEX_THREAD,
+                true,
+                Some(CODEX_MISSING_TURN),
+                r#"{"totalTokens":900,"inputTokens":800,"cachedInputTokens":0,"cacheReadInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":100,"reasoningOutputTokens":0}"#,
+            );
+        }
+
+        /// Tokens and message count per client.
+        type Totals = BTreeMap<String, (i64, i32)>;
+
+        fn unified_totals(messages: &[UnifiedMessage]) -> Totals {
+            let mut totals = Totals::new();
+            for message in messages {
+                let entry = totals.entry(message.client.to_string()).or_default();
+                entry.0 += message.tokens.total();
+                entry.1 += message.message_count;
+            }
+            totals
+        }
+
+        fn totals(rows: &[(&str, i64, i32)]) -> Totals {
+            rows.iter()
+                .map(|(client, tokens, messages)| (client.to_string(), (*tokens, *messages)))
+                .collect()
+        }
+
+        fn clients(names: &[&str]) -> Vec<String> {
+            names.iter().map(|name| name.to_string()).collect()
+        }
+
+        fn submit_default_clients() -> Vec<String> {
+            let mut clients: Vec<String> = ClientId::iter()
+                .filter(|client| client.submit_default())
+                .map(|client| client.as_str().to_string())
+                .collect();
+            clients.push("synthetic".to_string());
+            clients
+        }
+
+        fn collected(home: &Path, clients: &[String]) -> Totals {
+            unified_totals(&parse_all_messages_with_pricing_with_env_strategy(
+                home.to_str().unwrap(),
+                clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            ))
+        }
+
+        fn direct(home: &Path, clients: Option<Vec<String>>) -> (Totals, Vec<(ClientId, i32)>) {
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(home.to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients,
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            let mut totals = Totals::new();
+            for message in &parsed.messages {
+                let entry = totals.entry(message.client.to_string()).or_default();
+                entry.0 += message.input
+                    + message.output
+                    + message.cache_read
+                    + message.cache_write
+                    + message.reasoning;
+                entry.1 += message.message_count;
+            }
+            let counts = [ClientId::Claude, ClientId::Codex, ClientId::Bb]
+                .into_iter()
+                .map(|client| (client, parsed.counts.get(client)))
+                .collect();
+            (totals, counts)
+        }
+
+        /// The graph lane streams through `GraphSink`; `Submission` is the
+        /// pricing contract of the payload `tokscale submit` sends.
+        fn graph(
+            home: &Path,
+            clients: Vec<String>,
+            requirement: GraphPricingRequirement,
+        ) -> Totals {
+            let pricing = pricing::PricingService::new(
+                HashMap::from(["claude-sonnet-4-5", "gpt-5.2-codex"].map(|model| {
+                    (
+                        model.to_string(),
+                        pricing::ModelPricing {
+                            input_cost_per_token: Some(0.000001),
+                            output_cost_per_token: Some(0.000002),
+                            cache_read_input_token_cost: Some(0.0000001),
+                            cache_creation_input_token_cost: Some(0.000001),
+                            ..Default::default()
+                        },
+                    )
+                })),
+                HashMap::new(),
+            );
+            let graph = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(generate_graph_with_loaded_pricing(
+                    ReportOptions {
+                        home_dir: Some(home.to_str().unwrap().to_string()),
+                        clients: Some(clients),
+                        ..Default::default()
+                    },
+                    Some(&pricing),
+                    requirement,
+                    None,
+                ))
+                .unwrap();
+            let mut totals = Totals::new();
+            for day in &graph.contributions {
+                for row in &day.clients {
+                    let entry = totals.entry(row.client.clone()).or_default();
+                    entry.0 += row.tokens.input
+                        + row.tokens.output
+                        + row.tokens.cache_read
+                        + row.tokens.cache_write
+                        + row.tokens.reasoning;
+                    entry.1 += row.messages;
+                }
+            }
+            totals
+        }
+
+        #[test]
+        #[serial]
+        fn bb_claude_mirror_counts_once_on_every_lane_and_cache_state() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            claude_fixture(home);
+
+            let everything = totals(&[("bb", 1_000, 2), ("claude", 6_600, 2)]);
+            for phase in ["cold", "warm"] {
+                // Default scan (no client filter) and the submission set.
+                assert_eq!(collected(home, &[]), everything, "{phase} default");
+                assert_eq!(
+                    graph(
+                        home,
+                        submit_default_clients(),
+                        GraphPricingRequirement::Submission
+                    ),
+                    everything,
+                    "{phase} submission graph"
+                );
+                assert_eq!(
+                    graph(
+                        home,
+                        clients(&["claude", "bb"]),
+                        GraphPricingRequirement::Lenient
+                    ),
+                    everything,
+                    "{phase} graph"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["claude", "bb"])),
+                    everything,
+                    "{phase}"
+                );
+                // A filter that leaves out the provider keeps BB's own rows.
+                assert_eq!(
+                    collected(home, &clients(&["claude"])),
+                    totals(&[("claude", 6_600, 2)]),
+                    "{phase} claude only"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["bb"])),
+                    totals(&[("bb", 7_100, 3)]),
+                    "{phase} bb only"
+                );
+            }
+
+            // The uncached ParsedMessage lane agrees, counts included.
+            let (default_totals, default_counts) = direct(home, None);
+            assert_eq!(default_totals, everything);
+            assert_eq!(
+                default_counts,
+                vec![
+                    (ClientId::Claude, 2),
+                    (ClientId::Codex, 0),
+                    (ClientId::Bb, 2)
+                ]
+            );
+            let (bb_only, bb_counts) = direct(home, Some(clients(&["bb"])));
+            assert_eq!(bb_only, totals(&[("bb", 7_100, 3)]));
+            assert_eq!(bb_counts[2], (ClientId::Bb, 3));
+            let (claude_only, _) = direct(home, Some(clients(&["claude"])));
+            assert_eq!(claude_only, totals(&[("claude", 6_600, 2)]));
+        }
+
+        #[test]
+        #[serial]
+        fn bb_codex_mirror_counts_once_per_turn_the_rollout_holds() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            codex_fixture(home);
+
+            let everything = totals(&[("bb", 900, 1), ("codex", 6_100, 1)]);
+            for phase in ["cold", "warm"] {
+                assert_eq!(collected(home, &[]), everything, "{phase} default");
+                assert_eq!(
+                    graph(
+                        home,
+                        submit_default_clients(),
+                        GraphPricingRequirement::Submission
+                    ),
+                    everything,
+                    "{phase} submission graph"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["codex"])),
+                    totals(&[("codex", 6_100, 1)]),
+                    "{phase} codex only"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["bb"])),
+                    totals(&[("bb", 7_000, 2)]),
+                    "{phase} bb only"
+                );
+            }
+            let (default_totals, default_counts) = direct(home, None);
+            assert_eq!(default_totals, everything);
+            assert_eq!(
+                default_counts,
+                vec![
+                    (ClientId::Claude, 0),
+                    (ClientId::Codex, 1),
+                    (ClientId::Bb, 1)
+                ]
+            );
         }
     }
 
