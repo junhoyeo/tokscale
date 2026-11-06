@@ -597,6 +597,9 @@ struct ClaudeParseStart {
     consumed_offset: u64,
     messages: Vec<UnifiedMessage>,
     state: ClaudeParseState,
+    /// The row of the user turn still open at the checkpoint, if any (see
+    /// `turn_row` in `parse_claude_lines`).
+    turn_row: Option<usize>,
 }
 
 const CLAUDE_READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -650,6 +653,7 @@ pub(crate) fn resume_claude_file(
     for &(index, cache_write_1h) in &checkpoint.unclamped_cache_write_1h {
         messages.get_mut(index)?.tokens.cache_write_1h = cache_write_1h;
     }
+    let turn_row = open_turn_row(&messages, &checkpoint.state);
 
     let mut reader = BufReader::with_capacity(CLAUDE_READ_BUFFER_BYTES, file);
     let mut prefix_hasher = Sha256::new();
@@ -680,6 +684,7 @@ pub(crate) fn resume_claude_file(
             consumed_offset: checkpoint.consumed_offset,
             messages,
             state: checkpoint.state.clone(),
+            turn_row,
         },
         &mut parent_cache,
     ))
@@ -746,9 +751,35 @@ fn parse_claude_file_internal(
                 provider_confidences: Vec::with_capacity(64),
                 ..ClaudeParseState::default()
             },
+            turn_row: None,
         },
         parent_cache,
     )
+}
+
+/// The row of the user turn a checkpoint leaves open, rebuilt from the
+/// checkpointed rows rather than stored, so the checkpoint layout and digest
+/// stay as they were.
+///
+/// A turn is open when no human prompt has followed its first response
+/// (`pending_turn_start` is false). Its rows start at the last row marked as
+/// a turn start, and the row a later entry-only line (a `<synthetic>` notice)
+/// would update is the last one of them that has an entry uuid: the same row
+/// a full parse would be holding at that offset.
+fn open_turn_row(messages: &[UnifiedMessage], state: &ClaudeParseState) -> Option<usize> {
+    if state.pending_turn_start {
+        return None;
+    }
+    let turn_start = messages.iter().rposition(|message| message.is_turn_start)?;
+    messages[turn_start..]
+        .iter()
+        .rposition(|message| {
+            matches!(
+                message.claude_entry_uuid,
+                crate::sessions::ClaudeEntryUuid::Known(_)
+            )
+        })
+        .map(|offset| turn_start + offset)
 }
 
 /// Maps each dedup key to the index of its first message, as the parse loop
@@ -793,6 +824,7 @@ fn parse_claude_lines(
         mut consumed_offset,
         mut messages,
         state,
+        turn_row: open_turn_row,
     } = start;
     let ClaudeParseState {
         mut session_id,
@@ -834,9 +866,9 @@ fn parse_claude_lines(
     let fresh_from = messages.len();
     // The row of the current user turn's latest response. A later assistant
     // entry that adds no row of its own (a `<synthetic>` notice, a fallback
-    // note) still ends the turn, so it moves that row's entry uuid. Not part
-    // of the checkpoint: a resume starts a new turn, as BB's SDK host does.
-    let mut turn_row: Option<usize> = None;
+    // note) still ends the turn, so it moves that row's entry uuid. A resume
+    // rebuilds it from the checkpointed rows (`open_turn_row`).
+    let mut turn_row: Option<usize> = open_turn_row;
     let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
     let mut raw_line = Vec::with_capacity(4096);
@@ -2535,6 +2567,41 @@ mod tests {
             ClaudeEntryUuid::from_entry_uuid("not-a-uuid"),
             ClaudeEntryUuid::from_entry_uuid("not-a-uuid-2")
         );
+    }
+
+    #[test]
+    fn resumed_parse_moves_the_open_turn_row_like_a_full_parse() {
+        use crate::sessions::ClaudeEntryUuid;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let prefix = concat!(
+            r#"{"type":"user","uuid":"u-1","timestamp":"2026-09-21T10:00:00.000Z","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-4000-8000-000000000001","timestamp":"2026-09-21T10:00:01.000Z","requestId":"req_a","message":{"id":"msg_a","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "\n",
+        );
+        // Written after the checkpoint, still in the same user turn.
+        let notice = concat!(
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-4000-8000-000000000002","timestamp":"2026-09-21T10:00:02.000Z","message":{"id":"msg_s","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}],"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            "\n",
+        );
+        std::fs::write(&path, prefix).unwrap();
+        let first = parse_claude_file_with_checkpoint(&path, None);
+        let checkpoint = first.checkpoint.expect("a complete line checkpoints");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(notice.as_bytes())
+            .unwrap();
+        let resumed = resume_claude_file(&path, None, &checkpoint, &first.messages)
+            .expect("an appended file resumes");
+        let full = parse_claude_file_with_checkpoint(&path, None);
+        assert_eq!(
+            resumed.messages[0].claude_entry_uuid,
+            ClaudeEntryUuid::from_entry_uuid("bbbbbbbb-0000-4000-8000-000000000002")
+        );
+        assert_eq!(resumed.messages, full.messages);
     }
 
     #[test]
