@@ -3,14 +3,36 @@ use crate::{pricing, provider_identity, TokenBreakdown};
 use serde_json::Value;
 use std::path::Path;
 
+fn file_modified_ms(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Utc>::from(time).timestamp_millis())
+        .unwrap_or(0)
+}
+
 pub fn parse_antigravity_file(path: &Path) -> Vec<UnifiedMessage> {
+    parse_antigravity_file_inner(path, false).0
+}
+
+pub fn parse_antigravity_file_with_v1(path: &Path) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
+    parse_antigravity_file_inner(path, true)
+}
+
+fn parse_antigravity_file_inner(
+    path: &Path,
+    include_v1: bool,
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), Vec::new()),
     };
 
+    let fallback_file_ts = file_modified_ms(path);
     let mut messages = Vec::new();
+    let mut v1_messages = Vec::new();
     let mut session_model: Option<String> = None;
+    let mut session_timestamp: Option<i64> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -32,22 +54,50 @@ pub fn parse_antigravity_file(path: &Path) -> Vec<UnifiedMessage> {
                 {
                     session_model = Some(model_id.to_string());
                 }
+                let meta_ts = to_safe_i64(value.get("timestamp"));
+                if meta_ts > 0 {
+                    session_timestamp = Some(meta_ts);
+                }
             }
             "usage" => {
-                if let Some(message) = parse_usage_row(&value, session_model.as_deref()) {
+                let fallback_ts = session_timestamp
+                    .filter(|&ts| ts > 0)
+                    .unwrap_or(fallback_file_ts);
+                if let Some(message) =
+                    parse_usage_row(&value, session_model.as_deref(), fallback_ts, false)
+                {
                     messages.push(message);
+                }
+                if include_v1 {
+                    if let Some(v1_message) =
+                        parse_usage_row(&value, session_model.as_deref(), 0, true)
+                    {
+                        v1_messages.push(v1_message);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    messages
+    (messages, v1_messages)
 }
 
-fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<UnifiedMessage> {
+fn parse_usage_row(
+    value: &Value,
+    fallback_model: Option<&str>,
+    fallback_timestamp: i64,
+    v1_compat: bool,
+) -> Option<UnifiedMessage> {
     let session_id = value.get("sessionId").and_then(Value::as_str)?.to_string();
-    let timestamp = to_safe_i64(value.get("timestamp"));
+    let raw_timestamp = to_safe_i64(value.get("timestamp"));
+    let timestamp = if v1_compat {
+        raw_timestamp
+    } else if raw_timestamp > 0 {
+        raw_timestamp
+    } else {
+        fallback_timestamp
+    };
     if timestamp <= 0 {
         return None;
     }
@@ -73,10 +123,14 @@ fn parse_usage_row(value: &Value, fallback_model: Option<&str>) -> Option<Unifie
     let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
 
     let input = to_safe_i64(value.get("input"));
-    let output = to_safe_i64(value.get("output"));
+    let raw_output = to_safe_i64(value.get("output"));
     let cache_read = to_safe_i64(value.get("cacheRead"));
-    let cache_write = to_safe_i64(value.get("cacheWrite"));
     let reasoning = to_safe_i64(value.get("reasoning"));
+    let (output, cache_write) = if v1_compat {
+        (raw_output.saturating_add(reasoning), 0)
+    } else {
+        (raw_output, to_safe_i64(value.get("cacheWrite")))
+    };
     if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 && reasoning == 0 {
         return None;
     }
@@ -209,5 +263,23 @@ mod tests {
         assert_eq!(messages[0].provider_id, "google");
         assert_eq!(messages[1].model_id, "gemini-3.1-pro");
         assert_eq!(messages[1].provider_id, "google");
+    }
+
+    #[test]
+    fn parse_usage_row_falls_back_to_session_meta_or_file_mtime_when_timestamp_is_null() {
+        let input = r#"{"type":"session_meta","sessionId":"abc","modelId":"claude-sonnet-4.6","timestamp":1711200000000}
+{"type":"usage","sessionId":"abc","timestamp":null,"input":12,"output":4,"cacheRead":2,"cacheWrite":3,"reasoning":1,"responseId":"resp-null-ts"}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let (v2_messages, v1_messages) = parse_antigravity_file_with_v1(path.path());
+        assert_eq!(v2_messages.len(), 1);
+        assert_eq!(v2_messages[0].timestamp, 1_711_200_000_000);
+        assert_eq!(v2_messages[0].tokens.output, 4);
+        assert_eq!(v2_messages[0].tokens.cache_write, 3);
+        assert_eq!(v2_messages[0].tokens.reasoning, 1);
+        assert!(v1_messages.is_empty());
     }
 }

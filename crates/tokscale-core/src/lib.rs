@@ -861,6 +861,16 @@ impl RecountProofBuilder {
         self.cell(date, model_id).previous.add(message);
     }
 
+    /// A row counted by the previous parser generation.
+    fn record_previous(&mut self, date: &str, model_id: &str, message: &UnifiedMessage) {
+        self.cell(date, model_id).previous.add(message);
+    }
+
+    /// A row counted by the current parser generation.
+    fn record_corrected(&mut self, date: &str, model_id: &str, message: &UnifiedMessage) {
+        self.cell(date, model_id).corrected.add(message);
+    }
+
     fn finish(self) -> ClientRecountProof {
         self.proof
     }
@@ -5027,11 +5037,15 @@ fn parse_all_messages_streaming<S: MessageSink>(
         all_messages.extend(crush_messages);
     }
 
-    all_messages.extend(parse_antigravity_family_messages(
-        &scan_result,
-        pricing,
-        &machine_labeler,
-    ));
+    let (antigravity_messages, antigravity_recount_proofs) =
+        parse_antigravity_family_messages_with_recount_proofs(
+            &scan_result,
+            pricing,
+            &machine_labeler,
+            &flush_context,
+        );
+    all_messages.extend(antigravity_messages);
+    recount_proofs.extend(antigravity_recount_proofs);
 
     // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
     let trae_messages: Vec<UnifiedMessage> = scan_result
@@ -8967,6 +8981,7 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
 }
 
 type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
+type AntigravitySourceParserWithV1 = fn(&Path) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>);
 
 /// Read every Antigravity surface in legacy-first order, then collapse copies
 /// of the same provider response even when each surface assigned it a
@@ -9012,6 +9027,95 @@ fn parse_antigravity_family_messages(
     }
 
     dedupe_antigravity_family_messages(messages)
+}
+
+fn parse_antigravity_family_messages_with_recount_proofs(
+    scan_result: &scanner::ScanResult,
+    pricing: Option<&pricing::PricingService>,
+    machine_labeler: &machine_label::MachineLabeler,
+    flush_context: &FlushContext<'_>,
+) -> (Vec<UnifiedMessage>, BTreeMap<String, ClientRecountProof>) {
+    let sources: [(ClientId, AntigravitySourceParserWithV1); 3] = [
+        (
+            ClientId::Antigravity,
+            sessions::antigravity::parse_antigravity_file_with_v1,
+        ),
+        (
+            ClientId::AntigravityCli,
+            sessions::antigravity_cli::parse_antigravity_cli_file_with_v1,
+        ),
+        (
+            ClientId::AntigravityExtension,
+            sessions::antigravity_cli::parse_antigravity_extension_file_with_v1,
+        ),
+    ];
+
+    let mut messages = Vec::new();
+    let mut v1_messages = Vec::new();
+    for (client, parse) in sources {
+        let parsed_pairs: Vec<(Vec<UnifiedMessage>, Vec<UnifiedMessage>)> = scan_result
+            .get(client)
+            .par_iter()
+            .map(|path| {
+                let (mut current, mut v1) = parse(path);
+                machine_labeler.label_messages(path, &mut current);
+                machine_labeler.label_messages(path, &mut v1);
+                (current, v1)
+            })
+            .collect();
+        let mut source_messages = Vec::new();
+        let mut source_v1_messages = Vec::new();
+        for (current, v1) in parsed_pairs {
+            source_messages.extend(current);
+            source_v1_messages.extend(v1);
+        }
+        if let Some(pricing) = pricing {
+            for message in &mut source_messages {
+                apply_pricing_if_available(message, Some(pricing));
+            }
+            for message in &mut source_v1_messages {
+                apply_pricing_if_available(message, Some(pricing));
+                let _ = pricing.take_cost_estimate_source(message);
+            }
+        }
+        messages.extend(source_messages);
+        v1_messages.extend(source_v1_messages);
+    }
+
+    let messages = dedupe_antigravity_family_messages(messages);
+    let v1_messages = dedupe_antigravity_family_messages(v1_messages);
+
+    let mut builders: BTreeMap<String, RecountProofBuilder> = BTreeMap::new();
+    for message in &v1_messages {
+        if let Some((date, model_id)) = flushed_message_identity(message, flush_context) {
+            builders
+                .entry(message.client.as_str().to_string())
+                .or_default()
+                .record_previous(&date, &model_id, message);
+        }
+    }
+    for message in &messages {
+        if let Some((date, model_id)) = flushed_message_identity(message, flush_context) {
+            builders
+                .entry(message.client.as_str().to_string())
+                .or_default()
+                .record_corrected(&date, &model_id, message);
+        }
+    }
+
+    let mut proofs = BTreeMap::new();
+    for (client, builder) in builders {
+        let proof = builder.finish();
+        let has_diff = proof
+            .values()
+            .flat_map(|models| models.values())
+            .any(|entry| entry.previous != entry.corrected);
+        if has_diff {
+            proofs.insert(client, proof);
+        }
+    }
+
+    (messages, proofs)
 }
 
 /// Deduplicate only response IDs within the Antigravity family. Missing IDs
@@ -25231,6 +25335,11 @@ mod tests {
             graph.contributions[0].clients[0].model_id,
             "gemini-3-flash-preview"
         );
+        let date = &graph.contributions[0].date;
+        let proof = &graph.recount_proofs["antigravity"][date]["gemini-3-flash-preview"];
+        assert_eq!(proof.previous.tokens.output, 5);
+        assert_eq!(proof.corrected.tokens.output, 4);
+        assert_eq!(proof.corrected.tokens.reasoning, 1);
     }
 
     #[test]

@@ -2407,4 +2407,206 @@ describe("POST /api/submit Antigravity family cost floors", () => {
       ]!.tokens,
     ).toBe(27_110_137);
   });
+
+  it("reconciles v1->v2 Antigravity recount proofs (removing #1 model enum inflation, unswapping #9/#10 output/reasoning, adding #4 cacheWrite, and dropping 0-token phantom turns)", async () => {
+    const store = newStore();
+
+    // Step 1: Device submits under the old v1 parser where:
+    // - #1 = 1132 was added to #2 = 500 -> input = 1632
+    // - #9 = 40 (thinking) was mapped to output, #10 = 300 (response) was mapped to reasoning
+    // - #4 = 125 (cacheWrite) was ignored (0)
+    // - A failed 0-token generation carrying only #1 = 1026 was emitted as an `unknown` message
+    const v1Body = submissionBody("antigravity-cli", []);
+    v1Body.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
+    v1Body.summary = { clients: ["antigravity-cli"] };
+    (v1Body as any).contributions = [
+      {
+        date: "2026-08-10",
+        totals: {
+          tokens: 1632 + 40 + 16000 + 300 + 1026,
+          cost: 1.5,
+          messages: 2,
+          costIsComplete: false,
+        },
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-high",
+            tokens: {
+              input: 1632,
+              output: 40,
+              cacheRead: 16000,
+              cacheWrite: 0,
+              reasoning: 300,
+            },
+            cost: 1.5,
+            messages: 1,
+          },
+          {
+            client: "antigravity-cli",
+            modelId: "unknown",
+            tokens: {
+              input: 1026,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 0,
+            messages: 1,
+          },
+        ],
+      },
+    ];
+    await submitFamily(store, v1Body as any);
+    expect(storedTokens(store)).toBe(18_998);
+
+    // Step 2: Device upgrades to the v2 parser and submits with scanScope.recountProofs:
+    // - input is 500, output is 300, reasoning is 40, cacheWrite is 125, cacheRead is 16000
+    // - the 0-token `unknown` phantom turn is dropped (corrected = 0)
+    const v2Body = submissionBody("antigravity-cli", []);
+    v2Body.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
+    v2Body.summary = { clients: ["antigravity-cli"] };
+    (v2Body as any).contributions = [
+      {
+        date: "2026-08-10",
+        totals: {
+          tokens: 500 + 300 + 16000 + 125 + 40,
+          cost: 1.2,
+          messages: 1,
+          costIsComplete: true,
+        },
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-high",
+            tokens: {
+              input: 500,
+              output: 300,
+              cacheRead: 16000,
+              cacheWrite: 125,
+              reasoning: 40,
+            },
+            cost: 1.2,
+            messages: 1,
+          },
+        ],
+      },
+    ];
+    (v2Body.scanScope as Record<string, unknown>).recountProofs = {
+      "antigravity-cli": {
+        "2026-08-10": {
+          "gemini-3.5-flash-high": {
+            previous: {
+              tokens: {
+                input: 1632,
+                output: 40,
+                cacheRead: 16000,
+                cacheWrite: 0,
+                reasoning: 300,
+              },
+              cost: 1.5,
+              messages: 1,
+            },
+            corrected: {
+              tokens: {
+                input: 500,
+                output: 300,
+                cacheRead: 16000,
+                cacheWrite: 125,
+                reasoning: 40,
+              },
+              cost: 1.2,
+              messages: 1,
+            },
+          },
+          unknown: {
+            previous: {
+              tokens: {
+                input: 1026,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+              },
+              cost: 0,
+              messages: 1,
+            },
+            corrected: {
+              tokens: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+              },
+              cost: 0,
+              messages: 0,
+            },
+          },
+        },
+      },
+    };
+
+    const upgraded = await submitFamily(
+      store,
+      v2Body as ReturnType<typeof familySnapshotBody>,
+    );
+    expect(
+      (upgraded.warnings ?? []).some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(false);
+    expect(storedTokens(store)).toBe(16_965);
+    expect(storedCost(store)).toBeCloseTo(1.2, 8);
+    const cell = store.days[0]!.sourceBreakdown["antigravity-cli"]!;
+    expect(cell.input).toBe(500);
+    expect(cell.output).toBe(300);
+    expect(cell.cacheRead).toBe(16000);
+    expect(cell.cacheWrite).toBe(125);
+    expect(cell.reasoning).toBe(40);
+    expect(cell.messages).toBe(1);
+    expect(cell.models["unknown"]).toBeUndefined();
+
+    // Step 3: Deleting local history after transitioning to v2 still freezes!
+    const shrunkBody = submissionBody("antigravity-cli", []);
+    shrunkBody.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
+    shrunkBody.summary = { clients: ["antigravity-cli"] };
+    (shrunkBody as any).contributions = [
+      {
+        date: "2026-08-10",
+        totals: {
+          tokens: 100 + 50,
+          cost: 0.2,
+          messages: 1,
+          costIsComplete: true,
+        },
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-high",
+            tokens: {
+              input: 100,
+              output: 50,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 0.2,
+            messages: 1,
+          },
+        ],
+      },
+    ];
+    const shrunk = await submitFamily(
+      store,
+      shrunkBody as any,
+    );
+    expect(
+      (shrunk.warnings ?? []).some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(true);
+    expect(storedTokens(store)).toBe(16_965);
+  });
 });
