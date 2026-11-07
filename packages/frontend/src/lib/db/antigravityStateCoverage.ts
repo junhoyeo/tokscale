@@ -111,15 +111,11 @@ function modelToCoverage(model: ModelBreakdownData): Coverage {
   };
 }
 
-function validAntigravityRecountEntry(
+function validAntigravityDayInvariants(
   client: AntigravityClient,
-  entry: RecountProofEntry,
+  prev: Coverage,
+  corr: Coverage,
 ): boolean {
-  if (!validProofUsage(entry.previous) || !validProofUsage(entry.corrected)) {
-    return false;
-  }
-  const prev = entry.previous;
-  const corr = entry.corrected;
   if (client === "antigravity-cli" || client === "antigravity-extension") {
     // v1 -> v2 for SQLite gen_metadata:
     // - #1 (model enum) was added to #2 (input_tokens) in v1, so v1 input >= v2 input
@@ -129,11 +125,10 @@ function validAntigravityRecountEntry(
     // - #4 (cache_write_tokens) was 0 in v1.
     // - #5 (cache_read_tokens) is unchanged.
     return (
-      prev.tokens.input >= corr.tokens.input &&
-      prev.tokens.output + prev.tokens.reasoning <=
-        corr.tokens.output + corr.tokens.reasoning &&
-      prev.tokens.cacheRead === corr.tokens.cacheRead &&
-      prev.tokens.cacheWrite === 0 &&
+      prev.input >= corr.input &&
+      prev.output + prev.reasoning <= corr.output + corr.reasoning &&
+      prev.cacheRead === corr.cacheRead &&
+      prev.cacheWrite === 0 &&
       prev.messages >= corr.messages
     );
   }
@@ -143,11 +138,11 @@ function validAntigravityRecountEntry(
   // - v1 dropped usage rows whose raw timestamp was null/0 instead of falling
   //   back to session_meta / file mtime.
   return (
-    prev.tokens.input <= corr.tokens.input &&
-    prev.tokens.cacheRead <= corr.tokens.cacheRead &&
-    prev.tokens.cacheWrite === 0 &&
-    prev.tokens.reasoning <= corr.tokens.reasoning &&
-    prev.tokens.output <= corr.tokens.output + corr.tokens.reasoning &&
+    prev.input <= corr.input &&
+    prev.cacheRead <= corr.cacheRead &&
+    prev.cacheWrite === 0 &&
+    prev.reasoning <= corr.reasoning &&
+    prev.output <= corr.output + corr.reasoning &&
     prev.messages <= corr.messages
   );
 }
@@ -170,12 +165,21 @@ export function validateAntigravityRecountProof(
       ...Object.keys(proofModels),
       ...Object.keys(submittedModels),
     ]);
+    const dayPrev = emptyCoverage();
+    const dayCorr = emptyCoverage();
+
     for (const modelId of modelIds) {
       const entry = ownValue(proofModels, modelId);
       const model = ownValue(submittedModels, modelId);
-      if (!entry || !validAntigravityRecountEntry(client, entry)) {
+      if (
+        !entry ||
+        !validProofUsage(entry.previous) ||
+        !validProofUsage(entry.corrected)
+      ) {
         return undefined;
       }
+      addCoverage(dayPrev, usageToCoverage(entry.previous));
+      addCoverage(dayCorr, usageToCoverage(entry.corrected));
       const corr = usageToCoverage(entry.corrected);
       if (!model) {
         if (
@@ -194,6 +198,10 @@ export function validateAntigravityRecountProof(
       ) {
         return undefined;
       }
+    }
+
+    if (!validAntigravityDayInvariants(client, dayPrev, dayCorr)) {
+      return undefined;
     }
   }
   return proof;
@@ -252,7 +260,11 @@ function adjustCellWithRecountProof(
     if (entry) {
       const prevCov = usageToCoverage(entry.previous);
       const corrCov = usageToCoverage(entry.corrected);
-      if (!sameCoverage(prevCov, corrCov)) {
+      if (
+        !sameCoverage(prevCov, corrCov) ||
+        Math.abs(entry.previous.cost - entry.corrected.cost) >
+          PROOF_COST_TOLERANCE
+      ) {
         changed = true;
       }
       for (const field of COVERAGE_FIELDS) {

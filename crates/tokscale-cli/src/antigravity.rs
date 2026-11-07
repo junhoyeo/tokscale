@@ -3394,7 +3394,9 @@ fn normalize_session_metadata_with_timestamps(
                     .filter(|v| !v.is_null())
                     .map(|v| to_safe_i64(Some(v)))
                     .unwrap_or_else(|| {
-                        to_safe_i64(usage.get("outputTokens")).saturating_sub(reasoning)
+                        to_safe_i64(usage.get("outputTokens"))
+                            .saturating_sub(reasoning)
+                            .max(0)
                     });
                 let timestamp = usage
                     .get("createdAt")

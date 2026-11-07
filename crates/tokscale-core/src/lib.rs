@@ -25353,9 +25353,19 @@ mod tests {
         );
         let date = &graph.contributions[0].date;
         let proof = &graph.recount_proofs["antigravity"][date]["gemini-3-flash-preview"];
+        assert_eq!(proof.previous.tokens.input, 12);
         assert_eq!(proof.previous.tokens.output, 5);
+        assert_eq!(proof.previous.tokens.cache_read, 2);
+        assert_eq!(proof.previous.tokens.cache_write, 0);
+        assert_eq!(proof.previous.tokens.reasoning, 1);
+        assert_eq!(proof.previous.messages, 1);
+
+        assert_eq!(proof.corrected.tokens.input, 12);
         assert_eq!(proof.corrected.tokens.output, 4);
+        assert_eq!(proof.corrected.tokens.cache_read, 2);
+        assert_eq!(proof.corrected.tokens.cache_write, 0);
         assert_eq!(proof.corrected.tokens.reasoning, 1);
+        assert_eq!(proof.corrected.messages, 1);
     }
 
     #[test]
