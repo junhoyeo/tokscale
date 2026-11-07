@@ -3401,7 +3401,11 @@ fn normalize_session_metadata_with_timestamps(
                     .or_else(|| timestamp_for_usage(usage, usage_timestamps))
                     .or(created_at);
 
-                if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 && reasoning == 0
+                if input == 0
+                    && output == 0
+                    && cache_read == 0
+                    && cache_write == 0
+                    && reasoning == 0
                 {
                     continue;
                 }

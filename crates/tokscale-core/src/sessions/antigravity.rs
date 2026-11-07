@@ -91,9 +91,7 @@ fn parse_usage_row(
 ) -> Option<UnifiedMessage> {
     let session_id = value.get("sessionId").and_then(Value::as_str)?.to_string();
     let raw_timestamp = to_safe_i64(value.get("timestamp"));
-    let timestamp = if v1_compat {
-        raw_timestamp
-    } else if raw_timestamp > 0 {
+    let timestamp = if v1_compat || raw_timestamp > 0 {
         raw_timestamp
     } else {
         fallback_timestamp

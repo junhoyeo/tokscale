@@ -171,13 +171,9 @@ fn parse_antigravity_db_file_inner(
             messages.push(message);
         }
         if include_v1 {
-            if let Some(mut v1_message) = parse_gen_metadata_with_mode(
-                blob,
-                &ctx,
-                &mut seen_v1_response_ids,
-                *gen_idx,
-                true,
-            ) {
+            if let Some(mut v1_message) =
+                parse_gen_metadata_with_mode(blob, &ctx, &mut seen_v1_response_ids, *gen_idx, true)
+            {
                 if meta.workspace_key.is_some() {
                     v1_message
                         .set_workspace(meta.workspace_key.clone(), meta.workspace_label.clone());
