@@ -2265,6 +2265,7 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Vibe => 1,
         // v1->v2: cumulative total differencing and fork deduplication.
         ClientId::Bb => 2,
+        ClientId::Qoder => crate::sessions::qoder::QODER_PARSER_BASE_VERSION,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching

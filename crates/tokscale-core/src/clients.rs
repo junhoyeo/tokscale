@@ -1155,6 +1155,20 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Qoder = 60 => {
+        id: "qoder",
+        display: "Qoder",
+        logo: None,
+        root: PathRoot::EnvVar {
+            var: "QODER_CONFIG_DIR",
+            fallback_relative: ".qoder",
+        },
+        relative: "projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1270,7 +1284,18 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 60);
+        assert_eq!(ClientId::COUNT, 61);
+    }
+
+    #[test]
+    fn test_qoder_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("qoder").expect("qoder client should be registered");
+        assert_eq!(client.display_name(), "Qoder");
+        assert_eq!(client.data().relative_path, "projects");
+        assert_eq!(client.data().pattern, "*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]
