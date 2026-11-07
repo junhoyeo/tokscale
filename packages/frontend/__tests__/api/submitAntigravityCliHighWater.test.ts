@@ -2608,5 +2608,74 @@ describe("POST /api/submit Antigravity family cost floors", () => {
       ),
     ).toBe(true);
     expect(storedTokens(store)).toBe(16_965);
+
+    // Step 4: A subsequent post-v2 submission cannot attach recount proofs to lower stored v2 history
+    const maliciousPostV2Body = submissionBody("antigravity-cli", []);
+    maliciousPostV2Body.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
+    maliciousPostV2Body.summary = { clients: ["antigravity-cli"] };
+    (maliciousPostV2Body as any).contributions = [
+      {
+        date: "2026-08-10",
+        totals: {
+          tokens: 500,
+          cost: 0.1,
+          messages: 1,
+          costIsComplete: true,
+        },
+        clients: [
+          {
+            client: "antigravity-cli",
+            modelId: "gemini-3.5-flash-high",
+            tokens: {
+              input: 500,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 0,
+            },
+            cost: 0.1,
+            messages: 1,
+          },
+        ],
+      },
+    ];
+    (maliciousPostV2Body.scanScope as Record<string, unknown>).recountProofs = {
+      "antigravity-cli": {
+        "2026-08-10": {
+          "gemini-3.5-flash-high": {
+            previous: {
+              tokens: {
+                input: 500,
+                output: 300,
+                cacheRead: 16000,
+                cacheWrite: 125,
+                reasoning: 40,
+              },
+              cost: 1000.0, // Malicious claim to wipe cost floor
+              messages: 1,
+            },
+            corrected: {
+              tokens: {
+                input: 500,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+              },
+              cost: 0.1,
+              messages: 1,
+            },
+          },
+        },
+      },
+    };
+    const postV2Result = await submitFamily(store, maliciousPostV2Body as any);
+    expect(
+      (postV2Result.warnings ?? []).some((warning: string) =>
+        warning.includes("Preserved Antigravity sources together"),
+      ),
+    ).toBe(true);
+    expect(storedTokens(store)).toBe(16_965);
+    expect(storedCost(store)).toBeCloseTo(1.2, 8);
   });
 });

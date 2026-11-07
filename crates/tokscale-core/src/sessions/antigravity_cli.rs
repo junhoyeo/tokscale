@@ -79,7 +79,7 @@ pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
 /// token attribution for submission recount proofs.
 pub fn parse_antigravity_cli_file_with_v1(
     path: &Path,
-) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
     parse_antigravity_db_file_with_v1(path, "antigravity-cli")
 }
 
@@ -92,7 +92,7 @@ pub fn parse_antigravity_extension_file(path: &Path) -> Vec<UnifiedMessage> {
 /// legacy v1 token attribution for submission recount proofs.
 pub fn parse_antigravity_extension_file_with_v1(
     path: &Path,
-) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
     parse_antigravity_db_file_with_v1(path, "antigravity-extension")
 }
 
@@ -103,7 +103,7 @@ fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMe
 fn parse_antigravity_db_file_with_v1(
     path: &Path,
     client: &'static str,
-) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
     parse_antigravity_db_file_inner(path, client, true)
 }
 
@@ -111,9 +111,9 @@ fn parse_antigravity_db_file_inner(
     path: &Path,
     client: &'static str,
     include_v1: bool,
-) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
     let Some(conn) = open_readonly_sqlite_opt(path) else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), false);
     };
 
     let session_id = path
@@ -183,7 +183,7 @@ fn parse_antigravity_db_file_inner(
         }
     }
 
-    (messages, v1_messages)
+    (messages, v1_messages, true)
 }
 
 /// Model attribution recovered from the conversation as a whole, for rows whose
@@ -388,10 +388,12 @@ fn parse_gen_metadata_with_mode(
         let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
         let reasoning = to_i64(varint_field(usage, 9).unwrap_or(0));
         let resp_out = to_i64(varint_field(usage, 10).unwrap_or(0));
-        let output = if resp_out > 0 || reasoning > 0 {
+        let output = if resp_out > 0 {
             resp_out
+        } else if total_output > 0 {
+            total_output.saturating_sub(reasoning)
         } else {
-            total_output
+            0
         };
         (input, output, cache_read, cache_write, reasoning)
     };
@@ -2563,7 +2565,8 @@ mod tests {
 
         write_conversation(&path, &[failed_blob, build_gen_metadata()]);
 
-        let (v2_messages, v1_messages) = parse_antigravity_cli_file_with_v1(&path);
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
         assert_eq!(v2_messages.len(), 1);
         assert_eq!(v2_messages[0].dedup_key.as_deref(), Some("resp-1"));
         assert_eq!(v2_messages[0].tokens.input, 500);
@@ -2578,6 +2581,41 @@ mod tests {
         assert_eq!(v1_messages[1].tokens.input, 1632);
         assert_eq!(v1_messages[1].tokens.output, 40);
         assert_eq!(v1_messages[1].tokens.reasoning, 300);
+    }
+
+    #[test]
+    fn parse_gen_metadata_falls_back_to_total_output_sub_reasoning_when_field_10_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.db");
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(2, 100));
+        usage.extend(enc_varint(3, 340)); // total_output (#3)
+        usage.extend(enc_varint(9, 40)); // reasoning (#9)
+        usage.extend(enc_len(11, b"resp-fallback"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        write_conversation(&path, &[blob]);
+        let (v2_messages, _, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert_eq!(v2_messages.len(), 1);
+        assert_eq!(v2_messages[0].tokens.input, 100);
+        // output falls back to 340 - 40 = 300
+        assert_eq!(v2_messages[0].tokens.output, 300);
+        assert_eq!(v2_messages[0].tokens.reasoning, 40);
+    }
+
+    #[test]
+    fn unreadable_database_returns_false_status() {
+        let nonexistent = Path::new("/path/to/nonexistent/chat.db");
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(nonexistent);
+        assert!(!ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
     }
 
     #[test]

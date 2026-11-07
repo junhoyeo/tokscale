@@ -5043,6 +5043,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
             pricing,
             &machine_labeler,
             &flush_context,
+            &mut source_reads,
         );
     all_messages.extend(antigravity_messages);
     recount_proofs.extend(antigravity_recount_proofs);
@@ -8981,7 +8982,7 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
 }
 
 type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
-type AntigravitySourceParserWithV1 = fn(&Path) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>);
+type AntigravitySourceParserWithV1 = fn(&Path) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool);
 
 /// Read every Antigravity surface in legacy-first order, then collapse copies
 /// of the same provider response even when each surface assigned it a
@@ -9034,6 +9035,7 @@ fn parse_antigravity_family_messages_with_recount_proofs(
     pricing: Option<&pricing::PricingService>,
     machine_labeler: &machine_label::MachineLabeler,
     flush_context: &FlushContext<'_>,
+    source_reads: &mut BTreeMap<String, SourceReadSummary>,
 ) -> (Vec<UnifiedMessage>, BTreeMap<String, ClientRecountProof>) {
     let sources: [(ClientId, AntigravitySourceParserWithV1); 3] = [
         (
@@ -9052,20 +9054,31 @@ fn parse_antigravity_family_messages_with_recount_proofs(
 
     let mut messages = Vec::new();
     let mut v1_messages = Vec::new();
+    let mut client_read_ok: BTreeMap<String, bool> = BTreeMap::new();
     for (client, parse) in sources {
-        let parsed_pairs: Vec<(Vec<UnifiedMessage>, Vec<UnifiedMessage>)> = scan_result
-            .get(client)
+        let paths = scan_result.get(client);
+        let parsed_triplets: Vec<(Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool)> = paths
             .par_iter()
             .map(|path| {
-                let (mut current, mut v1) = parse(path);
+                let (mut current, mut v1, ok) = parse(path);
                 machine_labeler.label_messages(path, &mut current);
                 machine_labeler.label_messages(path, &mut v1);
-                (current, v1)
+                (current, v1, ok)
             })
             .collect();
+        let unreadable = parsed_triplets.iter().filter(|(_, _, ok)| !*ok).count();
+        source_reads.insert(
+            client.as_str().to_string(),
+            SourceReadSummary {
+                discovered: paths.len(),
+                unreadable,
+            },
+        );
+        client_read_ok.insert(client.as_str().to_string(), unreadable == 0);
+
         let mut source_messages = Vec::new();
         let mut source_v1_messages = Vec::new();
-        for (current, v1) in parsed_pairs {
+        for (current, v1, _) in parsed_triplets {
             source_messages.extend(current);
             source_v1_messages.extend(v1);
         }
@@ -9105,6 +9118,9 @@ fn parse_antigravity_family_messages_with_recount_proofs(
 
     let mut proofs = BTreeMap::new();
     for (client, builder) in builders {
+        if !client_read_ok.get(&client).copied().unwrap_or(false) {
+            continue;
+        }
         let proof = builder.finish();
         let has_diff = proof
             .values()
@@ -25295,7 +25311,7 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
         std::fs::write(
             sessions_dir.join("ag-submit.jsonl"),
-            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag","v":2}
 "#,
         )
         .unwrap();

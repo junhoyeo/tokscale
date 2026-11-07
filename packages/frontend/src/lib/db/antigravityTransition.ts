@@ -163,6 +163,14 @@ export function planAntigravityTransition(args: {
 
   const validatedProofs: AntigravityRecountProofs = {};
   for (const client of ANTIGRAVITY_FAMILY) {
+    const priorState = ownValue(args.parserStates, client);
+    // Recount proofs are only valid during the one-time transition when the
+    // stored parser state has not yet completed v2 (version < 2). Once a
+    // device has already submitted at version >= 2, proofs cannot be used to
+    // lower or reconcile post-v2 history.
+    if (priorState && priorState.version >= 2) {
+      continue;
+    }
     const validated = validateAntigravityRecountProof(
       client,
       ownValue(args.recountProofs, client),

@@ -3379,6 +3379,7 @@ fn normalize_session_metadata_with_timestamps(
             "sessionId": session_id,
             "modelId": model_id,
             "timestamp": created_at,
+            "version": 2,
         }))?);
 
         if let Some(retry_infos) = chat_model.get("retryInfos").and_then(Value::as_array) {
@@ -3390,6 +3391,7 @@ fn normalize_session_metadata_with_timestamps(
                 let reasoning = to_safe_i64(usage.get("thinkingOutputTokens"));
                 let output = usage
                     .get("responseOutputTokens")
+                    .filter(|v| !v.is_null())
                     .map(|v| to_safe_i64(Some(v)))
                     .unwrap_or_else(|| {
                         to_safe_i64(usage.get("outputTokens")).saturating_sub(reasoning)
@@ -3428,6 +3430,7 @@ fn normalize_session_metadata_with_timestamps(
                     "reasoning": reasoning,
                     "responseId": usage.get("responseId").and_then(Value::as_str),
                     "messageId": usage.get("messageId").and_then(Value::as_str),
+                    "v": 2,
                 }))?);
             }
         }
@@ -4065,6 +4068,31 @@ mod tests {
         assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(40));
         assert_eq!(usage.get("cacheRead").and_then(Value::as_i64), Some(16000));
         assert_eq!(usage.get("cacheWrite").and_then(Value::as_i64), Some(125));
+    }
+
+    #[test]
+    fn normalize_session_metadata_handles_null_response_output_tokens() {
+        let metadata = vec![serde_json::json!({
+            "chatModel": {
+                "responseModel": "claude-sonnet-4.6",
+                "chatStartMetadata": { "createdAt": "2026-03-24T10:00:00Z" },
+                "retryInfos": [{
+                    "usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 340,
+                        "responseOutputTokens": serde_json::Value::Null,
+                        "thinkingOutputTokens": 40,
+                        "responseId": "resp-null-out"
+                    }
+                }]
+            }
+        })];
+
+        let lines = normalize_session_metadata("session-1", &metadata).unwrap();
+        let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(usage.get("input").and_then(Value::as_i64), Some(100));
+        assert_eq!(usage.get("output").and_then(Value::as_i64), Some(300));
+        assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(40));
     }
 
     #[test]

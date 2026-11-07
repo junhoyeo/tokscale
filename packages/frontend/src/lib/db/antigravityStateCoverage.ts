@@ -511,12 +511,46 @@ export function antigravityPriorCoverage(
       // across all 7 fields (even if turns were simultaneously re-dated or
       // re-attributed across models). Represent the client's adjusted stored
       // coverage directly as `proofTotals.corrected`.
-      recountCostReduction += proofTotals.removedCost;
+      const rawClientStoredCost = rawClientCells.reduce(
+        (sum, c) => sum + (c?.cost ?? 0),
+        0,
+      );
+      const allowedCostReduction = Math.min(
+        proofTotals.removedCost,
+        rawClientStoredCost,
+      );
+      recountCostReduction += allowedCostReduction;
       const firstIdx = rawClientCells.findIndex((c) => c !== undefined);
       if (firstIdx !== -1) {
+        const correctedModels: Record<string, ModelBreakdownData> = {};
+        if (proof) {
+          for (const dayModels of Object.values(proof)) {
+            for (const [modelId, entry] of Object.entries(dayModels)) {
+              const existing = correctedModels[modelId] ?? {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                cost: 0,
+              };
+              existing.input += entry.corrected.tokens.input;
+              existing.output += entry.corrected.tokens.output;
+              existing.cacheRead += entry.corrected.tokens.cacheRead;
+              existing.cacheWrite += entry.corrected.tokens.cacheWrite;
+              existing.reasoning += entry.corrected.tokens.reasoning;
+              existing.cost += entry.corrected.cost;
+              correctedModels[modelId] = existing;
+            }
+          }
+        }
         adjustedBreakdowns[firstIdx][client] = {
           ...rawClientCells[firstIdx]!,
           ...proofTotals.corrected,
+          models:
+            Object.keys(correctedModels).length > 0
+              ? correctedModels
+              : rawClientCells[firstIdx]!.models,
         };
       }
       continue;
@@ -526,7 +560,8 @@ export function antigravityPriorCoverage(
       const rawCell = rawClientCells[index];
       if (!rawCell) return;
       const adjusted = adjustCellWithRecountProof(rawCell, day.date, proof);
-      recountCostReduction += adjusted.removedCost;
+      const allowedCellReduction = Math.min(adjusted.removedCost, rawCell.cost);
+      recountCostReduction += allowedCellReduction;
       if (adjusted.cell) {
         adjustedBreakdowns[index][client] = adjusted.cell;
       }

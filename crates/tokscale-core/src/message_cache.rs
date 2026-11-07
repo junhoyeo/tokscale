@@ -10265,6 +10265,33 @@ mod tests {
     }
 
     #[test]
+    fn test_antigravity_family_bump_moves_the_parser_generation() {
+        assert_eq!(parser_version(ClientId::Antigravity), 2);
+        assert_eq!(parser_version(ClientId::AntigravityCli), 2);
+        assert_eq!(parser_version(ClientId::AntigravityExtension), 2);
+
+        let pre_bump_generation = parser_generation_for_versions(
+            ClientId::ALL.iter().copied().map(|c| {
+                if c == ClientId::Antigravity
+                    || c == ClientId::AntigravityCli
+                    || c == ClientId::AntigravityExtension
+                {
+                    1
+                } else {
+                    parser_version(c)
+                }
+            }),
+            CLAUDE_RETAINED_PARSE_GENERATION,
+        );
+        assert_ne!(
+            parser_generation(),
+            pre_bump_generation,
+            "bumping Antigravity family to v2 must invalidate parser_generation(), \
+             preventing stale warm caches from reusing pre-v2 totals"
+        );
+    }
+
+    #[test]
     fn test_claude_sidechain_fingerprint_tracks_nested_parent_session_changes() {
         let dir = TempDir::new().unwrap();
         let project_dir = dir.path().join("projects/project-one");
