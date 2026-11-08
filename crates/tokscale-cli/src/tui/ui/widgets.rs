@@ -1765,11 +1765,6 @@ mod tests {
         }
     }
 
-    /// The bound rides in `Constraint::Length(10)` cells next to `$15.50`, and
-    /// the sessions table admits Cost/1M at a width computed from
-    /// `natural() == 10`. One cell wider than the widest ordinary rate and the
-    /// column would clip with no marker, so hold the measured budget here
-    /// rather than discovering it in a render sweep.
     #[test]
     fn qoder_client_color_is_orange_ff4d00() {
         assert_eq!(get_client_color("qoder"), Color::Rgb(255, 77, 0));
@@ -1779,6 +1774,11 @@ mod tests {
         );
     }
 
+    /// The bound rides in `Constraint::Length(10)` cells next to `$15.50`, and
+    /// the sessions table admits Cost/1M at a width computed from
+    /// `natural() == 10`. One cell wider than the widest ordinary rate and the
+    /// column would clip with no marker, so hold the measured budget here
+    /// rather than discovering it in a render sweep.
     #[test]
     fn sub_cent_bound_fits_the_cost_per_million_column() {
         const COST_PER_MILLION_CELLS: usize = 10;
