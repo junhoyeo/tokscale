@@ -2265,6 +2265,8 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Vibe => 1,
         // v1->v2: cumulative total differencing and fork deduplication.
         ClientId::Bb => 2,
+        // v1->v2: extract workspace key from project ancestors avoiding
+        // subagents and canonicalize BYOK/managed provider metadata.
         ClientId::Qoder => crate::sessions::qoder::QODER_PARSER_BASE_VERSION,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
@@ -8890,6 +8892,102 @@ mod tests {
     #[test]
     fn test_bb_parser_version() {
         assert_eq!(parser_version(ClientId::Bb), 2);
+    }
+
+    #[test]
+    fn test_qoder_parser_version() {
+        assert_eq!(parser_version(ClientId::Qoder), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_qoder_v1_shard_invalidates_and_reparses_to_v2() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let qoder_proj = source_home
+            .path()
+            .join(".qoder")
+            .join("projects")
+            .join("sample-project");
+        std::fs::create_dir_all(&qoder_proj).unwrap();
+        let source = qoder_proj.join("sess-test.jsonl");
+
+        std::fs::write(
+            &source,
+            concat!(
+                r#"{"type":"user","uuid":"u-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:00.000Z","message":{"role":"user","content":"Hello"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:02.000Z","message":{"id":"msg_01","role":"assistant","model":"qwen3.8-max","stop_reason":"end_turn","content":[{"type":"text","text":"Hi!"}],"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let current_identity = CacheIdentity::for_client(ClientId::Qoder);
+        assert_eq!(current_identity.parser_version, 2);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 1,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_message = UnifiedMessage::new(
+            "qoder",
+            "stale-model",
+            "stale-provider",
+            "sess-test",
+            1000,
+            crate::TokenBreakdown {
+                input: 9999,
+                output: 9999,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let initial_cache = SourceMessageCache::load();
+        assert!(
+            initial_cache.get(current_identity, &source).is_none(),
+            "stale v1 entry must not match v2 lookup identity"
+        );
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["qoder".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "qwen3.8-max");
+        assert_eq!(messages[0].tokens.input, 1200);
+        assert_eq!(messages[0].tokens.output, 300);
+        assert_ne!(messages[0].model_id, "stale-model");
+
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache
+            .get(current_identity, &source)
+            .expect("the v2 parse must replace the stale v1 row");
+        assert_eq!(rebuilt.parser_version, 2);
+        assert_eq!(rebuilt.messages.len(), 1);
+        assert_eq!(rebuilt.messages[0].model_id, "qwen3.8-max");
     }
 
     #[test]

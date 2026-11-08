@@ -32,7 +32,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-pub const QODER_PARSER_BASE_VERSION: u32 = 1;
+pub const QODER_PARSER_BASE_VERSION: u32 = 2;
 
 const CLIENT_ID: &str = "qoder";
 const DEFAULT_PROVIDER: &str = "qoder";
