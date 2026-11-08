@@ -591,7 +591,7 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
         "SessionStart": [
             {
                 "type": "command",
-                "command": "set -eu; dir=\"$HOME/.gemini/antigravity-cli\"; mkdir -p \"$dir\"; umask 077; tmp=$(mktemp \"$dir/active_session.env.XXXXXX\"); printf \"ANTIGRAVITY_CSRF_TOKEN=%s\\nANTIGRAVITY_LS_ADDRESS=%s\\n\" \"$ANTIGRAVITY_CSRF_TOKEN\" \"$ANTIGRAVITY_LS_ADDRESS\" > \"$tmp\"; mv -f \"$tmp\" \"$dir/active_session.env\"; echo \"{}\""
+                "command": "set -eu; dir=\"$HOME/.gemini/antigravity-cli\"; mkdir -p \"$dir\"; umask 077; tmp=$(mktemp \"$dir/active_session.env.XXXXXX\"); printf \"ANTIGRAVITY_CSRF_TOKEN=%s\\nANTIGRAVITY_LS_ADDRESS=%s\\n\" \"${ANTIGRAVITY_CSRF_TOKEN-}\" \"${ANTIGRAVITY_LS_ADDRESS-}\" > \"$tmp\"; mv -f \"$tmp\" \"$dir/active_session.env\"; echo \"{}\""
             }
         ]
     });
@@ -602,7 +602,33 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
 
     let formatted = serde_json::to_string_pretty(&root)?;
     let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp_path, formatted) {
+    let write_res = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0o600);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(mode)
+                .open(&tmp_path)?;
+            file.write_all(formatted.as_bytes())?;
+            file.flush()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp_path, formatted)
+        }
+    })();
+
+    if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e.into());
     }
@@ -2139,6 +2165,27 @@ mod tests {
         let cmd = session_start[0]["command"].as_str().unwrap();
         assert!(cmd.contains("umask 077"));
         assert!(cmd.contains("mktemp"));
+        assert!(cmd.contains("${ANTIGRAVITY_CSRF_TOKEN-}"));
+        assert!(cmd.contains("${ANTIGRAVITY_LS_ADDRESS-}"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn hook_registration_preserves_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+        std::fs::write(&hooks_file, "{}").unwrap();
+        std::fs::set_permissions(&hooks_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        register_antigravity_hook().unwrap();
+
+        let metadata = std::fs::metadata(&hooks_file).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 
     #[test]
