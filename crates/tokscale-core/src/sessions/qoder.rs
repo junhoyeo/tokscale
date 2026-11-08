@@ -760,7 +760,6 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                             .get("providerId")
                             .or_else(|| value.get("provider_id"))
                             .or_else(|| value.get("provider"))
-                            .or_else(|| value.get("modelSource"))
                     })
                     .and_then(Value::as_str)
                     .or(active_provider.as_deref());
@@ -1092,6 +1091,22 @@ mod tests {
             workspace_key_from_qoder_path(Path::new("subagents/agent-abc123.jsonl")),
             None
         );
+    }
+
+    #[test]
+    fn test_parse_qoder_model_source_does_not_override_provider() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-1","modelSource":"managed","message":{{"id":"msg_1","model":"deepseek-v3","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        // Without modelSource acting as explicit provider, "deepseek-v3" infers "deepseek"
+        assert_eq!(msg.provider_id.as_ref(), "deepseek");
     }
 
     #[test]
