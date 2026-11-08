@@ -20162,8 +20162,16 @@ mod tests {
             assert_eq!(messages[0].tokens.total(), 540);
         }
 
-        // Test invalid stopReason (missing completion evidence / failed client stream)
-        for invalid_stop in [r#""error""#, r#""abort""#, "null"] {
+        // Test invalid or non-string stopReason (missing completion evidence / failed client stream)
+        for invalid_stop in [
+            r#""error""#,
+            r#""abort""#,
+            "null",
+            "false",
+            "123",
+            r#"{"status":"failed"}"#,
+            "[]",
+        ] {
             std::fs::write(&session_file, format!(concat!(
                 r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
                 r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":{},"usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
