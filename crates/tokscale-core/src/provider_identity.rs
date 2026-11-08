@@ -338,6 +338,9 @@ fn inferred_provider_from_model_inner(
     if contains_family(&lower, "qwen", delimit_family_names)
         || contains_versioned_family(&lower, "qmodel")
         || contains_delimited(&lower, "qmodel")
+        || contains_delimited(&lower, "qmodelpreview")
+        || contains_delimited(&lower, "qmodellatest")
+        || contains_delimited(&lower, "qmodel38max")
         || contains_delimited(&lower, "qfmodel")
         || contains_delimited(&lower, "qf_model")
         || contains_delimited(&lower, "qf-model")
@@ -586,6 +589,12 @@ mod tests {
         assert_eq!(inferred_provider_from_model("co4pilot-v2"), None);
         assert_eq!(inferred_provider_from_model("metadata-model"), None);
         assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
+        assert_eq!(inferred_provider_from_model("antiqmodelpreview"), None);
+        assert_eq!(inferred_provider_from_model("myqmodellatestapp"), None);
+        assert_eq!(inferred_provider_from_model("preqmodel38maxpost"), None);
+        assert_eq!(inferred_provider_from_model("qmodelpreview"), Some("qwen"));
+        assert_eq!(inferred_provider_from_model("qmodellatest"), Some("qwen"));
+        assert_eq!(inferred_provider_from_model("qmodel38max"), Some("qwen"));
     }
 
     #[test]
@@ -614,6 +623,8 @@ mod tests {
             ("df_model", "deepseek"),
             ("df-model", "deepseek"),
             ("qmodel", "qwen"),
+            ("qmodelpreview", "qwen"),
+            ("qmodellatest", "qwen"),
             ("qfmodel", "qwen"),
             ("qf_model", "qwen"),
             ("qf-model", "qwen"),
@@ -646,6 +657,9 @@ mod tests {
             "remixtralized",
             "collamated",
             "unqwened-model",
+            "antiqmodelpreview",
+            "myqmodellatestapp",
+            "preqmodel38maxpost",
             "defugued",
             "skimimoed",
             "glimmer",
