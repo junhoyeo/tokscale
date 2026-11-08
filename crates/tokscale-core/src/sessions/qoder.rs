@@ -445,6 +445,8 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut session_id: Option<String> = None;
     let mut workspace_key = path_workspace_key;
     let mut workspace_label = path_workspace_label;
+    let mut session_runtime_model: Option<String> = None;
+    let mut last_business_model: Option<String> = None;
     let mut active_model: Option<String> = None;
     let mut active_provider: Option<String> = None;
     let mut context_chars: usize = 0;
@@ -503,7 +505,10 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     .map(str::trim)
                     .filter(|m| !is_synthetic_placeholder_model(m))
                 {
-                    active_model = Some(m.to_string());
+                    session_runtime_model = Some(m.to_string());
+                    if !m.eq_ignore_ascii_case("auto") {
+                        active_model = Some(m.to_string());
+                    }
                 }
                 if let Some(p) = value
                     .get("provider")
@@ -524,6 +529,16 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
             }
             "user" => {
                 let message_val = value.get("message");
+                if let Some(bmk) = value
+                    .get("businessModelKey")
+                    .or_else(|| message_val.and_then(|m| m.get("businessModelKey")))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+                {
+                    last_business_model = Some(bmk.to_string());
+                }
+
                 let content_val = message_val
                     .and_then(|m| m.get("content"))
                     .or_else(|| value.get("content"));
@@ -558,11 +573,22 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                 let Some((breakdown, reports_split)) = extract_usage_breakdown(data) else {
                     return;
                 };
-                let raw_model = data
+                let raw_model_candidate = data
                     .get("model")
                     .and_then(Value::as_str)
-                    .or(active_model.as_deref())
-                    .unwrap_or(DEFAULT_MODEL);
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty());
+
+                let raw_model = match raw_model_candidate {
+                    Some(m) if !m.eq_ignore_ascii_case("auto") => m,
+                    _ => last_business_model
+                        .as_deref()
+                        .or(session_runtime_model.as_deref())
+                        .or(active_model.as_deref())
+                        .or(raw_model_candidate)
+                        .unwrap_or(DEFAULT_MODEL),
+                };
+
                 if is_synthetic_placeholder_model(raw_model) {
                     return;
                 }
@@ -646,13 +672,35 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     if is_synthetic_placeholder_model(m) {
                         return;
                     }
-                    active_model = Some(m.to_string());
+                    if !m.eq_ignore_ascii_case("auto") {
+                        active_model = Some(m.to_string());
+                    }
                 }
 
-                let raw_model = raw_model_opt
-                    .or(active_model.as_deref())
-                    .unwrap_or(DEFAULT_MODEL)
-                    .to_string();
+                let assistant_bmk = value
+                    .get("businessModelKey")
+                    .or_else(|| message_val.and_then(|m| m.get("businessModelKey")))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"));
+
+                // In Qoder 1.1.82 - 1.1.85+, assistant turns carry generic model: "auto".
+                // Resolve actual model using user.businessModelKey (preceding user turn)
+                // or fallback to runtime-config.model (session-wide).
+                let raw_model = match raw_model_opt {
+                    Some(m) if !m.eq_ignore_ascii_case("auto") => m.to_string(),
+                    _ => assistant_bmk
+                        .or(last_business_model.as_deref())
+                        .or(session_runtime_model.as_deref())
+                        .or(active_model.as_deref())
+                        .or(raw_model_opt)
+                        .unwrap_or(DEFAULT_MODEL)
+                        .to_string(),
+                };
+
+                if !raw_model.eq_ignore_ascii_case("auto") && active_model.is_none() {
+                    active_model = Some(raw_model.clone());
+                }
 
                 let explicit_provider = message_val
                     .and_then(|m| {
@@ -939,5 +987,128 @@ mod tests {
             msg.pricing_model_id.as_deref(),
             Some("deepseek/chat/deepseek-v3")
         );
+    }
+
+    #[test]
+    fn test_parse_qoder_auto_model_resolved_via_business_model_key_and_runtime_config() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Session starting with runtime-config = gfmodel
+        writeln!(
+            file,
+            r#"{{"type":"workspace-directories","sessionId":"sess-auto-1","directories":["/work/demo"]}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"runtime-config","sessionId":"sess-auto-1","model":"gfmodel","timestamp":1794041573406}}"#
+        )
+        .unwrap();
+        // First user turn with businessModelKey = "gfmodel"
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"u1","sessionId":"sess-auto-1","timestamp":"2026-11-07T08:56:16.000Z","businessModelKey":"gfmodel","version":"1.1.84","message":{{"role":"user","content":"Run tests"}}}}"#
+        )
+        .unwrap();
+        // Assistant multi-block fragments sharing message.id and carrying generic model "auto"
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a1-0","sessionId":"sess-auto-1","timestamp":"2026-11-07T08:56:20.000Z","version":"1.1.84","message":{{"id":"msg_auto_1","role":"assistant","model":"auto","content":[{{"type":"thinking","thinking":"Planning test run"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a1-1","sessionId":"sess-auto-1","timestamp":"2026-11-07T08:56:22.000Z","version":"1.1.84","message":{{"id":"msg_auto_1","role":"assistant","model":"auto","content":[{{"type":"tool_use","id":"call_1","name":"Bash","input":{{"command":"cargo test"}}}}],"usage":{{"input_tokens":28000,"output_tokens":270,"cache_read_input_tokens":9000,"cache_creation_input_tokens":0}}}}}}"#
+        )
+        .unwrap();
+        // Follow-up tool result turn without businessModelKey
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"u2","sessionId":"sess-auto-1","timestamp":"2026-11-07T08:56:25.000Z","version":"1.1.84","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"call_1","content":"test result ok"}}]}}}}"#
+        )
+        .unwrap();
+        // Second assistant turn with model "auto", should still resolve to gfmodel
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a2","sessionId":"sess-auto-1","timestamp":"2026-11-07T08:56:28.000Z","version":"1.1.84","message":{{"id":"msg_auto_2","role":"assistant","model":"auto","content":[{{"type":"text","text":"All tests passed!"}}],"usage":{{"input_tokens":32000,"output_tokens":150,"cache_read_input_tokens":12000,"cache_creation_input_tokens":0}}}}}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 2);
+
+        // Turn 1
+        assert_eq!(messages[0].model_id.as_ref(), "glm-4-flash");
+        assert_eq!(messages[0].provider_id.as_ref(), "zai");
+        assert_eq!(messages[0].pricing_model_id.as_deref(), Some("gfmodel"));
+        assert_eq!(messages[0].tokens.input, 28000);
+        assert_eq!(messages[0].tokens.output, 270);
+        assert_eq!(messages[0].tokens.cache_read, 9000);
+
+        // Turn 2
+        assert_eq!(messages[1].model_id.as_ref(), "glm-4-flash");
+        assert_eq!(messages[1].provider_id.as_ref(), "zai");
+        assert_eq!(messages[1].pricing_model_id.as_deref(), Some("gfmodel"));
+        assert_eq!(messages[1].tokens.input, 32000);
+        assert_eq!(messages[1].tokens.output, 150);
+        assert_eq!(messages[1].tokens.cache_read, 12000);
+    }
+
+    #[test]
+    fn test_parse_qoder_absent_usage_field_and_missing_version_lines() {
+        let mut file = NamedTempFile::new().unwrap();
+        let prompt_text = "p".repeat(400); // ~100 tokens
+        let thinking_text = "t".repeat(200); // ~50 reasoning tokens
+        let reply_text = "r".repeat(600); // ~150 output tokens
+
+        // Lines without version field (workspace-directories, runtime-config, ai-title, last-prompt)
+        writeln!(
+            file,
+            r#"{{"type":"workspace-directories","sessionId":"sess-v115","directories":["C:\\Users\\alice\\work"]}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"runtime-config","sessionId":"sess-v115","model":"qmodel_preview","timestamp":1784988512000}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"ai-title","sessionId":"sess-v115","aiTitle":"Refactor handler"}}"#
+        )
+        .unwrap();
+        // User turn (version 1.1.5, usage absent)
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"u1","sessionId":"sess-v115","version":"1.1.5","timestamp":"2026-07-25T14:10:00.000Z","message":{{"role":"user","content":"{prompt_text}"}}}}"#
+        )
+        .unwrap();
+        // Assistant multi-block fragments without any usage field at all
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a1-0","sessionId":"sess-v115","version":"1.1.5","timestamp":"2026-07-25T14:10:02.000Z","message":{{"id":"msg_no_usage","type":"message","role":"assistant","model":"qmodel_preview","content":[{{"type":"thinking","thinking":"{thinking_text}"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a1-1","sessionId":"sess-v115","version":"1.1.5","timestamp":"2026-07-25T14:10:04.000Z","message":{{"id":"msg_no_usage","type":"message","role":"assistant","model":"qmodel_preview","content":[{{"type":"text","text":"{reply_text}"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"last-prompt","sessionId":"sess-v115","lastPrompt":"{prompt_text}"}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.model_id.as_ref(), "qwen3-coder");
+        assert_eq!(msg.provider_id.as_ref(), "qwen");
+        assert_eq!(msg.pricing_model_id.as_deref(), Some("qmodel_preview"));
+        assert_eq!(msg.tokens.input, 100);
+        assert_eq!(msg.tokens.output, 150);
+        assert_eq!(msg.tokens.reasoning, 50);
+        assert_eq!(msg.tokens.cache_read, 0);
+        assert_eq!(msg.dedup_key.as_deref(), Some("qoder:msg:msg_no_usage"));
     }
 }

@@ -308,7 +308,9 @@ fn inferred_provider_from_model_inner(
         return Some("xai");
     }
 
-    if contains_family(&lower, "deepseek", delimit_family_names) {
+    if contains_family(&lower, "deepseek", delimit_family_names)
+        || contains_delimited(&lower, "dfmodel")
+    {
         return Some("deepseek");
     }
 
@@ -331,7 +333,12 @@ fn inferred_provider_from_model_inner(
         return Some("meta");
     }
 
-    if contains_family(&lower, "qwen", delimit_family_names) {
+    if contains_family(&lower, "qwen", delimit_family_names)
+        || contains_delimited(&lower, "qmodel")
+        || contains_delimited(&lower, "qfmodel")
+        || lower.starts_with("qmodel_")
+        || lower.starts_with("qmodel-")
+    {
         return Some("qwen");
     }
 
@@ -361,7 +368,7 @@ fn inferred_provider_from_model_inner(
         return Some("xiaomi");
     }
     // GLM (Zhipu AI / Zai) — `glm-4.6`, `glm-5.2` etc.
-    if contains_versioned_family(&lower, "glm") {
+    if contains_versioned_family(&lower, "glm") || contains_delimited(&lower, "gfmodel") {
         return Some("zai");
     }
 
@@ -594,6 +601,13 @@ mod tests {
             ("kimi2", "moonshotai"),
             ("mimo2", "xiaomi"),
             ("glm5", "zai"),
+            ("dfmodel", "deepseek"),
+            ("qmodel", "qwen"),
+            ("qfmodel", "qwen"),
+            ("qmodel_38max", "qwen"),
+            ("qmodel_latest", "qwen"),
+            ("qmodel_preview", "qwen"),
+            ("gfmodel", "zai"),
         ];
         for (model, provider) in genuine {
             assert_eq!(
