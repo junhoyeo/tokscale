@@ -429,6 +429,47 @@ impl AssembledAssistantTurn {
     }
 }
 
+fn workspace_key_from_qoder_path(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+
+    // 1. Extract project directory when path is under `projects/<project>/...`
+    let components: Vec<&str> = parent
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+
+    for window in components.windows(2).rev() {
+        if window[0] == "projects" && !window[1].is_empty() && window[1] != "subagents" {
+            if let Some(key) = normalize_workspace_key(window[1]) {
+                return Some(key);
+            }
+        }
+    }
+
+    // 2. If path is a subagent transcript under `<project>/<session>/subagents/`
+    // (outside of a `projects/` directory), walk up past `subagents` and the
+    // session directory to the project directory.
+    let mut current = Some(parent);
+    while let Some(dir) = current {
+        if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+            if let Some(project_dir) = dir.parent().and_then(|p| p.parent()) {
+                if let Some(name) = project_dir.file_name().and_then(|n| n.to_str()) {
+                    if name != "projects" {
+                        if let Some(key) = normalize_workspace_key(name) {
+                            return Some(key);
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        current = dir.parent();
+    }
+
+    // 3. Fallback to standard parent directory workspace key, filtering out "subagents"
+    workspace_key_from_path(path).filter(|k| k != "subagents")
+}
+
 /// Parse a Qoder or Qoder CN `.jsonl` transcript file into [`UnifiedMessage`] records.
 pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
     if should_skip_qoder_file(path) {
@@ -437,7 +478,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let fallback_session_id = session_id_from_path(path);
-    let path_workspace_key = workspace_key_from_path(path);
+    let path_workspace_key = workspace_key_from_qoder_path(path);
     let path_workspace_label = path_workspace_key
         .as_deref()
         .and_then(workspace_label_from_key);
@@ -989,9 +1030,67 @@ mod tests {
         assert_eq!(msg.session_id.as_ref(), "sess-main:agent:abc123");
         assert_eq!(msg.provider_id.as_ref(), "deepseek");
         assert_eq!(msg.model_id.as_ref(), "deepseek-v3");
+        assert_eq!(msg.workspace_key.as_deref(), Some("my-repo"));
+        assert_eq!(msg.workspace_label.as_deref(), Some("my-repo"));
         assert_eq!(
             msg.pricing_model_id.as_deref(),
             Some("deepseek/chat/deepseek-v3")
+        );
+    }
+
+    #[test]
+    fn test_workspace_key_from_qoder_path_variations() {
+        // Standard session under projects
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new(
+                "/home/user/.qoder/projects/my-repo/sess-1.jsonl"
+            )),
+            Some("my-repo".to_string())
+        );
+        // Subagent under projects/<project>/<session>/subagents/
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new(
+                "/home/user/.qoder/projects/my-repo/sess-main/subagents/agent-abc123.jsonl"
+            )),
+            Some("my-repo".to_string())
+        );
+        // Subagent under projects/<project>/sessions/<session>/subagents/ (intermediate dir)
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new(
+                "/home/user/.qoder/projects/my-repo/sessions/sess-main/subagents/agent-abc123.jsonl"
+            )),
+            Some("my-repo".to_string())
+        );
+        // Subagent with deep workflow nesting under projects
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new(
+                "/home/user/.qoder-cn/projects/my-repo/sess-main/subagents/workflows/wf-1/agent-abc123.jsonl"
+            )),
+            Some("my-repo".to_string())
+        );
+        // Direct orphan session file under projects/ (should not resolve to the filename)
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new("/home/user/.qoder/projects/orphan.jsonl")),
+            Some("projects".to_string())
+        );
+        // Subagent outside of projects root: walks up past subagents and session dir to project
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new(
+                "/var/workspaces/my-repo/sess-1/subagents/agent-abc123.jsonl"
+            )),
+            Some("my-repo".to_string())
+        );
+        // Deep workflow subagent outside of projects root
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new(
+                "/var/workspaces/my-repo/sess-1/subagents/workflows/wf-1/agent-abc123.jsonl"
+            )),
+            Some("my-repo".to_string())
+        );
+        // Bare subagent without parent project: filtered out to avoid labeling workspace as "subagents"
+        assert_eq!(
+            workspace_key_from_qoder_path(Path::new("subagents/agent-abc123.jsonl")),
+            None
         );
     }
 
