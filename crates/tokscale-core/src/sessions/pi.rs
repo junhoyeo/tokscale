@@ -87,6 +87,22 @@ impl PiSessionHeader {
     }
 }
 
+pub(crate) fn is_completed_stop_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim().to_ascii_lowercase().as_str(),
+        "stop"
+            | "tooluse"
+            | "tool_use"
+            | "tool_calls"
+            | "tool_call"
+            | "toolcalls"
+            | "length"
+            | "end_turn"
+            | "stop_sequence"
+            | "max_tokens"
+    )
+}
+
 fn damaged_key_may_name(key: &str, expected: &str) -> bool {
     if !has_replacement_character(key) {
         return false;
@@ -258,6 +274,14 @@ pub struct PiSessionEntry {
     pub title: Option<String>,
     #[serde(rename = "targetId")]
     pub target_id: Option<String>,
+    #[serde(
+        default,
+        rename = "stopReason",
+        alias = "stop_reason",
+        alias = "finishReason",
+        alias = "finish_reason"
+    )]
+    pub stop_reason: Option<String>,
     #[serde(rename = "childUsage")]
     pub child_usage: Option<PiUsage>,
     #[serde(rename = "aggregateUsage")]
@@ -297,6 +321,13 @@ pub struct PiMessage {
     pub provider: Option<String>,
     #[serde(rename = "responseId")]
     pub response_id: Option<String>,
+    #[serde(
+        rename = "stopReason",
+        alias = "stop_reason",
+        alias = "finishReason",
+        alias = "finish_reason"
+    )]
+    pub stop_reason: Option<String>,
     pub timestamp: Option<serde_json::Value>,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<serde_json::Value>,
@@ -1062,12 +1093,23 @@ fn parse_pi_format_file_inner(
         unified.duration_ms = duration_ms;
         if let Some(namespace) = dedup_namespace {
             if options.cross_session_dedup {
-                let clean_response_key = response_id
-                    .filter(|id| {
-                        !id.trim().is_empty()
-                            && accepts_replacement_field(id, options.lossy_line_reader)
-                    })
-                    .map(|id| format!("{namespace}:response:{id}"));
+                let has_completion = match namespace {
+                    "omp" => message
+                        .and_then(|m| m.stop_reason.as_deref())
+                        .or(entry.stop_reason.as_deref())
+                        .is_some_and(is_completed_stop_reason),
+                    _ => true,
+                };
+                let clean_response_key = if has_completion {
+                    response_id
+                        .filter(|id| {
+                            !id.trim().is_empty()
+                                && accepts_replacement_field(id, options.lossy_line_reader)
+                        })
+                        .map(|id| format!("{namespace}:response:{}", id.trim()))
+                } else {
+                    None
+                };
                 let clean_message_key = entry.id.as_deref().filter(|id| {
                     !id.trim().is_empty()
                         && accepts_replacement_field(id, options.lossy_line_reader)

@@ -1736,7 +1736,9 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // +1: Standard Pi/OMP/Senpi parser now emits cross-session
             // namespaced dedup keys (same behavior as Kimchi/Prime).
             // +1 more: billed operations, as for Pi.
-            (ClientId::Omp, 2),
+            // +1 more: Omp requires verified stopReason completion before
+            // emitting response dedup keys eligible for Magpie attribution (#1585).
+            (ClientId::Omp, 3),
             (ClientId::Senpi, 2),
             (ClientId::Proma, 0),
             // +3 for Prime Agent's independent history. v1->v2 strips a
@@ -6725,7 +6727,12 @@ mod tests {
             (ClientId::PrimeAgent, 6),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert_eq!(current.parser_version, previous_version + 3, "{client:?}");
+            let expected_diff = if client == ClientId::Omp { 4 } else { 3 };
+            assert_eq!(
+                current.parser_version,
+                previous_version + expected_diff,
+                "{client:?}"
+            );
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: previous_version,
@@ -6766,7 +6773,12 @@ mod tests {
             (ClientId::PrimeAgent, 8),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert_eq!(current.parser_version, pre_merge_version + 1, "{client:?}");
+            let expected_diff = if client == ClientId::Omp { 2 } else { 1 };
+            assert_eq!(
+                current.parser_version,
+                pre_merge_version + expected_diff,
+                "{client:?}"
+            );
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: pre_merge_version,
@@ -6807,9 +6819,10 @@ mod tests {
             (ClientId::PrimeAgent, 7),
         ] {
             let current = CacheIdentity::for_client(client);
+            let expected_diff = if client == ClientId::Omp { 3 } else { 2 };
             assert_eq!(
                 current.parser_version,
-                completion_anchored_version + 2,
+                completion_anchored_version + expected_diff,
                 "{client:?}"
             );
             let completion_anchored = CacheIdentity {
@@ -6837,6 +6850,39 @@ mod tests {
                 fingerprint
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn omp_parser_version_invalidates_pre_stop_reason_shards() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(
+            b"{\"type\":\"session\",\"version\":3,\"id\":\"omp-1\",\"cwd\":\"/work\"}\n{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"assistant\",\"model\":\"gpt-5\",\"usage\":{\"input\":100,\"output\":50}}}\n",
+        );
+        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        let current = CacheIdentity::for_client(ClientId::Omp);
+        assert_eq!(current.parser_version, 8);
+        let previous = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 7,
+        };
+        let shard = cache_shard_path(current, source.path());
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            previous,
+            &[test_entry(previous, source.path(), "pre-stop-reason")],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+        assert!(SourceMessageCache::load()
+            .get(current, source.path())
+            .is_none());
+        assert_eq!(
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            fingerprint
+        );
     }
 
     #[test]
@@ -9038,7 +9084,7 @@ mod tests {
                 &[
                     (ClientId::Pi, 3),
                     (ClientId::Kimchi, 2),
-                    (ClientId::Omp, 2),
+                    (ClientId::Omp, 3),
                     (ClientId::Senpi, 2),
                     (ClientId::Proma, 0),
                     (ClientId::PrimeAgent, 4),
