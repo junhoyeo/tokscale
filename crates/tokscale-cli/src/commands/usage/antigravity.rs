@@ -194,7 +194,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
 /// impossible for whatever entry point is added next. The scope joins before
 /// returning, so both entry points stay as synchronous as they were.
 /// `crate::antigravity::https_rpc_request` isolates its own `block_on` the
-/// same way, and that one is reachable today: [`detected_ports`] walks into it
+/// same way, and that one is reachable today: `detected_ports` walks into it
 /// synchronously from inside the runtime `has_credentials` just entered.
 fn off_caller_runtime<T: Send>(work: impl FnOnce() -> T + Send) -> std::thread::Result<T> {
     std::thread::scope(|scope| scope.spawn(work).join())
