@@ -8984,20 +8984,44 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
 type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
 type AntigravitySourceParserWithV1 = fn(&Path) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool);
 
-/// Read every Antigravity surface in legacy-first order, then collapse copies
-/// of the same provider response even when each surface assigned it a
-/// different session ID. Antigravity's response ID is shared by the desktop
-/// cache, CLI database, and IDE extension database; session IDs are not.
+/// Read Antigravity surfaces in legacy-first order, but place cache entries that
+/// relied on fallback timestamps (e.g. file modification time when the usage record
+/// lacked a timestamp) after database sources (antigravity-cli and antigravity-extension).
+/// This ensures authoritative database timestamps win deduplication over cache mtime
+/// fallbacks, while preserving cache rows when no database record exists.
 fn parse_antigravity_family_messages(
     scan_result: &scanner::ScanResult,
     pricing: Option<&pricing::PricingService>,
     machine_labeler: &machine_label::MachineLabeler,
 ) -> Vec<UnifiedMessage> {
-    let sources: [(ClientId, AntigravitySourceParser); 3] = [
-        (
-            ClientId::Antigravity,
-            sessions::antigravity::parse_antigravity_file,
-        ),
+    let parsed_antigravity = scan_result
+        .get(ClientId::Antigravity)
+        .par_iter()
+        .map(|path| {
+            let (mut auth, mut fallback) =
+                sessions::antigravity::parse_antigravity_file_partitioned(path);
+            machine_labeler.label_messages(path, &mut auth);
+            machine_labeler.label_messages(path, &mut fallback);
+            (auth, fallback)
+        })
+        .collect::<Vec<_>>();
+
+    let mut antigravity_authoritative = Vec::new();
+    let mut antigravity_fallback = Vec::new();
+    for (auth, fallback) in parsed_antigravity {
+        antigravity_authoritative.extend(auth);
+        antigravity_fallback.extend(fallback);
+    }
+    if let Some(pricing) = pricing {
+        for message in &mut antigravity_authoritative {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+        for message in &mut antigravity_fallback {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+    }
+
+    let db_sources: [(ClientId, AntigravitySourceParser); 2] = [
         (
             ClientId::AntigravityCli,
             sessions::antigravity_cli::parse_antigravity_cli_file,
@@ -9008,8 +9032,8 @@ fn parse_antigravity_family_messages(
         ),
     ];
 
-    let mut messages = Vec::new();
-    for (client, parse) in sources {
+    let mut db_messages = Vec::new();
+    for (client, parse) in db_sources {
         let mut source_messages: Vec<UnifiedMessage> = scan_result
             .get(client)
             .par_iter()
@@ -9024,8 +9048,13 @@ fn parse_antigravity_family_messages(
                 apply_pricing_if_available(message, Some(pricing));
             }
         }
-        messages.extend(source_messages);
+        db_messages.extend(source_messages);
     }
+
+    let mut messages = Vec::new();
+    messages.extend(antigravity_authoritative);
+    messages.extend(db_messages);
+    messages.extend(antigravity_fallback);
 
     dedupe_antigravity_family_messages(messages)
 }
@@ -9037,11 +9066,55 @@ fn parse_antigravity_family_messages_with_recount_proofs(
     flush_context: &FlushContext<'_>,
     source_reads: &mut BTreeMap<String, SourceReadSummary>,
 ) -> (Vec<UnifiedMessage>, BTreeMap<String, ClientRecountProof>) {
-    let sources: [(ClientId, AntigravitySourceParserWithV1); 3] = [
-        (
-            ClientId::Antigravity,
-            sessions::antigravity::parse_antigravity_file_with_v1,
-        ),
+    let antigravity_paths = scan_result.get(ClientId::Antigravity);
+    let parsed_antigravity = antigravity_paths
+        .par_iter()
+        .map(|path| {
+            let (mut current_auth, mut current_fallback, mut v1, ok) =
+                sessions::antigravity::parse_antigravity_file_with_v1_partitioned(path);
+            machine_labeler.label_messages(path, &mut current_auth);
+            machine_labeler.label_messages(path, &mut current_fallback);
+            machine_labeler.label_messages(path, &mut v1);
+            (current_auth, current_fallback, v1, ok)
+        })
+        .collect::<Vec<_>>();
+
+    let unreadable = parsed_antigravity
+        .iter()
+        .filter(|(_, _, _, ok)| !*ok)
+        .count();
+    source_reads.insert(
+        ClientId::Antigravity.as_str().to_string(),
+        SourceReadSummary {
+            discovered: antigravity_paths.len(),
+            unreadable,
+        },
+    );
+    let mut client_read_ok: BTreeMap<String, bool> = BTreeMap::new();
+    client_read_ok.insert(ClientId::Antigravity.as_str().to_string(), unreadable == 0);
+
+    let mut antigravity_authoritative = Vec::new();
+    let mut antigravity_fallback = Vec::new();
+    let mut antigravity_v1 = Vec::new();
+    for (current_auth, current_fallback, v1, _) in parsed_antigravity {
+        antigravity_authoritative.extend(current_auth);
+        antigravity_fallback.extend(current_fallback);
+        antigravity_v1.extend(v1);
+    }
+    if let Some(pricing) = pricing {
+        for message in &mut antigravity_authoritative {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+        for message in &mut antigravity_fallback {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+        for message in &mut antigravity_v1 {
+            apply_pricing_if_available(message, Some(pricing));
+            let _ = pricing.take_cost_estimate_source(message);
+        }
+    }
+
+    let db_sources: [(ClientId, AntigravitySourceParserWithV1); 2] = [
         (
             ClientId::AntigravityCli,
             sessions::antigravity_cli::parse_antigravity_cli_file_with_v1,
@@ -9052,10 +9125,9 @@ fn parse_antigravity_family_messages_with_recount_proofs(
         ),
     ];
 
-    let mut messages = Vec::new();
-    let mut v1_messages = Vec::new();
-    let mut client_read_ok: BTreeMap<String, bool> = BTreeMap::new();
-    for (client, parse) in sources {
+    let mut db_messages = Vec::new();
+    let mut db_v1_messages = Vec::new();
+    for (client, parse) in db_sources {
         let paths = scan_result.get(client);
         let parsed_triplets: Vec<(Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool)> = paths
             .par_iter()
@@ -9091,9 +9163,18 @@ fn parse_antigravity_family_messages_with_recount_proofs(
                 let _ = pricing.take_cost_estimate_source(message);
             }
         }
-        messages.extend(source_messages);
-        v1_messages.extend(source_v1_messages);
+        db_messages.extend(source_messages);
+        db_v1_messages.extend(source_v1_messages);
     }
+
+    let mut messages = Vec::new();
+    messages.extend(antigravity_authoritative);
+    messages.extend(db_messages);
+    messages.extend(antigravity_fallback);
+
+    let mut v1_messages = Vec::new();
+    v1_messages.extend(antigravity_v1);
+    v1_messages.extend(db_v1_messages);
 
     let messages = dedupe_antigravity_family_messages(messages);
     let v1_messages = dedupe_antigravity_family_messages(v1_messages);
@@ -9246,8 +9327,12 @@ mod tests {
     // this branch conflict on every single upstream merge.
     use super::{aggregate_model_usage_entries_with_rollup, WorktreeRollup};
     use super::{flush_retained_lane, matches_flush_filter, FlushContext};
+    use super::{
+        machine_label, parse_antigravity_family_messages,
+        parse_antigravity_family_messages_with_recount_proofs,
+    };
     use serial_test::serial;
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
@@ -9471,6 +9556,387 @@ mod tests {
         assert_eq!(daily[0].totals.tokens, 146);
         assert_eq!(daily[0].token_breakdown.input, 120);
         assert_eq!(daily[0].token_breakdown.output, 26);
+    }
+
+    #[test]
+    fn antigravity_fallback_mtime_rows_yield_to_database_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = dir.path().join("cache.jsonl");
+        let ext_db_file = dir.path().join("extension-conversation.db");
+
+        // Write desktop cache file:
+        // - Row 1: timestamp is null (fallback to mtime), responseId is "resp-shared"
+        // - Row 2: timestamp is null (fallback to mtime), responseId is "resp-cache-only"
+        // - Row 3: timestamp is explicit 1_711_200_000_000, responseId is "resp-cache-auth"
+        let cache_content = r#"{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":100,"output":20,"reasoning":5,"responseId":"resp-shared"}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":50,"output":10,"reasoning":0,"responseId":"resp-cache-only"}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":1711200000000,"input":30,"output":5,"reasoning":0,"responseId":"resp-cache-auth"}
+"#;
+        std::fs::write(&cache_file, cache_content).unwrap();
+
+        fn enc_varint(field: u64, mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = field << 3;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            while value >= 0x80 {
+                out.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+            out
+        }
+
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = (field << 3) | 2;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            let mut len = payload.len();
+            while len >= 0x80 {
+                out.push((len as u8 & 0x7f) | 0x80);
+                len >>= 7;
+            }
+            out.push(len as u8);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        // Build extension SQLite DB with true timestamp for "resp-shared":
+        // Timestamp: 1_711_100_000 seconds
+        let mut ts_blob = Vec::new();
+        ts_blob.extend(enc_varint(1, 1_711_100_000));
+        ts_blob.extend(enc_varint(2, 0));
+
+        let mut gen9 = Vec::new();
+        gen9.extend(enc_len(4, &ts_blob));
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, 1132));
+        usage.extend(enc_varint(2, 100));
+        usage.extend(enc_varint(9, 5));
+        usage.extend(enc_varint(10, 15));
+        usage.extend(enc_len(11, b"resp-shared"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+
+        let outer = enc_len(1, &chat_model);
+
+        let conn = rusqlite::Connection::open(&ext_db_file).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![outer],
+        )
+        .unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result.get_mut(ClientId::Antigravity).push(cache_file);
+        scan_result
+            .get_mut(ClientId::AntigravityExtension)
+            .push(ext_db_file);
+
+        let machine_labeler = machine_label::MachineLabeler::default();
+        let messages = parse_antigravity_family_messages(&scan_result, None, &machine_labeler);
+
+        assert_eq!(messages.len(), 3);
+
+        let shared_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-shared"))
+            .expect("resp-shared must be present");
+        assert_eq!(
+            shared_msg.client, "antigravity-extension",
+            "DB copy must win over cache fallback"
+        );
+        assert_eq!(
+            shared_msg.timestamp, 1_711_100_000_000,
+            "DB true timestamp must be preserved"
+        );
+
+        let cache_only_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-cache-only"))
+            .expect("resp-cache-only must be present");
+        assert_eq!(cache_only_msg.client, "antigravity");
+        assert!(cache_only_msg.timestamp > 0);
+
+        let auth_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-cache-auth"))
+            .expect("resp-cache-auth must be present");
+        assert_eq!(auth_msg.client, "antigravity");
+        assert_eq!(auth_msg.timestamp, 1_711_200_000_000);
+    }
+
+    #[test]
+    fn antigravity_recount_proofs_preserve_extension_attribution_without_discrepancy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = dir.path().join("cache.jsonl");
+        let ext_db_file = dir.path().join("extension-conversation.db");
+
+        let cache_content = r#"{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":100,"output":20,"reasoning":5,"responseId":"resp-shared"}
+"#;
+        std::fs::write(&cache_file, cache_content).unwrap();
+
+        fn enc_varint(field: u64, mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = field << 3;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            while value >= 0x80 {
+                out.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+            out
+        }
+
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = (field << 3) | 2;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            let mut len = payload.len();
+            while len >= 0x80 {
+                out.push((len as u8 & 0x7f) | 0x80);
+                len >>= 7;
+            }
+            out.push(len as u8);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        let mut ts_blob = Vec::new();
+        ts_blob.extend(enc_varint(1, 1_711_100_000));
+        ts_blob.extend(enc_varint(2, 0));
+
+        let mut gen9 = Vec::new();
+        gen9.extend(enc_len(4, &ts_blob));
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, 1132));
+        usage.extend(enc_varint(2, 100));
+        usage.extend(enc_varint(9, 5));
+        usage.extend(enc_varint(10, 15));
+        usage.extend(enc_len(11, b"resp-shared"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+
+        let outer = enc_len(1, &chat_model);
+
+        let conn = rusqlite::Connection::open(&ext_db_file).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![outer],
+        )
+        .unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result.get_mut(ClientId::Antigravity).push(cache_file);
+        scan_result
+            .get_mut(ClientId::AntigravityExtension)
+            .push(ext_db_file);
+
+        let machine_labeler = machine_label::MachineLabeler::default();
+        let flush_context = FlushContext {
+            pricing: None,
+            include_all: true,
+            requested: HashSet::new(),
+            include_synthetic: true,
+            timezone: Some(crate::bucket_tz::BucketTimezone::Local),
+            local_machine_label: None,
+        };
+        let mut source_reads = BTreeMap::new();
+
+        let (messages, proofs) = parse_antigravity_family_messages_with_recount_proofs(
+            &scan_result,
+            None,
+            &machine_labeler,
+            &flush_context,
+            &mut source_reads,
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "antigravity-extension");
+        assert_eq!(messages[0].timestamp, 1_711_100_000_000);
+        assert!(!proofs.contains_key("antigravity"));
+    }
+
+    #[test]
+    fn antigravity_dedup_and_recount_proofs_with_mixed_fallback_and_authoritative_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = dir.path().join("cache.jsonl");
+        let ext_db_file = dir.path().join("extension-conversation.db");
+
+        // Cache contains:
+        // 1. resp-auth: explicit timestamp (1_711_200_000_000)
+        // 2. resp-fallback: null timestamp (falls back to mtime)
+        // 3. resp-fallback-only: null timestamp (falls back to mtime, not in DB)
+        let cache_content = r#"{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":1711200000000,"input":30,"output":10,"reasoning":2,"responseId":"resp-auth","v":2}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":100,"output":20,"reasoning":5,"responseId":"resp-fallback"}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":60,"output":15,"reasoning":3,"responseId":"resp-fallback-only"}
+"#;
+        std::fs::write(&cache_file, cache_content).unwrap();
+
+        fn enc_varint(field: u64, mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = field << 3;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            while value >= 0x80 {
+                out.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+            out
+        }
+
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = (field << 3) | 2;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            let mut len = payload.len();
+            while len >= 0x80 {
+                out.push((len as u8 & 0x7f) | 0x80);
+                len >>= 7;
+            }
+            out.push(len as u8);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        fn make_db_row(resp_id: &[u8], ts_seconds: u64) -> Vec<u8> {
+            let mut ts_blob = Vec::new();
+            ts_blob.extend(enc_varint(1, ts_seconds));
+            ts_blob.extend(enc_varint(2, 0));
+
+            let mut gen9 = Vec::new();
+            gen9.extend(enc_len(4, &ts_blob));
+
+            let mut usage = Vec::new();
+            usage.extend(enc_varint(1, 1132));
+            usage.extend(enc_varint(2, 100));
+            usage.extend(enc_varint(5, 500)); // cacheRead
+            usage.extend(enc_varint(9, 5));
+            usage.extend(enc_varint(10, 15));
+            usage.extend(enc_len(11, resp_id));
+
+            let mut chat_model = Vec::new();
+            chat_model.extend(enc_len(4, &usage));
+            chat_model.extend(enc_len(9, &gen9));
+            chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+
+            enc_len(1, &chat_model)
+        }
+
+        let conn = rusqlite::Connection::open(&ext_db_file).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+
+        let row1 = make_db_row(b"resp-auth", 1_711_050_000);
+        let row2 = make_db_row(b"resp-fallback", 1_711_100_000);
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![row1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (1, ?1, 0)",
+            rusqlite::params![row2],
+        )
+        .unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result.get_mut(ClientId::Antigravity).push(cache_file);
+        scan_result
+            .get_mut(ClientId::AntigravityExtension)
+            .push(ext_db_file);
+
+        let machine_labeler = machine_label::MachineLabeler::default();
+        let flush_context = FlushContext {
+            pricing: None,
+            include_all: true,
+            requested: HashSet::new(),
+            include_synthetic: true,
+            timezone: Some(crate::bucket_tz::BucketTimezone::Local),
+            local_machine_label: None,
+        };
+        let mut source_reads = BTreeMap::new();
+
+        let (messages, proofs) = parse_antigravity_family_messages_with_recount_proofs(
+            &scan_result,
+            None,
+            &machine_labeler,
+            &flush_context,
+            &mut source_reads,
+        );
+
+        assert_eq!(messages.len(), 3);
+
+        // 1. Authoritative cache row wins over DB row:
+        let msg_auth = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-auth"))
+            .unwrap();
+        assert_eq!(msg_auth.client, "antigravity");
+        assert_eq!(msg_auth.timestamp, 1_711_200_000_000);
+
+        // 2. DB row wins over fallback cache row:
+        let msg_fallback = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-fallback"))
+            .unwrap();
+        assert_eq!(msg_fallback.client, "antigravity-extension");
+        assert_eq!(msg_fallback.timestamp, 1_711_100_000_000);
+
+        // 3. Fallback-only cache row survives as antigravity:
+        let msg_only = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-fallback-only"))
+            .unwrap();
+        assert_eq!(msg_only.client, "antigravity");
+        assert!(msg_only.timestamp > 0);
+
+        // Verify recount proof for antigravity-extension preserves cacheRead
+        let ext_proof = proofs.get("antigravity-extension");
+        assert!(ext_proof.is_some());
+        for models in ext_proof.unwrap().values() {
+            for entry in models.values() {
+                assert_eq!(
+                    entry.previous.tokens.cache_read, entry.corrected.tokens.cache_read,
+                    "cacheRead must not drop for extension"
+                );
+            }
+        }
     }
 
     #[test]

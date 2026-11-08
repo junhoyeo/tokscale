@@ -12,26 +12,54 @@ fn file_modified_ms(path: &Path) -> Option<i64> {
 }
 
 pub fn parse_antigravity_file(path: &Path) -> Vec<UnifiedMessage> {
-    parse_antigravity_file_inner(path, false).0
+    let (mut auth, fallback, _, _) = parse_antigravity_file_inner(path, false);
+    auth.extend(fallback);
+    auth
 }
 
 pub fn parse_antigravity_file_with_v1(
     path: &Path,
 ) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
+    let (mut auth, fallback, v1, readable) = parse_antigravity_file_inner(path, true);
+    auth.extend(fallback);
+    (auth, v1, readable)
+}
+
+pub fn parse_antigravity_file_partitioned(
+    path: &Path,
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>) {
+    let (auth, fallback, _, _) = parse_antigravity_file_inner(path, false);
+    (auth, fallback)
+}
+
+pub fn parse_antigravity_file_with_v1_partitioned(
+    path: &Path,
+) -> (
+    Vec<UnifiedMessage>,
+    Vec<UnifiedMessage>,
+    Vec<UnifiedMessage>,
+    bool,
+) {
     parse_antigravity_file_inner(path, true)
 }
 
 fn parse_antigravity_file_inner(
     path: &Path,
     include_v1: bool,
-) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
+) -> (
+    Vec<UnifiedMessage>,
+    Vec<UnifiedMessage>,
+    Vec<UnifiedMessage>,
+    bool,
+) {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
-        Err(_) => return (Vec::new(), Vec::new(), false),
+        Err(_) => return (Vec::new(), Vec::new(), Vec::new(), false),
     };
 
     let fallback_file_ts = file_modified_ms(path);
-    let mut messages = Vec::new();
+    let mut authoritative_messages = Vec::new();
+    let mut fallback_messages = Vec::new();
     let mut v1_messages = Vec::new();
     let mut session_model: Option<String> = None;
     let mut session_timestamp: Option<i64> = None;
@@ -50,24 +78,25 @@ fn parse_antigravity_file_inner(
         let row_type = value.get("type").and_then(Value::as_str).unwrap_or("");
         match row_type {
             "session_meta" => {
-                if let Some(model_id) = value
+                session_model = value
                     .get("modelId")
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
-                {
-                    session_model = Some(model_id.to_string());
-                }
+                    .map(|id| id.to_string());
                 let meta_ts = to_safe_i64(value.get("timestamp"));
-                if meta_ts > 0 {
-                    session_timestamp = Some(meta_ts);
-                }
-                if value.get("version").and_then(Value::as_u64) == Some(2) {
-                    is_v2_session = true;
-                }
+                session_timestamp = if meta_ts > 0 { Some(meta_ts) } else { None };
+                is_v2_session = value.get("version").and_then(Value::as_u64) == Some(2);
             }
             "usage" => {
                 let fallback_ts = session_timestamp.filter(|&ts| ts > 0).or(fallback_file_ts);
-                let row_is_v2 = is_v2_session || value.get("v").and_then(Value::as_u64) == Some(2);
+                let row_is_v2 = is_v2_session
+                    || value.get("v").and_then(Value::as_u64) == Some(2)
+                    || value
+                        .get("responseOutputTokens")
+                        .filter(|v| !v.is_null())
+                        .is_some();
+                let raw_timestamp = to_safe_i64(value.get("timestamp"));
+                let is_fallback_ts = raw_timestamp <= 0;
                 if let Some(message) = parse_usage_row(
                     &value,
                     session_model.as_deref(),
@@ -75,7 +104,11 @@ fn parse_antigravity_file_inner(
                     false,
                     row_is_v2,
                 ) {
-                    messages.push(message);
+                    if is_fallback_ts {
+                        fallback_messages.push(message);
+                    } else {
+                        authoritative_messages.push(message);
+                    }
                 }
                 if include_v1 {
                     if let Some(v1_message) =
@@ -89,7 +122,7 @@ fn parse_antigravity_file_inner(
         }
     }
 
-    (messages, v1_messages, true)
+    (authoritative_messages, fallback_messages, v1_messages, true)
 }
 
 fn parse_usage_row(
@@ -131,7 +164,11 @@ fn parse_usage_row(
     let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
 
     let input = to_safe_i64(value.get("input"));
-    let raw_output = to_safe_i64(value.get("output"));
+    let raw_output = value
+        .get("responseOutputTokens")
+        .filter(|v| !v.is_null())
+        .map(|v| to_safe_i64(Some(v)))
+        .unwrap_or_else(|| to_safe_i64(value.get("output")));
     let cache_read = to_safe_i64(value.get("cacheRead"));
     let reasoning = to_safe_i64(value.get("reasoning"));
     let (output, cache_write) = if v1_compat {
@@ -145,7 +182,12 @@ fn parse_usage_row(
         };
         (v1_output, 0)
     } else {
-        (raw_output, to_safe_i64(value.get("cacheWrite")))
+        let output = if is_v2_format {
+            raw_output
+        } else {
+            raw_output.saturating_sub(reasoning)
+        };
+        (output, to_safe_i64(value.get("cacheWrite")))
     };
     if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 && reasoning == 0 {
         return None;
@@ -294,7 +336,8 @@ mod tests {
         assert!(ok);
         assert_eq!(v2_messages.len(), 1);
         assert_eq!(v2_messages[0].timestamp, 1_711_200_000_000);
-        assert_eq!(v2_messages[0].tokens.output, 4);
+        // Legacy cache format (no version: 2): output is 4 - 1 = 3
+        assert_eq!(v2_messages[0].tokens.output, 3);
         assert_eq!(v2_messages[0].tokens.cache_write, 3);
         assert_eq!(v2_messages[0].tokens.reasoning, 1);
         assert!(v1_messages.is_empty());
@@ -312,15 +355,118 @@ mod tests {
         let (v2_messages, v1_messages, ok) = parse_antigravity_file_with_v1(path.path());
         assert!(ok);
         assert_eq!(v2_messages.len(), 2);
-        // First message had null timestamp, so it fell back to file mtime > 0
-        assert!(v2_messages[0].timestamp > 0);
+        // Authoritative messages come first:
+        // Message 0 is resp-v2 (timestamp 1711200000002, v: 2, so output is raw_output = 4).
+        assert_eq!(v2_messages[0].timestamp, 1_711_200_000_002);
         assert_eq!(v2_messages[0].tokens.output, 4);
-        assert_eq!(v2_messages[0].tokens.cache_write, 0);
+        assert_eq!(v2_messages[0].tokens.reasoning, 1);
+        assert_eq!(v2_messages[0].tokens.cache_write, 2);
+        assert_eq!(v2_messages[0].dedup_key.as_deref(), Some("resp-v2"));
+
+        // Message 1 is resp-legacy (timestamp null, fell back to file mtime > 0, legacy format so output is 4 - 1 = 3).
+        assert!(v2_messages[1].timestamp > 0);
+        assert_eq!(v2_messages[1].tokens.output, 3);
+        assert_eq!(v2_messages[1].tokens.reasoning, 1);
+        assert_eq!(v2_messages[1].tokens.cache_write, 0);
+        assert_eq!(v2_messages[1].dedup_key.as_deref(), Some("resp-legacy"));
 
         // In v1_messages, only rows with explicit timestamp > 0 are accepted (first row had null ts, so rejected in v1).
         // The second row has v=2, so v1 emulation adds reasoning back (4 + 1 = 5) and zeroes cache_write.
         assert_eq!(v1_messages.len(), 1);
         assert_eq!(v1_messages[0].tokens.output, 5);
         assert_eq!(v1_messages[0].tokens.cache_write, 0);
+
+        // Verify partitioning:
+        let (auth, fallback) = parse_antigravity_file_partitioned(path.path());
+        assert_eq!(auth.len(), 1);
+        assert_eq!(auth[0].dedup_key.as_deref(), Some("resp-v2"));
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].dedup_key.as_deref(), Some("resp-legacy"));
+    }
+
+    #[test]
+    fn parse_legacy_cache_file_does_not_double_count_reasoning() {
+        // Pre-v2 cache format: output stores total tokens including reasoning.
+        let input = r#"{"type":"session_meta","sessionId":"legacy-sess","modelId":"claude-sonnet-4.6"}
+{"type":"usage","sessionId":"legacy-sess","timestamp":1711200000000,"input":100,"output":50,"cacheRead":20,"reasoning":15,"responseId":"resp-1"}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_file_with_v1(path.path());
+        assert!(ok);
+        assert_eq!(v2_messages.len(), 1);
+        // v2 output must be text only: 50 - 15 = 35
+        assert_eq!(v2_messages[0].tokens.output, 35);
+        assert_eq!(v2_messages[0].tokens.reasoning, 15);
+        // Total tokens: 100 + 35 + 15 = 150 (not 100 + 50 + 15 = 165)
+        let total = v2_messages[0].tokens.input
+            + v2_messages[0].tokens.output
+            + v2_messages[0].tokens.reasoning;
+        assert_eq!(total, 150);
+
+        // In v1 emulation: output is raw_output = 50. Total is 100 + 50 = 150.
+        assert_eq!(v1_messages.len(), 1);
+        assert_eq!(v1_messages[0].tokens.output, 50);
+        assert_eq!(v1_messages[0].tokens.reasoning, 15);
+    }
+
+    #[test]
+    fn parse_usage_row_handles_explicit_null_response_output_tokens_in_legacy_mode() {
+        // When responseOutputTokens is explicit null in JSON, it should not mark
+        // the row as v2; legacy output must subtract reasoning.
+        let input = r#"{"type":"usage","sessionId":"sess-null-out","modelId":"claude-sonnet-4.6","timestamp":1711200000000,"input":100,"output":50,"cacheRead":20,"reasoning":15,"responseOutputTokens":null,"responseId":"resp-null"}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_file_with_v1(path.path());
+        assert!(ok);
+        assert_eq!(v2_messages.len(), 1);
+        // Must be text only: 50 - 15 = 35 (not 50)
+        assert_eq!(v2_messages[0].tokens.output, 35);
+        assert_eq!(v2_messages[0].tokens.reasoning, 15);
+        assert_eq!(v1_messages.len(), 1);
+        assert_eq!(v1_messages[0].tokens.output, 50);
+    }
+
+    #[test]
+    fn parse_antigravity_file_resets_session_meta_state_across_sessions() {
+        // Session 1 is v2 format with explicit timestamp
+        // Session 2 is legacy format without version or timestamp
+        let input = r#"{"type":"session_meta","sessionId":"sess-1","modelId":"claude-sonnet-4.6","timestamp":1711200000000,"version":2}
+{"type":"usage","sessionId":"sess-1","timestamp":1711200000001,"input":50,"output":20,"reasoning":5,"responseId":"resp-1","v":2}
+{"type":"session_meta","sessionId":"sess-2","modelId":"claude-opus-4.6"}
+{"type":"usage","sessionId":"sess-2","timestamp":null,"input":80,"output":40,"reasoning":10,"responseId":"resp-2"}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let (v2_messages, _, ok) = parse_antigravity_file_with_v1(path.path());
+        assert!(ok);
+        assert_eq!(v2_messages.len(), 2);
+
+        // sess-1 is authoritative, v2 format: output is raw 20
+        let s1 = v2_messages
+            .iter()
+            .find(|m| m.session_id == "sess-1")
+            .unwrap();
+        assert_eq!(s1.tokens.output, 20);
+        assert_eq!(s1.tokens.reasoning, 5);
+        assert_eq!(s1.timestamp, 1_711_200_000_001);
+
+        // sess-2 is legacy format: output is 40 - 10 = 30 (not 40!)
+        // and its timestamp must NOT borrow sess-1's 1711200000000
+        let s2 = v2_messages
+            .iter()
+            .find(|m| m.session_id == "sess-2")
+            .unwrap();
+        assert_eq!(s2.tokens.output, 30);
+        assert_eq!(s2.tokens.reasoning, 10);
+        assert_ne!(s2.timestamp, 1_711_200_000_000);
+        assert!(s2.timestamp > 0); // fell back to file mtime
     }
 }
