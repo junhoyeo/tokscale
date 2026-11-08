@@ -267,13 +267,22 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("qmodel", "qwen3-coder");
     m.insert("qmodel_preview", "qwen3-coder");
     m.insert("qmodel-preview", "qwen3-coder");
+    m.insert("qmodelpreview", "qwen3-coder");
     m.insert("qmodel_38max", "qwen3.8-max");
     m.insert("qmodel-38max", "qwen3.8-max");
+    m.insert("qmodel38max", "qwen3.8-max");
     m.insert("qmodel_latest", "qwen3.8-max");
     m.insert("qmodel-latest", "qwen3.8-max");
+    m.insert("qmodellatest", "qwen3.8-max");
     m.insert("qfmodel", "qwen-flash");
+    m.insert("qf_model", "qwen-flash");
+    m.insert("qf-model", "qwen-flash");
     m.insert("dfmodel", "deepseek-v3");
+    m.insert("df_model", "deepseek-v3");
+    m.insert("df-model", "deepseek-v3");
     m.insert("gfmodel", "glm-4-flash");
+    m.insert("gf_model", "glm-4-flash");
+    m.insert("gf-model", "glm-4-flash");
     m
 });
 
@@ -285,12 +294,12 @@ pub fn resolve_alias(model_id: &str) -> Option<&'static str> {
     if let Some(target) = CURSOR_PRICING_ALIASES.get(lowered.as_str()) {
         return Some(target);
     }
-    // kimi-code reports some rows as `kimi-code/<id>`. The Kimi parser strips
-    // that prefix before pricing, but any other path reaching pricing with the
-    // qualified form would otherwise miss every alias above and fall through to
-    // the Models.dev `kimi-for-coding/*` namespace, which prices at $0.00 — so
-    // the qualified and bare spellings of the same model would disagree.
-    let bare = lowered.strip_prefix("kimi-code/")?;
+    // kimi-code and qoder report some rows qualified by client name
+    // (`kimi-code/<id>`, `qoder/<id>`, `qoder-cn/<id>`).
+    let bare = lowered
+        .strip_prefix("kimi-code/")
+        .or_else(|| lowered.strip_prefix("qoder/"))
+        .or_else(|| lowered.strip_prefix("qoder-cn/"))?;
     MODEL_ALIASES.get(bare).copied()
 }
 
@@ -804,16 +813,28 @@ mod tests {
             ("qmodel", "qwen3-coder"),
             ("qmodel_preview", "qwen3-coder"),
             ("QMODEL-PREVIEW", "qwen3-coder"),
+            ("qmodelpreview", "qwen3-coder"),
             ("qmodel_38max", "qwen3.8-max"),
             ("QMODEL-38MAX", "qwen3.8-max"),
+            ("qmodel38max", "qwen3.8-max"),
             ("qmodel_latest", "qwen3.8-max"),
             ("qmodel-latest", "qwen3.8-max"),
+            ("qmodellatest", "qwen3.8-max"),
             ("qfmodel", "qwen-flash"),
             ("QFMODEL", "qwen-flash"),
+            ("qf_model", "qwen-flash"),
+            ("qf-model", "qwen-flash"),
             ("dfmodel", "deepseek-v3"),
             ("DFMODEL", "deepseek-v3"),
+            ("df_model", "deepseek-v3"),
+            ("df-model", "deepseek-v3"),
             ("gfmodel", "glm-4-flash"),
             ("GFMODEL", "glm-4-flash"),
+            ("gf_model", "glm-4-flash"),
+            ("gf-model", "glm-4-flash"),
+            ("qoder/qmodel", "qwen3-coder"),
+            ("qoder/dfmodel", "deepseek-v3"),
+            ("qoder-cn/gfmodel", "glm-4-flash"),
         ];
 
         for (raw, expected) in cases {

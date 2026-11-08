@@ -310,6 +310,8 @@ fn inferred_provider_from_model_inner(
 
     if contains_family(&lower, "deepseek", delimit_family_names)
         || contains_delimited(&lower, "dfmodel")
+        || contains_delimited(&lower, "df_model")
+        || contains_delimited(&lower, "df-model")
     {
         return Some("deepseek");
     }
@@ -334,8 +336,11 @@ fn inferred_provider_from_model_inner(
     }
 
     if contains_family(&lower, "qwen", delimit_family_names)
+        || contains_versioned_family(&lower, "qmodel")
         || contains_delimited(&lower, "qmodel")
         || contains_delimited(&lower, "qfmodel")
+        || contains_delimited(&lower, "qf_model")
+        || contains_delimited(&lower, "qf-model")
         || lower.starts_with("qmodel_")
         || lower.starts_with("qmodel-")
     {
@@ -368,7 +373,11 @@ fn inferred_provider_from_model_inner(
         return Some("xiaomi");
     }
     // GLM (Zhipu AI / Zai) — `glm-4.6`, `glm-5.2` etc.
-    if contains_versioned_family(&lower, "glm") || contains_delimited(&lower, "gfmodel") {
+    if contains_versioned_family(&lower, "glm")
+        || contains_delimited(&lower, "gfmodel")
+        || contains_delimited(&lower, "gf_model")
+        || contains_delimited(&lower, "gf-model")
+    {
         return Some("zai");
     }
 
@@ -602,12 +611,21 @@ mod tests {
             ("mimo2", "xiaomi"),
             ("glm5", "zai"),
             ("dfmodel", "deepseek"),
+            ("df_model", "deepseek"),
+            ("df-model", "deepseek"),
             ("qmodel", "qwen"),
             ("qfmodel", "qwen"),
+            ("qf_model", "qwen"),
+            ("qf-model", "qwen"),
             ("qmodel_38max", "qwen"),
+            ("qmodel38max", "qwen"),
             ("qmodel_latest", "qwen"),
+            ("qmodel-latest", "qwen"),
             ("qmodel_preview", "qwen"),
+            ("qmodel-preview", "qwen"),
             ("gfmodel", "zai"),
+            ("gf_model", "zai"),
+            ("gf-model", "zai"),
         ];
         for (model, provider) in genuine {
             assert_eq!(

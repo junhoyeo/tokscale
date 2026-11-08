@@ -505,9 +505,10 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     .map(str::trim)
                     .filter(|m| !is_synthetic_placeholder_model(m))
                 {
-                    session_runtime_model = Some(m.to_string());
                     if !m.eq_ignore_ascii_case("auto") {
+                        session_runtime_model = Some(m.to_string());
                         active_model = Some(m.to_string());
+                        last_business_model = Some(m.to_string());
                     }
                 }
                 if let Some(p) = value
@@ -537,6 +538,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
                 {
                     last_business_model = Some(bmk.to_string());
+                    active_model = Some(bmk.to_string());
                 }
 
                 let content_val = message_val
@@ -684,6 +686,10 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     .map(str::trim)
                     .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"));
 
+                if let Some(bmk) = assistant_bmk {
+                    last_business_model = Some(bmk.to_string());
+                }
+
                 // In Qoder 1.1.82 - 1.1.85+, assistant turns carry generic model: "auto".
                 // Resolve actual model using user.businessModelKey (preceding user turn)
                 // or fallback to runtime-config.model (session-wide).
@@ -698,7 +704,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                         .to_string(),
                 };
 
-                if !raw_model.eq_ignore_ascii_case("auto") && active_model.is_none() {
+                if !raw_model.eq_ignore_ascii_case("auto") {
                     active_model = Some(raw_model.clone());
                 }
 
@@ -1110,5 +1116,52 @@ mod tests {
         assert_eq!(msg.tokens.reasoning, 50);
         assert_eq!(msg.tokens.cache_read, 0);
         assert_eq!(msg.dedup_key.as_deref(), Some("qoder:msg:msg_no_usage"));
+    }
+
+    #[test]
+    fn test_parse_qoder_dynamic_runtime_config_change_between_turns() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Turn 1: runtime-config = gfmodel, user businessModelKey = gfmodel
+        writeln!(
+            file,
+            r#"{{"type":"runtime-config","sessionId":"sess-dyn","model":"gfmodel","timestamp":1000}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"u1","sessionId":"sess-dyn","businessModelKey":"gfmodel","timestamp":"2026-11-07T08:00:00.000Z","message":{{"role":"user","content":"Turn 1"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a1","sessionId":"sess-dyn","timestamp":"2026-11-07T08:00:05.000Z","message":{{"id":"msg_1","role":"assistant","model":"auto","content":[{{"type":"text","text":"reply 1"}}],"usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+        )
+        .unwrap();
+
+        // User changes model to dfmodel in IDE dropdown (emits runtime-config)
+        writeln!(
+            file,
+            r#"{{"type":"runtime-config","sessionId":"sess-dyn","model":"dfmodel","timestamp":2000}}"#
+        )
+        .unwrap();
+
+        // Turn 2: user follow-up prompt without businessModelKey
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"u2","sessionId":"sess-dyn","timestamp":"2026-11-07T08:01:00.000Z","message":{{"role":"user","content":"Turn 2"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"a2","sessionId":"sess-dyn","timestamp":"2026-11-07T08:01:05.000Z","message":{{"id":"msg_2","role":"assistant","model":"auto","content":[{{"type":"text","text":"reply 2"}}],"usage":{{"input_tokens":200,"output_tokens":80}}}}}}"#
+        )
+        .unwrap();
+
+        let msgs = parse_qoder_file(file.path());
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].model_id.as_ref(), "glm-4-flash");
+        assert_eq!(msgs[0].pricing_model_id.as_deref(), Some("gfmodel"));
+        assert_eq!(msgs[1].model_id.as_ref(), "deepseek-v3");
+        assert_eq!(msgs[1].pricing_model_id.as_deref(), Some("dfmodel"));
     }
 }

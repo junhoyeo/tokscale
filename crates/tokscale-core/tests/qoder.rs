@@ -176,18 +176,33 @@ async fn test_qoder_gist_representative_schema_periods() {
     )
     .unwrap();
 
+    // 6. Dynamic runtime-config switch: session starts with gfmodel, runtime-config changes to dfmodel,
+    // subsequent turn without businessModelKey resolves to dfmodel (deepseek-v3 / deepseek).
+    std::fs::write(
+        qoder_cn_proj.join("08_dynamic_runtime_config.jsonl"),
+        concat!(
+            r#"{"type":"runtime-config","sessionId":"sess-dyn","model":"gfmodel","timestamp":1794050000000}"#, "\n",
+            r#"{"type":"user","uuid":"u-dyn-1","sessionId":"sess-dyn","version":"1.1.84","businessModelKey":"gfmodel","timestamp":"2026-11-07T13:00:00.000Z","message":{"role":"user","content":"Initial prompt"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a-dyn-1","sessionId":"sess-dyn","version":"1.1.84","timestamp":"2026-11-07T13:00:05.000Z","message":{"id":"msg_dyn_1","type":"message","role":"assistant","model":"auto","content":[{"type":"text","text":"GF reply"}],"usage":{"input_tokens":10000,"output_tokens":80,"cache_read_input_tokens":2000,"cache_creation_input_tokens":0}}}"#, "\n",
+            r#"{"type":"runtime-config","sessionId":"sess-dyn","model":"dfmodel","timestamp":1794050010000}"#, "\n",
+            r#"{"type":"user","uuid":"u-dyn-2","sessionId":"sess-dyn","version":"1.1.84","timestamp":"2026-11-07T13:01:00.000Z","message":{"role":"user","content":"Followup without key"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a-dyn-2","sessionId":"sess-dyn","version":"1.1.84","timestamp":"2026-11-07T13:01:05.000Z","message":{"id":"msg_dyn_2","type":"message","role":"assistant","model":"auto","content":[{"type":"text","text":"DF dynamic reply"}],"usage":{"input_tokens":12000,"output_tokens":90,"cache_read_input_tokens":3000,"cache_creation_input_tokens":0}}}"#, "\n"
+        ),
+    )
+    .unwrap();
+
     let scan = scan_all_clients_with_scanner_settings(
         home.to_str().unwrap(),
         &["qoder".to_string()],
         false,
         &ScannerSettings::default(),
     );
-    assert_eq!(scan.get(ClientId::Qoder).len(), 5);
+    assert_eq!(scan.get(ClientId::Qoder).len(), 6);
 
     let parsed = parse_local_clients(qoder_options(home)).unwrap();
-    // 1 (p1) + 1 (p2) + 1 (p5) + 2 (p7 turns 1 & 2) + 1 (fallback) = 6 messages
-    assert_eq!(parsed.counts.get(ClientId::Qoder), 6);
-    assert_eq!(parsed.messages.len(), 6);
+    // 1 (p1) + 1 (p2) + 1 (p5) + 2 (p7 turns 1 & 2) + 1 (fallback) + 2 (dynamic) = 8 messages
+    assert_eq!(parsed.counts.get(ClientId::Qoder), 8);
+    assert_eq!(parsed.messages.len(), 8);
 
     // Check Period 01: absent usage -> estimated tokens
     let m01 = parsed
@@ -263,8 +278,33 @@ async fn test_qoder_gist_representative_schema_periods() {
     assert_eq!(m_df.output, 120);
     assert_eq!(m_df.cache_read, 5000);
 
+    // Check Dynamic runtime-config change: Turn 1 gfmodel, Turn 2 dfmodel
+    let mut sess_dyn_msgs: Vec<_> = parsed
+        .messages
+        .iter()
+        .filter(|m| m.session_id.as_ref() == "sess-dyn")
+        .collect();
+    sess_dyn_msgs.sort_by_key(|m| m.timestamp);
+    assert_eq!(sess_dyn_msgs.len(), 2);
+
+    let mdyn_1 = sess_dyn_msgs[0];
+    assert_eq!(mdyn_1.model_id.as_ref(), "glm-4-flash");
+    assert_eq!(mdyn_1.provider_id.as_ref(), "zai");
+    assert_eq!(mdyn_1.pricing_model_id.as_deref(), Some("gfmodel"));
+    assert_eq!(mdyn_1.input, 10000);
+    assert_eq!(mdyn_1.output, 80);
+    assert_eq!(mdyn_1.cache_read, 2000);
+
+    let mdyn_2 = sess_dyn_msgs[1];
+    assert_eq!(mdyn_2.model_id.as_ref(), "deepseek-v3");
+    assert_eq!(mdyn_2.provider_id.as_ref(), "deepseek");
+    assert_eq!(mdyn_2.pricing_model_id.as_deref(), Some("dfmodel"));
+    assert_eq!(mdyn_2.input, 12000);
+    assert_eq!(mdyn_2.output, 90);
+    assert_eq!(mdyn_2.cache_read, 3000);
+
     let uncached = parse_local_unified_messages_with_pricing_uncached(qoder_options(home), None)
         .await
         .unwrap();
-    assert_eq!(uncached.len(), 6);
+    assert_eq!(uncached.len(), 8);
 }
