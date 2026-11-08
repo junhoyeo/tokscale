@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(dead_code))]
 
 mod amp;
-mod antigravity;
+pub mod antigravity;
 mod claude;
 pub mod codex;
 mod copilot;

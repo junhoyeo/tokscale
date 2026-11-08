@@ -90,6 +90,23 @@ impl ConfirmDialog {
         }
     }
 
+    pub fn antigravity_hook(
+        target_path: String,
+        confirmed_value: Rc<RefCell<Option<String>>>,
+    ) -> Self {
+        Self {
+            value: target_path.clone(),
+            title: " Link Antigravity CLI ",
+            message: "Register a SessionStart hook in ~/.gemini/config/hooks.json to sync agy usage across terminals without manual token copying.",
+            target_label: target_path,
+            effect: "agy writes session env on start; tokscale discovers quota automatically",
+            confirm_label: "Register",
+            confirm_verb: "register",
+            tone: ConfirmTone::Accent,
+            confirmed_value,
+        }
+    }
+
     fn confirm(&self) {
         *self.confirmed_value.borrow_mut() = Some(self.value.clone());
     }

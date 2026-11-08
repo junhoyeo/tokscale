@@ -12,9 +12,14 @@
 //! {}
 //! ```
 //!
-//! No CSRF token is required for this method, and tokscale never has to hold
-//! an Antigravity credential of its own — the token stays inside the language
-//! server and we only read the numbers it already computed.
+//! Antigravity language server v1.5.3+ enforces CSRF token validation across
+//! Connect-RPC endpoints, including `RetrieveUserQuotaSummary`, via the
+//! `X-Codeium-Csrf-Token` header. Tokscale supplies this token from the
+//! candidate connection metadata (for IDE processes), the active
+//! `ANTIGRAVITY_CSRF_TOKEN` environment variable, or a recorded session
+//! environment file (`active_session.env`) populated by session lifecycle hooks.
+//! Older language server versions that do not require a CSRF token continue
+//! to be supported when no token is present.
 //!
 //! Calling Google's `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
 //! directly was tried first and rejected: authentication succeeds, but a
@@ -333,11 +338,53 @@ fn quota_client(round: Duration) -> Result<reqwest::Client> {
         .build()?)
 }
 
-async fn call_rpc(client: reqwest::Client, port: u16) -> Result<QuotaSummary> {
-    let response = client
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateTarget {
+    pub(crate) port: u16,
+    pub(crate) csrf_token: Option<String>,
+}
+
+impl From<u16> for CandidateTarget {
+    fn from(port: u16) -> Self {
+        Self {
+            port,
+            csrf_token: None,
+        }
+    }
+}
+
+impl From<(u16, Option<String>)> for CandidateTarget {
+    fn from((port, csrf_token): (u16, Option<String>)) -> Self {
+        Self { port, csrf_token }
+    }
+}
+
+impl From<(u16, &str)> for CandidateTarget {
+    fn from((port, csrf_token): (u16, &str)) -> Self {
+        Self {
+            port,
+            csrf_token: Some(csrf_token.to_string()),
+        }
+    }
+}
+
+async fn call_rpc(
+    client: reqwest::Client,
+    port: u16,
+    csrf_token: Option<&str>,
+) -> Result<QuotaSummary> {
+    let mut request = client
         .post(format!("http://127.0.0.1:{port}{RPC_PATH}"))
         // Connect-RPC rejects the request without this header.
-        .header("Connect-Protocol-Version", "1")
+        .header("Connect-Protocol-Version", "1");
+
+    let token = resolve_csrf_token(csrf_token);
+
+    if let Some(token) = token.as_deref() {
+        request = request.header("X-Codeium-Csrf-Token", token);
+    }
+
+    let response = request
         .json(&serde_json::json!({}))
         .send()
         .await?
@@ -348,18 +395,233 @@ async fn call_rpc(client: reqwest::Client, port: u16) -> Result<QuotaSummary> {
     Ok(envelope.response)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParsedSession {
+    pub(crate) csrf_token: Option<String>,
+    pub(crate) address: Option<String>,
+    pub(crate) port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+struct SessionJson {
+    #[serde(default)]
+    csrf_token: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    ls_address: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    ls_port: Option<u16>,
+}
+
+pub(crate) fn parse_session_content(content: &str) -> ParsedSession {
+    let trimmed = content.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(json) = serde_json::from_str::<SessionJson>(trimmed) {
+            let csrf_token = json
+                .csrf_token
+                .or(json.token)
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            let address = json
+                .address
+                .or(json.ls_address)
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty());
+            let port = json
+                .port
+                .or(json.ls_port)
+                .filter(|&p| p != 0)
+                .or_else(|| address.as_deref().and_then(parse_port_from_address));
+            return ParsedSession {
+                csrf_token,
+                address,
+                port,
+            };
+        }
+    }
+
+    let mut session = ParsedSession::default();
+    for raw_line in trimmed.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_uppercase();
+        let val = val.trim().trim_matches(|c| c == '"' || c == '\'');
+        if val.is_empty() {
+            continue;
+        }
+        match key.as_str() {
+            "ANTIGRAVITY_CSRF_TOKEN" | "CSRF_TOKEN" | "TOKEN" => {
+                session.csrf_token = Some(val.to_string());
+            }
+            "ANTIGRAVITY_LS_ADDRESS" | "LS_ADDRESS" | "ADDRESS" => {
+                session.address = Some(val.to_string());
+                if session.port.is_none() {
+                    session.port = parse_port_from_address(val);
+                }
+            }
+            "ANTIGRAVITY_LS_PORT" | "LS_PORT" | "PORT" => {
+                if let Ok(p) = val.parse::<u16>() {
+                    if p != 0 {
+                        session.port = Some(p);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    session
+}
+
+fn session_file_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(override_path) = std::env::var("ANTIGRAVITY_SESSION_FILE") {
+        let path = PathBuf::from(override_path);
+        if path.is_file() {
+            paths.push(path);
+        }
+    }
+    if let Ok(dir) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
+        let base = PathBuf::from(dir);
+        paths.push(base.join("active_session.env"));
+        paths.push(base.join("session_env"));
+    }
+    if let Some(home) = tokscale_core::paths::home_dir() {
+        let base = home.join(".gemini").join("antigravity-cli");
+        paths.push(base.join("active_session.env"));
+        paths.push(base.join("session_env"));
+        let cache_base = home.join(".cache").join("tokscale");
+        paths.push(cache_base.join("antigravity_session.env"));
+    }
+    paths.retain(|p| p.is_file());
+    paths
+}
+
+fn active_session() -> Option<ParsedSession> {
+    for path in session_file_paths() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let session = parse_session_content(&content);
+            if session.csrf_token.is_some() || session.port.is_some() {
+                return Some(session);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_csrf_token(explicit: Option<&str>) -> Option<String> {
+    if let Some(token) = explicit.filter(|t| !t.trim().is_empty()) {
+        return Some(token.to_string());
+    }
+    if let Ok(token) = std::env::var("ANTIGRAVITY_CSRF_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    active_session().and_then(|s| s.csrf_token)
+}
+
+pub const HOOK_SPEC_KEY: &str = "tokscale-session-sync";
+
+/// Location of the global Antigravity customization `hooks.json` file.
+pub fn global_hooks_path() -> Option<PathBuf> {
+    if let Ok(override_path) = std::env::var("ANTIGRAVITY_HOOKS_FILE") {
+        let trimmed = override_path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    tokscale_core::paths::home_dir().map(|h| h.join(".gemini").join("config").join("hooks.json"))
+}
+
+/// Checks whether the Tokscale session sync hook is registered in `hooks.json`.
+pub fn is_antigravity_hook_registered() -> bool {
+    let Some(path) = global_hooks_path() else {
+        return false;
+    };
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    json.as_object()
+        .map(|obj| obj.contains_key(HOOK_SPEC_KEY))
+        .unwrap_or(false)
+}
+
+/// Registers the Tokscale session sync hook in `~/.gemini/config/hooks.json`.
+pub fn register_antigravity_hook() -> Result<PathBuf> {
+    let Some(path) = global_hooks_path() else {
+        anyhow::bail!("unable to determine home directory");
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut root = if path.is_file() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+
+    let hook_spec = serde_json::json!({
+        "SessionStart": [
+            {
+                "type": "command",
+                "command": "mkdir -p \"$HOME/.gemini/antigravity-cli\" && printf \"ANTIGRAVITY_CSRF_TOKEN=%s\\nANTIGRAVITY_LS_ADDRESS=%s\\n\" \"$ANTIGRAVITY_CSRF_TOKEN\" \"$ANTIGRAVITY_LS_ADDRESS\" > \"$HOME/.gemini/antigravity-cli/active_session.env\" && chmod 600 \"$HOME/.gemini/antigravity-cli/active_session.env\"; echo \"{}\""
+            }
+        ]
+    });
+
+    root.as_object_mut()
+        .context("hooks.json root must be a JSON object")?
+        .insert(HOOK_SPEC_KEY.to_string(), hook_spec);
+
+    let formatted = serde_json::to_string_pretty(&root)?;
+    std::fs::write(&path, formatted)?;
+    Ok(path)
+}
+
 // ── Port discovery ──
 
 /// Find a language server that answers `RetrieveUserQuotaSummary`, and keep
 /// what it answered.
 ///
-/// Two sources, cheapest first:
+/// Four sources, cheapest first:
 ///
-/// 1. The CLI log, which records `listening on random port at NNNN for HTTP`
+/// 1. Environment variables (`ANTIGRAVITY_LS_ADDRESS` or `ANTIGRAVITY_LS_PORT`),
+///    which immediately supply the server port and CSRF token when tokscale is
+///    invoked from an active `agy` session or configured runner.
+/// 2. Recorded active session environment file (`active_session.env`), which
+///    shares the token and listening address across separate terminal sessions
+///    when populated by an Antigravity `SessionStart` lifecycle hook.
+/// 3. The CLI log, which records `listening on random port at NNNN for HTTP`
 ///    on every start. Reading one file beats enumerating processes.
-/// 2. [`crate::antigravity::detect_antigravity_connections`], which finds the
-///    IDE's language server. That path needs a CSRF token on the process
-///    command line, which the `agy` CLI does not have — hence source 1.
+/// 4. [`crate::antigravity::detect_antigravity_connections`], which finds the
+///    IDE's language server. That path extracts `--csrf_token` and the declared
+///    or listening port from the running process.
 ///
 /// Candidates are asked rather than trusted: the process listens on both an
 /// HTTPS (gRPC) port and an HTTP one, and only the latter speaks plain JSON.
@@ -368,16 +630,24 @@ async fn call_rpc(client: reqwest::Client, port: u16) -> Result<QuotaSummary> {
 /// port the same question again, which is a second round trip for an answer
 /// already in hand.
 async fn discover_quota() -> Option<QuotaSummary> {
-    discover_quota_from(&[&ports_from_cli_log, &detected_ports]).await
+    discover_quota_from(&[
+        &targets_from_env,
+        &targets_from_session,
+        &targets_from_cli_log,
+        &detected_targets,
+    ])
+    .await
 }
 
 /// Ask each source in turn and stop at the first that answers.
 ///
-/// Separate from [`discover_quota`] so the sequencing can be tested: source 2
+/// Separate from [`discover_quota`] so the sequencing can be tested: source 4
 /// runs `ps` and has no fixture, so the only way to observe that a first
-/// source which spent its whole round still leaves the second one asked is to
-/// hand discovery two sources the test controls.
-async fn discover_quota_from(sources: &[&dyn Fn() -> Vec<u16>]) -> Option<QuotaSummary> {
+/// source which spent its whole round still leaves the next one asked is to
+/// hand discovery sources the test controls.
+async fn discover_quota_from(
+    sources: &[&dyn Fn() -> Vec<CandidateTarget>],
+) -> Option<QuotaSummary> {
     for source in sources {
         if let Some(summary) = race_for_quota(source()).await {
             return Some(summary);
@@ -386,21 +656,100 @@ async fn discover_quota_from(sources: &[&dyn Fn() -> Vec<u16>]) -> Option<QuotaS
     None
 }
 
-/// Ports of the IDE language servers found by scanning processes.
-///
-/// Reached only when the log offered nothing, which keeps `ps` plus a
-/// heartbeat per port off the common path. Unlike source 1 this is
-/// synchronous and brings its own per-socket timeouts, so it sits outside
-/// either round's deadline.
-fn detected_ports() -> Vec<u16> {
+/// Candidate targets from the environment (`ANTIGRAVITY_LS_ADDRESS` or `ANTIGRAVITY_LS_PORT`).
+fn targets_from_env() -> Vec<CandidateTarget> {
+    let token = std::env::var("ANTIGRAVITY_CSRF_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let mut targets = Vec::new();
+
+    if let Ok(addr) = std::env::var("ANTIGRAVITY_LS_ADDRESS") {
+        if let Some(port) = parse_port_from_address(&addr) {
+            targets.push(CandidateTarget {
+                port,
+                csrf_token: token.clone(),
+            });
+        }
+    }
+
+    if let Ok(port_str) = std::env::var("ANTIGRAVITY_LS_PORT") {
+        if let Ok(port) = port_str.trim().parse::<u16>() {
+            if port != 0 && !targets.iter().any(|t| t.port == port) {
+                targets.push(CandidateTarget {
+                    port,
+                    csrf_token: token.clone(),
+                });
+            }
+        }
+    }
+
+    targets
+}
+
+/// Candidate targets from a recorded session environment file (`active_session.env`).
+fn targets_from_session() -> Vec<CandidateTarget> {
+    let Some(session) = active_session() else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    if let Some(port) = session.port {
+        targets.push(CandidateTarget {
+            port,
+            csrf_token: session.csrf_token,
+        });
+    }
+    targets
+}
+
+/// Parse a port number from an address string such as `localhost:45015`, `127.0.0.1:45015`,
+/// `[::1]:45015`, `:45015`, or `45015`.
+fn parse_port_from_address(addr: &str) -> Option<u16> {
+    let trimmed = addr.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if let Some((_, port_str)) = trimmed.rsplit_once(':') {
+        port_str.trim_matches(|c: char| !c.is_ascii_digit())
+    } else {
+        trimmed
+    };
+    candidate.parse::<u16>().ok().filter(|&p| p != 0)
+}
+
+/// Candidate targets from the CLI log (`cli.log`), pairing each logged port with
+/// `ANTIGRAVITY_CSRF_TOKEN` if present in the environment or active session file.
+fn targets_from_cli_log() -> Vec<CandidateTarget> {
+    let token = resolve_csrf_token(None);
+    ports_from_cli_log()
+        .into_iter()
+        .map(|port| CandidateTarget {
+            port,
+            csrf_token: token.clone(),
+        })
+        .collect()
+}
+
+/// Candidate targets of IDE language servers found by scanning processes.
+fn detected_targets() -> Vec<CandidateTarget> {
     crate::antigravity::detect_antigravity_connections()
         .map(|connections| {
             connections
                 .into_iter()
-                .map(|connection| connection.port)
+                .map(|connection| CandidateTarget {
+                    port: connection.port,
+                    csrf_token: Some(connection.csrf_token),
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn detected_ports() -> Vec<u16> {
+    detected_targets()
+        .into_iter()
+        .map(|target| target.port)
+        .collect()
 }
 
 /// Ask every candidate at once and keep the best answer.
@@ -412,17 +761,17 @@ fn detected_ports() -> Vec<u16> {
 /// inherited from a round that already ran -- is the only bound left. Losing
 /// requests are cancelled when the set is dropped.
 ///
-/// "Best" is by position rather than by who finishes first: `ports` arrives
+/// "Best" is by position rather than by who finishes first: `targets` arrives
 /// newest first and the newest is the one the log calls current. The round
 /// returns the moment nothing better can still arrive, and until then waits
 /// for a better-ranked candidate exactly as long as it waits for any --
 /// [`DISCOVERY_ROUND_TIMEOUT`] says why that is one bound and not two.
 ///
-/// An empty `ports` returns before building anything, which is what keeps a
+/// An empty `targets` returns before building anything, which is what keeps a
 /// machine with no Antigravity from paying for a client it has nothing to
 /// send to.
-async fn race_for_quota(ports: Vec<u16>) -> Option<QuotaSummary> {
-    race_for_quota_with(ports, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
+async fn race_for_quota(targets: Vec<CandidateTarget>) -> Option<QuotaSummary> {
+    race_for_quota_with(targets, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
 }
 
 /// [`race_for_quota`] with the round budget and the client build handed in.
@@ -446,21 +795,28 @@ async fn race_for_quota(ports: Vec<u16>) -> Option<QuotaSummary> {
 /// `build_client` is given `round` so the client's per-request timeout -- the
 /// backstop for a `call_rpc` awaited outside a round -- cannot undercut it.
 async fn race_for_quota_with(
-    ports: Vec<u16>,
+    targets: Vec<CandidateTarget>,
     round: Duration,
     build_client: &dyn Fn(Duration) -> Result<reqwest::Client>,
 ) -> Option<QuotaSummary> {
-    if ports.is_empty() {
+    if targets.is_empty() {
         return None;
     }
 
     let client = build_client(round).ok()?;
     let deadline = tokio::time::Instant::now() + round;
-    let mut settled = vec![false; ports.len()];
+    let mut settled = vec![false; targets.len()];
     let mut requests = tokio::task::JoinSet::new();
-    for (rank, port) in ports.into_iter().enumerate() {
+    for (rank, target) in targets.into_iter().enumerate() {
         let client = client.clone();
-        requests.spawn(async move { (rank, call_rpc(client, port).await.ok()) });
+        requests.spawn(async move {
+            (
+                rank,
+                call_rpc(client, target.port, target.csrf_token.as_deref())
+                    .await
+                    .ok(),
+            )
+        });
     }
 
     let mut best: Option<(usize, QuotaSummary)> = None;
@@ -494,6 +850,18 @@ async fn race_for_quota_with(
 }
 
 fn cli_log_path() -> Option<PathBuf> {
+    if let Some(home) = tokscale_core::paths::home_dir() {
+        let path = home.join(".gemini").join("antigravity-cli").join("cli.log");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if let Ok(dir) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
+        let path = PathBuf::from(dir).join("cli.log");
+        if path.exists() {
+            return Some(path);
+        }
+    }
     Some(
         tokscale_core::paths::home_dir()?
             .join(".gemini")
@@ -600,6 +968,7 @@ mod tests {
     use crate::commands::usage::test_server::{spawn_server, Seen};
     use crate::commands::usage::{usage_providers, Fetch};
     use serial_test::serial;
+    use std::io::Write;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -623,6 +992,10 @@ mod tests {
         fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
             unsafe { std::env::set_var(key, value) };
         }
+
+        fn remove(&mut self, key: &str) {
+            unsafe { std::env::remove_var(key) };
+        }
     }
 
     impl Drop for EnvGuard {
@@ -640,8 +1013,15 @@ mod tests {
 
     /// `dirs::home_dir()` falls back to `USERPROFILE` whenever the `HOME`
     /// override is rejected, so both have to point at the fixture or the
-    /// Windows leg reads the runner's real `cli.log`.
-    const HOME_ENV_KEYS: [&str; 2] = ["HOME", "USERPROFILE"];
+    /// Windows leg reads the runner's real `cli.log`. `ANTIGRAVITY_LS_ADDRESS`
+    /// and `ANTIGRAVITY_LS_PORT` are also captured to prevent tests from
+    /// talking to a real background `agy` instance.
+    const HOME_ENV_KEYS: [&str; 4] = [
+        "HOME",
+        "USERPROFILE",
+        "ANTIGRAVITY_LS_ADDRESS",
+        "ANTIGRAVITY_LS_PORT",
+    ];
 
     /// One quota group, named distinctly enough that a real language server
     /// running on the machine under test cannot be mistaken for the fixture.
@@ -666,9 +1046,11 @@ mod tests {
             })
             .collect();
         std::fs::write(log_dir.join("cli.log"), log).unwrap();
-        for key in HOME_ENV_KEYS {
+        for key in ["HOME", "USERPROFILE"] {
             env.set(key, home.path());
         }
+        env.remove("ANTIGRAVITY_LS_ADDRESS");
+        env.remove("ANTIGRAVITY_LS_PORT");
     }
 
     /// A listener that accepts and then says nothing.
@@ -994,7 +1376,7 @@ mod tests {
             .unwrap();
         let started = std::time::Instant::now();
         let summary = runtime.block_on(race_for_quota_with(
-            vec![port_of(&newer_base), port_of(&older_base)],
+            vec![port_of(&newer_base).into(), port_of(&older_base).into()],
             ROUND_STALL_GUARD,
             &quota_client,
         ));
@@ -1036,8 +1418,8 @@ mod tests {
         let stalled = spawn_black_hole();
         let (base, seen) = spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
         let healthy = port_of(&base);
-        let first: &dyn Fn() -> Vec<u16> = &|| vec![stalled];
-        let second: &dyn Fn() -> Vec<u16> = &|| vec![healthy];
+        let first: &dyn Fn() -> Vec<CandidateTarget> = &|| vec![stalled.into()];
+        let second: &dyn Fn() -> Vec<CandidateTarget> = &|| vec![healthy.into()];
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1109,7 +1491,7 @@ mod tests {
         let (base, _seen) = spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
         assert!(runtime
             .block_on(race_for_quota_with(
-                vec![port_of(&base)],
+                vec![port_of(&base).into()],
                 ROUND_STALL_GUARD,
                 &counted_client
             ))
@@ -1152,7 +1534,7 @@ mod tests {
             .unwrap();
         let started = std::time::Instant::now();
         let summary = runtime.block_on(race_for_quota_with(
-            vec![0],
+            vec![0.into()],
             ROUND_STALL_GUARD,
             &quota_client,
         ));
@@ -1511,5 +1893,232 @@ mod tests {
         assert_eq!(slug("Gemini Models"), "gemini-models");
         assert_eq!(slug("Claude and GPT models"), "claude-and-gpt-models");
         assert_eq!(slug("  spaced  "), "spaced");
+    }
+
+    #[test]
+    fn parse_port_from_address_handles_valid_and_invalid_formats() {
+        assert_eq!(parse_port_from_address("localhost:45015"), Some(45015));
+        assert_eq!(parse_port_from_address("127.0.0.1:45015"), Some(45015));
+        assert_eq!(parse_port_from_address("[::1]:45015"), Some(45015));
+        assert_eq!(parse_port_from_address(":45015"), Some(45015));
+        assert_eq!(parse_port_from_address("45015"), Some(45015));
+        assert_eq!(parse_port_from_address("  localhost:45015  "), Some(45015));
+
+        assert_eq!(parse_port_from_address(""), None);
+        assert_eq!(parse_port_from_address("   "), None);
+        assert_eq!(parse_port_from_address("localhost"), None);
+        assert_eq!(parse_port_from_address("localhost:abc"), None);
+        assert_eq!(parse_port_from_address("localhost:0"), None);
+    }
+
+    fn spawn_csrf_verifying_server(expected_token: &'static str) -> (u16, Arc<Mutex<bool>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let port = listener.local_addr().unwrap().port();
+        let verified = Arc::new(Mutex::new(false));
+        let verified_clone = Arc::clone(&verified);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                if text.contains(&format!(
+                    "x-codeium-csrf-token: {}",
+                    expected_token.to_ascii_lowercase()
+                )) {
+                    *verified_clone.lock().unwrap() = true;
+                }
+                let body = FIXTURE_QUOTA;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                break;
+            }
+        });
+
+        (port, verified)
+    }
+
+    #[test]
+    #[serial]
+    fn call_rpc_sends_csrf_token_header_when_present() {
+        let (port, verified) = spawn_csrf_verifying_server("test-csrf-token-1234");
+        let client = quota_client(ROUND_STALL_GUARD).unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_CSRF_TOKEN"]);
+        env.remove("ANTIGRAVITY_CSRF_TOKEN");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let summary = rt
+            .block_on(call_rpc(client, port, Some("test-csrf-token-1234")))
+            .expect("call_rpc succeeds");
+
+        assert_eq!(summary.groups.len(), 1);
+        assert!(
+            *verified.lock().unwrap(),
+            "request must include X-Codeium-Csrf-Token: test-csrf-token-1234"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn call_rpc_uses_env_csrf_token_fallback() {
+        let (port, verified) = spawn_csrf_verifying_server("fallback-env-token-5678");
+        let client = quota_client(ROUND_STALL_GUARD).unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_CSRF_TOKEN"]);
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "fallback-env-token-5678");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let summary = rt
+            .block_on(call_rpc(client, port, None))
+            .expect("call_rpc succeeds");
+
+        assert_eq!(summary.groups.len(), 1);
+        assert!(
+            *verified.lock().unwrap(),
+            "request must fall back to ANTIGRAVITY_CSRF_TOKEN: fallback-env-token-5678"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn targets_from_env_parses_ls_address_and_port() {
+        let mut env = EnvGuard::capture(&[
+            "ANTIGRAVITY_LS_ADDRESS",
+            "ANTIGRAVITY_LS_PORT",
+            "ANTIGRAVITY_CSRF_TOKEN",
+        ]);
+
+        env.set("ANTIGRAVITY_LS_ADDRESS", "localhost:45015");
+        env.set("ANTIGRAVITY_LS_PORT", "45016");
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "mock-token-abc");
+
+        let targets = targets_from_env();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets[0],
+            CandidateTarget {
+                port: 45015,
+                csrf_token: Some("mock-token-abc".to_string()),
+            }
+        );
+        assert_eq!(
+            targets[1],
+            CandidateTarget {
+                port: 45016,
+                csrf_token: Some("mock-token-abc".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_session_content_parses_env_format() {
+        let content = r#"
+            # Active Antigravity session
+            export ANTIGRAVITY_CSRF_TOKEN="test-token-uuid-1234"
+            export ANTIGRAVITY_LS_ADDRESS="127.0.0.1:45015"
+            export ANTIGRAVITY_LS_PORT="45015"
+        "#;
+        let session = parse_session_content(content);
+        assert_eq!(session.csrf_token.as_deref(), Some("test-token-uuid-1234"));
+        assert_eq!(session.address.as_deref(), Some("127.0.0.1:45015"));
+        assert_eq!(session.port, Some(45015));
+    }
+
+    #[test]
+    fn parse_session_content_parses_json_format() {
+        let content = r#"{
+            "csrf_token": "json-uuid-5678",
+            "ls_address": "localhost:43210"
+        }"#;
+        let session = parse_session_content(content);
+        assert_eq!(session.csrf_token.as_deref(), Some("json-uuid-5678"));
+        assert_eq!(session.port, Some(43210));
+    }
+
+    #[test]
+    #[serial]
+    fn targets_from_session_reads_valid_session_file() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "ANTIGRAVITY_CSRF_TOKEN=file-token-9999").unwrap();
+        writeln!(tmp, "ANTIGRAVITY_LS_ADDRESS=127.0.0.1:45019").unwrap();
+        tmp.flush().unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_SESSION_FILE", "ANTIGRAVITY_CSRF_TOKEN"]);
+        env.set("ANTIGRAVITY_SESSION_FILE", tmp.path().to_str().unwrap());
+        env.remove("ANTIGRAVITY_CSRF_TOKEN");
+
+        let targets = targets_from_session();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0],
+            CandidateTarget {
+                port: 45019,
+                csrf_token: Some("file-token-9999".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn targets_from_cli_log_uses_session_csrf_token_fallback() {
+        use std::io::Write;
+        let mut session_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            session_file,
+            "ANTIGRAVITY_CSRF_TOKEN=fallback-session-token"
+        )
+        .unwrap();
+        session_file.flush().unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_SESSION_FILE", "ANTIGRAVITY_CSRF_TOKEN"]);
+        env.set(
+            "ANTIGRAVITY_SESSION_FILE",
+            session_file.path().to_str().unwrap(),
+        );
+        env.remove("ANTIGRAVITY_CSRF_TOKEN");
+
+        assert_eq!(
+            resolve_csrf_token(None),
+            Some("fallback-session-token".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn hook_registration_creates_and_detects_hook_spec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        assert!(!is_antigravity_hook_registered());
+
+        let path = register_antigravity_hook().expect("registration succeeds");
+        assert_eq!(path, hooks_file);
+        assert!(is_antigravity_hook_registered());
+
+        // Verify JSON contents
+        let content = std::fs::read_to_string(&hooks_file).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(json.as_object().unwrap().contains_key(HOOK_SPEC_KEY));
+        let session_start = &json[HOOK_SPEC_KEY]["SessionStart"];
+        assert!(session_start.is_array());
+        assert_eq!(session_start[0]["type"], "command");
     }
 }

@@ -462,6 +462,25 @@ fn action_bar_buttons(app: &App, compact: bool) -> Vec<ActionBarButton> {
             },
             action: ClickAction::CodexStartLogin,
         },
+        ActionBarButton {
+            key: if app.is_antigravity_hook_registered() {
+                if compact {
+                    MessageKey::ActionAntigravityLinkedShort
+                } else {
+                    MessageKey::ActionAntigravityLinked
+                }
+            } else if compact {
+                MessageKey::ActionLinkAntigravityShort
+            } else {
+                MessageKey::ActionLinkAntigravity
+            },
+            kind: if app.is_antigravity_hook_registered() {
+                ButtonKind::Disabled
+            } else {
+                ButtonKind::Secondary
+            },
+            action: ClickAction::AntigravityLinkHook,
+        },
     ];
     if !app.subscription_usage.is_empty() {
         buttons.push(ActionBarButton {
