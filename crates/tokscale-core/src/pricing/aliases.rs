@@ -40,6 +40,13 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // long-context spelling must resolve to the same real moonshotai row as
     // bare `k3` instead of landing on the zero-priced subscription namespace.
     m.insert("k3-256k", "kimi-k3");
+    // Kimi CLI reports `k3.1-pro`. models.dev publishes that model part only
+    // under `kimi-code-plan-cn` / `kimi-code-plan-global` at $0.00. The API
+    // row is Moonshot's USD card (`kimi-k3.1-pro`, $2 / $10 per 1M, $0.20
+    // cached input), the same currency LiteLLM, models.dev, and OpenRouter
+    // use for DeepSeek and GLM.
+    m.insert("k3.1-pro", "kimi-k3.1-pro");
+    m.insert("k3.1-pro-highspeed", "kimi-k3.1-pro-highspeed");
     // Kimi Work (the Kimi desktop app's agent mode) embeds the same kimi-code
     // kernel and writes the same wire protocol, but reports its own ids.
     // Unaliased they fuzzy-match badly: `k2d6-agent` landed on
@@ -346,6 +353,14 @@ mod tests {
         // `kimi-for-coding/k3-256k` row on models.dev, so it must resolve to
         // the same real moonshotai row as bare `k3`.
         assert_eq!(resolve_alias("k3-256k"), Some("kimi-k3"));
+        // `k3.1-pro` is its own model part on the $0.00 coding-plan rows, so
+        // it must resolve to Moonshot's API id rather than that plan.
+        assert_eq!(resolve_alias("k3.1-pro"), Some("kimi-k3.1-pro"));
+        assert_eq!(
+            resolve_alias("k3.1-pro-highspeed"),
+            Some("kimi-k3.1-pro-highspeed")
+        );
+        assert_eq!(resolve_alias("K3.1-PRO"), Some("kimi-k3.1-pro"));
     }
 
     #[test]
@@ -403,7 +418,14 @@ mod tests {
     #[test]
     fn qualified_kimi_code_ids_resolve_like_their_bare_form() {
         // A `kimi-code/<id>` row must not price differently from `<id>`.
-        for bare in ["k3", "kimi-for-coding", "k2d6-agent", "k3-agent"] {
+        for bare in [
+            "k3",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            "kimi-for-coding",
+            "k2d6-agent",
+            "k3-agent",
+        ] {
             let qualified = format!("kimi-code/{bare}");
             assert_eq!(
                 resolve_alias(&qualified),
