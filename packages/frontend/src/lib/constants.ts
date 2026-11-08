@@ -229,7 +229,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   vibe: "#FA520F",
   proma: "#6366F1",
   bb: "#4F46E5",
-  qoder: "#FF6A00",
+  qoder: "#FF4D00",
 };
 
 // Derived values
