@@ -570,27 +570,28 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
         anyhow::bail!("unable to determine home directory");
     };
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = path
+        .parent()
+        .context("hooks.json must have a parent directory")?;
+    std::fs::create_dir_all(parent)?;
 
     let mut root = if path.is_file() {
         let content = std::fs::read_to_string(&path)?;
         serde_json::from_str::<serde_json::Value>(&content)
-            .unwrap_or_else(|_| serde_json::json!({}))
+            .context("hooks.json contains invalid JSON")?
     } else {
         serde_json::json!({})
     };
 
     if !root.is_object() {
-        root = serde_json::json!({});
+        anyhow::bail!("hooks.json root must be a JSON object");
     }
 
     let hook_spec = serde_json::json!({
         "SessionStart": [
             {
                 "type": "command",
-                "command": "mkdir -p \"$HOME/.gemini/antigravity-cli\" && printf \"ANTIGRAVITY_CSRF_TOKEN=%s\\nANTIGRAVITY_LS_ADDRESS=%s\\n\" \"$ANTIGRAVITY_CSRF_TOKEN\" \"$ANTIGRAVITY_LS_ADDRESS\" > \"$HOME/.gemini/antigravity-cli/active_session.env\" && chmod 600 \"$HOME/.gemini/antigravity-cli/active_session.env\"; echo \"{}\""
+                "command": "set -eu; dir=\"$HOME/.gemini/antigravity-cli\"; mkdir -p \"$dir\"; umask 077; tmp=$(mktemp \"$dir/active_session.env.XXXXXX\"); printf \"ANTIGRAVITY_CSRF_TOKEN=%s\\nANTIGRAVITY_LS_ADDRESS=%s\\n\" \"$ANTIGRAVITY_CSRF_TOKEN\" \"$ANTIGRAVITY_LS_ADDRESS\" > \"$tmp\"; mv -f \"$tmp\" \"$dir/active_session.env\"; echo \"{}\""
             }
         ]
     });
@@ -600,7 +601,15 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
         .insert(HOOK_SPEC_KEY.to_string(), hook_spec);
 
     let formatted = serde_json::to_string_pretty(&root)?;
-    std::fs::write(&path, formatted)?;
+    let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp_path, formatted) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+    if let Err(e) = tokscale_core::fs_atomic::replace_file(&tmp_path, &path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
     Ok(path)
 }
 
@@ -850,14 +859,14 @@ async fn race_for_quota_with(
 }
 
 fn cli_log_path() -> Option<PathBuf> {
-    if let Some(home) = tokscale_core::paths::home_dir() {
-        let path = home.join(".gemini").join("antigravity-cli").join("cli.log");
+    if let Ok(dir) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
+        let path = PathBuf::from(dir).join("cli.log");
         if path.exists() {
             return Some(path);
         }
     }
-    if let Ok(dir) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
-        let path = PathBuf::from(dir).join("cli.log");
+    if let Some(home) = tokscale_core::paths::home_dir() {
+        let path = home.join(".gemini").join("antigravity-cli").join("cli.log");
         if path.exists() {
             return Some(path);
         }
@@ -982,11 +991,15 @@ mod tests {
 
     impl EnvGuard {
         fn capture(keys: &[&'static str]) -> Self {
-            Self(
-                keys.iter()
-                    .map(|key| (*key, std::env::var_os(key)))
-                    .collect(),
-            )
+            let captured = keys
+                .iter()
+                .map(|key| {
+                    let prev = std::env::var_os(key);
+                    unsafe { std::env::remove_var(key) };
+                    (*key, prev)
+                })
+                .collect();
+            Self(captured)
         }
 
         fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
@@ -1016,11 +1029,14 @@ mod tests {
     /// Windows leg reads the runner's real `cli.log`. `ANTIGRAVITY_LS_ADDRESS`
     /// and `ANTIGRAVITY_LS_PORT` are also captured to prevent tests from
     /// talking to a real background `agy` instance.
-    const HOME_ENV_KEYS: [&str; 4] = [
+    const HOME_ENV_KEYS: [&str; 7] = [
         "HOME",
         "USERPROFILE",
         "ANTIGRAVITY_LS_ADDRESS",
         "ANTIGRAVITY_LS_PORT",
+        "ANTIGRAVITY_CSRF_TOKEN",
+        "ANTIGRAVITY_APP_DATA_DIR",
+        "ANTIGRAVITY_SESSION_FILE",
     ];
 
     /// One quota group, named distinctly enough that a real language server
@@ -2120,5 +2136,42 @@ mod tests {
         let session_start = &json[HOOK_SPEC_KEY]["SessionStart"];
         assert!(session_start.is_array());
         assert_eq!(session_start[0]["type"], "command");
+        let cmd = session_start[0]["command"].as_str().unwrap();
+        assert!(cmd.contains("umask 077"));
+        assert!(cmd.contains("mktemp"));
+    }
+
+    #[test]
+    #[serial]
+    fn hook_registration_fails_on_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+        std::fs::write(&hooks_file, "{ invalid json").unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        let err = register_antigravity_hook().unwrap_err();
+        assert!(err.to_string().contains("invalid JSON"));
+        // Confirm content was not wiped
+        assert_eq!(
+            std::fs::read_to_string(&hooks_file).unwrap(),
+            "{ invalid json"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cli_log_path_prioritizes_app_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom_dir = tmp.path().join("custom_app_data");
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        let custom_log = custom_dir.join("cli.log");
+        std::fs::write(&custom_log, "listening on random port at 4567 for HTTP").unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_APP_DATA_DIR"]);
+        env.set("ANTIGRAVITY_APP_DATA_DIR", custom_dir.to_str().unwrap());
+
+        assert_eq!(cli_log_path(), Some(custom_log));
     }
 }

@@ -97,9 +97,9 @@ impl ConfirmDialog {
         Self {
             value: target_path.clone(),
             title: " Link Antigravity CLI ",
-            message: "Register a SessionStart hook in ~/.gemini/config/hooks.json to sync agy usage across terminals without manual token copying.",
+            message: "Add a SessionStart hook so agy syncs quota without token copying.",
             target_label: target_path,
-            effect: "agy writes session env on start; tokscale discovers quota automatically",
+            effect: "agy writes session env; tokscale auto-discovers quota",
             confirm_label: "Register",
             confirm_verb: "register",
             tone: ConfirmTone::Accent,

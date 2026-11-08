@@ -403,6 +403,7 @@ pub struct App {
     confirmed_codex_remove_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_reset_account_id: Rc<RefCell<Option<String>>>,
     confirmed_antigravity_hook: Rc<RefCell<Option<String>>>,
+    antigravity_hook_registered: bool,
     pub hide_usage_emails: bool,
     pub codex_login_lines: Vec<String>,
     pub(crate) codex_login_outcome: Option<CodexLoginOutcome>,
@@ -587,6 +588,8 @@ impl App {
             confirmed_codex_remove_account_id,
             confirmed_codex_reset_account_id,
             confirmed_antigravity_hook,
+            antigravity_hook_registered:
+                crate::commands::usage::antigravity::is_antigravity_hook_registered(),
             hide_usage_emails: true,
             codex_login_lines: Vec::new(),
             codex_login_outcome: None,
@@ -1028,9 +1031,6 @@ impl App {
                 };
                 self.reset_selection();
             }
-            KeyCode::Char('g') if self.current_tab == Tab::Usage => {
-                self.confirm_antigravity_hook_registration();
-            }
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
             }
@@ -1461,7 +1461,12 @@ impl App {
     }
 
     pub fn is_antigravity_hook_registered(&self) -> bool {
-        crate::commands::usage::antigravity::is_antigravity_hook_registered()
+        self.antigravity_hook_registered
+    }
+
+    pub fn refresh_antigravity_hook_registered(&mut self) {
+        self.antigravity_hook_registered =
+            crate::commands::usage::antigravity::is_antigravity_hook_registered();
     }
 
     pub fn confirm_antigravity_hook_registration(&mut self) {
@@ -1483,6 +1488,7 @@ impl App {
         if confirmed.is_some() {
             match crate::commands::usage::antigravity::register_antigravity_hook() {
                 Ok(path) => {
+                    self.antigravity_hook_registered = true;
                     self.set_status(&format!("Registered hook in {}", path.display()));
                     self.refresh_usage();
                 }
@@ -1849,6 +1855,9 @@ impl App {
         self.persist_current_sort();
 
         self.current_tab = target;
+        if target == Tab::Usage {
+            self.refresh_antigravity_hook_registered();
+        }
         if target != Tab::Daily {
             self.selected_daily_detail_date = None;
         }
