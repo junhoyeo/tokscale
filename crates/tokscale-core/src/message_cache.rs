@@ -8896,12 +8896,12 @@ mod tests {
 
     #[test]
     fn test_qoder_parser_version() {
-        assert_eq!(parser_version(ClientId::Qoder), 2);
+        assert_eq!(parser_version(ClientId::Qoder), 3);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_qoder_v1_shard_invalidates_and_reparses_to_v2() {
+    fn test_qoder_v2_shard_invalidates_and_reparses_to_v3() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -8918,28 +8918,30 @@ mod tests {
             concat!(
                 r#"{"type":"user","uuid":"u-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:00.000Z","message":{"role":"user","content":"Hello"}}"#,
                 "\n",
-                r#"{"type":"assistant","uuid":"a-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:02.000Z","message":{"id":"msg_01","role":"assistant","model":"qwen3.8-max","stop_reason":"end_turn","content":[{"type":"text","text":"Hi!"}],"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}}"#,
+                r#"{"type":"assistant","uuid":"a-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:02.000Z","message":{"id":"msg_01","role":"assistant","model":"qmodel_preview","stop_reason":"end_turn","content":[{"type":"text","text":"Hi!"}],"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}}"#,
                 "\n"
             ),
         )
         .unwrap();
 
         let current_identity = CacheIdentity::for_client(ClientId::Qoder);
-        assert_eq!(current_identity.parser_version, 2);
+        assert_eq!(current_identity.parser_version, 3);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
-            parser_version: 1,
+            parser_version: 2,
         };
         let fingerprint = SourceFingerprint::from_path(&source).unwrap();
         let stale_message = UnifiedMessage::new(
             "qoder",
-            "stale-model",
-            "stale-provider",
+            "qwen3-coder",
+            "qwen",
             "sess-test",
             1000,
             crate::TokenBreakdown {
-                input: 9999,
-                output: 9999,
+                input: 1200,
+                output: 300,
+                cache_read: 500,
+                cache_write: 100,
                 ..Default::default()
             },
             0.0,
@@ -8965,7 +8967,7 @@ mod tests {
         let initial_cache = SourceMessageCache::load();
         assert!(
             initial_cache.get(current_identity, &source).is_none(),
-            "stale v1 entry must not match v2 lookup identity"
+            "stale v2 entry must not match v3 lookup identity"
         );
 
         let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
@@ -8976,18 +8978,18 @@ mod tests {
             &crate::scanner::ScannerSettings::default(),
         );
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "qwen3.8-max");
+        assert_eq!(messages[0].model_id, "qmodel_preview");
         assert_eq!(messages[0].tokens.input, 1200);
         assert_eq!(messages[0].tokens.output, 300);
-        assert_ne!(messages[0].model_id, "stale-model");
+        assert_ne!(messages[0].model_id, "qwen3-coder");
 
         let cache = SourceMessageCache::load();
         let rebuilt = cache
             .get(current_identity, &source)
-            .expect("the v2 parse must replace the stale v1 row");
-        assert_eq!(rebuilt.parser_version, 2);
+            .expect("the v3 parse must replace the stale v2 row");
+        assert_eq!(rebuilt.parser_version, 3);
         assert_eq!(rebuilt.messages.len(), 1);
-        assert_eq!(rebuilt.messages[0].model_id, "qwen3.8-max");
+        assert_eq!(rebuilt.messages[0].model_id, "qmodel_preview");
     }
 
     #[test]
