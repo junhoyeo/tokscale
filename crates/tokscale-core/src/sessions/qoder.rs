@@ -1157,17 +1157,17 @@ mod tests {
         assert_eq!(messages.len(), 2);
 
         // Turn 1
-        assert_eq!(messages[0].model_id.as_ref(), "glm-4-flash");
+        assert_eq!(messages[0].model_id.as_ref(), "gfmodel");
         assert_eq!(messages[0].provider_id.as_ref(), "zai");
-        assert_eq!(messages[0].pricing_model_id.as_deref(), Some("gfmodel"));
+        assert_eq!(messages[0].pricing_model_id.as_deref(), None);
         assert_eq!(messages[0].tokens.input, 28000);
         assert_eq!(messages[0].tokens.output, 270);
         assert_eq!(messages[0].tokens.cache_read, 9000);
 
         // Turn 2
-        assert_eq!(messages[1].model_id.as_ref(), "glm-4-flash");
+        assert_eq!(messages[1].model_id.as_ref(), "gfmodel");
         assert_eq!(messages[1].provider_id.as_ref(), "zai");
-        assert_eq!(messages[1].pricing_model_id.as_deref(), Some("gfmodel"));
+        assert_eq!(messages[1].pricing_model_id.as_deref(), None);
         assert_eq!(messages[1].tokens.input, 32000);
         assert_eq!(messages[1].tokens.output, 150);
         assert_eq!(messages[1].tokens.cache_read, 12000);
@@ -1222,9 +1222,9 @@ mod tests {
         let messages = parse_qoder_file(file.path());
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
-        assert_eq!(msg.model_id.as_ref(), "qwen3-coder");
+        assert_eq!(msg.model_id.as_ref(), "qmodel_preview");
         assert_eq!(msg.provider_id.as_ref(), "qwen");
-        assert_eq!(msg.pricing_model_id.as_deref(), Some("qmodel_preview"));
+        assert_eq!(msg.pricing_model_id.as_deref(), None);
         assert_eq!(msg.tokens.input, 100);
         assert_eq!(msg.tokens.output, 150);
         assert_eq!(msg.tokens.reasoning, 50);
@@ -1273,9 +1273,9 @@ mod tests {
 
         let msgs = parse_qoder_file(file.path());
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].model_id.as_ref(), "glm-4-flash");
-        assert_eq!(msgs[0].pricing_model_id.as_deref(), Some("gfmodel"));
-        assert_eq!(msgs[1].model_id.as_ref(), "deepseek-v3");
-        assert_eq!(msgs[1].pricing_model_id.as_deref(), Some("dfmodel"));
+        assert_eq!(msgs[0].model_id.as_ref(), "gfmodel");
+        assert_eq!(msgs[0].pricing_model_id.as_deref(), None);
+        assert_eq!(msgs[1].model_id.as_ref(), "dfmodel");
+        assert_eq!(msgs[1].pricing_model_id.as_deref(), None);
     }
 }

@@ -210,9 +210,9 @@ async fn test_qoder_gist_representative_schema_periods() {
         .iter()
         .find(|m| m.session_id.as_ref() == "sess-01")
         .expect("sess-01");
-    assert_eq!(m01.model_id.as_ref(), "qwen3-coder");
+    assert_eq!(m01.model_id.as_ref(), "qmodel_preview");
     assert_eq!(m01.provider_id.as_ref(), "qwen");
-    assert_eq!(m01.pricing_model_id.as_deref(), Some("qmodel_preview"));
+    assert_eq!(m01.pricing_model_id.as_deref(), None);
     assert_eq!(m01.input, 100);
     assert_eq!(m01.output, 150);
     assert_eq!(m01.reasoning, 50);
@@ -223,9 +223,9 @@ async fn test_qoder_gist_representative_schema_periods() {
         .iter()
         .find(|m| m.session_id.as_ref() == "sess-02")
         .expect("sess-02");
-    assert_eq!(m02.model_id.as_ref(), "qwen3.8-max");
+    assert_eq!(m02.model_id.as_ref(), "qmodel_38max");
     assert_eq!(m02.provider_id.as_ref(), "qwen");
-    assert_eq!(m02.pricing_model_id.as_deref(), Some("qmodel_38max"));
+    assert_eq!(m02.pricing_model_id.as_deref(), None);
     assert_eq!(m02.input, 200);
     assert_eq!(m02.output, 100);
 
@@ -235,13 +235,13 @@ async fn test_qoder_gist_representative_schema_periods() {
         .iter()
         .find(|m| m.session_id.as_ref() == "sess-05")
         .expect("sess-05");
-    assert_eq!(m05.model_id.as_ref(), "qwen-flash");
+    assert_eq!(m05.model_id.as_ref(), "qfmodel");
     assert_eq!(m05.provider_id.as_ref(), "qwen");
-    assert_eq!(m05.pricing_model_id.as_deref(), Some("qfmodel"));
+    assert_eq!(m05.pricing_model_id.as_deref(), None);
     assert_eq!(m05.input, 4304);
     assert_eq!(m05.output, 16);
 
-    // Check Period 07: model "auto" resolved via businessModelKey gfmodel -> glm-4-flash / zai
+    // Check Period 07: model "auto" resolved via businessModelKey gfmodel -> zai
     let mut sess_07_msgs: Vec<_> = parsed
         .messages
         .iter()
@@ -251,29 +251,29 @@ async fn test_qoder_gist_representative_schema_periods() {
     assert_eq!(sess_07_msgs.len(), 2);
 
     let m07_1 = sess_07_msgs[0];
-    assert_eq!(m07_1.model_id.as_ref(), "glm-4-flash");
+    assert_eq!(m07_1.model_id.as_ref(), "gfmodel");
     assert_eq!(m07_1.provider_id.as_ref(), "zai");
-    assert_eq!(m07_1.pricing_model_id.as_deref(), Some("gfmodel"));
+    assert_eq!(m07_1.pricing_model_id.as_deref(), None);
     assert_eq!(m07_1.input, 28067);
     assert_eq!(m07_1.output, 272);
 
     let m07_2 = sess_07_msgs[1];
-    assert_eq!(m07_2.model_id.as_ref(), "glm-4-flash");
+    assert_eq!(m07_2.model_id.as_ref(), "gfmodel");
     assert_eq!(m07_2.provider_id.as_ref(), "zai");
-    assert_eq!(m07_2.pricing_model_id.as_deref(), Some("gfmodel"));
+    assert_eq!(m07_2.pricing_model_id.as_deref(), None);
     assert_eq!(m07_2.input, 32057);
     assert_eq!(m07_2.output, 295);
     assert_eq!(m07_2.cache_read, 9856);
 
-    // Check Fallback: model "auto" resolved via runtime-config dfmodel -> deepseek-v3 / deepseek
+    // Check Fallback: model "auto" resolved via runtime-config dfmodel -> deepseek
     let m_df = parsed
         .messages
         .iter()
         .find(|m| m.session_id.as_ref() == "sess-df")
         .expect("sess-df");
-    assert_eq!(m_df.model_id.as_ref(), "deepseek-v3");
+    assert_eq!(m_df.model_id.as_ref(), "dfmodel");
     assert_eq!(m_df.provider_id.as_ref(), "deepseek");
-    assert_eq!(m_df.pricing_model_id.as_deref(), Some("dfmodel"));
+    assert_eq!(m_df.pricing_model_id.as_deref(), None);
     assert_eq!(m_df.input, 15000);
     assert_eq!(m_df.output, 120);
     assert_eq!(m_df.cache_read, 5000);
@@ -288,17 +288,17 @@ async fn test_qoder_gist_representative_schema_periods() {
     assert_eq!(sess_dyn_msgs.len(), 2);
 
     let mdyn_1 = sess_dyn_msgs[0];
-    assert_eq!(mdyn_1.model_id.as_ref(), "glm-4-flash");
+    assert_eq!(mdyn_1.model_id.as_ref(), "gfmodel");
     assert_eq!(mdyn_1.provider_id.as_ref(), "zai");
-    assert_eq!(mdyn_1.pricing_model_id.as_deref(), Some("gfmodel"));
+    assert_eq!(mdyn_1.pricing_model_id.as_deref(), None);
     assert_eq!(mdyn_1.input, 10000);
     assert_eq!(mdyn_1.output, 80);
     assert_eq!(mdyn_1.cache_read, 2000);
 
     let mdyn_2 = sess_dyn_msgs[1];
-    assert_eq!(mdyn_2.model_id.as_ref(), "deepseek-v3");
+    assert_eq!(mdyn_2.model_id.as_ref(), "dfmodel");
     assert_eq!(mdyn_2.provider_id.as_ref(), "deepseek");
-    assert_eq!(mdyn_2.pricing_model_id.as_deref(), Some("dfmodel"));
+    assert_eq!(mdyn_2.pricing_model_id.as_deref(), None);
     assert_eq!(mdyn_2.input, 12000);
     assert_eq!(mdyn_2.output, 90);
     assert_eq!(mdyn_2.cache_read, 3000);

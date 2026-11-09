@@ -262,27 +262,6 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
     m.insert("kimi-k2-instruct-0905", "kimi-k2.5"); // Specific version → base (avoids reseller)
-
-    // Qoder built-in model shorthands
-    m.insert("qmodel", "qwen3-coder");
-    m.insert("qmodel_preview", "qwen3-coder");
-    m.insert("qmodel-preview", "qwen3-coder");
-    m.insert("qmodelpreview", "qwen3-coder");
-    m.insert("qmodel_38max", "qwen3.8-max");
-    m.insert("qmodel-38max", "qwen3.8-max");
-    m.insert("qmodel38max", "qwen3.8-max");
-    m.insert("qmodel_latest", "qwen3.8-max");
-    m.insert("qmodel-latest", "qwen3.8-max");
-    m.insert("qmodellatest", "qwen3.8-max");
-    m.insert("qfmodel", "qwen-flash");
-    m.insert("qf_model", "qwen-flash");
-    m.insert("qf-model", "qwen-flash");
-    m.insert("dfmodel", "deepseek-v3");
-    m.insert("df_model", "deepseek-v3");
-    m.insert("df-model", "deepseek-v3");
-    m.insert("gfmodel", "glm-4-flash");
-    m.insert("gf_model", "glm-4-flash");
-    m.insert("gf-model", "glm-4-flash");
     m
 });
 
@@ -808,40 +787,22 @@ mod tests {
     }
 
     #[test]
-    fn resolves_qoder_builtin_model_aliases() {
-        let cases = [
-            ("qmodel", "qwen3-coder"),
-            ("qmodel_preview", "qwen3-coder"),
-            ("QMODEL-PREVIEW", "qwen3-coder"),
-            ("qmodelpreview", "qwen3-coder"),
-            ("qmodel_38max", "qwen3.8-max"),
-            ("QMODEL-38MAX", "qwen3.8-max"),
-            ("qmodel38max", "qwen3.8-max"),
-            ("qmodel_latest", "qwen3.8-max"),
-            ("qmodel-latest", "qwen3.8-max"),
-            ("qmodellatest", "qwen3.8-max"),
-            ("qfmodel", "qwen-flash"),
-            ("QFMODEL", "qwen-flash"),
-            ("qf_model", "qwen-flash"),
-            ("qf-model", "qwen-flash"),
-            ("dfmodel", "deepseek-v3"),
-            ("DFMODEL", "deepseek-v3"),
-            ("df_model", "deepseek-v3"),
-            ("df-model", "deepseek-v3"),
-            ("gfmodel", "glm-4-flash"),
-            ("GFMODEL", "glm-4-flash"),
-            ("gf_model", "glm-4-flash"),
-            ("gf-model", "glm-4-flash"),
-            ("qoder/qmodel", "qwen3-coder"),
-            ("qoder/dfmodel", "deepseek-v3"),
-            ("qoder-cn/gfmodel", "glm-4-flash"),
-        ];
-
-        for (raw, expected) in cases {
+    fn does_not_alias_qoder_dynamic_slot_models() {
+        for raw in [
+            "qmodel",
+            "qmodel_preview",
+            "qmodel_38max",
+            "qmodel_latest",
+            "qfmodel",
+            "dfmodel",
+            "gfmodel",
+            "qoder/dfmodel",
+            "qoder-cn/gfmodel",
+        ] {
             assert_eq!(
                 super::resolve_alias(raw),
-                Some(expected),
-                "qoder model alias {raw} should resolve to {expected}"
+                None,
+                "qoder dynamic slot identifier {raw} should not be statically aliased"
             );
         }
     }
