@@ -32,6 +32,16 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Base parser version for Qoder and Qoder CN transcripts.
+///
+/// - Version 1: Initial parser implementation.
+/// - Version 2: Walks ancestor directory tree to properly extract project
+///   workspaces for deeply nested subagent transcripts, and avoids treating
+///   internal telemetry fields as explicit provider overrides.
+/// - Version 3: Removes speculative static model alias mappings for dynamic
+///   Qoder slots (`dfmodel`, `gfmodel`, `qmodel`, `qfmodel`) so transcripts
+///   preserve native model slot identifiers without assuming third-party
+///   model upgrades.
 pub const QODER_PARSER_BASE_VERSION: u32 = 3;
 
 const CLIENT_ID: &str = "qoder";
