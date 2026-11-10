@@ -194,12 +194,13 @@ fn parse_antigravity_db_file_inner(
     (messages, v1_messages, read_complete)
 }
 
-/// Whether the database has a `gen_metadata` to read. A lookup that fails
-/// counts as present, so the file is reported unread rather than empty.
+/// Whether the database has the `gen_metadata` table Antigravity writes. A
+/// lookup that fails counts as present, so the file is reported unread
+/// rather than empty.
 fn has_gen_metadata(conn: &Connection) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master \
-         WHERE type IN ('table', 'view') AND name = 'gen_metadata')",
+         WHERE type = 'table' AND name = 'gen_metadata')",
         [],
         |row| row.get::<_, bool>(0),
     )
@@ -2647,6 +2648,26 @@ mod tests {
         Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE unrelated (id integer);")
+            .unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn unrelated_view_named_gen_metadata_is_a_complete_empty_read() {
+        // Antigravity writes `gen_metadata` as a table. A same-named view
+        // without its columns belongs to some other database.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE notes (body text);
+                 CREATE VIEW gen_metadata AS SELECT body AS summary FROM notes;",
+            )
             .unwrap();
 
         let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
