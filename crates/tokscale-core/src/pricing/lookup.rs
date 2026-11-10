@@ -3900,12 +3900,18 @@ fn key_root_is_cross_provider_alias(key: &str, provider_id: &str) -> bool {
 // @keep: these roots look like providers and are not, which is the whole point.
 /// Dataset key roots that name a SUBSCRIPTION PLAN, not a billing endpoint.
 ///
-/// Models.dev publishes every row under `kimi-for-coding/` with explicit
-/// 0.0/0.0 rates because a Kimi coding subscription is billed by the plan, not
-/// by the token. Rows like these are not a price sheet for anything.
+/// Models.dev publishes the Kimi coding-plan rows at explicit 0.0/0.0
+/// because those plans are billed by the subscription, not by the token.
+/// The roots are `kimi-for-coding/` plus the later regional plans
+/// `kimi-code-plan-cn/` and `kimi-code-plan-global/`. None of them is a
+/// price sheet.
 ///
 /// Underscore-normalized to compare with `normalized_key_root`.
-const ZERO_PRICED_SUBSCRIPTION_NAMESPACES: &[&str] = &["kimi_for_coding"];
+const ZERO_PRICED_SUBSCRIPTION_NAMESPACES: &[&str] = &[
+    "kimi_for_coding",
+    "kimi_code_plan_cn",
+    "kimi_code_plan_global",
+];
 
 /// Whether the key is rooted at a subscription namespace whose rows are
 /// published at $0.00, and so cannot prove a billing identity.
@@ -5814,6 +5820,148 @@ mod tests {
             assert!(result.evidence.alias_applied, "hint: {hint}");
             assert!(result.evidence.is_submission_safe(), "hint: {hint}");
         }
+    }
+
+    #[test]
+    fn hinted_kimi_k31_pro_uses_the_moonshot_api_card() {
+        // Kimi CLI records bare `k3.1-pro` (the parser also strips a
+        // `kimi-code/` prefix). models.dev publishes that model part only on
+        // the regional coding plans at $0.00. Moonshot's own row is the USD
+        // card shared with LiteLLM and OpenRouter: $2 / $10 per 1M and $0.20
+        // cached input. Highspeed is $4 / $20, with the same cached-input
+        // rate. The CNY list is not the dataset currency.
+        let models_dev = HashMap::from([
+            (
+                "kimi-code-plan-cn/k3.1-pro".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    cache_read_input_token_cost: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "kimi-code-plan-global/k3.1-pro".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    cache_read_input_token_cost: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "kimi-code-plan-cn/k3.1-pro-highspeed".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "kimi-code-plan-global/k3.1-pro-highspeed".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.0),
+                    output_cost_per_token: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "moonshotai/kimi-k3.1-pro".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(2e-6),
+                    output_cost_per_token: Some(1e-5),
+                    cache_read_input_token_cost: Some(2e-7),
+                    ..Default::default()
+                },
+            ),
+            (
+                "moonshotai/kimi-k3.1-pro-highspeed".to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(4e-6),
+                    output_cost_per_token: Some(2e-5),
+                    cache_read_input_token_cost: Some(2e-7),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let cases = [
+            ("k3.1-pro", "moonshotai/kimi-k3.1-pro", 2e-6, 1e-5, 2e-7),
+            (
+                "kimi-code/k3.1-pro",
+                "moonshotai/kimi-k3.1-pro",
+                2e-6,
+                1e-5,
+                2e-7,
+            ),
+            (
+                "k3.1-pro-highspeed",
+                "moonshotai/kimi-k3.1-pro-highspeed",
+                4e-6,
+                2e-5,
+                2e-7,
+            ),
+        ];
+        for (model, key, input, output, cache_read) in cases {
+            for hint in ["moonshot", "kimi_for_coding"] {
+                let result = lookup
+                    .lookup_with_provider(model, Some(hint))
+                    .unwrap_or_else(|| panic!("{model} / {hint} must price"));
+                assert_eq!(result.matched_key, key, "{model} / {hint}");
+                assert_eq!(result.pricing.input_cost_per_token, Some(input), "{model}");
+                assert_eq!(
+                    result.pricing.output_cost_per_token,
+                    Some(output),
+                    "{model}"
+                );
+                assert_eq!(
+                    result.pricing.cache_read_input_token_cost,
+                    Some(cache_read),
+                    "{model}"
+                );
+                assert_eq!(
+                    result.evidence.kind,
+                    ResolutionKind::ProviderScoped,
+                    "{model} / {hint}"
+                );
+                assert!(result.evidence.alias_applied, "{model} / {hint}");
+                assert!(result.evidence.is_submission_safe(), "{model} / {hint}");
+            }
+        }
+    }
+
+    #[test]
+    fn kimi_code_plan_row_is_not_a_price_sheet() {
+        let models_dev = HashMap::from([(
+            "kimi-code-plan-cn/k3.1-pro".to_string(),
+            ModelPricing {
+                input_cost_per_token: Some(0.0),
+                output_cost_per_token: Some(0.0),
+                cache_read_input_token_cost: Some(0.0),
+                ..Default::default()
+            },
+        )]);
+        let lookup = PricingLookup::new_with_models_dev(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            models_dev,
+        );
+
+        let result = lookup
+            .lookup("kimi-code-plan-cn/k3.1-pro")
+            .expect("the plan row stays reachable");
+        assert_eq!(result.matched_key, "kimi-code-plan-cn/k3.1-pro");
+        assert!(result.evidence.subscription_namespace);
+        assert!(!result.evidence.is_submission_safe());
     }
 
     /// `pricing::aliases` redirects every `kimi-for-coding` model id anybody has
