@@ -22,11 +22,16 @@ import { createSafeRecord, ownValue } from "../safeRecord";
  * covers the credited lifetime therefore replaces stored days so the web
  * graph matches the TUI, without the per-day merge guard inflating totals.
  *
- * Antigravity parsers are registered at generation 1. The database parser is
+ * Antigravity parsers are registered at generation 2. The database parser is
  * shared by the CLI and IDE extension, and reads a per-generation stamp out of
  * `gen_metadata`; the `antigravity` parser correlates standalone rows to
  * trajectory steps. All three source labels are admitted and reconciled as one
  * family because the same provider response can appear in multiple surfaces.
+ * Generation 1 added the model enum to input tokens, swapped response and
+ * thinking output and dropped cache writes, so generation 2 counts the same
+ * history differently in absolute terms. `planAntigravityTransition` keeps
+ * accepting generation 1 from a device until a generation-2 snapshot has
+ * replaced that device's stored layout.
  *
  * Devin CLI and Cursor are registered at submission generation 2. Devin CLI
  * generation 1 counted one API request once per persisted database row; Cursor
@@ -49,9 +54,9 @@ export const SUPPORTED_VERSIONED_PARSERS: Readonly<Record<string, number>> = {
   amp: 2,
   // Membership and accepted generations for the atomic Antigravity family
   // transition; the submit route deliberately skips independent client plans.
-  "antigravity-cli": 1,
-  "antigravity-extension": 1,
-  antigravity: 1,
+  "antigravity-cli": 2,
+  "antigravity-extension": 2,
+  antigravity: 2,
 };
 
 /**
