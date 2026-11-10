@@ -43,7 +43,8 @@ use std::path::Path;
 ///   preserve native model slot identifiers without assuming third-party
 ///   model upgrades.
 /// - Version 4: Treats `qoder/` and `qoder-cn/` model prefixes as client
-///   namespaces so BYOK rows retain their vendor attribution.
+///   namespaces so BYOK rows retain their vendor attribution, and stops
+///   attributing orphan transcripts to the `projects` layout directory.
 pub const QODER_PARSER_BASE_VERSION: u32 = 4;
 
 const CLIENT_ID: &str = "qoder";
@@ -494,8 +495,8 @@ fn workspace_key_from_qoder_path(path: &Path) -> Option<String> {
         current = dir.parent();
     }
 
-    // 3. Fallback to standard parent directory workspace key, filtering out "subagents"
-    workspace_key_from_path(path).filter(|k| k != "subagents")
+    // 3. Fallback to standard parent directory workspace key, filtering out layout directories
+    workspace_key_from_path(path).filter(|k| k != "subagents" && k != "projects")
 }
 
 /// Parse a Qoder or Qoder CN `.jsonl` transcript file into [`UnifiedMessage`] records.
@@ -1096,10 +1097,10 @@ mod tests {
             )),
             Some("my-repo".to_string())
         );
-        // Direct orphan session file under projects/ (should not resolve to the filename)
+        // Direct orphan session file under projects/ has no project workspace
         assert_eq!(
             workspace_key_from_qoder_path(Path::new("/home/user/.qoder/projects/orphan.jsonl")),
-            Some("projects".to_string())
+            None
         );
         // Subagent outside of projects root: walks up past subagents and session dir to project
         assert_eq!(
