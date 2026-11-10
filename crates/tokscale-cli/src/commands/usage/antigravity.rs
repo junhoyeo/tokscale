@@ -547,6 +547,9 @@ pub fn global_hooks_path() -> Option<PathBuf> {
 
 /// Checks whether the Tokscale session sync hook is registered in `hooks.json`.
 pub fn is_antigravity_hook_registered() -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
     let Some(path) = global_hooks_path() else {
         return false;
     };
@@ -566,6 +569,9 @@ pub fn is_antigravity_hook_registered() -> bool {
 
 /// Registers the Tokscale session sync hook in `~/.gemini/config/hooks.json`.
 pub fn register_antigravity_hook() -> Result<PathBuf> {
+    if !cfg!(unix) {
+        anyhow::bail!("Antigravity hook registration is only supported on Unix");
+    }
     let Some(path) = global_hooks_path() else {
         anyhow::bail!("unable to determine home directory");
     };
@@ -2138,6 +2144,21 @@ mod tests {
             resolve_csrf_token(None),
             Some("fallback-session-token".to_string())
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    #[serial]
+    fn hook_registration_is_rejected_without_writing_on_non_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        let err = register_antigravity_hook().unwrap_err();
+        assert!(err.to_string().contains("only supported on Unix"));
+        assert!(!hooks_file.exists());
     }
 
     #[test]
