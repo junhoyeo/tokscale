@@ -508,6 +508,24 @@ impl SourceFingerprint {
         )
     }
 
+    pub(crate) fn check_qoder_path_with_meta_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        let related_paths = path.file_stem().and_then(|stem| stem.to_str()).map(|stem| {
+            (
+                ".meta.json".to_string(),
+                path.with_file_name(format!("{stem}.meta.json")),
+            )
+        });
+        Self::check_path_with_related_mode(
+            path,
+            related_paths,
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
     pub(crate) fn check_sqlite_path(
         path: &Path,
         cached: Option<&Self>,
@@ -9097,6 +9115,53 @@ mod tests {
         assert_eq!(rebuilt.parser_version, 4);
         assert_eq!(rebuilt.messages.len(), 1);
         assert_eq!(rebuilt.messages[0].model_id, "qmodel_preview");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_qoder_meta_sidecar_invalidates_warm_cache() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let subagents_dir = source_home
+            .path()
+            .join(".qoder")
+            .join("projects")
+            .join("sample-project")
+            .join("sess-main")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        let source = subagents_dir.join("agent-abc123.jsonl");
+        let meta = subagents_dir.join("agent-abc123.meta.json");
+        std::fs::write(
+            &source,
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"sess-main","agentId":"abc123","timestamp":"2026-11-07T11:00:00.000Z","message":{"id":"msg_sub_1","model":"deepseek-v3","usage":{"input_tokens":500,"output_tokens":200}}}"#,
+        )
+        .unwrap();
+
+        let parse = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["qoder".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+
+        let initial = parse();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].agent.as_deref(), Some("Abc123"));
+
+        std::fs::write(&meta, r#"{"agentType":"code-reviewer"}"#).unwrap();
+        let added = parse();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].agent.as_deref(), Some("Code Reviewer"));
+
+        std::fs::write(&meta, r#"{"agentType":"security-reviewer"}"#).unwrap();
+        let edited = parse();
+        assert_eq!(edited.len(), 1);
+        assert_eq!(edited[0].agent.as_deref(), Some("Security Reviewer"));
     }
 
     #[test]

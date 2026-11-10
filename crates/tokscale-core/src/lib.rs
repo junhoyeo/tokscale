@@ -2606,13 +2606,49 @@ fn parse_all_messages_streaming<S: MessageSink>(
     ) where
         F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
     {
+        parse_cached_lane_deduped_with_fingerprint(
+            scan_result,
+            source_cache,
+            pricing,
+            all_messages,
+            machine_labeler,
+            scan_client,
+            message_cache::SourceFingerprint::check_path_samples_only,
+            parse,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_cached_lane_deduped_with_fingerprint<F, FingerprintFn>(
+        scan_result: &scanner::ScanResult,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        all_messages: &mut Vec<UnifiedMessage>,
+        machine_labeler: &machine_label::MachineLabeler,
+        scan_client: ClientId,
+        fingerprint_from_path: FingerprintFn,
+        parse: F,
+    ) where
+        F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
+        FingerprintFn: Fn(
+                &Path,
+                Option<&message_cache::SourceFingerprint>,
+            ) -> Option<message_cache::FingerprintStatus>
+            + Sync,
+    {
         let cache_identity = message_cache::CacheIdentity::for_client(scan_client);
         let outcomes: Vec<CachedParseOutcome> = scan_result
             .get(scan_client)
             .par_iter()
             .map(|path| {
-                let mut outcome =
-                    load_or_parse_source(cache_identity, path, source_cache, pricing, &parse);
+                let mut outcome = load_or_parse_source_with_fingerprint(
+                    cache_identity,
+                    path,
+                    source_cache,
+                    pricing,
+                    &fingerprint_from_path,
+                    &parse,
+                );
                 machine_labeler.label_messages(path, &mut outcome.messages);
                 outcome
             })
@@ -4916,13 +4952,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
     );
 
     // Parse Qoder and Qoder CN JSONL transcripts
-    parse_cached_lane_deduped(
+    parse_cached_lane_deduped_with_fingerprint(
         &scan_result,
         &mut source_cache,
         pricing,
         &mut all_messages,
         &machine_labeler,
         ClientId::Qoder,
+        message_cache::SourceFingerprint::check_qoder_path_with_meta_samples_only,
         sessions::qoder::parse_qoder_file,
     );
 
