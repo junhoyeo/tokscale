@@ -200,22 +200,30 @@ fn bb_event_identity(dedup_key: &str) -> &str {
         .unwrap_or(dedup_key)
 }
 
-fn names_provider_session(message: &UnifiedMessage) -> bool {
-    message
+/// How much of the provider's identity a BB row names: nothing, the session,
+/// or the session and the turn.
+fn provider_identity_rank(message: &UnifiedMessage) -> u8 {
+    match message
         .dedup_key
         .as_deref()
         .and_then(provider_mirror_from_dedup_key)
-        .is_some()
+    {
+        None => 0,
+        Some(mirror) if mirror.turn.is_none() => 1,
+        Some(_) => 2,
+    }
 }
 
 /// Collapse BB rows that record the same event: a forked thread copies its
 /// parent's history with the same turn ids and sequence numbers (see
 /// [`scan_bb_sqlite`]), and several databases can hold one thread.
 ///
-/// The copy keeps the first row's position. When only a later copy names the
-/// provider session (BB clears `provider_thread_id` on copied rows, and an
-/// older copy may lack `providerThreadId` in its data), that copy replaces it,
-/// so the lanes can still match the event against the provider's own log.
+/// The copy keeps the first row's position. When a later copy names more of
+/// the provider's identity, that copy replaces it, so the lanes can still
+/// match the event against the provider's own log: BB clears
+/// `provider_thread_id` on copied rows, an older copy may lack
+/// `providerThreadId` in its data, and a thread forked while a turn was
+/// running has the turn's usage row without its `turn/completed` checkpoint.
 /// Either way the kept row is a turn start when any copy was.
 pub(crate) fn dedup_bb_messages(
     messages: impl IntoIterator<Item = UnifiedMessage>,
@@ -233,7 +241,7 @@ pub(crate) fn dedup_bb_messages(
                 // that turn id, across threads, so the start may be on the
                 // copy that is dropped. The kept row inherits it.
                 let is_turn_start = kept[index].is_turn_start || message.is_turn_start;
-                if !names_provider_session(&kept[index]) && names_provider_session(&message) {
+                if provider_identity_rank(&message) > provider_identity_rank(&kept[index]) {
                     kept[index] = message;
                 }
                 kept[index].is_turn_start = is_turn_start;
@@ -1489,6 +1497,65 @@ mod tests {
                     .count(),
                 1
             );
+        }
+    }
+
+    #[test]
+    fn test_fork_copy_without_the_completion_keeps_the_turn_identity() {
+        // A thread forked while a turn was still running copies the turn's
+        // usage row, `providerThreadId` included, but not the
+        // `turn/completed` row written afterwards. Whichever copy is read
+        // first, the kept row must name the turn, or it could not be matched
+        // to the provider's own record of that turn.
+        for (original_thread, copy_thread) in [("thr_a", "thr_b"), ("thr_b", "thr_a")] {
+            let dir = TempDir::new().unwrap();
+            let db_path = dir.path().join("bb.db");
+            let conn = create_current_schema_bb_db(&db_path);
+            insert_thread(&conn, original_thread, "claude-code", None);
+            insert_thread(&conn, copy_thread, "claude-code", Some(original_thread));
+            insert_event(
+                &conn,
+                "e1",
+                original_thread,
+                "turn_1",
+                1,
+                "thread/tokenUsage/updated",
+                Some("sess-1"),
+                USAGE_DATA,
+            );
+            insert_event(
+                &conn,
+                "e2",
+                original_thread,
+                "turn_1",
+                2,
+                "turn/completed",
+                Some("sess-1"),
+                r#"{"providerThreadId":"sess-1","status":"completed","providerCheckpointId":"uuid-last"}"#,
+            );
+            insert_event(
+                &conn,
+                "e3",
+                copy_thread,
+                "turn_1",
+                1,
+                "thread/tokenUsage/updated",
+                None,
+                USAGE_DATA,
+            );
+
+            let messages = parse_bb_sqlite(&db_path);
+            assert_eq!(messages.len(), 1, "fork copy must collapse");
+            assert_eq!(
+                provider_mirror_from_dedup_key(messages[0].dedup_key.as_deref().unwrap()),
+                Some(BbProviderMirror {
+                    provider: BbMirrorProvider::Claude,
+                    session: "sess-1",
+                    turn: Some("uuid-last"),
+                }),
+                "{original_thread} is the original"
+            );
+            assert!(messages[0].is_turn_start);
         }
     }
 
