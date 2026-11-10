@@ -4265,6 +4265,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::omp::parse_omp_file,
     );
 
+    let omp_attributed =
+        sessions::magpie::attribute_omp_responses(home_dir, use_env_roots, &mut all_messages);
+    if omp_attributed > 0 {
+        for message in &mut all_messages {
+            if message.client == "omp" {
+                message.refresh_derived_fields();
+                apply_pricing_if_available(message, pricing);
+            }
+        }
+    }
+
     let proma_outcomes: Vec<_> = scan_result
         .get(ClientId::Proma)
         .par_iter()
@@ -20073,6 +20084,186 @@ mod tests {
             messages[0].model_id, "group/auto",
             "ambiguous OpenCodex claims stay unresolved"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn magpie_attributes_omp_responses_without_changing_token_totals() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+        let omp_sessions = home.join(".omp/agent/sessions/--test-workspace--");
+        std::fs::create_dir_all(&omp_sessions).unwrap();
+        let session_file = omp_sessions.join("session.jsonl");
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":"stop","usage":{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}"#, "\n"
+        )).unwrap();
+
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(ledger.join("usage.jsonl"), concat!(
+            r#"{"agent":"omp","response_id":"resp-omp-1","provider":"openai","served":"gpt-fixture","req":"group/auto","in":300,"out":40,"cache_read":200,"reasoning":10,"status":200}"#, "\n"
+        )).unwrap();
+
+        let clients = ["omp".to_string()];
+        let pricing = pricing::PricingService::new(
+            HashMap::from([(
+                "gpt-fixture".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.01),
+                    output_cost_per_token: Some(0.01),
+                    cache_read_input_token_cost: Some(0.01),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+
+        // Cold and warm scans must agree on attribution, cost, and usage totals.
+        // Also verifies that Magpie rows carrying reasoning counters for OMP requests
+        // are successfully matched without altering token totals.
+        for _ in 0..2 {
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 540);
+            assert_eq!(messages[0].model_id, "gpt-fixture");
+            assert_eq!(messages[0].provider_id, "openai");
+            assert_eq!(messages[0].billing_identity.id(), Some("custom-billing"));
+            assert!((messages[0].cost - 5.4).abs() < 1e-9);
+        }
+
+        // Test alternative valid completion reasons: toolUse, length, tool_calls, tool_call, toolcalls
+        for valid_stop in ["toolUse", "length", "tool_calls", "tool_call", "toolcalls"] {
+            std::fs::write(&session_file, format!(concat!(
+                r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
+                r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":"{}","usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
+            ), valid_stop)).unwrap();
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(
+                messages[0].model_id, "gpt-fixture",
+                "valid stopReason {valid_stop}"
+            );
+            assert_eq!(messages[0].tokens.total(), 540);
+        }
+
+        // Test finish_reason / finishReason aliases
+        for (field, val) in [("finishReason", "stop"), ("finish_reason", "tool_calls")] {
+            std::fs::write(&session_file, format!(concat!(
+                r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
+                r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","{}":"{}","usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
+            ), field, val)).unwrap();
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages[0].model_id, "gpt-fixture", "valid alias {field}");
+            assert_eq!(messages[0].tokens.total(), 540);
+        }
+
+        // Test invalid or non-string stopReason (missing completion evidence / failed client stream)
+        for invalid_stop in [
+            r#""error""#,
+            r#""abort""#,
+            "null",
+            "false",
+            "123",
+            r#"{"status":"failed"}"#,
+            "[]",
+        ] {
+            std::fs::write(&session_file, format!(concat!(
+                r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
+                r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":{},"usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
+            ), invalid_stop)).unwrap();
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages[0].tokens.total(), 540);
+            assert_eq!(
+                messages[0].model_id, "group/auto",
+                "failed stopReason {invalid_stop}"
+            );
+        }
+
+        // Entirely missing stopReason field
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","usage":{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}"#, "\n"
+        )).unwrap();
+        let messages =
+            parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+        assert_eq!(messages[0].tokens.total(), 540);
+        assert_eq!(messages[0].model_id, "group/auto", "missing stopReason");
+
+        // Restore valid session message
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":"stop","usage":{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}"#, "\n"
+        )).unwrap();
+
+        // Gateway failure / mismatch checks
+        let row = serde_json::json!({
+            "agent": "omp", "response_id": "resp-omp-1", "provider": "openai",
+            "served": "gpt-fixture", "req": "group/auto", "in": 300, "out": 40,
+            "cache_read": 200, "status": 200
+        });
+        for (field, value) in [
+            ("err", serde_json::json!("stream failed")),
+            ("status", serde_json::json!(500)),
+            ("agent", serde_json::json!("codex")),
+            ("served", serde_json::json!("group/auto-example")),
+            ("served", serde_json::json!("group/auto")),
+            ("served", serde_json::json!("auto")),
+            ("req", serde_json::json!("mismatched/model")),
+            ("in", serde_json::json!(301)),
+            ("out", serde_json::json!(41)),
+            ("cache_read", serde_json::json!(201)),
+            ("reasoning", serde_json::json!(45)),
+            ("reasoning", serde_json::json!(-1)),
+            ("source", serde_json::json!("reported")),
+            ("computer", serde_json::json!("remote-machine")),
+            ("via", serde_json::json!("remote-machine")),
+            ("rejected", serde_json::json!(true)),
+            ("handed_on", serde_json::json!(true)),
+        ] {
+            let mut invalid = row.clone();
+            invalid[field] = value;
+            std::fs::write(ledger.join("usage.jsonl"), format!("{invalid}\n")).unwrap();
+            let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+            assert_eq!(messages[0].tokens.total(), 540, "{field}");
+            assert_eq!(messages[0].model_id, "group/auto", "{field}");
+        }
+
+        // Duplicate response ID in Magpie ledger
+        std::fs::write(ledger.join("usage.jsonl"), format!("{row}\n{row}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(messages[0].tokens.total(), 540);
+        assert_eq!(
+            messages[0].model_id, "group/auto",
+            "duplicate Magpie response ID"
+        );
+
+        // Retries: Failed client stream + retry attempt with distinct ID.
+        // Test that cold and warm scans agree across retries.
+        std::fs::write(ledger.join("usage.jsonl"), concat!(
+            r#"{"agent":"omp","response_id":"resp-retry-success","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":20,"cache_read":0,"status":200}"#, "\n"
+        )).unwrap();
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-failed","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-retry-failed","stopReason":"error","usage":{"input":100,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":105}}}"#, "\n",
+            r#"{"type":"message","id":"msg-success","timestamp":"2026-10-01T00:00:05Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-retry-success","stopReason":"stop","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}"#, "\n"
+        )).unwrap();
+        for _ in 0..2 {
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages.len(), 2);
+            let failed_msg = messages.iter().find(|m| m.tokens.total() == 105).unwrap();
+            let success_msg = messages.iter().find(|m| m.tokens.total() == 120).unwrap();
+            assert_eq!(failed_msg.model_id, "group/auto");
+            assert_eq!(success_msg.model_id, "gpt-fixture");
+            let total_tokens: i64 = messages.iter().map(|m| m.tokens.total()).sum();
+            assert_eq!(total_tokens, 225, "usage totals preserved across retry");
+        }
     }
 
     #[test]

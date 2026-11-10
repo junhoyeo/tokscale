@@ -87,6 +87,22 @@ impl PiSessionHeader {
     }
 }
 
+pub(crate) fn is_completed_stop_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim().to_ascii_lowercase().as_str(),
+        "stop"
+            | "tooluse"
+            | "tool_use"
+            | "tool_calls"
+            | "tool_call"
+            | "toolcalls"
+            | "length"
+            | "end_turn"
+            | "stop_sequence"
+            | "max_tokens"
+    )
+}
+
 fn damaged_key_may_name(key: &str, expected: &str) -> bool {
     if !has_replacement_character(key) {
         return false;
@@ -258,6 +274,15 @@ pub struct PiSessionEntry {
     pub title: Option<String>,
     #[serde(rename = "targetId")]
     pub target_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_standalone_field",
+        rename = "stopReason",
+        alias = "stop_reason",
+        alias = "finishReason",
+        alias = "finish_reason"
+    )]
+    pub stop_reason: Option<String>,
     #[serde(rename = "childUsage")]
     pub child_usage: Option<PiUsage>,
     #[serde(rename = "aggregateUsage")]
@@ -297,6 +322,15 @@ pub struct PiMessage {
     pub provider: Option<String>,
     #[serde(rename = "responseId")]
     pub response_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_standalone_field",
+        rename = "stopReason",
+        alias = "stop_reason",
+        alias = "finishReason",
+        alias = "finish_reason"
+    )]
+    pub stop_reason: Option<String>,
     pub timestamp: Option<serde_json::Value>,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<serde_json::Value>,
@@ -1062,12 +1096,29 @@ fn parse_pi_format_file_inner(
         unified.duration_ms = duration_ms;
         if let Some(namespace) = dedup_namespace {
             if options.cross_session_dedup {
-                let clean_response_key = response_id
-                    .filter(|id| {
-                        !id.trim().is_empty()
-                            && accepts_replacement_field(id, options.lossy_line_reader)
-                    })
-                    .map(|id| format!("{namespace}:response:{id}"));
+                let has_completion = match namespace {
+                    "omp" => message
+                        .and_then(|m| m.stop_reason.as_deref())
+                        .or(entry.stop_reason.as_deref())
+                        .is_some_and(is_completed_stop_reason),
+                    _ => true,
+                };
+                let clean_response_key = if has_completion {
+                    response_id
+                        .filter(|id| {
+                            !id.trim().is_empty()
+                                && accepts_replacement_field(id, options.lossy_line_reader)
+                        })
+                        .map(|id| {
+                            if namespace == "omp" {
+                                format!("{namespace}:response:{}", id.trim())
+                            } else {
+                                format!("{namespace}:response:{id}")
+                            }
+                        })
+                } else {
+                    None
+                };
                 let clean_message_key = entry.id.as_deref().filter(|id| {
                     !id.trim().is_empty()
                         && accepts_replacement_field(id, options.lossy_line_reader)
@@ -2292,5 +2343,180 @@ not valid json
             );
             assert_eq!(rows[0].session_title.as_deref(), Some("Shared title"));
         }
+    }
+
+    #[test]
+    fn test_stop_reason_tolerant_deserialization() {
+        for non_string in [
+            "false",
+            "true",
+            "0",
+            "42",
+            "3.14",
+            r#"{"type":"stop"}"#,
+            r#"["stop"]"#,
+            "null",
+        ] {
+            // Test PiSessionEntry with non-string stopReason and aliases
+            for field in ["stopReason", "stop_reason", "finishReason", "finish_reason"] {
+                let json = format!(r#"{{"type":"message","{field}":{non_string}}}"#);
+                let entry: Result<PiSessionEntry, _> = serde_json::from_str(&json);
+                assert!(
+                    entry.is_ok(),
+                    "PiSessionEntry failed deserializing non-string {field}={non_string}: {:?}",
+                    entry.err()
+                );
+                assert_eq!(entry.unwrap().stop_reason, None);
+
+                let msg_json = format!(r#"{{"{field}":{non_string}}}"#);
+                let msg: Result<PiMessage, _> = serde_json::from_str(&msg_json);
+                assert!(
+                    msg.is_ok(),
+                    "PiMessage failed deserializing non-string {field}={non_string}: {:?}",
+                    msg.err()
+                );
+                assert_eq!(msg.unwrap().stop_reason, None);
+            }
+        }
+
+        // Test valid string stopReason and aliases
+        for field in ["stopReason", "stop_reason", "finishReason", "finish_reason"] {
+            let json = format!(r#"{{"type":"message","{field}":"end_turn"}}"#);
+            let entry: PiSessionEntry = serde_json::from_str(&json).unwrap();
+            assert_eq!(entry.stop_reason.as_deref(), Some("end_turn"));
+
+            let msg_json = format!(r#"{{"{field}":"tool_calls"}}"#);
+            let msg: PiMessage = serde_json::from_str(&msg_json).unwrap();
+            assert_eq!(msg.stop_reason.as_deref(), Some("tool_calls"));
+        }
+
+        // Test missing field
+        let entry: PiSessionEntry = serde_json::from_str(r#"{"type":"message"}"#).unwrap();
+        assert_eq!(entry.stop_reason, None);
+        let msg: PiMessage = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(msg.stop_reason, None);
+    }
+
+    #[test]
+    fn test_parse_pi_format_non_string_stop_reason_preserves_usage() {
+        let file = create_test_file(concat!(
+            r#"{"type":"session","id":"omp-sess-1","cwd":"/work"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-bool","message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-1","stopReason":false,"usage":{"input":10,"output":5}}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-obj","stopReason":{"raw":"stop"},"message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-2","usage":{"input":20,"output":10}}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-valid","message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-3","stopReason":"stop","usage":{"input":30,"output":15}}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-entry-stop-msg-bool","stopReason":"stop","message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-4","stopReason":false,"usage":{"input":40,"output":20}}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-entry-stop-msg-error","stopReason":"stop","message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-5","stopReason":"error","usage":{"input":50,"output":25}}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-entry-bool-msg-stop","stopReason":123,"message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-6","stopReason":"stop","usage":{"input":60,"output":30}}}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-entry-alias","finishReason":"tool_calls","message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"resp-7","usage":{"input":70,"output":35}}}"#,
+            "\n"
+        ));
+
+        let rows = parse_pi_format_file(file.path(), "omp", "openai");
+        assert_eq!(
+            rows.len(),
+            7,
+            "non-string stopReason messages must not be dropped"
+        );
+
+        assert_eq!(rows[0].tokens.input, 10);
+        assert_eq!(rows[0].tokens.output, 5);
+        // Non-string stopReason lacks recognized completion evidence, so no response dedup key
+        assert!(rows[0]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("omp:message:msg-bool:"));
+
+        assert_eq!(rows[1].tokens.input, 20);
+        assert_eq!(rows[1].tokens.output, 10);
+        assert!(rows[1]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("omp:message:msg-obj:"));
+
+        assert_eq!(rows[2].tokens.input, 30);
+        assert_eq!(rows[2].tokens.output, 15);
+        // Valid stopReason receives response dedup key
+        assert_eq!(rows[2].dedup_key.as_deref(), Some("omp:response:resp-3"));
+
+        // Entry-level valid stopReason with message non-string stopReason falls back to entry
+        assert_eq!(rows[3].tokens.input, 40);
+        assert_eq!(rows[3].tokens.output, 20);
+        assert_eq!(rows[3].dedup_key.as_deref(), Some("omp:response:resp-4"));
+
+        // Message-level explicit error overrides entry valid stopReason
+        assert_eq!(rows[4].tokens.input, 50);
+        assert_eq!(rows[4].tokens.output, 25);
+        assert!(rows[4]
+            .dedup_key
+            .as_deref()
+            .unwrap()
+            .starts_with("omp:message:msg-entry-stop-msg-error:"));
+
+        // Message-level valid stopReason with entry non-string stopReason succeeds
+        assert_eq!(rows[5].tokens.input, 60);
+        assert_eq!(rows[5].tokens.output, 30);
+        assert_eq!(rows[5].dedup_key.as_deref(), Some("omp:response:resp-6"));
+
+        // Entry-level alias finishReason succeeds
+        assert_eq!(rows[6].tokens.input, 70);
+        assert_eq!(rows[6].tokens.output, 35);
+        assert_eq!(rows[6].dedup_key.as_deref(), Some("omp:response:resp-7"));
+    }
+
+    #[test]
+    fn test_clean_response_key_preserves_non_omp_id_whitespace() {
+        let file = create_test_file(concat!(
+            r#"{"type":"session","id":"sess-ws","cwd":"/work"}"#,
+            "\n",
+            r#"{"type":"message","id":"msg-ws","message":{"role":"assistant","provider":"openai","model":"gpt-5","responseId":"  resp-with-spaces  ","stopReason":"stop","usage":{"input":10,"output":5}}}"#,
+            "\n"
+        ));
+
+        let pi_rows = parse_pi_format_file(file.path(), "pi", "openai");
+        assert_eq!(pi_rows.len(), 1);
+        assert_eq!(
+            pi_rows[0].dedup_key.as_deref(),
+            Some("pi:response:  resp-with-spaces  "),
+            "Pi must preserve whitespace in response dedup keys"
+        );
+
+        let senpi_rows = parse_pi_format_file(file.path(), "senpi", "openai");
+        assert_eq!(senpi_rows.len(), 1);
+        assert_eq!(
+            senpi_rows[0].dedup_key.as_deref(),
+            Some("senpi:response:  resp-with-spaces  "),
+            "Senpi must preserve whitespace in response dedup keys"
+        );
+
+        let omp_rows = parse_pi_format_file(file.path(), "omp", "openai");
+        assert_eq!(omp_rows.len(), 1);
+        assert_eq!(
+            omp_rows[0].dedup_key.as_deref(),
+            Some("omp:response:resp-with-spaces"),
+            "Omp trims whitespace in response dedup keys"
+        );
+
+        let mut observer = NoopPiFormatObserver;
+        let prime_rows = parse_pi_format_rlm_file_with_observer(
+            file.path(),
+            "prime-agent",
+            "openai",
+            &mut observer,
+        );
+        assert_eq!(prime_rows.len(), 1);
+        assert_eq!(
+            prime_rows[0].dedup_key.as_deref(),
+            Some("prime-agent:response:  resp-with-spaces  "),
+            "Prime Agent must preserve whitespace in response dedup keys"
+        );
     }
 }
