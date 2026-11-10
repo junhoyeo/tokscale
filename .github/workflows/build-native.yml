@@ -39,9 +39,10 @@ jobs:
       # A pull request only has to show that every target still compiles and
       # links. The release profile's fat LTO with one codegen unit is most of
       # a build's time and does not change that answer, so pull request builds
-      # turn it off. One target keeps the release profile, so a change that
-      # only fails under it is still caught before a release is cut.
-      FAST_PROFILE: ${{ github.event_name == 'pull_request' && matrix.settings.target != 'x86_64-unknown-linux-gnu' }}
+      # turn it off. Android keeps the release profile: it is the one target
+      # whose binary this workflow also runs, so every pull request still
+      # builds and starts one binary exactly as a release does.
+      FAST_PROFILE: ${{ github.event_name == 'pull_request' && matrix.settings.target != 'aarch64-linux-android' }}
     strategy:
       fail-fast: false
       matrix:
