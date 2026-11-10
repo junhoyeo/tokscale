@@ -56,6 +56,7 @@ pub(crate) mod opencodex;
 pub mod pi;
 pub mod prime_agent;
 pub mod proma;
+pub mod qoder;
 pub mod qwen;
 pub mod reasonix;
 pub mod roocode;

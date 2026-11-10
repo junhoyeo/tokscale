@@ -1015,6 +1015,20 @@ pub fn built_in_extra_scan_paths_for(
         ));
     }
 
+    if enabled.contains(&ClientId::Qoder) {
+        // Qoder CN (`@qodercn-ai/qoderclicn` and Qoder CN Desktop) uses
+        // `~/.qoder-cn` by default and honors `QODERCN_CONFIG_DIR`.
+        let qoder_cn_root = PathRoot::EnvVar {
+            var: "QODERCN_CONFIG_DIR",
+            fallback_relative: ".qoder-cn",
+        }
+        .resolve_with_env_strategy(home_dir, use_env_roots);
+        paths.push((
+            ClientId::Qoder,
+            PathBuf::from(join_native(&qoder_cn_root, "projects")),
+        ));
+    }
+
     paths
 }
 

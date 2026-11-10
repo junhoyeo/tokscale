@@ -1,4 +1,4 @@
-//! Attribute Codex's response-scoped usage to the model reported by Magpie.
+//! Attribute Codex and OMP response-scoped usage to the model reported by Magpie.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -33,7 +33,7 @@ struct LedgerRow {
     tier_served: Option<String>,
 }
 
-fn response_id(message: &UnifiedMessage) -> Option<&str> {
+fn codex_response_id(message: &UnifiedMessage) -> Option<&str> {
     if message.client != "codex"
         || message.message_count != 1
         || message.model_attribution_conflicted
@@ -48,6 +48,19 @@ fn response_id(message: &UnifiedMessage) -> Option<&str> {
     (!scope.is_empty() && !id.is_empty() && !id.contains(':')).then_some(id)
 }
 
+fn omp_response_id(message: &UnifiedMessage) -> Option<&str> {
+    if message.client != "omp" || message.message_count != 1 || message.model_attribution_conflicted
+    {
+        return None;
+    }
+    let key = message
+        .dedup_key
+        .as_deref()?
+        .strip_prefix("omp:response:")?;
+    let trimmed = key.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 fn ledger_path(home: &str, use_env_roots: bool) -> PathBuf {
     if use_env_roots {
         if let Some(root) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
@@ -59,20 +72,23 @@ fn ledger_path(home: &str, use_env_roots: bool) -> PathBuf {
     PathBuf::from(home).join(".config/magpie/usage.jsonl")
 }
 
-/// Use a unique, completed local gateway response only when its counters agree
-/// with the Codex response record. The ledger never supplies additional usage.
-pub(crate) fn attribute_codex_responses(
+fn attribute_client_responses<F>(
     home: &str,
     use_env_roots: bool,
     messages: &mut [UnifiedMessage],
     already_attributed: &HashSet<usize>,
-) -> usize {
+    agent: &str,
+    extract_response_id: F,
+) -> usize
+where
+    F: Fn(&UnifiedMessage) -> Option<&str>,
+{
     let mut wanted = HashMap::new();
     for (index, message) in messages.iter().enumerate() {
         if already_attributed.contains(&index) {
             continue;
         }
-        if let Some(id) = response_id(message) {
+        if let Some(id) = extract_response_id(message) {
             wanted
                 .entry(id.to_string())
                 .and_modify(|slot| *slot = None)
@@ -99,7 +115,12 @@ pub(crate) fn attribute_codex_responses(
         let Ok(row) = simd_json::serde::from_slice::<LedgerRow>(&mut line) else {
             continue;
         };
-        let Some(id) = row.response_id.as_deref() else {
+        let Some(id) = row
+            .response_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         if !wanted.contains_key(id) {
@@ -135,7 +156,7 @@ pub(crate) fn attribute_codex_responses(
             .checked_add(message.tokens.cache_read)
             .and_then(|n| n.checked_add(message.tokens.cache_write));
         let recorded_output = message.tokens.output.checked_add(message.tokens.reasoning);
-        if row.agent.as_deref() != Some("codex")
+        if row.agent.as_deref() != Some(agent)
             || !row
                 .status
                 .is_some_and(|status| (200..300).contains(&status))
@@ -160,19 +181,30 @@ pub(crate) fn attribute_codex_responses(
                 .req
                 .as_deref()
                 .is_some_and(|req| req.eq_ignore_ascii_case(served))
+            || row.req.as_deref().is_some_and(|req| {
+                !req.trim().is_empty() && !req.trim().eq_ignore_ascii_case(message.model_id.trim())
+            })
             || input < 0
             || output < 0
             || row.cache_read.unwrap_or(0) < 0
             || row.cache_write.unwrap_or(0) < 0
+            || row.reasoning.unwrap_or(0) < 0
             || row
                 .cache_read
                 .is_some_and(|tokens| tokens != message.tokens.cache_read)
             || row
                 .cache_write
                 .is_some_and(|tokens| tokens != message.tokens.cache_write)
-            || row
-                .reasoning
-                .is_some_and(|tokens| tokens != message.tokens.reasoning)
+            || (agent == "codex"
+                && row
+                    .reasoning
+                    .is_some_and(|tokens| tokens != message.tokens.reasoning))
+            || (agent == "omp"
+                && (row.reasoning.is_some_and(|r| r > output)
+                    || (message.tokens.reasoning > 0
+                        && row
+                            .reasoning
+                            .is_some_and(|tokens| tokens != message.tokens.reasoning))))
             || gateway_input.is_none()
             || gateway_input != recorded_input
             || Some(output) != recorded_output
@@ -202,6 +234,42 @@ pub(crate) fn attribute_codex_responses(
     attributed
 }
 
+/// Use a unique, completed local gateway response only when its counters agree
+/// with the Codex response record. The ledger never supplies additional usage.
+pub(crate) fn attribute_codex_responses(
+    home: &str,
+    use_env_roots: bool,
+    messages: &mut [UnifiedMessage],
+    already_attributed: &HashSet<usize>,
+) -> usize {
+    attribute_client_responses(
+        home,
+        use_env_roots,
+        messages,
+        already_attributed,
+        "codex",
+        codex_response_id,
+    )
+}
+
+/// Use a unique, completed local gateway response only when its counters agree
+/// with the confirmed OMP response record. The ledger never supplies additional usage.
+pub(crate) fn attribute_omp_responses(
+    home: &str,
+    use_env_roots: bool,
+    messages: &mut [UnifiedMessage],
+) -> usize {
+    let already_attributed = HashSet::new();
+    attribute_client_responses(
+        home,
+        use_env_roots,
+        messages,
+        &already_attributed,
+        "omp",
+        omp_response_id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,8 +287,85 @@ mod tests {
             0.0,
         );
         message.dedup_key = Some("codex:usage-record:session:123:500:40:200:10".into());
-        assert_eq!(response_id(&message), None);
+        assert_eq!(codex_response_id(&message), None);
         message.dedup_key = Some("codex:usage-record:session:resp-123".into());
-        assert_eq!(response_id(&message), Some("resp-123"));
+        assert_eq!(codex_response_id(&message), Some("resp-123"));
+    }
+
+    #[test]
+    fn omp_response_id_extraction() {
+        let mut message = UnifiedMessage::new(
+            "omp",
+            "auto",
+            "omp",
+            "session",
+            1,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        message.dedup_key = Some("omp:response:resp-omp-42".into());
+        assert_eq!(omp_response_id(&message), Some("resp-omp-42"));
+
+        message.dedup_key = Some("omp:message:b2:12345:omp:auto:10:20:0:0".into());
+        assert_eq!(omp_response_id(&message), None);
+
+        message.client = "codex".into();
+        message.dedup_key = Some("omp:response:resp-omp-42".into());
+        assert_eq!(omp_response_id(&message), None);
+
+        message.client = "omp".into();
+        message.model_attribution_conflicted = true;
+        assert_eq!(omp_response_id(&message), None);
+    }
+
+    #[test]
+    fn duplicate_omp_client_candidates_are_rejected() {
+        let temp_home = tempfile::TempDir::new().unwrap();
+        let ledger_dir = temp_home.path().join(".config/magpie");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(
+            ledger_dir.join("usage.jsonl"),
+            r#"{"agent":"omp","response_id":"dup-resp","provider":"anthropic","served":"claude-sonnet-4-5","req":"group/auto","in":100,"out":50,"status":200}"#
+        ).unwrap();
+
+        let mut msg1 = UnifiedMessage::new(
+            "omp",
+            "group/auto",
+            "omp",
+            "session-1",
+            1,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+        msg1.dedup_key = Some("omp:response:dup-resp".into());
+
+        let mut msg2 = UnifiedMessage::new(
+            "omp",
+            "group/auto",
+            "omp",
+            "session-2",
+            1,
+            TokenBreakdown {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+        msg2.dedup_key = Some("omp:response:dup-resp".into());
+
+        let mut messages = vec![msg1, msg2];
+        let count =
+            attribute_omp_responses(temp_home.path().to_str().unwrap(), false, &mut messages);
+        assert_eq!(
+            count, 0,
+            "duplicate client candidates must not be attributed"
+        );
+        assert_eq!(messages[0].model_id, "group/auto");
+        assert_eq!(messages[1].model_id, "group/auto");
     }
 }

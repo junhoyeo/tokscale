@@ -225,6 +225,7 @@ pub enum ClickAction {
     CodexUseAccount { account_id: String },
     CodexRemoveAccount { account_id: String },
     CodexResetAccount { account_id: String },
+    AntigravityLinkHook,
 }
 
 fn codex_reset_outcome_label(
@@ -401,6 +402,8 @@ pub struct App {
     confirmed_codex_use_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_remove_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_reset_account_id: Rc<RefCell<Option<String>>>,
+    confirmed_antigravity_hook: Rc<RefCell<Option<String>>>,
+    antigravity_hook_registered: bool,
     pub hide_usage_emails: bool,
     pub codex_login_lines: Vec<String>,
     pub(crate) codex_login_outcome: Option<CodexLoginOutcome>,
@@ -507,6 +510,7 @@ impl App {
         let confirmed_codex_use_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_remove_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_reset_account_id = Rc::new(RefCell::new(None));
+        let confirmed_antigravity_hook = Rc::new(RefCell::new(None));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         let current_tab = if Self::tab_visible(&settings, requested_tab) {
             requested_tab
@@ -583,6 +587,9 @@ impl App {
             confirmed_codex_use_account_id,
             confirmed_codex_remove_account_id,
             confirmed_codex_reset_account_id,
+            confirmed_antigravity_hook,
+            antigravity_hook_registered:
+                crate::commands::usage::antigravity::is_antigravity_hook_registered(),
             hide_usage_emails: true,
             codex_login_lines: Vec::new(),
             codex_login_outcome: None,
@@ -903,6 +910,7 @@ impl App {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key.code);
             self.consume_confirmed_codex_account_action();
+            self.consume_confirmed_antigravity_hook_action();
             self.apply_pending_language_change();
             return false;
         }
@@ -1332,6 +1340,9 @@ impl App {
             ClickAction::CodexResetAccount { account_id } => {
                 self.confirm_codex_rate_limit_reset(&account_id);
             }
+            ClickAction::AntigravityLinkHook => {
+                self.confirm_antigravity_hook_registration();
+            }
         }
     }
 
@@ -1446,6 +1457,45 @@ impl App {
         let account_id = self.confirmed_codex_reset_account_id.borrow_mut().take();
         if let Some(account_id) = account_id {
             self.reset_codex_rate_limits(&account_id);
+        }
+    }
+
+    pub fn is_antigravity_hook_registered(&self) -> bool {
+        self.antigravity_hook_registered
+    }
+
+    pub fn refresh_antigravity_hook_registered(&mut self) {
+        self.antigravity_hook_registered =
+            crate::commands::usage::antigravity::is_antigravity_hook_registered();
+    }
+
+    pub fn confirm_antigravity_hook_registration(&mut self) {
+        if self.is_antigravity_hook_registered() {
+            self.set_status("Antigravity CLI sync hook is already installed");
+            return;
+        }
+        let target_path = crate::commands::usage::antigravity::global_hooks_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.gemini/config/hooks.json".to_string());
+        let dialog =
+            ConfirmDialog::antigravity_hook(target_path, self.confirmed_antigravity_hook.clone());
+        self.dialog_stack.show(Box::new(dialog));
+        self.set_status("Confirm Antigravity hook registration");
+    }
+
+    fn consume_confirmed_antigravity_hook_action(&mut self) {
+        let confirmed = self.confirmed_antigravity_hook.borrow_mut().take();
+        if confirmed.is_some() {
+            match crate::commands::usage::antigravity::register_antigravity_hook() {
+                Ok(path) => {
+                    self.antigravity_hook_registered = true;
+                    self.set_status(&format!("Registered hook in {}", path.display()));
+                    self.refresh_usage();
+                }
+                Err(e) => {
+                    self.set_status(&format!("Failed to register hook: {e}"));
+                }
+            }
         }
     }
 
@@ -1697,6 +1747,7 @@ impl App {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_mouse(event);
             self.consume_confirmed_codex_account_action();
+            self.consume_confirmed_antigravity_hook_action();
             return;
         }
 
@@ -1804,6 +1855,9 @@ impl App {
         self.persist_current_sort();
 
         self.current_tab = target;
+        if target == Tab::Usage {
+            self.refresh_antigravity_hook_registered();
+        }
         if target != Tab::Daily {
             self.selected_daily_detail_date = None;
         }

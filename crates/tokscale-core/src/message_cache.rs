@@ -1741,7 +1741,9 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // +1: Standard Pi/OMP/Senpi parser now emits cross-session
             // namespaced dedup keys (same behavior as Kimchi/Prime).
             // +1 more: billed operations, as for Pi.
-            (ClientId::Omp, 2),
+            // +1 more: Omp requires verified stopReason completion before
+            // emitting response dedup keys eligible for Magpie attribution (#1585).
+            (ClientId::Omp, 3),
             (ClientId::Senpi, 2),
             (ClientId::Proma, 0),
             // +3 for Prime Agent's independent history. v1->v2 strips a
@@ -2249,7 +2251,8 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Mux => 1,
         ClientId::Crush => 1,
         ClientId::Goose => 1,
-        ClientId::Antigravity => 1,
+        // v1->v2: fall back to session_meta / file mtime when usage timestamp is null.
+        ClientId::Antigravity => 2,
         ClientId::Zed => 1,
         ClientId::Trae => 1,
         ClientId::Warp => 1,
@@ -2272,6 +2275,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v2->v3: dedup keys name the provider session and turn, so a row
         // mirrored from a Claude transcript or Codex rollout can yield to it.
         ClientId::Bb => 3,
+        // v1->v2: extract workspace key from project ancestors avoiding
+        // subagents and canonicalize BYOK/managed provider metadata.
+        ClientId::Qoder => crate::sessions::qoder::QODER_PARSER_BASE_VERSION,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -6785,7 +6791,12 @@ mod tests {
             (ClientId::PrimeAgent, 6),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert_eq!(current.parser_version, previous_version + 3, "{client:?}");
+            let expected_diff = if client == ClientId::Omp { 4 } else { 3 };
+            assert_eq!(
+                current.parser_version,
+                previous_version + expected_diff,
+                "{client:?}"
+            );
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: previous_version,
@@ -6826,7 +6837,12 @@ mod tests {
             (ClientId::PrimeAgent, 8),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert_eq!(current.parser_version, pre_merge_version + 1, "{client:?}");
+            let expected_diff = if client == ClientId::Omp { 2 } else { 1 };
+            assert_eq!(
+                current.parser_version,
+                pre_merge_version + expected_diff,
+                "{client:?}"
+            );
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: pre_merge_version,
@@ -6867,9 +6883,10 @@ mod tests {
             (ClientId::PrimeAgent, 7),
         ] {
             let current = CacheIdentity::for_client(client);
+            let expected_diff = if client == ClientId::Omp { 3 } else { 2 };
             assert_eq!(
                 current.parser_version,
-                completion_anchored_version + 2,
+                completion_anchored_version + expected_diff,
                 "{client:?}"
             );
             let completion_anchored = CacheIdentity {
@@ -6897,6 +6914,39 @@ mod tests {
                 fingerprint
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn omp_parser_version_invalidates_pre_stop_reason_shards() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(
+            b"{\"type\":\"session\",\"version\":3,\"id\":\"omp-1\",\"cwd\":\"/work\"}\n{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"assistant\",\"model\":\"gpt-5\",\"usage\":{\"input\":100,\"output\":50}}}\n",
+        );
+        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        let current = CacheIdentity::for_client(ClientId::Omp);
+        assert_eq!(current.parser_version, 8);
+        let previous = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 7,
+        };
+        let shard = cache_shard_path(current, source.path());
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &shard,
+            previous,
+            &[test_entry(previous, source.path(), "pre-stop-reason")],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+        assert!(SourceMessageCache::load()
+            .get(current, source.path())
+            .is_none());
+        assert_eq!(
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            fingerprint
+        );
     }
 
     #[test]
@@ -8952,6 +9002,104 @@ mod tests {
     }
 
     #[test]
+    fn test_qoder_parser_version() {
+        assert_eq!(parser_version(ClientId::Qoder), 3);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_qoder_v2_shard_invalidates_and_reparses_to_v3() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let qoder_proj = source_home
+            .path()
+            .join(".qoder")
+            .join("projects")
+            .join("sample-project");
+        std::fs::create_dir_all(&qoder_proj).unwrap();
+        let source = qoder_proj.join("sess-test.jsonl");
+
+        std::fs::write(
+            &source,
+            concat!(
+                r#"{"type":"user","uuid":"u-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:00.000Z","message":{"role":"user","content":"Hello"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a-1","sessionId":"sess-test","cwd":"/work/sample-project","timestamp":"2026-11-07T10:00:02.000Z","message":{"id":"msg_01","role":"assistant","model":"qmodel_preview","stop_reason":"end_turn","content":[{"type":"text","text":"Hi!"}],"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let current_identity = CacheIdentity::for_client(ClientId::Qoder);
+        assert_eq!(current_identity.parser_version, 3);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 2,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_message = UnifiedMessage::new(
+            "qoder",
+            "qwen3-coder",
+            "qwen",
+            "sess-test",
+            1000,
+            crate::TokenBreakdown {
+                input: 1200,
+                output: 300,
+                cache_read: 500,
+                cache_write: 100,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let initial_cache = SourceMessageCache::load();
+        assert!(
+            initial_cache.get(current_identity, &source).is_none(),
+            "stale v2 entry must not match v3 lookup identity"
+        );
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["qoder".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "qmodel_preview");
+        assert_eq!(messages[0].tokens.input, 1200);
+        assert_eq!(messages[0].tokens.output, 300);
+        assert_ne!(messages[0].model_id, "qwen3-coder");
+
+        let cache = SourceMessageCache::load();
+        let rebuilt = cache
+            .get(current_identity, &source)
+            .expect("the v3 parse must replace the stale v2 row");
+        assert_eq!(rebuilt.parser_version, 3);
+        assert_eq!(rebuilt.messages.len(), 1);
+        assert_eq!(rebuilt.messages[0].model_id, "qmodel_preview");
+    }
+
+    #[test]
     #[serial_test::serial]
     fn test_bb_stale_shards_invalidate_and_reparse() {
         let cache_home = TempDir::new().unwrap();
@@ -9255,7 +9403,7 @@ mod tests {
                 &[
                     (ClientId::Pi, 3),
                     (ClientId::Kimchi, 2),
-                    (ClientId::Omp, 2),
+                    (ClientId::Omp, 3),
                     (ClientId::Senpi, 2),
                     (ClientId::Proma, 0),
                     (ClientId::PrimeAgent, 4),
@@ -10477,6 +10625,33 @@ mod tests {
             PRE_BUMP_GENERATION,
             "the bump must change the generation, or a warm TUI keeps painting \
              the pre-fix totals"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_family_bump_moves_the_parser_generation() {
+        assert_eq!(parser_version(ClientId::Antigravity), 2);
+        assert_eq!(parser_version(ClientId::AntigravityCli), 2);
+        assert_eq!(parser_version(ClientId::AntigravityExtension), 2);
+
+        let pre_bump_generation = parser_generation_for_versions(
+            ClientId::ALL.iter().copied().map(|c| {
+                if c == ClientId::Antigravity
+                    || c == ClientId::AntigravityCli
+                    || c == ClientId::AntigravityExtension
+                {
+                    1
+                } else {
+                    parser_version(c)
+                }
+            }),
+            CLAUDE_RETAINED_PARSE_GENERATION,
+        );
+        assert_ne!(
+            parser_generation(),
+            pre_bump_generation,
+            "bumping Antigravity family to v2 must invalidate parser_generation(), \
+             preventing stale warm caches from reusing pre-v2 totals"
         );
     }
 

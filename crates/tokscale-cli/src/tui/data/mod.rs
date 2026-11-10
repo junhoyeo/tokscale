@@ -2429,6 +2429,7 @@ mod tests {
         assert_eq!(clients[57], ClientId::Vibe);
         assert_eq!(clients[58], ClientId::Proma);
         assert_eq!(clients[59], ClientId::Bb);
+        assert_eq!(clients[60], ClientId::Qoder);
     }
 
     #[test]
@@ -2494,6 +2495,7 @@ mod tests {
             "Mistral Vibe",
             "Proma",
             "BB",
+            "Qoder",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -2554,6 +2556,7 @@ mod tests {
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Vibe), 'T');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Proma), 'J');
         assert_eq!(crate::tui::client_ui::hotkey(ClientId::Bb), 'Z');
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Qoder), 'Q');
     }
 
     #[test]
@@ -2687,6 +2690,10 @@ mod tests {
             Some(ClientId::Proma)
         );
         assert_eq!(crate::tui::client_ui::from_hotkey('Z'), Some(ClientId::Bb));
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('Q'),
+            Some(ClientId::Qoder)
+        );
     }
 
     #[test]

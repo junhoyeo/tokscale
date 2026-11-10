@@ -2,10 +2,13 @@ import type { ClientBreakdownData } from "./helpers";
 import {
   ANTIGRAVITY_FAMILY,
   antigravityPriorCoverage,
+  validateAntigravityRecountProof,
+  type AntigravityRecountProofs,
 } from "./antigravityStateCoverage";
 import {
   foldParserClientSnapshot,
   SUPPORTED_VERSIONED_PARSERS,
+  type ClientRecountProof,
   type DeviceParserStates,
   type IncomingParserContribution,
 } from "./parserHighWater";
@@ -38,6 +41,7 @@ export interface AntigravityTransitionPlan {
   mode: "status-quo" | "freeze" | "replace";
   parserVersions?: Record<string, number>;
   layouts?: FamilyLayouts;
+  recountCostReduction?: number;
   warning?: string;
 }
 
@@ -87,6 +91,7 @@ export function planAntigravityTransition(args: {
   incomingVersions?: Record<string, number>;
   persistedVersions?: Record<string, number>;
   parserStates?: DeviceParserStates;
+  recountProofs?: Record<string, ClientRecountProof>;
   fullHistory: boolean;
   isBackfill: boolean;
   contributions: Array<IncomingParserContribution & { totals?: { costIsComplete?: boolean } }>;
@@ -156,7 +161,31 @@ export function planAntigravityTransition(args: {
     ])
   ) as FamilyLayouts;
 
-  const previous = antigravityPriorCoverage(args.existingDays, args.parserStates);
+  const validatedProofs: AntigravityRecountProofs = {};
+  for (const client of ANTIGRAVITY_FAMILY) {
+    const priorState = ownValue(args.parserStates, client);
+    // Recount proofs are only valid during the one-time transition when the
+    // stored parser state has not yet completed v2 (version < 2). Once a
+    // device has already submitted at version >= 2, proofs cannot be used to
+    // lower or reconcile post-v2 history.
+    if (priorState && priorState.version >= 2) {
+      continue;
+    }
+    const validated = validateAntigravityRecountProof(
+      client,
+      ownValue(args.recountProofs, client),
+      layouts[client],
+    );
+    if (validated) {
+      validatedProofs[client] = validated;
+    }
+  }
+
+  const previous = antigravityPriorCoverage(
+    args.existingDays,
+    args.parserStates,
+    validatedProofs,
+  );
   if (previous.unverifiable) {
     return freeze("a prior Antigravity parser high-water state cannot be verified");
   }
@@ -184,6 +213,9 @@ export function planAntigravityTransition(args: {
     mode: "replace",
     parserVersions,
     layouts,
+    ...(previous.recountCostReduction > 0
+      ? { recountCostReduction: previous.recountCostReduction }
+      : {}),
     warning: pricingIncomplete
       ? "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again. Some models could not be priced: tokens are credited, costs stay partial and floored at the credited lifetime until a fully priced snapshot replaces them."
       : "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again.",
