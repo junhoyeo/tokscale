@@ -755,7 +755,10 @@ async fn fetch_proxy_billing(
 }
 
 fn parse_proxy_billing_metric(value: &Value, now: DateTime<Utc>) -> Option<UsageMetric> {
-    let config = value.get("config")?;
+    // Legacy responses may carry monthlyLimit/used at the top level.
+    let Some(config) = value.get("config") else {
+        return parse_proxy_legacy_metric(value);
+    };
     let used_percent = proxy_credit_used_percent(config)
         .or_else(|| proxy_active_unified_period(config, now).map(|()| 0.0));
     if let Some(used_percent) = used_percent {
@@ -1198,6 +1201,22 @@ mod tests {
                 Some("$200.00/$200.00 left")
             );
         }
+    }
+
+    #[test]
+    fn parses_legacy_credits_without_config_wrapper() {
+        let value = serde_json::json!({ "monthlyLimit": 5000, "used": 1000 });
+        let metric = parse_proxy_billing_metric(&value, Utc::now())
+            .expect("a top-level legacy credits payload must produce a metric");
+        assert_eq!(metric.label, "Monthly");
+        assert!((metric.used_percent - 20.0).abs() < f64::EPSILON);
+        assert_eq!(
+            metric.remaining_label.as_deref(),
+            Some("$40.00/$50.00 left")
+        );
+
+        let unrelated = serde_json::json!({ "error": "unavailable" });
+        assert!(parse_proxy_billing_metric(&unrelated, Utc::now()).is_none());
     }
 
     #[test]
