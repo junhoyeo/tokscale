@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::themes::Theme;
 use crate::tui::ui::widgets::truncate_ellipsis_with_marker as truncate;
 use crate::ui_glyphs::Glyphs;
@@ -43,7 +44,7 @@ impl ConfirmDialog {
     ) -> Self {
         Self {
             value: account_id,
-            title: " Switch Codex Account ",
+            title: "Switch Codex Account",
             message: "This will replace the active Codex auth.json account.",
             target_label: account_label,
             effect: "New Codex requests use this account",
@@ -61,7 +62,7 @@ impl ConfirmDialog {
     ) -> Self {
         Self {
             value: account_id,
-            title: " Remove Codex Account ",
+            title: "Remove Codex Account",
             message: "This will remove the saved Codex account from Tokscale.",
             target_label: account_label,
             effect: "Saved account is deleted; codex CLI login is unchanged",
@@ -79,7 +80,7 @@ impl ConfirmDialog {
     ) -> Self {
         Self {
             value: account_id,
-            title: " Reset Codex Limits ",
+            title: "Reset Codex Limits",
             message: "This will consume one available Codex reset credit.",
             target_label: account_label,
             effect: "Codex rate-limit windows reset for this account",
@@ -93,14 +94,16 @@ impl ConfirmDialog {
     pub fn antigravity_hook(
         target_path: String,
         confirmed_value: Rc<RefCell<Option<String>>>,
+        language: TuiLanguage,
     ) -> Self {
         Self {
             value: target_path.clone(),
-            title: " Link Antigravity CLI ",
-            message: "Add a SessionStart hook so agy syncs quota without token copying.",
+            title: tr(language, MessageKey::AntigravityHookDialogTitle),
+            message: tr(language, MessageKey::AntigravityHookDialogMessage),
             target_label: target_path,
-            effect: "agy writes session env; tokscale auto-discovers quota",
-            confirm_label: "Register",
+            effect: tr(language, MessageKey::AntigravityHookDialogEffect),
+            confirm_label: tr(language, MessageKey::AntigravityHookDialogConfirm),
+            // The key hint line is English in every confirm dialog.
             confirm_verb: "register",
             tone: ConfirmTone::Accent,
             confirmed_value,
@@ -224,7 +227,7 @@ impl DialogContent for ConfirmDialog {
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs) {
         let tone = self.tone_color(theme);
         let block = Block::default()
-            .title(self.title)
+            .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .border_set(glyphs.border)
             .border_style(Style::default().fg(tone));
@@ -382,6 +385,35 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn antigravity_dialog_renders_in_korean() {
+        let confirmed = Rc::new(RefCell::new(None));
+        let dialog = ConfirmDialog::antigravity_hook(
+            "~/.gemini/config/hooks.json".to_string(),
+            confirmed,
+            TuiLanguage::Ko,
+        );
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let backend = TestBackend::new(72, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| dialog.render(frame, Rect::new(0, 0, 72, 10), &theme, Glyphs::unicode()))
+            .unwrap();
+        let body = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(72)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .map(|row| crate::tui::ui::header_budget::strip_wide_continuation_cells(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains(" Antigravity CLI 연동 "), "{body}");
+        assert!(body.contains("Enter/y register"), "{body}");
+        assert!(!body.contains("Link Antigravity CLI"), "{body}");
     }
 
     #[test]

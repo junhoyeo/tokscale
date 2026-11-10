@@ -356,6 +356,12 @@ pub enum MessageKey {
     ActionHideEmails,
     ActionReset,
 
+    // Antigravity hook confirmation
+    AntigravityHookDialogTitle,
+    AntigravityHookDialogMessage,
+    AntigravityHookDialogEffect,
+    AntigravityHookDialogConfirm,
+
     // Usage section headings
     HeadingAttention,
     HeadingDiagnostics,
@@ -812,6 +818,12 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ActionShowEmails => "m Show Emails",
         MessageKey::ActionHideEmails => "m Hide Emails",
         MessageKey::ActionReset => "x Reset",
+        MessageKey::AntigravityHookDialogTitle => "Link Antigravity CLI",
+        MessageKey::AntigravityHookDialogMessage =>
+            "Add a SessionStart hook so agy syncs quota without token copying.",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy writes session env; tokscale auto-discovers quota",
+        MessageKey::AntigravityHookDialogConfirm => "Register",
 
         MessageKey::HeadingAttention => "Attention",
         MessageKey::HeadingDiagnostics => "Diagnostics",
@@ -1239,6 +1251,12 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionShowEmails => "m 이메일 표시",
         MessageKey::ActionHideEmails => "m 이메일 숨기기",
         MessageKey::ActionReset => "x 초기화",
+        MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 연동",
+        MessageKey::AntigravityHookDialogMessage =>
+            "SessionStart 훅을 추가해 토큰을 복사하지 않고 사용량을 동기화합니다.",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy가 세션 정보를 기록하고 tokscale이 사용량을 찾습니다",
+        MessageKey::AntigravityHookDialogConfirm => "등록",
 
         MessageKey::HeadingAttention => "주의",
         MessageKey::HeadingDiagnostics => "진단",
@@ -1673,6 +1691,12 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionShowEmails => "m メール表示",
         MessageKey::ActionHideEmails => "m メール非表示",
         MessageKey::ActionReset => "x リセット",
+        MessageKey::AntigravityHookDialogTitle => "Antigravity CLI を連携",
+        MessageKey::AntigravityHookDialogMessage =>
+            "SessionStart フックでトークンをコピーせず使用量を同期します。",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy がセッション環境を書き、tokscale が使用量を自動検出",
+        MessageKey::AntigravityHookDialogConfirm => "登録",
 
         MessageKey::HeadingAttention => "注意",
         MessageKey::HeadingDiagnostics => "診断",
@@ -2098,6 +2122,12 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionShowEmails => "m 显示邮箱",
         MessageKey::ActionHideEmails => "m 隐藏邮箱",
         MessageKey::ActionReset => "x 重置",
+        MessageKey::AntigravityHookDialogTitle => "关联 Antigravity CLI",
+        MessageKey::AntigravityHookDialogMessage =>
+            "添加 SessionStart 钩子，无需复制令牌即可同步用量。",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy 写入会话环境，tokscale 自动发现用量",
+        MessageKey::AntigravityHookDialogConfirm => "注册",
 
         MessageKey::HeadingAttention => "注意",
         MessageKey::HeadingDiagnostics => "诊断",
@@ -2515,6 +2545,12 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionShowEmails => "m Afficher e-mails",
         MessageKey::ActionHideEmails => "m Masquer e-mails",
         MessageKey::ActionReset => "x Réinitialiser",
+        MessageKey::AntigravityHookDialogTitle => "Associer Antigravity CLI",
+        MessageKey::AntigravityHookDialogMessage =>
+            "Hook SessionStart pour synchroniser sans copier le jeton.",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy écrit la session, tokscale détecte le quota",
+        MessageKey::AntigravityHookDialogConfirm => "Ajouter",
 
         MessageKey::HeadingAttention => "Attention",
         MessageKey::HeadingDiagnostics => "Diagnostics",
@@ -3079,6 +3115,10 @@ mod tests {
             MessageKey::ActionShowEmails,
             MessageKey::ActionHideEmails,
             MessageKey::ActionReset,
+            MessageKey::AntigravityHookDialogTitle,
+            MessageKey::AntigravityHookDialogMessage,
+            MessageKey::AntigravityHookDialogEffect,
+            MessageKey::AntigravityHookDialogConfirm,
             MessageKey::HeadingAttention,
             MessageKey::HeadingDiagnostics,
             MessageKey::HeadingProviders,
