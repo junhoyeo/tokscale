@@ -8393,12 +8393,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::omp::parse_omp_file(path))
         .collect();
-    let mut omp_seen: HashSet<String> = HashSet::new();
-    let omp_msgs: Vec<ParsedMessage> = omp_msgs_raw
-        .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut omp_seen, message))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
+    let omp_msgs: Vec<ParsedMessage> =
+        reconcile_omp_responses(&home_dir, options.use_env_roots, omp_msgs_raw, None)
+            .iter()
+            .map(unified_to_parsed)
+            .collect();
     let omp_count = omp_msgs.len() as i32;
     counts.set(ClientId::Omp, omp_count);
     messages.extend(omp_msgs);
@@ -21151,6 +21150,45 @@ mod tests {
             let total_tokens: i64 = messages.iter().map(|m| m.tokens.total()).sum();
             assert_eq!(total_tokens, 225, "usage totals preserved across retry");
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_local_clients_attributes_omp_from_magpie() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let sessions = home.join(".omp/agent/sessions/--test-workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("session.jsonl"),
+            concat!(
+                r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#,
+                "\n",
+                r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-local","stopReason":"stop","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(
+            ledger.join("usage.jsonl"),
+            concat!(
+                r#"{"agent":"omp","response_id":"resp-omp-local","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":20,"status":200}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["omp".to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].model_id, "gpt-fixture");
     }
 
     #[test]
