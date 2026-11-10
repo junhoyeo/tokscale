@@ -2182,6 +2182,7 @@ mod tests {
         assert!(!hooks_file.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn hook_registration_creates_and_detects_hook_spec() {
@@ -2324,6 +2325,7 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn hook_registration_fails_on_malformed_json() {
