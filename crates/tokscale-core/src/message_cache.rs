@@ -61,7 +61,12 @@ const LEGACY_CACHE_FORMAT_VERSION_V10: u32 = 10;
 const LEGACY_MICODE_CACHE_FORMAT_VERSION_V11: u32 = 11;
 // Claude checkpoints are a namespace-specific sidecar. Billing changes the
 // entry layout and persisted parser state, so retain a decoder for main's v12.
-const CLAUDE_CACHE_FORMAT_VERSION: u32 = 13;
+// v14 adds each message's transcript entry uuid beside the entry. A v13 shard
+// still loads as current (not migrated): its rows may be the only record of
+// turns Claude Code rewrote out of their transcripts, so they must never be
+// rebuilt for this; they load with `ClaudeEntryUuid::Unknown`.
+const CLAUDE_CACHE_FORMAT_VERSION: u32 = 14;
+const LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13: u32 = 13;
 const LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V12: u32 = 12;
 // Billing fields change CachedSourceEntry's positional layout. Copilot's
 // released v12 envelope must reparse rather than decode it as the new layout.
@@ -2267,7 +2272,9 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Muse => 3,
         ClientId::Vibe => 1,
         // v1->v2: cumulative total differencing and fork deduplication.
-        ClientId::Bb => 2,
+        // v2->v3: dedup keys name the provider session and turn, so a row
+        // mirrored from a Claude transcript or Codex rollout can yield to it.
+        ClientId::Bb => 3,
         // v1->v2: extract workspace key from project ancestors avoiding
         // subagents and canonicalize BYOK/managed provider metadata.
         ClientId::Qoder => crate::sessions::qoder::QODER_PARSER_BASE_VERSION,
@@ -2536,6 +2543,7 @@ impl From<LegacyUnifiedMessageV7> for UnifiedMessage {
             session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
@@ -2628,6 +2636,7 @@ impl From<LegacyUnifiedMessageV8> for UnifiedMessage {
             session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
@@ -2718,6 +2727,7 @@ impl From<LegacyUnifiedMessageV9> for UnifiedMessage {
             session_title: message.session_title.map(crate::sessions::SharedStr::from),
             parent_session_id: None,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
@@ -2883,6 +2893,7 @@ impl From<LegacyUnifiedMessageV10> for UnifiedMessage {
             is_turn_start: message.is_turn_start,
             model_attribution_conflicted: message.model_attribution_conflicted,
             copilot_context: None,
+            claude_entry_uuid: Default::default(),
             machine_label: None,
             billing_identity: crate::sessions::BillingIdentity::Unknown,
             pricing_model_id: None,
@@ -4341,10 +4352,46 @@ fn read_shard_with_limit_unchecked(
         type ClaudeWireEntry = (
             CachedSourceEntry,
             Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+            Vec<crate::sessions::ClaudeEntryUuid>,
         );
         return match bincode::options()
             .with_limit(max_shard_bytes)
             .deserialize::<Vec<ClaudeWireEntry>>(&envelope.payload)
+        {
+            Ok(entries) => {
+                let mut restored = Vec::with_capacity(entries.len());
+                for (mut entry, checkpoint, entry_uuids) in entries {
+                    if entry.messages.len() != entry_uuids.len() {
+                        return ShardReadStatus::Invalid(
+                            "Claude entry uuid length mismatch".into(),
+                        );
+                    }
+                    for (message, entry_uuid) in entry.messages.iter_mut().zip(entry_uuids) {
+                        message.claude_entry_uuid = entry_uuid;
+                    }
+                    let checkpoint =
+                        checkpoint.filter(|checkpoint| checkpoint.has_valid_integrity());
+                    restored.push(entry.with_claude_checkpoint(checkpoint));
+                }
+                ShardReadStatus::Loaded(restored)
+            }
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+
+    if envelope.format_version == LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13
+        && identity.namespace == ClientId::Claude.as_str()
+    {
+        // Same entries and checkpoints as v14, without entry uuids. Loaded,
+        // not migrated: nothing about the rows is stale, and a rebuild would
+        // drop history the transcripts no longer hold.
+        type ClaudeWireEntryV13 = (
+            CachedSourceEntry,
+            Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+        );
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<ClaudeWireEntryV13>>(&envelope.payload)
         {
             Ok(entries) => ShardReadStatus::Loaded(
                 entries
@@ -4649,7 +4696,14 @@ fn write_shard_with_limit(
     } else if is_claude {
         let entries: Vec<_> = entries
             .iter()
-            .map(|entry| (entry, &entry.claude_checkpoint))
+            .map(|entry| {
+                let entry_uuids: Vec<_> = entry
+                    .messages
+                    .iter()
+                    .map(|message| message.claude_entry_uuid)
+                    .collect();
+                (entry, &entry.claude_checkpoint, entry_uuids)
+            })
             .collect();
         bincode::options()
             .with_limit(max_shard_bytes)
@@ -5282,6 +5336,8 @@ mod tests {
         for message in &mut resumed {
             message.billing_identity = crate::sessions::BillingIdentity::Unknown;
             message.pricing_model_id = None;
+            // Not part of the frozen layout (a Claude envelope sidecar).
+            message.claude_entry_uuid = Default::default();
         }
         let mut expected = expected;
         expected.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
@@ -5291,6 +5347,8 @@ mod tests {
         for message in &mut warm {
             message.billing_identity = crate::sessions::BillingIdentity::Unknown;
             message.pricing_model_id = None;
+            // Not part of the frozen layout (a Claude envelope sidecar).
+            message.claude_entry_uuid = Default::default();
         }
         warm.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
         assert_eq!(
@@ -5342,6 +5400,8 @@ mod tests {
         for message in &mut messages {
             message.billing_identity = crate::sessions::BillingIdentity::Unknown;
             message.pricing_model_id = None;
+            // Not part of the frozen layout (a Claude envelope sidecar).
+            message.claude_entry_uuid = Default::default();
         }
         expected.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
         messages.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
@@ -8938,7 +8998,7 @@ mod tests {
 
     #[test]
     fn test_bb_parser_version() {
-        assert_eq!(parser_version(ClientId::Bb), 2);
+        assert_eq!(parser_version(ClientId::Bb), 3);
     }
 
     #[test]
@@ -9041,7 +9101,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_bb_v1_shard_invalidates_and_reparses_to_v2() {
+    fn test_bb_stale_shards_invalidate_and_reparse() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -9084,60 +9144,217 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let current_identity = CacheIdentity::for_client(ClientId::Bb);
-        let stale_identity = CacheIdentity {
-            namespace: current_identity.namespace,
-            parser_version: 1,
+        // v1 predates fork dedup; v2 predates the provider identity in the
+        // dedup key, without which a mirrored row cannot yield to the
+        // provider's own record.
+        for stale_version in [1, 2] {
+            let current_identity = CacheIdentity::for_client(ClientId::Bb);
+            let stale_identity = CacheIdentity {
+                namespace: current_identity.namespace,
+                parser_version: stale_version,
+            };
+            let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+            let stale_message = UnifiedMessage::new(
+                "bb",
+                "stale-model",
+                "stale-provider",
+                "thr_test",
+                1000,
+                crate::TokenBreakdown {
+                    input: 9999,
+                    output: 9999,
+                    ..Default::default()
+                },
+                0.0,
+            );
+            let stale_entry = CachedSourceEntry::new(
+                stale_identity,
+                &source,
+                fingerprint.clone(),
+                vec![stale_message],
+                Vec::new(),
+                None,
+            );
+            let stale_path = cache_shard_path(current_identity, &source);
+            ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+            write_shard_with_limit(
+                &stale_path,
+                stale_identity,
+                &[stale_entry],
+                MAX_CACHE_SHARD_BYTES,
+            )
+            .unwrap();
+
+            let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["bb".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            );
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].model_id, "claude-3-7-sonnet");
+            assert_eq!(messages[0].tokens.input, 1000);
+            assert_eq!(messages[0].tokens.output, 200);
+
+            let cache = SourceMessageCache::load();
+            let rebuilt = cache
+                .get(current_identity, &source)
+                .expect("the current parse must replace the stale row");
+            assert_eq!(rebuilt.parser_version, 3);
+        }
+    }
+
+    /// Rewrite the Claude shard holding `source` in the v13 envelope, which
+    /// has no entry uuids: what every cache written before them holds.
+    fn downgrade_claude_shard_to_v13(source: &Path) {
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let shard = cache_shard_path(identity, source);
+        let mut envelope: CachedShardEnvelope = bincode::options()
+            .deserialize(&fs::read(&shard).unwrap())
+            .unwrap();
+        assert_eq!(envelope.format_version, CLAUDE_CACHE_FORMAT_VERSION);
+        let entries: Vec<(
+            CachedSourceEntry,
+            Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+            Vec<crate::sessions::ClaudeEntryUuid>,
+        )> = bincode::options().deserialize(&envelope.payload).unwrap();
+        let legacy: Vec<_> = entries
+            .iter()
+            .map(|(entry, checkpoint, _)| (entry, checkpoint))
+            .collect();
+        envelope.format_version = LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13;
+        envelope.payload = bincode::options().serialize(&legacy).unwrap();
+        fs::write(&shard, bincode::options().serialize(&envelope).unwrap()).unwrap();
+    }
+
+    fn claude_shard_format(source: &Path) -> u32 {
+        let shard = cache_shard_path(CacheIdentity::for_client(ClientId::Claude), source);
+        bincode::options()
+            .deserialize::<CachedShardEnvelope>(&fs::read(shard).unwrap())
+            .unwrap()
+            .format_version
+    }
+
+    /// A Claude cache written before rows kept their transcript entry uuid
+    /// must keep loading as it is (it can hold history the transcript lost),
+    /// and BB rows must still be matched per turn wherever the transcript
+    /// still has the entry.
+    #[test]
+    #[serial_test::serial]
+    fn test_legacy_claude_cache_without_entry_uuids_matches_bb_turns() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let home = source_home.path();
+        let session = "33333333-2222-4333-8444-555555555555";
+        let source = home.join(format!(".claude/projects/-work-legacy/{session}.jsonl"));
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let line = |uuid: &str, id: &str, input: i64, output: i64, minute: u32| {
+            format!(
+                concat!(
+                    r#"{{"type":"user","uuid":"{uuid}-user","sessionId":"{session}","timestamp":"2026-09-21T10:{minute:02}:00.000Z","message":{{"role":"user","content":"hi"}}}}"#,
+                    "\n",
+                    r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"{session}","timestamp":"2026-09-21T10:{minute:02}:05.000Z","requestId":"req_{id}","message":{{"id":"msg_{id}","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#,
+                    "\n"
+                ),
+                uuid = uuid,
+                session = session,
+                minute = minute,
+                id = id,
+                input = input,
+                output = output,
+            )
         };
-        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
-        let stale_message = UnifiedMessage::new(
-            "bb",
-            "stale-model",
-            "stale-provider",
-            "thr_test",
-            1000,
-            crate::TokenBreakdown {
-                input: 9999,
-                output: 9999,
-                ..Default::default()
-            },
-            0.0,
-        );
-        let stale_entry = CachedSourceEntry::new(
-            stale_identity,
-            &source,
-            fingerprint.clone(),
-            vec![stale_message],
-            Vec::new(),
-            None,
-        );
-        let stale_path = cache_shard_path(current_identity, &source);
-        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
-        write_shard_with_limit(
-            &stale_path,
-            stale_identity,
-            &[stale_entry],
-            MAX_CACHE_SHARD_BYTES,
-        )
+        let old_uuid = "44444444-0000-4000-8000-000000000000";
+        let new_uuid = "44444444-0000-4000-8000-000000000001";
+        let old_turn = line(old_uuid, "old", 400, 100, 0);
+        let new_turn = line(new_uuid, "new", 800, 200, 1);
+        fs::write(&source, format!("{old_turn}{new_turn}")).unwrap();
+
+        let bb_dir = home.join(".bb");
+        fs::create_dir_all(&bb_dir).unwrap();
+        let conn = rusqlite::Connection::open(bb_dir.join("bb.db")).unwrap();
+        conn.execute_batch(&format!(
+            r#"
+            CREATE TABLE threads (id TEXT PRIMARY KEY NOT NULL, project_id TEXT, provider_id TEXT NOT NULL,
+                model_override TEXT, title TEXT, parent_thread_id TEXT, created_at INTEGER NOT NULL);
+            CREATE TABLE events (id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT,
+                provider_thread_id TEXT, sequence INTEGER NOT NULL, type TEXT NOT NULL,
+                data TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL);
+            INSERT INTO threads VALUES ('thr_c', NULL, 'claude-code', 'claude-sonnet-4-5', NULL, NULL, 1000);
+            INSERT INTO threads VALUES ('thr_pi', NULL, 'pi', 'claude-sonnet-4-5', NULL, NULL, 1000);
+            INSERT INTO events VALUES ('u0', 'thr_c', 't0', '{session}', 1, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":500,"inputTokens":400,"outputTokens":100}}}}}}', 1790762400000);
+            INSERT INTO events VALUES ('c0', 'thr_c', 't0', '{session}', 2, 'turn/completed',
+                '{{"status":"completed","providerCheckpointId":"{old_uuid}"}}', 1790762400001);
+            INSERT INTO events VALUES ('u1', 'thr_c', 't1', '{session}', 3, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":1000,"inputTokens":800,"outputTokens":200}}}}}}', 1790762460000);
+            INSERT INTO events VALUES ('c1', 'thr_c', 't1', '{session}', 4, 'turn/completed',
+                '{{"status":"completed","providerCheckpointId":"{new_uuid}"}}', 1790762460001);
+            INSERT INTO events VALUES ('u2', 'thr_c', 't2', '{session}', 5, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":700,"inputTokens":600,"outputTokens":100}}}}}}', 1790762520000);
+            INSERT INTO events VALUES ('c2', 'thr_c', 't2', '{session}', 6, 'turn/completed',
+                '{{"status":"completed","providerCheckpointId":"44444444-0000-4000-8000-0000000000b2"}}', 1790762520001);
+            INSERT INTO events VALUES ('u3', 'thr_pi', 't3', 'pi-session', 1, 'thread/tokenUsage/updated',
+                '{{"tokenUsage":{{"last":{{"totalTokens":333,"inputTokens":233,"outputTokens":100}}}}}}', 1790762520000);
+            "#
+        ))
         .unwrap();
+        drop(conn);
 
-        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
-            source_home.path().to_str().unwrap(),
-            &["bb".to_string()],
-            None,
-            false,
-            &crate::scanner::ScannerSettings::default(),
-        );
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].model_id, "claude-3-7-sonnet");
-        assert_eq!(messages[0].tokens.input, 1000);
-        assert_eq!(messages[0].tokens.output, 200);
+        let totals = || {
+            let mut totals = std::collections::BTreeMap::<String, (i64, i32)>::new();
+            for message in crate::parse_all_messages_with_pricing_with_env_strategy(
+                home.to_str().unwrap(),
+                &[],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            ) {
+                let entry = totals.entry(message.client.to_string()).or_default();
+                entry.0 += message.tokens.total();
+                entry.1 += message.message_count;
+            }
+            totals.into_iter().collect::<Vec<_>>()
+        };
+        let both_matched = vec![
+            ("bb".to_string(), (1_033, 2)),
+            ("claude".to_string(), (1_500, 2)),
+        ];
+        assert_eq!(totals(), both_matched, "cold");
 
-        let cache = SourceMessageCache::load();
-        let rebuilt = cache
-            .get(current_identity, &source)
-            .expect("the v2 parse must replace the stale v1 row");
-        assert_eq!(rebuilt.parser_version, 2);
+        // A cache from before entry uuids, for an unchanged transcript: it
+        // loads as current and is not rewritten, and the rows are matched by
+        // reading the uuids back from the transcript.
+        downgrade_claude_shard_to_v13(&source);
+        for phase in ["legacy", "legacy warm"] {
+            assert_eq!(totals(), both_matched, "{phase}");
+            assert_eq!(
+                claude_shard_format(&source),
+                LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+                "{phase}: an unchanged legacy entry must not be rebuilt"
+            );
+        }
+
+        // Claude Code then compacts the transcript, dropping the old turn.
+        // The cache still holds that row without its uuid, so it cannot be
+        // matched to BB's turn: the documented fallback takes every
+        // unmatched BB turn of this session as counted. The old row survives
+        // (500 still under claude), and the BB-only 700 is the cost.
+        fs::write(&source, &new_turn).unwrap();
+        for phase in ["compacted", "compacted warm"] {
+            assert_eq!(
+                totals(),
+                vec![
+                    ("bb".to_string(), (333, 1)),
+                    ("claude".to_string(), (1_500, 2)),
+                ],
+                "{phase}"
+            );
+        }
+        assert_eq!(claude_shard_format(&source), CLAUDE_CACHE_FORMAT_VERSION);
     }
 
     #[test]
@@ -10790,7 +11007,40 @@ mod tests {
             session: ContextOrigin::Trace,
             agent: ContextOrigin::Record,
         });
-        assert_eq!(CLAUDE_CACHE_FORMAT_VERSION, COPILOT_CACHE_FORMAT_VERSION);
+        // Claude's v13 decoder still shares Copilot's current number.
+        assert_eq!(
+            LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+            COPILOT_CACHE_FORMAT_VERSION
+        );
+        let legacy_claude = dir.path().join("claude-v13.bin");
+        let legacy_envelope = CachedShardEnvelope {
+            format_version: LEGACY_CLAUDE_CACHE_FORMAT_VERSION_V13,
+            parser_namespace: claude.namespace.to_string(),
+            parser_version: claude.parser_version,
+            payload: bincode::options()
+                .serialize(&vec![(&claude_entry, &claude_entry.claude_checkpoint)])
+                .unwrap(),
+        };
+        fs::write(
+            &legacy_claude,
+            bincode::options().serialize(&legacy_envelope).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_shard(&legacy_claude, copilot),
+            ShardReadStatus::Stale
+        ));
+        let ShardReadStatus::Loaded(restored) = read_shard(&legacy_claude, claude) else {
+            panic!("a v13 Claude envelope must load as current");
+        };
+        assert_eq!(
+            restored[0].claude_checkpoint,
+            claude_entry.claude_checkpoint
+        );
+        assert!(restored[0]
+            .messages
+            .iter()
+            .all(|message| message.claude_entry_uuid == crate::sessions::ClaudeEntryUuid::Unknown));
         for (identity, other, entry) in [
             (claude, copilot, claude_entry),
             (copilot, claude, copilot_entry),
@@ -10884,7 +11134,12 @@ mod tests {
             panic!("a format-{CACHE_FORMAT_VERSION} Claude shard still loads");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].messages, entry.messages);
+        // The layout predates entry uuids, so the rows load without them.
+        let mut expected_messages = entry.messages.clone();
+        for message in &mut expected_messages {
+            message.claude_entry_uuid = crate::sessions::ClaudeEntryUuid::Unknown;
+        }
+        assert_eq!(entries[0].messages, expected_messages);
         assert_eq!(
             entries[0].fallback_timestamp_indices, entry.fallback_timestamp_indices,
             "retention provenance survives"
