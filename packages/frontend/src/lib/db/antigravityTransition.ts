@@ -119,7 +119,11 @@ export function planAntigravityTransition(args: {
   const unknownStoredGeneration = ANTIGRAVITY_FAMILY.some((client) =>
     (ownValue(args.persistedVersions, client) ?? 0) > SUPPORTED_VERSIONED_PARSERS[client]
   );
-  const transitioned = ANTIGRAVITY_FAMILY.some((client) =>
+  // Every member, because a replace pins all three at once. A single pinned
+  // member is left over from a submit an earlier receiver froze as a future
+  // generation: it changed no cell, so the layout is still the previous
+  // generation's.
+  const transitioned = ANTIGRAVITY_FAMILY.every((client) =>
     ownValue(args.persistedVersions, client) === SUPPORTED_VERSIONED_PARSERS[client]
   );
   const declaresRegistered = ANTIGRAVITY_FAMILY.every((client) =>

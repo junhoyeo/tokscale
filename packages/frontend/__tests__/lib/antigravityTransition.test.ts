@@ -803,6 +803,23 @@ describe("planAntigravityTransition generation boundary", () => {
     expect(plan.parserVersions).toEqual(pins(PREVIOUS));
   });
 
+  it("still corrects a device whose only marker is one member an earlier receiver pinned", () => {
+    // Before generation 2 was registered, a submit declaring it for one
+    // member froze as a future generation and pinned only that member. No
+    // cell changed, so the stored layout is still the previous generation's
+    // and the proof must still apply.
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      persistedVersions: { "antigravity-extension": GEN },
+      recountProofs: proof,
+      contributions: snapshot(correctedCount),
+      existingDays: stored(previousCount),
+    });
+    expect(plan.mode).toBe("replace");
+    expect(plan.parserVersions).toEqual(pins(GEN));
+    expect(plan.recountCostReduction).toBeCloseTo(0.3, 8);
+  });
+
   it("ignores a recount proof once the device is on the registered generation", () => {
     // The stored cell equals the proof's previous side and the proof passes
     // every structural check. After the transition the stored cells are in
