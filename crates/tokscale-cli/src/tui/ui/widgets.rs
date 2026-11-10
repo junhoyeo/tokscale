@@ -880,6 +880,7 @@ pub fn get_client_color(client: &str) -> Color {
         "proma" => Color::Rgb(99, 102, 241), // #6366F1
         "vibe" => Color::Rgb(250, 82, 15),   // #FA520F Mistral orange
         "bb" => Color::Rgb(79, 70, 229),     // #4F46E5 Indigo
+        "qoder" => Color::Rgb(255, 77, 0),   // #FF4D00 Alibaba Qoder orange
         _ => Color::Rgb(136, 136, 136),      // #888888
     }
 }
@@ -1762,6 +1763,15 @@ mod tests {
             assert_eq!(format_cost_per_million(3.00, 1_000_000, glyphs), "$3.00");
             assert_eq!(format_cost_per_million(15.50, 1_000_000, glyphs), "$15.50");
         }
+    }
+
+    #[test]
+    fn qoder_client_color_is_orange_ff4d00() {
+        assert_eq!(get_client_color("qoder"), Color::Rgb(255, 77, 0));
+        assert_ne!(
+            get_client_color("qoder"),
+            get_client_color("opencodereview")
+        );
     }
 
     /// The bound rides in `Constraint::Length(10)` cells next to `$15.50`, and

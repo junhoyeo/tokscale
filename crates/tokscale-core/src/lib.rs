@@ -4726,6 +4726,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::qwen::parse_qwen_file,
     );
 
+    // Parse Qoder and Qoder CN JSONL transcripts
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        &machine_labeler,
+        ClientId::Qoder,
+        sessions::qoder::parse_qoder_file,
+    );
+
     let roocode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::RooCode)
         .par_iter()
@@ -8448,6 +8459,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let qwen_count = qwen_msgs.len() as i32;
     counts.set(ClientId::Qwen, qwen_count);
     messages.extend(qwen_msgs);
+
+    let qoder_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Qoder)
+        .par_iter()
+        .flat_map(|path| sessions::qoder::parse_qoder_file(path))
+        .collect();
+    let mut qoder_seen: HashSet<String> = HashSet::new();
+    let qoder_msgs: Vec<ParsedMessage> = qoder_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut qoder_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let qoder_count = summed_parsed_message_count(&qoder_msgs);
+    counts.set(ClientId::Qoder, qoder_count);
+    messages.extend(qoder_msgs);
 
     let roocode_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::RooCode)

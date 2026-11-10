@@ -280,12 +280,12 @@ pub fn resolve_alias(model_id: &str) -> Option<&'static str> {
     if let Some(target) = CURSOR_PRICING_ALIASES.get(lowered.as_str()) {
         return Some(target);
     }
-    // kimi-code reports some rows as `kimi-code/<id>`. The Kimi parser strips
-    // that prefix before pricing, but any other path reaching pricing with the
-    // qualified form would otherwise miss every alias above and fall through to
-    // the Models.dev `kimi-for-coding/*` namespace, which prices at $0.00 — so
-    // the qualified and bare spellings of the same model would disagree.
-    let bare = lowered.strip_prefix("kimi-code/")?;
+    // kimi-code and qoder report some rows qualified by client name
+    // (`kimi-code/<id>`, `qoder/<id>`, `qoder-cn/<id>`).
+    let bare = lowered
+        .strip_prefix("kimi-code/")
+        .or_else(|| lowered.strip_prefix("qoder/"))
+        .or_else(|| lowered.strip_prefix("qoder-cn/"))?;
     MODEL_ALIASES.get(bare).copied()
 }
 
@@ -805,6 +805,27 @@ mod tests {
             assert!(result.evidence.alias_applied);
             assert!(result.evidence.is_submission_safe());
             assert!(service.covers_usage_with_provider(model_id, Some("anthropic"), &usage));
+        }
+    }
+
+    #[test]
+    fn does_not_alias_qoder_dynamic_slot_models() {
+        for raw in [
+            "qmodel",
+            "qmodel_preview",
+            "qmodel_38max",
+            "qmodel_latest",
+            "qfmodel",
+            "dfmodel",
+            "gfmodel",
+            "qoder/dfmodel",
+            "qoder-cn/gfmodel",
+        ] {
+            assert_eq!(
+                super::resolve_alias(raw),
+                None,
+                "qoder dynamic slot identifier {raw} should not be statically aliased"
+            );
         }
     }
 }
