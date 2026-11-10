@@ -5,11 +5,11 @@ use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::truncate_ellipsis_with_marker as truncate;
+use crate::tui::ui::widgets::{
+    display_width, pad_to_width, truncate_ellipsis_to_width_with_marker as truncate,
+};
 use crate::ui_glyphs::Glyphs;
 
 use super::{DialogContent, DialogResult};
@@ -165,7 +165,7 @@ impl ConfirmDialog {
             };
         };
 
-        let confirm_width = self.confirm_button().width() as u16;
+        let confirm_width = display_width(&self.confirm_button()) as u16;
         if inner.width < confirm_width {
             return ButtonLayout {
                 confirm: None,
@@ -173,7 +173,7 @@ impl ConfirmDialog {
             };
         }
 
-        let cancel_width = self.cancel_button().width() as u16;
+        let cancel_width = display_width(self.cancel_button()) as u16;
         let gap = 2u16;
         let total = confirm_width
             .saturating_add(gap)
@@ -347,12 +347,8 @@ fn labeled_line(
     ellipsis: &str,
 ) -> Line<'static> {
     let width = width as usize;
-    // Padded by display width: a CJK label is two cells per character.
-    let label_text = format!(
-        "{label}{}",
-        " ".repeat(8usize.saturating_sub(label.width()))
-    );
-    let label_width = label_text.width();
+    let label_text = pad_to_width(label, 8);
+    let label_width = display_width(&label_text);
     if width <= label_width {
         return Line::from(Span::styled(
             truncate(&label_text, width, ellipsis),
@@ -469,6 +465,45 @@ mod tests {
                 "{language:?}"
             );
         }
+    }
+
+    #[test]
+    fn narrow_antigravity_dialog_marks_a_cut_double_width_effect_line() {
+        use crate::tui::ui::header_budget::strip_wide_continuation_cells;
+
+        let dialog = ConfirmDialog::antigravity_hook(
+            "~/.gemini/config/hooks.json".to_string(),
+            Rc::new(RefCell::new(None)),
+            TuiLanguage::Ko,
+        );
+        let (width, height) = (40, 10);
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                dialog.render(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    &theme,
+                    Glyphs::unicode(),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let effect_label = tr(TuiLanguage::Ko, MessageKey::DialogEffectLabel);
+        let effect_row = (0..height)
+            .map(|y| {
+                let cells: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                strip_wide_continuation_cells(&cells)
+            })
+            .find(|row| row.contains(effect_label))
+            .expect("effect row");
+
+        let ellipsis = Glyphs::unicode().ellipsis;
+        assert!(
+            effect_row.trim_end_matches(['│', ' ']).ends_with(ellipsis),
+            "{effect_row}"
+        );
     }
 
     #[test]

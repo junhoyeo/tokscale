@@ -540,6 +540,10 @@ pub(crate) fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
     truncate_ellipsis_with_marker(s, max_chars, Glyphs::ascii_safe().ellipsis)
 }
 
+/// Cut by code points. Kept for the tests that compare the cell-based
+/// version against it; rendering code uses
+/// [`truncate_ellipsis_to_width_with_marker`].
+#[cfg(test)]
 pub(crate) fn truncate_ellipsis_with_marker(s: &str, max_chars: usize, marker: &str) -> String {
     if max_chars == 0 {
         return String::new();
