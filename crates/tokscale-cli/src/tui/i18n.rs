@@ -1691,7 +1691,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionShowEmails => "m メール表示",
         MessageKey::ActionHideEmails => "m メール非表示",
         MessageKey::ActionReset => "x リセット",
-        MessageKey::AntigravityHookDialogTitle => "Antigravity CLI を連携",
+        MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 連携",
         MessageKey::AntigravityHookDialogMessage =>
             "SessionStart フックでトークンをコピーせず使用量を同期します。",
         MessageKey::AntigravityHookDialogEffect =>
