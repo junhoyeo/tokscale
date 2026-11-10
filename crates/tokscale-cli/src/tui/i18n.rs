@@ -1253,7 +1253,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionReset => "x 초기화",
         MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 연동",
         MessageKey::AntigravityHookDialogMessage =>
-            "SessionStart 훅을 추가해 토큰을 복사하지 않고 사용량을 동기화합니다.",
+            "SessionStart 훅을 추가해 토큰 복사 없이 사용량을 동기화합니다.",
         MessageKey::AntigravityHookDialogEffect =>
             "agy가 세션 정보를 기록하고 tokscale이 사용량을 찾습니다",
         MessageKey::AntigravityHookDialogConfirm => "등록",
