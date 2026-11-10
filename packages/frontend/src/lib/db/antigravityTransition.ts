@@ -51,7 +51,10 @@ export interface AntigravityTransitionPlan {
   /**
    * The generation of the snapshot that last replaced this device's family
    * layout, so it also names the units of the stored cells. A freeze never
-   * advances it.
+   * moves it to the registered generation. The one freeze that writes a
+   * different value pins the members that declared a generation newer than
+   * the registered one, which keeps the device frozen until the receiver
+   * registers it.
    */
   parserVersions?: Record<string, number>;
   layouts?: FamilyLayouts;
