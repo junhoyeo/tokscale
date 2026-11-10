@@ -5,7 +5,7 @@ on:
   # Tarpaulin runs the whole suite a second time under instrumentation, which
   # takes about half an hour, to refresh a badge whose rounded value moves
   # once every week or two. The Tests workflow already runs the suite on
-  # every push, so this runs weekly instead of on each one.
+  # every push that changes the Rust workspace, so this runs weekly instead.
   schedule:
     - cron: "17 3 * * 1"
 
