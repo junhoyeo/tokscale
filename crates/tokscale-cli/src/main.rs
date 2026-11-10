@@ -5408,6 +5408,11 @@ fn withhold_coverage_for_clients(
     scope
         .complete_day_clients
         .retain(|client| !incomplete_clients.contains(client));
+    if let Some(proofs) = &mut scope.recount_proofs {
+        for client in incomplete_clients {
+            proofs.remove(client);
+        }
+    }
     scope.full_history = scope.full_history && scope.full_history_clients.len() == declared;
 }
 

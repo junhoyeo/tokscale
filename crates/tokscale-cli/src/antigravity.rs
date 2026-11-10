@@ -3274,7 +3274,9 @@ fn session_metadata_needs_trajectory_timestamps(metadata: &[Value]) -> bool {
                     let usage = retry.get("usage").unwrap_or(retry);
                     let has_usage = to_safe_i64(usage.get("inputTokens")) > 0
                         || to_safe_i64(usage.get("outputTokens")) > 0
+                        || to_safe_i64(usage.get("responseOutputTokens")) > 0
                         || to_safe_i64(usage.get("cacheReadTokens")) > 0
+                        || to_safe_i64(usage.get("cacheWriteTokens")) > 0
                         || to_safe_i64(usage.get("thinkingOutputTokens")) > 0;
                     let has_timestamp = usage
                         .get("createdAt")
@@ -3377,15 +3379,25 @@ fn normalize_session_metadata_with_timestamps(
             "sessionId": session_id,
             "modelId": model_id,
             "timestamp": created_at,
+            "version": 2,
         }))?);
 
         if let Some(retry_infos) = chat_model.get("retryInfos").and_then(Value::as_array) {
             for retry in retry_infos {
                 let usage = retry.get("usage").unwrap_or(retry);
                 let input = to_safe_i64(usage.get("inputTokens"));
-                let output = to_safe_i64(usage.get("outputTokens"));
                 let cache_read = to_safe_i64(usage.get("cacheReadTokens"));
+                let cache_write = to_safe_i64(usage.get("cacheWriteTokens"));
                 let reasoning = to_safe_i64(usage.get("thinkingOutputTokens"));
+                let output = usage
+                    .get("responseOutputTokens")
+                    .filter(|v| !v.is_null())
+                    .map(|v| to_safe_i64(Some(v)))
+                    .unwrap_or_else(|| {
+                        to_safe_i64(usage.get("outputTokens"))
+                            .saturating_sub(reasoning)
+                            .max(0)
+                    });
                 let timestamp = usage
                     .get("createdAt")
                     .or_else(|| usage.get("timestamp"))
@@ -3393,7 +3405,12 @@ fn normalize_session_metadata_with_timestamps(
                     .or_else(|| timestamp_for_usage(usage, usage_timestamps))
                     .or(created_at);
 
-                if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 {
+                if input == 0
+                    && output == 0
+                    && cache_read == 0
+                    && cache_write == 0
+                    && reasoning == 0
+                {
                     continue;
                 }
 
@@ -3411,10 +3428,11 @@ fn normalize_session_metadata_with_timestamps(
                     "input": input,
                     "output": output,
                     "cacheRead": cache_read,
-                    "cacheWrite": 0,
+                    "cacheWrite": cache_write,
                     "reasoning": reasoning,
                     "responseId": usage.get("responseId").and_then(Value::as_str),
                     "messageId": usage.get("messageId").and_then(Value::as_str),
+                    "v": 2,
                 }))?);
             }
         }
@@ -4018,6 +4036,65 @@ mod tests {
             .iter()
             .any(|line| line.contains("\"type\":\"session_meta\"")));
         assert!(lines.iter().any(|line| line.contains("\"type\":\"usage\"")));
+        let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+        // When responseOutputTokens is omitted, output falls back to outputTokens - thinkingOutputTokens.
+        assert_eq!(usage.get("output").and_then(Value::as_i64), Some(4));
+        assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(1));
+        assert_eq!(usage.get("cacheWrite").and_then(Value::as_i64), Some(0));
+    }
+
+    #[test]
+    fn normalize_session_metadata_reads_response_output_and_cache_write_tokens() {
+        let metadata = vec![serde_json::json!({
+            "chatModel": {
+                "responseModel": "claude-sonnet-4.6",
+                "chatStartMetadata": { "createdAt": "2026-03-24T10:00:00Z" },
+                "retryInfos": [{
+                    "usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 340,
+                        "responseOutputTokens": 300,
+                        "thinkingOutputTokens": 40,
+                        "cacheReadTokens": 16000,
+                        "cacheWriteTokens": 125,
+                        "responseId": "resp-explicit"
+                    }
+                }]
+            }
+        })];
+
+        let lines = normalize_session_metadata("session-1", &metadata).unwrap();
+        let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(usage.get("input").and_then(Value::as_i64), Some(100));
+        assert_eq!(usage.get("output").and_then(Value::as_i64), Some(300));
+        assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(40));
+        assert_eq!(usage.get("cacheRead").and_then(Value::as_i64), Some(16000));
+        assert_eq!(usage.get("cacheWrite").and_then(Value::as_i64), Some(125));
+    }
+
+    #[test]
+    fn normalize_session_metadata_handles_null_response_output_tokens() {
+        let metadata = vec![serde_json::json!({
+            "chatModel": {
+                "responseModel": "claude-sonnet-4.6",
+                "chatStartMetadata": { "createdAt": "2026-03-24T10:00:00Z" },
+                "retryInfos": [{
+                    "usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 340,
+                        "responseOutputTokens": serde_json::Value::Null,
+                        "thinkingOutputTokens": 40,
+                        "responseId": "resp-null-out"
+                    }
+                }]
+            }
+        })];
+
+        let lines = normalize_session_metadata("session-1", &metadata).unwrap();
+        let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(usage.get("input").and_then(Value::as_i64), Some(100));
+        assert_eq!(usage.get("output").and_then(Value::as_i64), Some(300));
+        assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(40));
     }
 
     #[test]

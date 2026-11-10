@@ -2246,7 +2246,8 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Mux => 1,
         ClientId::Crush => 1,
         ClientId::Goose => 1,
-        ClientId::Antigravity => 1,
+        // v1->v2: fall back to session_meta / file mtime when usage timestamp is null.
+        ClientId::Antigravity => 2,
         ClientId::Zed => 1,
         ClientId::Trae => 1,
         ClientId::Warp => 1,
@@ -10407,6 +10408,33 @@ mod tests {
             PRE_BUMP_GENERATION,
             "the bump must change the generation, or a warm TUI keeps painting \
              the pre-fix totals"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_family_bump_moves_the_parser_generation() {
+        assert_eq!(parser_version(ClientId::Antigravity), 2);
+        assert_eq!(parser_version(ClientId::AntigravityCli), 2);
+        assert_eq!(parser_version(ClientId::AntigravityExtension), 2);
+
+        let pre_bump_generation = parser_generation_for_versions(
+            ClientId::ALL.iter().copied().map(|c| {
+                if c == ClientId::Antigravity
+                    || c == ClientId::AntigravityCli
+                    || c == ClientId::AntigravityExtension
+                {
+                    1
+                } else {
+                    parser_version(c)
+                }
+            }),
+            CLAUDE_RETAINED_PARSE_GENERATION,
+        );
+        assert_ne!(
+            parser_generation(),
+            pre_bump_generation,
+            "bumping Antigravity family to v2 must invalidate parser_generation(), \
+             preventing stale warm caches from reusing pre-v2 totals"
         );
     }
 

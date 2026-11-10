@@ -1007,6 +1007,7 @@ export async function POST(request: Request) {
         incomingVersions: data.scanScope?.parserVersions,
         persistedVersions: submittedDevice.parserVersions ?? undefined,
         parserStates: deviceParserStates,
+        recountProofs: data.scanScope?.recountProofs,
         fullHistory: scanScopeCoversFullHistory(data.scanScope, ANTIGRAVITY_FAMILY),
         isBackfill,
         contributions: data.contributions,
@@ -1049,7 +1050,11 @@ export async function POST(request: Request) {
       // complete sibling carrying moved spend would double-count it.
       const antigravityReplacing = antigravityPlan.mode === "replace";
       const antigravityFamilyFloor = antigravityReplacing
-        ? quantizeFamilyFloor(existingDeviceDays, ANTIGRAVITY_FAMILY)
+        ? Math.max(
+            0,
+            quantizeFamilyFloor(existingDeviceDays, ANTIGRAVITY_FAMILY) -
+              (antigravityPlan.recountCostReduction ?? 0)
+          )
         : 0;
       const individuallyFlooredClients = replaceClients.filter(
         (client) =>
