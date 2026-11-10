@@ -9003,12 +9003,12 @@ mod tests {
 
     #[test]
     fn test_qoder_parser_version() {
-        assert_eq!(parser_version(ClientId::Qoder), 3);
+        assert_eq!(parser_version(ClientId::Qoder), 4);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_qoder_v2_shard_invalidates_and_reparses_to_v3() {
+    fn test_qoder_v3_shard_invalidates_and_reparses_to_v4() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -9032,10 +9032,10 @@ mod tests {
         .unwrap();
 
         let current_identity = CacheIdentity::for_client(ClientId::Qoder);
-        assert_eq!(current_identity.parser_version, 3);
+        assert_eq!(current_identity.parser_version, 4);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
-            parser_version: 2,
+            parser_version: 3,
         };
         let fingerprint = SourceFingerprint::from_path(&source).unwrap();
         let stale_message = UnifiedMessage::new(
@@ -9074,7 +9074,7 @@ mod tests {
         let initial_cache = SourceMessageCache::load();
         assert!(
             initial_cache.get(current_identity, &source).is_none(),
-            "stale v2 entry must not match v3 lookup identity"
+            "stale v3 entry must not match v4 lookup identity"
         );
 
         let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
@@ -9093,8 +9093,8 @@ mod tests {
         let cache = SourceMessageCache::load();
         let rebuilt = cache
             .get(current_identity, &source)
-            .expect("the v3 parse must replace the stale v2 row");
-        assert_eq!(rebuilt.parser_version, 3);
+            .expect("the v4 parse must replace the stale v3 row");
+        assert_eq!(rebuilt.parser_version, 4);
         assert_eq!(rebuilt.messages.len(), 1);
         assert_eq!(rebuilt.messages[0].model_id, "qmodel_preview");
     }

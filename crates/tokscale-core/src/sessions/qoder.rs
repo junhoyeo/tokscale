@@ -42,7 +42,9 @@ use std::path::Path;
 ///   Qoder slots (`dfmodel`, `gfmodel`, `qmodel`, `qfmodel`) so transcripts
 ///   preserve native model slot identifiers without assuming third-party
 ///   model upgrades.
-pub const QODER_PARSER_BASE_VERSION: u32 = 3;
+/// - Version 4: Treats `qoder/` and `qoder-cn/` model prefixes as client
+///   namespaces so BYOK rows retain their vendor attribution.
+pub const QODER_PARSER_BASE_VERSION: u32 = 4;
 
 const CLIENT_ID: &str = "qoder";
 const DEFAULT_PROVIDER: &str = "qoder";
@@ -81,15 +83,18 @@ fn canonicalize_qoder_model_and_provider(
 ) -> (String, String) {
     let trimmed_model = raw_model.trim();
     // BYOK models in Qoder can be stored as `<provider>/<type>/<modelId>` or
-    // `<provider>/<modelId>`. Extract the provider prefix before stripping it.
-    let prefix_provider = if trimmed_model.contains('/') {
-        let first_segment = trimmed_model.split('/').next().unwrap_or("");
+    // `<provider>/<modelId>`. Qoder also qualifies models with its client name.
+    let first_segment = trimmed_model.split('/').next().unwrap_or("");
+    let client_qualified = trimmed_model.contains('/')
+        && (first_segment.eq_ignore_ascii_case("qoder")
+            || first_segment.eq_ignore_ascii_case("qoder-cn"));
+    let prefix_provider = if trimmed_model.contains('/') && !client_qualified {
         provider_identity::canonical_provider(first_segment)
     } else {
         None
     };
 
-    let bare_model = if prefix_provider.is_some() {
+    let bare_model = if prefix_provider.is_some() || client_qualified {
         trimmed_model
             .rsplit('/')
             .next()
@@ -1117,6 +1122,36 @@ mod tests {
         let msg = &messages[0];
         // Without modelSource acting as explicit provider, "deepseek-v3" infers "deepseek"
         assert_eq!(msg.provider_id.as_ref(), "deepseek");
+    }
+
+    #[test]
+    fn test_parse_qoder_client_qualified_models_infer_vendor_provider() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-1","message":{{"id":"msg_1","model":"qoder/claude-sonnet-4-6","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-1","message":{{"id":"msg_2","model":"qoder-cn/deepseek-v3","usage":{{"input_tokens":200,"output_tokens":75}}}}}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(
+            messages[0].pricing_model_id.as_deref(),
+            Some("qoder/claude-sonnet-4-6")
+        );
+        assert_eq!(messages[1].model_id.as_ref(), "deepseek-v3");
+        assert_eq!(messages[1].provider_id.as_ref(), "deepseek");
+        assert_eq!(
+            messages[1].pricing_model_id.as_deref(),
+            Some("qoder-cn/deepseek-v3")
+        );
     }
 
     #[test]
