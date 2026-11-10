@@ -3389,11 +3389,8 @@ fn normalize_session_metadata_with_timestamps(
                 let cache_read = to_safe_i64(usage.get("cacheReadTokens"));
                 let cache_write = to_safe_i64(usage.get("cacheWriteTokens"));
                 let reasoning = to_safe_i64(usage.get("thinkingOutputTokens"));
-                let output = usage
-                    .get("responseOutputTokens")
-                    .filter(|v| !v.is_null())
-                    .map(|v| to_safe_i64(Some(v)))
-                    .unwrap_or_else(|| {
+                let output =
+                    parse_safe_i64(usage.get("responseOutputTokens")).unwrap_or_else(|| {
                         to_safe_i64(usage.get("outputTokens"))
                             .saturating_sub(reasoning)
                             .max(0)
@@ -3456,16 +3453,19 @@ fn resolve_model_id(chat_model: &Value) -> String {
         .to_string()
 }
 
+/// A token counter clamped to zero, or `None` when the field is absent or
+/// is not a number.
+fn parse_safe_i64(value: Option<&Value>) -> Option<i64> {
+    let inner = value?;
+    inner
+        .as_i64()
+        .or_else(|| inner.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| inner.as_str().and_then(|text| text.parse::<i64>().ok()))
+        .map(|number| number.max(0))
+}
+
 fn to_safe_i64(value: Option<&Value>) -> i64 {
-    value
-        .and_then(|inner| {
-            inner
-                .as_i64()
-                .or_else(|| inner.as_u64().and_then(|number| i64::try_from(number).ok()))
-                .or_else(|| inner.as_str().and_then(|text| text.parse::<i64>().ok()))
-        })
-        .unwrap_or(0)
-        .max(0)
+    parse_safe_i64(value).unwrap_or(0)
 }
 
 fn stale_relative_paths(previous: &AntigravityManifest, next: &AntigravityManifest) -> Vec<String> {
@@ -4073,18 +4073,55 @@ mod tests {
     }
 
     #[test]
-    fn normalize_session_metadata_handles_null_response_output_tokens() {
+    fn normalize_session_metadata_falls_back_when_response_output_is_not_a_number() {
+        for response_output in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!("n/a"),
+            serde_json::json!([300]),
+        ] {
+            let metadata = vec![serde_json::json!({
+                "chatModel": {
+                    "responseModel": "claude-sonnet-4.6",
+                    "chatStartMetadata": { "createdAt": "2026-03-24T10:00:00Z" },
+                    "retryInfos": [{
+                        "usage": {
+                            "inputTokens": 100,
+                            "outputTokens": 340,
+                            "responseOutputTokens": response_output.clone(),
+                            "thinkingOutputTokens": 40,
+                            "responseId": "resp-no-response-output"
+                        }
+                    }]
+                }
+            })];
+
+            let lines = normalize_session_metadata("session-1", &metadata).unwrap();
+            let usage: Value = serde_json::from_str(&lines[1]).unwrap();
+            assert_eq!(usage.get("input").and_then(Value::as_i64), Some(100));
+            assert_eq!(
+                usage.get("output").and_then(Value::as_i64),
+                Some(300),
+                "responseOutputTokens: {response_output}"
+            );
+            assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(40));
+        }
+    }
+
+    #[test]
+    fn normalize_session_metadata_reads_string_response_output_tokens() {
+        // int64 fields arrive as JSON strings from protobuf-backed RPCs.
         let metadata = vec![serde_json::json!({
             "chatModel": {
                 "responseModel": "claude-sonnet-4.6",
                 "chatStartMetadata": { "createdAt": "2026-03-24T10:00:00Z" },
                 "retryInfos": [{
                     "usage": {
-                        "inputTokens": 100,
-                        "outputTokens": 340,
-                        "responseOutputTokens": serde_json::Value::Null,
-                        "thinkingOutputTokens": 40,
-                        "responseId": "resp-null-out"
+                        "inputTokens": "100",
+                        "outputTokens": "340",
+                        "responseOutputTokens": "0",
+                        "thinkingOutputTokens": "40",
+                        "responseId": "resp-string-out"
                     }
                 }]
             }
@@ -4092,8 +4129,7 @@ mod tests {
 
         let lines = normalize_session_metadata("session-1", &metadata).unwrap();
         let usage: Value = serde_json::from_str(&lines[1]).unwrap();
-        assert_eq!(usage.get("input").and_then(Value::as_i64), Some(100));
-        assert_eq!(usage.get("output").and_then(Value::as_i64), Some(300));
+        assert_eq!(usage.get("output").and_then(Value::as_i64), Some(0));
         assert_eq!(usage.get("reasoning").and_then(Value::as_i64), Some(40));
     }
 
