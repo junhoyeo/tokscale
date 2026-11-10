@@ -581,6 +581,10 @@ pub fn is_antigravity_hook_registered() -> bool {
 
 /// Registers the Tokscale session sync hook in `~/.gemini/config/hooks.json`.
 pub fn register_antigravity_hook() -> Result<PathBuf> {
+    register_antigravity_hook_with(|| {})
+}
+
+fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathBuf> {
     if !cfg!(unix) {
         anyhow::bail!("Antigravity hook registration is only supported on Unix");
     }
@@ -593,9 +597,13 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
         .context("hooks.json must have a parent directory")?;
     std::fs::create_dir_all(parent)?;
 
-    let mut root = if path.is_file() {
-        let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<serde_json::Value>(&content)
+    let initial_content = if path.is_file() {
+        Some(std::fs::read(&path)?)
+    } else {
+        None
+    };
+    let mut root = if let Some(content) = initial_content.as_deref() {
+        serde_json::from_slice::<serde_json::Value>(content)
             .context("hooks.json contains invalid JSON")?
     } else {
         serde_json::json!({})
@@ -640,6 +648,16 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e.into());
+    }
+    before_replace();
+    let current_content = if path.is_file() {
+        Some(std::fs::read(&path)?)
+    } else {
+        None
+    };
+    if current_content != initial_content {
+        let _ = std::fs::remove_file(&tmp_path);
+        anyhow::bail!("hooks.json changed during registration; no changes were written");
     }
     if let Err(e) = tokscale_core::fs_atomic::replace_file(&tmp_path, &path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -2259,6 +2277,32 @@ mod tests {
         assert!(!is_antigravity_hook_registered());
         register_antigravity_hook().unwrap();
         assert!(is_antigravity_hook_registered());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn hook_registration_rejects_a_concurrent_hooks_file_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+        let initial = serde_json::json!({"existing": {"event": []}});
+        std::fs::write(&hooks_file, serde_json::to_vec(&initial).unwrap()).unwrap();
+
+        let concurrent = serde_json::json!({
+            "existing": {"event": []},
+            "other-hook": {"SessionStart": []}
+        });
+        let concurrent_bytes = serde_json::to_vec(&concurrent).unwrap();
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        let err = register_antigravity_hook_with(|| {
+            std::fs::write(&hooks_file, &concurrent_bytes).unwrap();
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("changed during registration"));
+        assert_eq!(std::fs::read(&hooks_file).unwrap(), concurrent_bytes);
     }
 
     #[test]
