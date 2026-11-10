@@ -200,17 +200,25 @@ fn bb_event_identity(dedup_key: &str) -> &str {
         .unwrap_or(dedup_key)
 }
 
-/// How much of the provider's identity a BB row names: nothing, the session,
-/// or the session and the turn.
-fn provider_identity_rank(message: &UnifiedMessage) -> u8 {
-    match message
-        .dedup_key
-        .as_deref()
-        .and_then(provider_mirror_from_dedup_key)
-    {
-        None => 0,
-        Some(mirror) if mirror.turn.is_none() => 1,
-        Some(_) => 2,
+/// True when `copy` names provider identity that `kept` lacks without
+/// contradicting what `kept` already names: the session when `kept` names
+/// none, or the turn of the same session.
+fn adds_provider_identity(kept: &UnifiedMessage, copy: &UnifiedMessage) -> bool {
+    fn mirror(message: &UnifiedMessage) -> Option<BbProviderMirror<'_>> {
+        message
+            .dedup_key
+            .as_deref()
+            .and_then(provider_mirror_from_dedup_key)
+    }
+    match (mirror(kept), mirror(copy)) {
+        (None, Some(_)) => true,
+        (Some(kept), Some(copy)) => {
+            kept.turn.is_none()
+                && copy.turn.is_some()
+                && kept.provider == copy.provider
+                && kept.session == copy.session
+        }
+        _ => false,
     }
 }
 
@@ -224,7 +232,8 @@ fn provider_identity_rank(message: &UnifiedMessage) -> u8 {
 /// `provider_thread_id` on copied rows, an older copy may lack
 /// `providerThreadId` in its data, and a thread forked while a turn was
 /// running has the turn's usage row without its `turn/completed` checkpoint.
-/// Either way the kept row is a turn start when any copy was.
+/// A copy that names a different provider session never replaces the kept
+/// row. Either way the kept row is a turn start when any copy was.
 pub(crate) fn dedup_bb_messages(
     messages: impl IntoIterator<Item = UnifiedMessage>,
 ) -> Vec<UnifiedMessage> {
@@ -241,7 +250,7 @@ pub(crate) fn dedup_bb_messages(
                 // that turn id, across threads, so the start may be on the
                 // copy that is dropped. The kept row inherits it.
                 let is_turn_start = kept[index].is_turn_start || message.is_turn_start;
-                if provider_identity_rank(&message) > provider_identity_rank(&kept[index]) {
+                if adds_provider_identity(&kept[index], &message) {
                     kept[index] = message;
                 }
                 kept[index].is_turn_start = is_turn_start;
@@ -1557,6 +1566,58 @@ mod tests {
             );
             assert!(messages[0].is_turn_start);
         }
+    }
+
+    #[test]
+    fn test_copy_naming_another_provider_session_does_not_replace_the_kept_row() {
+        // Same event identity, but the rows disagree on the provider session,
+        // so the later one is not a more complete copy of the first.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("bb.db");
+        let conn = create_current_schema_bb_db(&db_path);
+        insert_thread(&conn, "thr_a", "claude-code", None);
+        insert_thread(&conn, "thr_b", "claude-code", None);
+        insert_event(
+            &conn,
+            "e1",
+            "thr_a",
+            "turn_1",
+            1,
+            "thread/tokenUsage/updated",
+            Some("sess-1"),
+            USAGE_DATA,
+        );
+        insert_event(
+            &conn,
+            "e2",
+            "thr_b",
+            "turn_1",
+            1,
+            "thread/tokenUsage/updated",
+            Some("sess-2"),
+            r#"{"providerThreadId":"sess-2","tokenUsage":{"last":{"totalTokens":150,"inputTokens":100,"outputTokens":50}}}"#,
+        );
+        insert_event(
+            &conn,
+            "e3",
+            "thr_b",
+            "turn_1",
+            2,
+            "turn/completed",
+            Some("sess-2"),
+            r#"{"providerThreadId":"sess-2","status":"completed","providerCheckpointId":"uuid-other"}"#,
+        );
+
+        let messages = parse_bb_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            provider_mirror_from_dedup_key(messages[0].dedup_key.as_deref().unwrap()),
+            Some(BbProviderMirror {
+                provider: BbMirrorProvider::Claude,
+                session: "sess-1",
+                turn: None,
+            })
+        );
     }
 
     #[test]
