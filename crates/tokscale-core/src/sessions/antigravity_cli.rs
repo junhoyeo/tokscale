@@ -2701,9 +2701,10 @@ mod tests {
     }
 
     #[test]
-    fn gen_metadata_scan_that_stops_midway_is_an_unreadable_source() {
-        // `abs` of the smallest integer fails when the row is stepped, the
-        // way a damaged page does: the query prepares and then cannot finish.
+    fn gen_metadata_scan_that_fails_while_stepping_is_an_unreadable_source() {
+        // `abs` of the smallest integer fails when the statement is stepped,
+        // the way a damaged page does: the query prepares and then cannot
+        // finish, whether or not it yielded rows first.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("damaged.db");
         let conn = Connection::open(&path).unwrap();
