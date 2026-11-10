@@ -533,6 +533,18 @@ fn resolve_csrf_token(explicit: Option<&str>) -> Option<String> {
 }
 
 pub const HOOK_SPEC_KEY: &str = "tokscale-session-sync";
+const HOOK_COMMAND: &str = r#"set -eu; token=${ANTIGRAVITY_CSRF_TOKEN-}; address=${ANTIGRAVITY_LS_ADDRESS-}; if [ -z "$token" ] || [ -z "$address" ]; then echo "{}"; exit 0; fi; dir="$HOME/.gemini/antigravity-cli"; mkdir -p "$dir"; umask 077; tmp=$(mktemp "$dir/active_session.env.XXXXXX"); printf "ANTIGRAVITY_CSRF_TOKEN=%s\nANTIGRAVITY_LS_ADDRESS=%s\n" "$token" "$address" > "$tmp"; mv -f "$tmp" "$dir/active_session.env"; echo "{}""#;
+
+fn hook_spec() -> serde_json::Value {
+    serde_json::json!({
+        "SessionStart": [
+            {
+                "type": "command",
+                "command": HOOK_COMMAND
+            }
+        ]
+    })
+}
 
 /// Location of the global Antigravity customization `hooks.json` file.
 pub fn global_hooks_path() -> Option<PathBuf> {
@@ -547,6 +559,9 @@ pub fn global_hooks_path() -> Option<PathBuf> {
 
 /// Checks whether the Tokscale session sync hook is registered in `hooks.json`.
 pub fn is_antigravity_hook_registered() -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
     let Some(path) = global_hooks_path() else {
         return false;
     };
@@ -560,12 +575,19 @@ pub fn is_antigravity_hook_registered() -> bool {
         return false;
     };
     json.as_object()
-        .map(|obj| obj.contains_key(HOOK_SPEC_KEY))
-        .unwrap_or(false)
+        .and_then(|obj| obj.get(HOOK_SPEC_KEY))
+        .is_some_and(|value| value == &hook_spec())
 }
 
 /// Registers the Tokscale session sync hook in `~/.gemini/config/hooks.json`.
 pub fn register_antigravity_hook() -> Result<PathBuf> {
+    register_antigravity_hook_with(|| {})
+}
+
+fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathBuf> {
+    if !cfg!(unix) {
+        anyhow::bail!("Antigravity hook registration is only supported on Unix");
+    }
     let Some(path) = global_hooks_path() else {
         anyhow::bail!("unable to determine home directory");
     };
@@ -575,9 +597,13 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
         .context("hooks.json must have a parent directory")?;
     std::fs::create_dir_all(parent)?;
 
-    let mut root = if path.is_file() {
-        let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str::<serde_json::Value>(&content)
+    let initial_content = if path.is_file() {
+        Some(std::fs::read(&path)?)
+    } else {
+        None
+    };
+    let mut root = if let Some(content) = initial_content.as_deref() {
+        serde_json::from_slice::<serde_json::Value>(content)
             .context("hooks.json contains invalid JSON")?
     } else {
         serde_json::json!({})
@@ -587,18 +613,9 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
         anyhow::bail!("hooks.json root must be a JSON object");
     }
 
-    let hook_spec = serde_json::json!({
-        "SessionStart": [
-            {
-                "type": "command",
-                "command": "set -eu; dir=\"$HOME/.gemini/antigravity-cli\"; mkdir -p \"$dir\"; umask 077; tmp=$(mktemp \"$dir/active_session.env.XXXXXX\"); printf \"ANTIGRAVITY_CSRF_TOKEN=%s\\nANTIGRAVITY_LS_ADDRESS=%s\\n\" \"${ANTIGRAVITY_CSRF_TOKEN-}\" \"${ANTIGRAVITY_LS_ADDRESS-}\" > \"$tmp\"; mv -f \"$tmp\" \"$dir/active_session.env\"; echo \"{}\""
-            }
-        ]
-    });
-
     root.as_object_mut()
         .context("hooks.json root must be a JSON object")?
-        .insert(HOOK_SPEC_KEY.to_string(), hook_spec);
+        .insert(HOOK_SPEC_KEY.to_string(), hook_spec());
 
     let formatted = serde_json::to_string_pretty(&root)?;
     let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
@@ -631,6 +648,16 @@ pub fn register_antigravity_hook() -> Result<PathBuf> {
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e.into());
+    }
+    before_replace();
+    let current_content = if path.is_file() {
+        Some(std::fs::read(&path)?)
+    } else {
+        None
+    };
+    if current_content != initial_content {
+        let _ = std::fs::remove_file(&tmp_path);
+        anyhow::bail!("hooks.json changed during registration; no changes were written");
     }
     if let Err(e) = tokscale_core::fs_atomic::replace_file(&tmp_path, &path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -2140,6 +2167,22 @@ mod tests {
         );
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    #[serial]
+    fn hook_registration_is_rejected_without_writing_on_non_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        let err = register_antigravity_hook().unwrap_err();
+        assert!(err.to_string().contains("only supported on Unix"));
+        assert!(!hooks_file.exists());
+    }
+
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn hook_registration_creates_and_detects_hook_spec() {
@@ -2165,8 +2208,102 @@ mod tests {
         let cmd = session_start[0]["command"].as_str().unwrap();
         assert!(cmd.contains("umask 077"));
         assert!(cmd.contains("mktemp"));
-        assert!(cmd.contains("${ANTIGRAVITY_CSRF_TOKEN-}"));
-        assert!(cmd.contains("${ANTIGRAVITY_LS_ADDRESS-}"));
+        assert!(cmd.contains("token=${ANTIGRAVITY_CSRF_TOKEN-}"));
+        assert!(cmd.contains("address=${ANTIGRAVITY_LS_ADDRESS-}"));
+        assert!(cmd.contains(r#"[ -z "$token" ] || [ -z "$address" ]"#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn incomplete_session_does_not_replace_complete_hook_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        register_antigravity_hook().unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
+        let command = json[HOOK_SPEC_KEY]["SessionStart"][0]["command"]
+            .as_str()
+            .unwrap();
+        let session_file = tmp
+            .path()
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("active_session.env");
+
+        let complete = std::process::Command::new("sh")
+            .args(["-c", command])
+            .env("HOME", tmp.path())
+            .env("ANTIGRAVITY_CSRF_TOKEN", "complete-token")
+            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:45019")
+            .status()
+            .unwrap();
+        assert!(complete.success());
+        let expected = std::fs::read_to_string(&session_file).unwrap();
+
+        let incomplete = std::process::Command::new("sh")
+            .args(["-c", command])
+            .env("HOME", tmp.path())
+            .env_remove("ANTIGRAVITY_CSRF_TOKEN")
+            .env_remove("ANTIGRAVITY_LS_ADDRESS")
+            .status()
+            .unwrap();
+        assert!(incomplete.success());
+        assert_eq!(std::fs::read_to_string(session_file).unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn outdated_hook_command_is_not_reported_as_registered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+        std::fs::write(
+            &hooks_file,
+            serde_json::to_vec(&serde_json::json!({
+                HOOK_SPEC_KEY: {
+                    "SessionStart": [{ "type": "command", "command": "old command" }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        assert!(!is_antigravity_hook_registered());
+        register_antigravity_hook().unwrap();
+        assert!(is_antigravity_hook_registered());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn hook_registration_rejects_a_concurrent_hooks_file_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_file = tmp.path().join("hooks.json");
+        let initial = serde_json::json!({"existing": {"event": []}});
+        std::fs::write(&hooks_file, serde_json::to_vec(&initial).unwrap()).unwrap();
+
+        let concurrent = serde_json::json!({
+            "existing": {"event": []},
+            "other-hook": {"SessionStart": []}
+        });
+        let concurrent_bytes = serde_json::to_vec(&concurrent).unwrap();
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
+        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
+
+        let err = register_antigravity_hook_with(|| {
+            std::fs::write(&hooks_file, &concurrent_bytes).unwrap();
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("changed during registration"));
+        assert_eq!(std::fs::read(&hooks_file).unwrap(), concurrent_bytes);
     }
 
     #[test]
@@ -2188,6 +2325,7 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn hook_registration_fails_on_malformed_json() {

@@ -333,7 +333,24 @@ fn save_cache_at(path: &std::path::Path, data: &[UsageOutput]) {
         "timestamp": timestamp,
         "data": data,
     });
-    let _ = std::fs::write(path, serde_json::to_string(&json).unwrap_or_default());
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let serialized = serde_json::to_vec(&json).map_err(std::io::Error::other)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        use std::io::Write;
+        file.write_all(&serialized)?;
+        file.flush()?;
+        tokscale_core::fs_atomic::replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
 }
 
 pub fn save_cache(data: &[UsageOutput]) {
@@ -854,6 +871,25 @@ mod tests {
         save_cache(&[sample_output("Codex")]);
         assert!(load_cache().is_none());
         clear_cache();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subscription_cache_save_replaces_the_file_instead_of_rewriting_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = cache_path_in(temp.path()).unwrap();
+        save_cache_at(&path, &[sample_output("Codex")]);
+        let open_file = std::fs::File::open(&path).unwrap();
+        let original_inode = open_file.metadata().unwrap().ino();
+        let original_permissions = open_file.metadata().unwrap().permissions();
+
+        save_cache_at(&path, &[sample_output("Copilot")]);
+
+        let replacement = std::fs::metadata(&path).unwrap();
+        assert_ne!(replacement.ino(), original_inode);
+        assert_eq!(replacement.permissions(), original_permissions);
     }
 
     #[test]

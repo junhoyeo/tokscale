@@ -587,12 +587,13 @@ async function submitOldThenNew(client: string) {
 }
 
 describe("POST /api/submit Antigravity family high-water", () => {
-  it("registers antigravity-cli at the generation the CLI declares", () => {
-    // Both re-attributions move a token to a different day and never change
-    // the lifetime total, so no installed generation has to be frozen out.
-    // Registering anything above 1 would instead freeze every submit from
-    // every shipped CLI until the two are bumped in lockstep.
-    expect(SUPPORTED_VERSIONED_PARSERS["antigravity-cli"]).toBe(1);
+  it("registers antigravity-cli at the generation the current CLI declares", () => {
+    // Generation 1 only ever moved a token to a different day. Generation 2
+    // counts the same history differently, so it is registered, and
+    // `planAntigravityTransition` keeps accepting generation 1 from a device
+    // that has not moved on. Registering 2 alone would freeze every submit
+    // from every shipped CLI, which is why the tests below still submit 1.
+    expect(SUPPORTED_VERSIONED_PARSERS["antigravity-cli"]).toBe(2);
   });
 
   it("does not raise the stored total when a session is re-dated per generation", async () => {
@@ -1256,12 +1257,12 @@ describe("POST /api/submit Antigravity family high-water", () => {
 });
 
 describe("POST /api/submit Antigravity source-family re-attribution", () => {
-  it("registers antigravity at the generation the CLI declares", () => {
-    expect(SUPPORTED_VERSIONED_PARSERS.antigravity).toBe(1);
+  it("registers antigravity at the generation the current CLI declares", () => {
+    expect(SUPPORTED_VERSIONED_PARSERS.antigravity).toBe(2);
   });
 
-  it("registers Antigravity IDE Extensions at generation 1", () => {
-    expect(SUPPORTED_VERSIONED_PARSERS["antigravity-extension"]).toBe(1);
+  it("registers Antigravity IDE Extensions at generation 2", () => {
+    expect(SUPPORTED_VERSIONED_PARSERS["antigravity-extension"]).toBe(2);
   });
 
   it("does not count a response again when its source changes to the IDE extension", async () => {
@@ -1543,14 +1544,18 @@ describe("POST /api/submit Antigravity source-family re-attribution", () => {
       "antigravity-extension",
       SESSION_START_DATING,
     );
-    future.scanScope.parserVersions["antigravity-extension"] = 2;
+    const futureGeneration =
+      SUPPORTED_VERSIONED_PARSERS["antigravity-extension"] + 1;
+    future.scanScope.parserVersions["antigravity-extension"] = futureGeneration;
 
     installTx(store);
     mockSubmit(future);
     const futureResponse = await post(future);
     expect(futureResponse.status).toBe(200);
     expect((await futureResponse.json()).metrics.totalTokens).toBe(0);
-    expect(store.device.parserVersions).toEqual({ "antigravity-extension": 2 });
+    expect(store.device.parserVersions).toEqual({
+      "antigravity-extension": futureGeneration,
+    });
     expect(store.days).toHaveLength(0);
 
     const older = submissionBody(
@@ -1563,7 +1568,9 @@ describe("POST /api/submit Antigravity source-family re-attribution", () => {
     expect(olderResponse.status).toBe(200);
     const olderJson = await olderResponse.json();
     expect(olderJson.metrics.totalTokens).toBe(0);
-    expect(store.device.parserVersions["antigravity-extension"]).toBe(2);
+    expect(store.device.parserVersions["antigravity-extension"]).toBe(
+      futureGeneration,
+    );
     expect(store.days).toHaveLength(0);
     expect(
       olderJson.warnings.some((warning: string) =>
@@ -2169,6 +2176,15 @@ describe("POST /api/submit Antigravity family cost floors", () => {
     return response.json();
   }
 
+  function declareRegisteredGeneration(body: ReturnType<typeof submissionBody>) {
+    body.scanScope.parserVersions = Object.fromEntries(
+      ANTIGRAVITY_FAMILY.map((client) => [
+        client,
+        SUPPORTED_VERSIONED_PARSERS[client],
+      ]),
+    );
+  }
+
   it("credits Antigravity tokens when a full-family scan contains an unpriced model", async () => {
     const store = newStore();
     const unpricedSnapshot = (flashTokens: number) =>
@@ -2460,11 +2476,15 @@ describe("POST /api/submit Antigravity family cost floors", () => {
     ];
     await submitFamily(store, v1Body as any);
     expect(storedTokens(store)).toBe(18_998);
+    for (const client of ANTIGRAVITY_FAMILY) {
+      expect(store.device.parserVersions[client]).toBe(1);
+    }
 
     // Step 2: Device upgrades to the v2 parser and submits with scanScope.recountProofs:
     // - input is 500, output is 300, reasoning is 40, cacheWrite is 125, cacheRead is 16000
     // - the 0-token `unknown` phantom turn is dropped (corrected = 0)
     const v2Body = submissionBody("antigravity-cli", []);
+    declareRegisteredGeneration(v2Body);
     v2Body.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
     v2Body.summary = { clients: ["antigravity-cli"] };
     (v2Body as any).contributions = [
@@ -2559,6 +2579,9 @@ describe("POST /api/submit Antigravity family cost floors", () => {
     ).toBe(false);
     expect(storedTokens(store)).toBe(16_965);
     expect(storedCost(store)).toBeCloseTo(1.2, 8);
+    for (const client of ANTIGRAVITY_FAMILY) {
+      expect(store.device.parserVersions[client]).toBe(2);
+    }
     const cell = store.days[0]!.sourceBreakdown["antigravity-cli"]!;
     expect(cell.input).toBe(500);
     expect(cell.output).toBe(300);
@@ -2570,6 +2593,7 @@ describe("POST /api/submit Antigravity family cost floors", () => {
 
     // Step 3: Deleting local history after transitioning to v2 still freezes!
     const shrunkBody = submissionBody("antigravity-cli", []);
+    declareRegisteredGeneration(shrunkBody);
     shrunkBody.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
     shrunkBody.summary = { clients: ["antigravity-cli"] };
     (shrunkBody as any).contributions = [
@@ -2611,6 +2635,7 @@ describe("POST /api/submit Antigravity family cost floors", () => {
 
     // Step 4: A subsequent post-v2 submission cannot attach recount proofs to lower stored v2 history
     const maliciousPostV2Body = submissionBody("antigravity-cli", []);
+    declareRegisteredGeneration(maliciousPostV2Body);
     maliciousPostV2Body.meta.dateRange = { start: "2026-08-10", end: "2026-08-10" };
     maliciousPostV2Body.summary = { clients: ["antigravity-cli"] };
     (maliciousPostV2Body as any).contributions = [
@@ -2677,5 +2702,94 @@ describe("POST /api/submit Antigravity family cost floors", () => {
     ).toBe(true);
     expect(storedTokens(store)).toBe(16_965);
     expect(storedCost(store)).toBeCloseTo(1.2, 8);
+  });
+
+  it("keeps a device on generation 2 from being rolled back by an older CLI or lowered by a later proof", async () => {
+    const DATE = "2026-08-10";
+    const MODEL = "gemini-3.5-flash-high";
+    type Count = {
+      tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number };
+      cost: number;
+      messages: number;
+    };
+    // No cache write, so a forged proof whose previous side equals the stored
+    // generation-2 cell still passes every structural check.
+    const generation1: Count = {
+      tokens: { input: 1632, output: 40, cacheRead: 16000, cacheWrite: 0, reasoning: 300 },
+      cost: 1.5,
+      messages: 1,
+    };
+    const generation2: Count = {
+      tokens: { input: 500, output: 300, cacheRead: 16000, cacheWrite: 0, reasoning: 40 },
+      cost: 1.2,
+      messages: 1,
+    };
+    const lowered: Count = {
+      tokens: { input: 100, output: 300, cacheRead: 16000, cacheWrite: 0, reasoning: 40 },
+      cost: 0.1,
+      messages: 1,
+    };
+    const total = (count: Count) =>
+      Object.values(count.tokens).reduce((sum, n) => sum + n, 0);
+    const body = (
+      count: Count,
+      options: { registered: boolean; proofFrom?: Count },
+    ) => {
+      const built = submissionBody("antigravity-cli", []);
+      if (options.registered) declareRegisteredGeneration(built);
+      built.meta.dateRange = { start: DATE, end: DATE };
+      built.summary = { clients: ["antigravity-cli"] };
+      (built as any).contributions = [
+        {
+          date: DATE,
+          totals: { costIsComplete: true },
+          clients: [{ client: "antigravity-cli", modelId: MODEL, ...count }],
+        },
+      ];
+      if (options.proofFrom) {
+        (built.scanScope as Record<string, unknown>).recountProofs = {
+          "antigravity-cli": {
+            [DATE]: { [MODEL]: { previous: options.proofFrom, corrected: count } },
+          },
+        };
+      }
+      return built as ReturnType<typeof familySnapshotBody>;
+    };
+    const preserved = (json: { warnings?: string[] }) =>
+      (json.warnings ?? []).find((warning) =>
+        warning.includes("Preserved Antigravity sources together"),
+      );
+    const store = newStore();
+
+    await submitFamily(store, body(generation1, { registered: false }));
+    expect(storedTokens(store)).toBe(total(generation1));
+
+    const upgraded = await submitFamily(
+      store,
+      body(generation2, { registered: true, proofFrom: generation1 }),
+    );
+    expect(preserved(upgraded)).toBeUndefined();
+    expect(storedTokens(store)).toBe(total(generation2));
+    expect(storedCost(store)).toBeCloseTo(1.2, 8);
+
+    // An older CLI on the same device still counts the model enum as input.
+    const rolledBack = await submitFamily(
+      store,
+      body(generation1, { registered: false }),
+    );
+    expect(preserved(rolledBack)).toContain("Update the Tokscale CLI");
+    expect(storedTokens(store)).toBe(total(generation2));
+    expect(storedCost(store)).toBeCloseTo(1.2, 8);
+
+    const forged = await submitFamily(
+      store,
+      body(lowered, { registered: true, proofFrom: generation2 }),
+    );
+    expect(preserved(forged)).toBeDefined();
+    expect(storedTokens(store)).toBe(total(generation2));
+    expect(storedCost(store)).toBeCloseTo(1.2, 8);
+    for (const client of ANTIGRAVITY_FAMILY) {
+      expect(store.device.parserVersions[client]).toBe(2);
+    }
   });
 });

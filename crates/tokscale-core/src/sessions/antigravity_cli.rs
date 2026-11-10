@@ -58,7 +58,7 @@
 //! server-supplied name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash
 //! (High)`) and could be localized.
 
-use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
+use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on, SqliteScan};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -132,7 +132,7 @@ fn parse_antigravity_db_file_inner(
     // Quiet: a database without `gen_metadata` is not an Antigravity generation
     // database at all, so there is nothing to warn about.
     let mut rows: Vec<(Option<i64>, Vec<u8>)> = Vec::new();
-    sqlite_for_each_row_on(
+    let scan = sqlite_for_each_row_on(
         &conn,
         path,
         "SELECT idx, data FROM gen_metadata ORDER BY idx",
@@ -144,6 +144,14 @@ fn parse_antigravity_db_file_inner(
             Ok(())
         },
     );
+    // A scan that failed or stopped midway leaves usage unread. The caller
+    // must not declare this client's history complete then: the rest of the
+    // family's snapshot could otherwise replace what this file still holds.
+    let read_complete = match scan {
+        SqliteScan::Ran => true,
+        SqliteScan::NotPrepared => !has_gen_metadata(&conn),
+        SqliteScan::NotOpened | SqliteScan::NotExecuted | SqliteScan::Incomplete => false,
+    };
     let session_models = SessionModels::from_blobs(rows.iter().map(|(_, blob)| blob.as_slice()));
     let ctx = GenContext {
         client,
@@ -183,7 +191,20 @@ fn parse_antigravity_db_file_inner(
         }
     }
 
-    (messages, v1_messages, true)
+    (messages, v1_messages, read_complete)
+}
+
+/// Whether the database has the `gen_metadata` table Antigravity writes. A
+/// lookup that fails counts as present, so the file is reported unread
+/// rather than empty.
+fn has_gen_metadata(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+         WHERE type = 'table' AND name = 'gen_metadata')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
 }
 
 /// Model attribution recovered from the conversation as a whole, for rows whose
@@ -2616,6 +2637,99 @@ mod tests {
         assert!(!ok);
         assert!(v2_messages.is_empty());
         assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn database_without_gen_metadata_is_a_complete_empty_read() {
+        // Not a generation database, so it holds no usage this parser could
+        // miss. Reporting it unread would withhold the whole family's submit.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (id integer);")
+            .unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn unrelated_view_named_gen_metadata_is_a_complete_empty_read() {
+        // Antigravity writes `gen_metadata` as a table. A same-named view
+        // without its columns belongs to some other database.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE notes (body text);
+                 CREATE VIEW gen_metadata AS SELECT body AS summary FROM notes;",
+            )
+            .unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn gen_metadata_that_cannot_be_queried_is_an_unreadable_source() {
+        // The table exists, so the conversation has usage, but the column
+        // this parser selects is gone. A file reported as read while its rows
+        // were not would let the rest of the family's snapshot replace the
+        // history this file still holds.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drifted.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, payload blob);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, payload) VALUES (0, ?1)",
+            params![build_gen_metadata()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(!ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn gen_metadata_scan_that_fails_while_stepping_is_an_unreadable_source() {
+        // `abs` of the smallest integer fails when the statement is stepped,
+        // the way a damaged page does: the query prepares and then cannot
+        // finish, whether or not it yielded rows first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("damaged.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE rows (idx integer, data blob);
+             CREATE VIEW gen_metadata AS
+                 SELECT idx,
+                        CASE WHEN idx = 1 THEN abs(-9223372036854775807 - 1) ELSE data END AS data
+                 FROM rows;",
+        )
+        .unwrap();
+        for idx in 0..2 {
+            conn.execute(
+                "INSERT INTO rows (idx, data) VALUES (?1, ?2)",
+                params![
+                    idx,
+                    build_row(Some("gemini-3-flash-a"), None, &format!("resp-{idx}"))
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let (_, _, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(!ok);
     }
 
     #[test]

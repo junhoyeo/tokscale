@@ -42,7 +42,10 @@ use std::path::Path;
 ///   Qoder slots (`dfmodel`, `gfmodel`, `qmodel`, `qfmodel`) so transcripts
 ///   preserve native model slot identifiers without assuming third-party
 ///   model upgrades.
-pub const QODER_PARSER_BASE_VERSION: u32 = 3;
+/// - Version 4: Treats `qoder/` and `qoder-cn/` model prefixes as client
+///   namespaces so BYOK rows retain their vendor attribution, and stops
+///   attributing orphan transcripts to the `projects` layout directory.
+pub const QODER_PARSER_BASE_VERSION: u32 = 4;
 
 const CLIENT_ID: &str = "qoder";
 const DEFAULT_PROVIDER: &str = "qoder";
@@ -81,15 +84,18 @@ fn canonicalize_qoder_model_and_provider(
 ) -> (String, String) {
     let trimmed_model = raw_model.trim();
     // BYOK models in Qoder can be stored as `<provider>/<type>/<modelId>` or
-    // `<provider>/<modelId>`. Extract the provider prefix before stripping it.
-    let prefix_provider = if trimmed_model.contains('/') {
-        let first_segment = trimmed_model.split('/').next().unwrap_or("");
+    // `<provider>/<modelId>`. Qoder also qualifies models with its client name.
+    let first_segment = trimmed_model.split('/').next().unwrap_or("");
+    let client_qualified = trimmed_model.contains('/')
+        && (first_segment.eq_ignore_ascii_case("qoder")
+            || first_segment.eq_ignore_ascii_case("qoder-cn"));
+    let prefix_provider = if trimmed_model.contains('/') && !client_qualified {
         provider_identity::canonical_provider(first_segment)
     } else {
         None
     };
 
-    let bare_model = if prefix_provider.is_some() {
+    let bare_model = if prefix_provider.is_some() || client_qualified {
         trimmed_model
             .rsplit('/')
             .next()
@@ -142,7 +148,10 @@ fn extract_usage_breakdown(usage: &Value) -> Option<(TokenBreakdown, bool)> {
             .max(0);
         let total = extract_i64(obj.get("totalTokenCount"));
 
-        if prompt + candidates + thoughts + cache_read == 0 {
+        if [prompt, candidates, thoughts, cache_read]
+            .iter()
+            .all(|&tokens| tokens == 0)
+        {
             return None;
         }
 
@@ -224,7 +233,17 @@ fn extract_usage_breakdown(usage: &Value) -> Option<(TokenBreakdown, bool)> {
     .unwrap_or(0)
     .max(0);
 
-    if input + output + cache_read + cache_write + cache_write_1h + reasoning == 0 {
+    if [
+        input,
+        output,
+        cache_read,
+        cache_write,
+        cache_write_1h,
+        reasoning,
+    ]
+    .iter()
+    .all(|&tokens| tokens == 0)
+    {
         return None;
     }
 
@@ -476,8 +495,8 @@ fn workspace_key_from_qoder_path(path: &Path) -> Option<String> {
         current = dir.parent();
     }
 
-    // 3. Fallback to standard parent directory workspace key, filtering out "subagents"
-    workspace_key_from_path(path).filter(|k| k != "subagents")
+    // 3. Fallback to standard parent directory workspace key, filtering out layout directories
+    workspace_key_from_path(path).filter(|k| k != "subagents" && k != "projects")
 }
 
 /// Parse a Qoder or Qoder CN `.jsonl` transcript file into [`UnifiedMessage`] records.
@@ -596,7 +615,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     .and_then(|m| m.get("content"))
                     .or_else(|| value.get("content"));
                 let (reg_chars, reas_chars) = count_content_chars(content_val);
-                context_chars = context_chars.saturating_add(reg_chars + reas_chars);
+                context_chars = context_chars.saturating_add(reg_chars.saturating_add(reas_chars));
 
                 let is_synthetic = value
                     .get("isSynthetic")
@@ -843,7 +862,8 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                             }
                         }
                     }
-                    context_chars = context_chars.saturating_add(out_chars + reas_chars);
+                    context_chars =
+                        context_chars.saturating_add(out_chars.saturating_add(reas_chars));
                     return;
                 }
 
@@ -879,7 +899,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                 };
 
                 let input_snapshot = context_chars;
-                context_chars = context_chars.saturating_add(out_chars + reas_chars);
+                context_chars = context_chars.saturating_add(out_chars.saturating_add(reas_chars));
 
                 let (authoritative_tokens, reports_cache_split) = match usage_breakdown {
                     Some((b, s)) => (Some(b), s),
@@ -1077,10 +1097,10 @@ mod tests {
             )),
             Some("my-repo".to_string())
         );
-        // Direct orphan session file under projects/ (should not resolve to the filename)
+        // Direct orphan session file under projects/ has no project workspace
         assert_eq!(
             workspace_key_from_qoder_path(Path::new("/home/user/.qoder/projects/orphan.jsonl")),
-            Some("projects".to_string())
+            None
         );
         // Subagent outside of projects root: walks up past subagents and session dir to project
         assert_eq!(
@@ -1117,6 +1137,36 @@ mod tests {
         let msg = &messages[0];
         // Without modelSource acting as explicit provider, "deepseek-v3" infers "deepseek"
         assert_eq!(msg.provider_id.as_ref(), "deepseek");
+    }
+
+    #[test]
+    fn test_parse_qoder_client_qualified_models_infer_vendor_provider() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-1","message":{{"id":"msg_1","model":"qoder/claude-sonnet-4-6","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-1","message":{{"id":"msg_2","model":"qoder-cn/deepseek-v3","usage":{{"input_tokens":200,"output_tokens":75}}}}}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].model_id.as_ref(), "claude-sonnet-4-6");
+        assert_eq!(messages[0].provider_id.as_ref(), "anthropic");
+        assert_eq!(
+            messages[0].pricing_model_id.as_deref(),
+            Some("qoder/claude-sonnet-4-6")
+        );
+        assert_eq!(messages[1].model_id.as_ref(), "deepseek-v3");
+        assert_eq!(messages[1].provider_id.as_ref(), "deepseek");
+        assert_eq!(
+            messages[1].pricing_model_id.as_deref(),
+            Some("qoder-cn/deepseek-v3")
+        );
     }
 
     #[test]
@@ -1181,6 +1231,30 @@ mod tests {
         assert_eq!(messages[1].tokens.input, 32000);
         assert_eq!(messages[1].tokens.output, 150);
         assert_eq!(messages[1].tokens.cache_read, 12000);
+    }
+
+    #[test]
+    fn test_parse_qoder_usage_counters_do_not_overflow() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-max","message":{{"id":"msg_openai","model":"deepseek-v3","usage":{{"input_tokens":9223372036854775807,"output_tokens":9223372036854775807}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-max","message":{{"id":"msg_gemini","model":"qwen3-max","usage":{{"promptTokenCount":9223372036854775807,"candidatesTokenCount":9223372036854775807,"thoughtsTokenCount":9223372036854775807,"cachedContentTokenCount":9223372036854775807}}}}}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, i64::MAX);
+        assert_eq!(messages[0].tokens.output, i64::MAX);
+        assert_eq!(messages[1].tokens.input, 0);
+        assert_eq!(messages[1].tokens.output, i64::MAX);
+        assert_eq!(messages[1].tokens.cache_read, i64::MAX);
+        assert_eq!(messages[1].tokens.reasoning, i64::MAX);
     }
 
     #[test]

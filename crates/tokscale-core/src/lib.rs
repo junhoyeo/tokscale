@@ -2606,13 +2606,49 @@ fn parse_all_messages_streaming<S: MessageSink>(
     ) where
         F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
     {
+        parse_cached_lane_deduped_with_fingerprint(
+            scan_result,
+            source_cache,
+            pricing,
+            all_messages,
+            machine_labeler,
+            scan_client,
+            message_cache::SourceFingerprint::check_path_samples_only,
+            parse,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_cached_lane_deduped_with_fingerprint<F, FingerprintFn>(
+        scan_result: &scanner::ScanResult,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        all_messages: &mut Vec<UnifiedMessage>,
+        machine_labeler: &machine_label::MachineLabeler,
+        scan_client: ClientId,
+        fingerprint_from_path: FingerprintFn,
+        parse: F,
+    ) where
+        F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
+        FingerprintFn: Fn(
+                &Path,
+                Option<&message_cache::SourceFingerprint>,
+            ) -> Option<message_cache::FingerprintStatus>
+            + Sync,
+    {
         let cache_identity = message_cache::CacheIdentity::for_client(scan_client);
         let outcomes: Vec<CachedParseOutcome> = scan_result
             .get(scan_client)
             .par_iter()
             .map(|path| {
-                let mut outcome =
-                    load_or_parse_source(cache_identity, path, source_cache, pricing, &parse);
+                let mut outcome = load_or_parse_source_with_fingerprint(
+                    cache_identity,
+                    path,
+                    source_cache,
+                    pricing,
+                    &fingerprint_from_path,
+                    &parse,
+                );
                 machine_labeler.label_messages(path, &mut outcome.messages);
                 outcome
             })
@@ -4456,26 +4492,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::senpi::parse_senpi_file,
     );
 
-    parse_cached_lane_deduped(
+    let mut omp_messages = Vec::new();
+    parse_cached_lane(
         &scan_result,
         &mut source_cache,
         pricing,
-        &mut all_messages,
+        &mut omp_messages,
         &machine_labeler,
         ClientId::Omp,
         sessions::omp::parse_omp_file,
     );
-
-    let omp_attributed =
-        sessions::magpie::attribute_omp_responses(home_dir, use_env_roots, &mut all_messages);
-    if omp_attributed > 0 {
-        for message in &mut all_messages {
-            if message.client == "omp" {
-                message.refresh_derived_fields();
-                apply_pricing_if_available(message, pricing);
-            }
-        }
-    }
+    all_messages.extend(reconcile_omp_responses(
+        home_dir,
+        use_env_roots,
+        omp_messages,
+        pricing,
+    ));
 
     let proma_outcomes: Vec<_> = scan_result
         .get(ClientId::Proma)
@@ -4916,13 +4948,14 @@ fn parse_all_messages_streaming<S: MessageSink>(
     );
 
     // Parse Qoder and Qoder CN JSONL transcripts
-    parse_cached_lane_deduped(
+    parse_cached_lane_deduped_with_fingerprint(
         &scan_result,
         &mut source_cache,
         pricing,
         &mut all_messages,
         &machine_labeler,
         ClientId::Qoder,
+        message_cache::SourceFingerprint::check_qoder_path_with_meta_samples_only,
         sessions::qoder::parse_qoder_file,
     );
 
@@ -8360,12 +8393,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::omp::parse_omp_file(path))
         .collect();
-    let mut omp_seen: HashSet<String> = HashSet::new();
-    let omp_msgs: Vec<ParsedMessage> = omp_msgs_raw
-        .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut omp_seen, message))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
+    let omp_msgs: Vec<ParsedMessage> =
+        reconcile_omp_responses(&home_dir, options.use_env_roots, omp_msgs_raw, None)
+            .iter()
+            .map(unified_to_parsed)
+            .collect();
     let omp_count = omp_msgs.len() as i32;
     counts.set(ClientId::Omp, omp_count);
     messages.extend(omp_msgs);
@@ -9215,6 +9247,48 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
         .dedup_key
         .as_ref()
         .is_none_or(|key| seen_keys.insert(key.clone()))
+}
+
+fn reconcile_omp_responses(
+    home: &str,
+    use_env_roots: bool,
+    mut messages: Vec<UnifiedMessage>,
+    pricing: Option<&pricing::PricingService>,
+) -> Vec<UnifiedMessage> {
+    let mut equivalent_candidates = HashSet::new();
+    messages.retain(|message| {
+        let Some(response_key) = message
+            .dedup_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("omp:response:"))
+        else {
+            return true;
+        };
+        equivalent_candidates.insert((
+            response_key.to_string(),
+            message.model_id.clone(),
+            message.provider_id.clone(),
+            message.message_count,
+            message.model_attribution_conflicted,
+            message.tokens.input,
+            message.tokens.output,
+            message.tokens.cache_read,
+            message.tokens.cache_write,
+            message.tokens.cache_write_1h,
+            message.tokens.reasoning,
+        ))
+    });
+
+    if sessions::magpie::attribute_omp_responses(home, use_env_roots, &mut messages) > 0 {
+        for message in &mut messages {
+            message.refresh_derived_fields();
+            apply_pricing_if_available(message, pricing);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    messages.retain(|message| should_keep_deduped_message(&mut seen, message));
+    messages
 }
 
 type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
@@ -21075,6 +21149,126 @@ mod tests {
             assert_eq!(success_msg.model_id, "gpt-fixture");
             let total_tokens: i64 = messages.iter().map(|m| m.tokens.total()).sum();
             assert_eq!(total_tokens, 225, "usage totals preserved across retry");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_local_clients_attributes_omp_from_magpie() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let sessions = home.join(".omp/agent/sessions/--test-workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("session.jsonl"),
+            concat!(
+                r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#,
+                "\n",
+                r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-local","stopReason":"stop","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(
+            ledger.join("usage.jsonl"),
+            concat!(
+                r#"{"agent":"omp","response_id":"resp-omp-local","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":20,"status":200}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["omp".to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].model_id, "gpt-fixture");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn magpie_rejects_conflicting_omp_response_copies_in_both_file_orders() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        for (case, first_output, second_output, expected_model) in [
+            ("matching-first", 20, 21, "group/auto"),
+            ("conflicting-first", 21, 20, "group/auto"),
+            ("equivalent-copies", 20, 20, "gpt-fixture"),
+        ] {
+            let source_home = tempfile::TempDir::new().unwrap();
+            let home = source_home.path();
+            let sessions = home.join(".omp/agent/sessions/--test-workspace--");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let response_id = format!("resp-{case}");
+            let record = |session: &str, output: i64| {
+                let session = serde_json::json!({
+                    "type": "session",
+                    "version": 3,
+                    "id": session,
+                    "timestamp": "2026-10-01T00:00:00Z",
+                    "cwd": "/work"
+                });
+                let message = serde_json::json!({
+                    "type": "message",
+                    "id": "msg-1",
+                    "timestamp": "2026-10-01T00:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "model": "group/auto",
+                        "provider": "custom-billing",
+                        "responseId": response_id,
+                        "stopReason": "stop",
+                        "usage": {
+                            "input": 100,
+                            "output": output,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 100 + output
+                        }
+                    }
+                });
+                format!("{session}\n{message}\n")
+            };
+            std::fs::write(
+                sessions.join("session-a.jsonl"),
+                record("session-a", first_output),
+            )
+            .unwrap();
+            std::fs::write(
+                sessions.join("session-b.jsonl"),
+                record("session-b", second_output),
+            )
+            .unwrap();
+
+            let ledger = home.join(".config/magpie");
+            std::fs::create_dir_all(&ledger).unwrap();
+            std::fs::write(
+                ledger.join("usage.jsonl"),
+                format!(
+                    r#"{{"agent":"omp","response_id":"{response_id}","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":{first_output},"status":200}}
+"#
+                ),
+            )
+            .unwrap();
+
+            for scan in ["cold", "warm"] {
+                let messages = parse_all_messages_with_pricing(
+                    home.to_str().unwrap(),
+                    &["omp".to_string()],
+                    None,
+                );
+                assert_eq!(messages.len(), 1, "{case} {scan}");
+                assert_eq!(messages[0].tokens.input, 100, "{case} {scan}");
+                assert_eq!(messages[0].tokens.output, first_output, "{case} {scan}");
+                assert_eq!(messages[0].model_id, expected_model, "{case} {scan}");
+            }
         }
     }
 

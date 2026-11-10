@@ -5321,6 +5321,15 @@ const DEVIN_CLI_SUBMISSION_PARSER_VERSION: u32 = 2;
 /// parser cache so the scan can ship the same per-day recount proof used for
 /// Devin CLI; generation 1 stays accepted only until a device transitions.
 const CURSOR_SUBMISSION_PARSER_VERSION: u32 = 2;
+/// Antigravity generation 2 reads the usage fields the way the provider
+/// defines them: the model enum is no longer added to input, response and
+/// thinking output are no longer swapped, and cache writes are counted
+/// (parser cache v1->v2 for all three sources). It counts the same history
+/// differently, so the scan ships a per-day recount proof for the family and
+/// the receiver (`planAntigravityTransition`) applies it at the one submit
+/// that moves a device to this generation. Generation 1 stays accepted only
+/// until then.
+const ANTIGRAVITY_SUBMISSION_PARSER_VERSION: u32 = 2;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5724,6 +5733,9 @@ fn submit_scan_scope(
         .map(|client| {
             let version = match client.as_str() {
                 "amp" => AMP_SUBMISSION_PARSER_VERSION,
+                "antigravity" | "antigravity-cli" | "antigravity-extension" => {
+                    ANTIGRAVITY_SUBMISSION_PARSER_VERSION
+                }
                 "copilot" => COPILOT_SUBMISSION_PARSER_VERSION,
                 "cursor" => CURSOR_SUBMISSION_PARSER_VERSION,
                 "devin-cli" => DEVIN_CLI_SUBMISSION_PARSER_VERSION,
@@ -10616,6 +10628,24 @@ mod tests {
         let scope = submit_scan_scope(Some(&clients), true, true).expect("droid scope");
 
         assert_eq!(scope.parser_versions.get("droid"), Some(&1));
+    }
+
+    /// The receiver registers generation 2 for the whole Antigravity family
+    /// (`SUPPORTED_VERSIONED_PARSERS`) and freezes a family that declares two
+    /// generations at once, so all three sources must move together.
+    #[test]
+    fn submit_scan_scope_declares_the_antigravity_family_generation() {
+        let family = [
+            "antigravity".to_string(),
+            "antigravity-cli".to_string(),
+            "antigravity-extension".to_string(),
+        ];
+        for full_history in [true, false] {
+            let scope = submit_scan_scope(Some(&family), full_history, true).expect("scope");
+            for client in &family {
+                assert_eq!(scope.parser_versions.get(client), Some(&2), "{client}");
+            }
+        }
     }
 
     /// A date-bounded submit still ships the snapshot-integrity clients

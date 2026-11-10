@@ -508,6 +508,24 @@ impl SourceFingerprint {
         )
     }
 
+    pub(crate) fn check_qoder_path_with_meta_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        let related_paths = path.file_stem().and_then(|stem| stem.to_str()).map(|stem| {
+            (
+                ".meta.json".to_string(),
+                path.with_file_name(format!("{stem}.meta.json")),
+            )
+        });
+        Self::check_path_with_related_mode(
+            path,
+            related_paths,
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
     pub(crate) fn check_sqlite_path(
         path: &Path,
         cached: Option<&Self>,
@@ -9003,12 +9021,12 @@ mod tests {
 
     #[test]
     fn test_qoder_parser_version() {
-        assert_eq!(parser_version(ClientId::Qoder), 3);
+        assert_eq!(parser_version(ClientId::Qoder), 4);
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_qoder_v2_shard_invalidates_and_reparses_to_v3() {
+    fn test_qoder_v3_shard_invalidates_and_reparses_to_v4() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -9032,10 +9050,10 @@ mod tests {
         .unwrap();
 
         let current_identity = CacheIdentity::for_client(ClientId::Qoder);
-        assert_eq!(current_identity.parser_version, 3);
+        assert_eq!(current_identity.parser_version, 4);
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
-            parser_version: 2,
+            parser_version: 3,
         };
         let fingerprint = SourceFingerprint::from_path(&source).unwrap();
         let stale_message = UnifiedMessage::new(
@@ -9074,7 +9092,7 @@ mod tests {
         let initial_cache = SourceMessageCache::load();
         assert!(
             initial_cache.get(current_identity, &source).is_none(),
-            "stale v2 entry must not match v3 lookup identity"
+            "stale v3 entry must not match v4 lookup identity"
         );
 
         let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
@@ -9093,10 +9111,57 @@ mod tests {
         let cache = SourceMessageCache::load();
         let rebuilt = cache
             .get(current_identity, &source)
-            .expect("the v3 parse must replace the stale v2 row");
-        assert_eq!(rebuilt.parser_version, 3);
+            .expect("the v4 parse must replace the stale v3 row");
+        assert_eq!(rebuilt.parser_version, 4);
         assert_eq!(rebuilt.messages.len(), 1);
         assert_eq!(rebuilt.messages[0].model_id, "qmodel_preview");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_qoder_meta_sidecar_invalidates_warm_cache() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let subagents_dir = source_home
+            .path()
+            .join(".qoder")
+            .join("projects")
+            .join("sample-project")
+            .join("sess-main")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        let source = subagents_dir.join("agent-abc123.jsonl");
+        let meta = subagents_dir.join("agent-abc123.meta.json");
+        std::fs::write(
+            &source,
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"sess-main","agentId":"abc123","timestamp":"2026-11-07T11:00:00.000Z","message":{"id":"msg_sub_1","model":"deepseek-v3","usage":{"input_tokens":500,"output_tokens":200}}}"#,
+        )
+        .unwrap();
+
+        let parse = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["qoder".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+
+        let initial = parse();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].agent.as_deref(), Some("Abc123"));
+
+        std::fs::write(&meta, r#"{"agentType":"code-reviewer"}"#).unwrap();
+        let added = parse();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].agent.as_deref(), Some("Code Reviewer"));
+
+        std::fs::write(&meta, r#"{"agentType":"security-reviewer"}"#).unwrap();
+        let edited = parse();
+        assert_eq!(edited.len(), 1);
+        assert_eq!(edited[0].agent.as_deref(), Some("Security Reviewer"));
     }
 
     #[test]

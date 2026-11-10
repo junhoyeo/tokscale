@@ -462,7 +462,10 @@ fn action_bar_buttons(app: &App, compact: bool) -> Vec<ActionBarButton> {
             },
             action: ClickAction::CodexStartLogin,
         },
-        ActionBarButton {
+    ];
+    // The hook is a POSIX shell command, so it can only be registered on Unix.
+    if cfg!(unix) {
+        buttons.push(ActionBarButton {
             key: if app.is_antigravity_hook_registered() {
                 if compact {
                     MessageKey::ActionAntigravityLinkedShort
@@ -480,8 +483,8 @@ fn action_bar_buttons(app: &App, compact: bool) -> Vec<ActionBarButton> {
                 ButtonKind::Secondary
             },
             action: ClickAction::AntigravityLinkHook,
-        },
-    ];
+        });
+    }
     if !app.subscription_usage.is_empty() {
         buttons.push(ActionBarButton {
             key: match (app.hide_usage_emails, compact) {
@@ -5602,6 +5605,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_action_bar_does_not_offer_antigravity_hook_registration() {
+        let app = make_app();
+        assert!(action_bar_buttons(&app, false)
+            .iter()
+            .all(|button| !matches!(button.action, ClickAction::AntigravityLinkHook)));
     }
 
     /// A translation must never cost the user a button.

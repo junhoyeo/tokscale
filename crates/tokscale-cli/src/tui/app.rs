@@ -1477,8 +1477,11 @@ impl App {
         let target_path = crate::commands::usage::antigravity::global_hooks_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.gemini/config/hooks.json".to_string());
-        let dialog =
-            ConfirmDialog::antigravity_hook(target_path, self.confirmed_antigravity_hook.clone());
+        let dialog = ConfirmDialog::antigravity_hook(
+            target_path,
+            self.confirmed_antigravity_hook.clone(),
+            self.settings.tui_language,
+        );
         self.dialog_stack.show(Box::new(dialog));
         self.set_status("Confirm Antigravity hook registration");
     }
