@@ -147,7 +147,10 @@ fn extract_usage_breakdown(usage: &Value) -> Option<(TokenBreakdown, bool)> {
             .max(0);
         let total = extract_i64(obj.get("totalTokenCount"));
 
-        if prompt + candidates + thoughts + cache_read == 0 {
+        if [prompt, candidates, thoughts, cache_read]
+            .iter()
+            .all(|&tokens| tokens == 0)
+        {
             return None;
         }
 
@@ -229,7 +232,17 @@ fn extract_usage_breakdown(usage: &Value) -> Option<(TokenBreakdown, bool)> {
     .unwrap_or(0)
     .max(0);
 
-    if input + output + cache_read + cache_write + cache_write_1h + reasoning == 0 {
+    if [
+        input,
+        output,
+        cache_read,
+        cache_write,
+        cache_write_1h,
+        reasoning,
+    ]
+    .iter()
+    .all(|&tokens| tokens == 0)
+    {
         return None;
     }
 
@@ -601,7 +614,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                     .and_then(|m| m.get("content"))
                     .or_else(|| value.get("content"));
                 let (reg_chars, reas_chars) = count_content_chars(content_val);
-                context_chars = context_chars.saturating_add(reg_chars + reas_chars);
+                context_chars = context_chars.saturating_add(reg_chars.saturating_add(reas_chars));
 
                 let is_synthetic = value
                     .get("isSynthetic")
@@ -848,7 +861,8 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                             }
                         }
                     }
-                    context_chars = context_chars.saturating_add(out_chars + reas_chars);
+                    context_chars =
+                        context_chars.saturating_add(out_chars.saturating_add(reas_chars));
                     return;
                 }
 
@@ -884,7 +898,7 @@ pub fn parse_qoder_file(path: &Path) -> Vec<UnifiedMessage> {
                 };
 
                 let input_snapshot = context_chars;
-                context_chars = context_chars.saturating_add(out_chars + reas_chars);
+                context_chars = context_chars.saturating_add(out_chars.saturating_add(reas_chars));
 
                 let (authoritative_tokens, reports_cache_split) = match usage_breakdown {
                     Some((b, s)) => (Some(b), s),
@@ -1216,6 +1230,30 @@ mod tests {
         assert_eq!(messages[1].tokens.input, 32000);
         assert_eq!(messages[1].tokens.output, 150);
         assert_eq!(messages[1].tokens.cache_read, 12000);
+    }
+
+    #[test]
+    fn test_parse_qoder_usage_counters_do_not_overflow() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-max","message":{{"id":"msg_openai","model":"deepseek-v3","usage":{{"input_tokens":9223372036854775807,"output_tokens":9223372036854775807}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"sess-max","message":{{"id":"msg_gemini","model":"qwen3-max","usage":{{"promptTokenCount":9223372036854775807,"candidatesTokenCount":9223372036854775807,"thoughtsTokenCount":9223372036854775807,"cachedContentTokenCount":9223372036854775807}}}}}}"#
+        )
+        .unwrap();
+
+        let messages = parse_qoder_file(file.path());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, i64::MAX);
+        assert_eq!(messages[0].tokens.output, i64::MAX);
+        assert_eq!(messages[1].tokens.input, 0);
+        assert_eq!(messages[1].tokens.output, i64::MAX);
+        assert_eq!(messages[1].tokens.cache_read, i64::MAX);
+        assert_eq!(messages[1].tokens.reasoning, i64::MAX);
     }
 
     #[test]
