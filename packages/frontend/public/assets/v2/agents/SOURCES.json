@@ -267,7 +267,8 @@
     },
     "gh-alibaba.webp": {
       "clients": [
-        "opencodereview"
+        "opencodereview",
+        "qoder"
       ],
       "source": "https://github.com/alibaba.png",
       "readme_row": "OpenCodeReview"
@@ -399,6 +400,14 @@
       "source": "https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png",
       "readme_row": "Proma",
       "retrieved": "2026-10-25"
+    },
+    "gh-get-bb.webp": {
+      "clients": [
+        "bb"
+      ],
+      "source": "https://github.com/get-bb.png",
+      "readme_row": "BB",
+      "retrieved": "2026-11-11"
     }
   }
 }
