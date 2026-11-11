@@ -133,8 +133,8 @@ export default function PrivacyPage() {
         <li>
           <strong>Vercel</strong> — hosting, and Vercel Analytics for aggregate
           page view and interaction statistics (for example, how often the install
-          command is copied); it sets no cookies, and invite links and search text
-          are removed before anything is sent
+          command is copied); it sets no cookies, and invite tokens, group addresses
+          and search text are removed before anything is sent
         </li>
         <li>
           <strong>Neon</strong> — the PostgreSQL database where the data above
