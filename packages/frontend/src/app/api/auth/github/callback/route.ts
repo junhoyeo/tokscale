@@ -10,6 +10,7 @@ import { createSession, setSessionCookie } from "@/lib/auth/session";
 import { db, users } from "@/lib/db";
 import { eq } from "drizzle-orm";
 import { getPublicOrigin } from "@/lib/seo/urls";
+import { trackServerEvent } from "@/lib/analytics/server";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -95,6 +96,7 @@ export async function GET(request: Request) {
         .returning({ id: users.id });
 
       userId = newUser.id;
+      trackServerEvent("signed_up", request);
     }
 
     // Create session

@@ -8,6 +8,7 @@ import {
   type SubmissionData,
 } from "@/lib/validation/submission";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { trackServerEvent } from "@/lib/analytics/server";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -1723,6 +1724,10 @@ export async function POST(request: Request) {
         },
       };
     });
+
+    if (result.isNewSubmission) {
+      trackServerEvent("first_usage_submitted", request);
+    }
 
     // Phase 1 / 1.5 census. Deliberately after the transaction commits, and
     // deliberately unable to affect the response below.
