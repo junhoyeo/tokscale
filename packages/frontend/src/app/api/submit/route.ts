@@ -15,6 +15,7 @@ import {
   hasAdminUnhideOverride,
 } from "@/lib/moderation/withholding";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
+import { trackServerEvent } from "@/lib/analytics/server";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -62,6 +63,8 @@ import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
+import { expireExploreCache } from "@/lib/explore/cache";
+import { advanceExploreCacheRevision } from "@/lib/explore/revision";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 import { createSafeRecord, ownValue } from "@/lib/safeRecord";
 
@@ -1862,6 +1865,7 @@ export async function POST(request: Request) {
                 // lock rather than the submission transaction's BEGIN time.
                 createdAt: sql`clock_timestamp()`,
               });
+              await advanceExploreCacheRevision(tx);
             }
           }
         }
@@ -1914,6 +1918,10 @@ export async function POST(request: Request) {
       applied: result.autoWithheld,
     })}`);
 
+    if (result.isNewSubmission) {
+      trackServerEvent("first_usage_submitted", request);
+    }
+
     // Phase 1 / 1.5 census. Deliberately after the transaction commits, and
     // deliberately unable to affect the response below.
     await recordRatchetCensus({
@@ -1930,9 +1938,12 @@ export async function POST(request: Request) {
       revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
       revalidateTag(`user-rank:${usernameCacheKey}`, "max");
-      if (result.autoWithheld && "revalidatePath" in nextCache && typeof nextCache.revalidatePath === "function") {
-        nextCache.revalidatePath("/");
-        nextCache.revalidatePath("/leaderboard");
+      if (result.autoWithheld) {
+        expireExploreCache();
+        if ("revalidatePath" in nextCache && typeof nextCache.revalidatePath === "function") {
+          nextCache.revalidatePath("/");
+          nextCache.revalidatePath("/leaderboard");
+        }
       }
     } catch (e) {
       console.error("Public cache invalidation failed:", e);

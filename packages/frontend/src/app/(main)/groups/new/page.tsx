@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { Navigation } from "@/components/layout/Navigation";
-import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 import { getSession } from "@/lib/auth/session";
 import CreateGroupClient from "./CreateGroupClient";
 
@@ -17,7 +17,7 @@ export default async function NewGroupPage() {
       <main className="service-main" id="main-content">
         <CreateGroupClient />
       </main>
-      <ServiceFooter />
+      <PublicFooter />
     </div>
   );
 }

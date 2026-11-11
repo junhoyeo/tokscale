@@ -1,0 +1,144 @@
+{
+  "sources": [
+    {
+      "id": "src_cerebras_s1_2026_04_17",
+      "url": "https://www.sec.gov/Archives/edgar/data/2021728/000162828026025762/cerebras-sx1april2026.htm",
+      "publisher": "SEC EDGAR (Cerebras Systems Inc.)",
+      "type": "sec_filing",
+      "title": "Cerebras registration statement on Form S-1, April 17, 2026",
+      "publishedAt": "2026-04-17",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001628280-26-025762",
+        "cik": "0002021728",
+        "filedAt": "2026-04-17"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_cerebras_424b4_2026_05_14",
+      "url": "https://www.sec.gov/Archives/edgar/data/2021728/000162828026035214/cerebras-424b4.htm",
+      "publisher": "SEC EDGAR (Cerebras Systems Inc.)",
+      "type": "sec_filing",
+      "title": "Cerebras final prospectus (Form 424B4) for its initial public offering, dated May 13, 2026",
+      "publishedAt": "2026-05-13",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "424B4",
+        "accession": "0001628280-26-035214",
+        "cik": "0002021728",
+        "filedAt": "2026-05-14"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_cerebras_8k_2026_05_15",
+      "url": "https://www.sec.gov/Archives/edgar/data/2021728/000162828026035605/closing8-k.htm",
+      "publisher": "SEC EDGAR (Cerebras Systems Inc.)",
+      "type": "sec_filing",
+      "title": "Cerebras Form 8-K, May 15, 2026 (completion of the initial public offering)",
+      "publishedAt": "2026-05-15",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-035605",
+        "cik": "0002021728",
+        "filedAt": "2026-05-15",
+        "periodOfReport": "2026-05-15"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_cerebras_ipo_2026",
+    "slug": "cerebras-ipo-2026",
+    "kind": "ipo",
+    "types": [
+      "ipo"
+    ],
+    "title": "Cerebras initial public offering",
+    "summary": "Cerebras sold Class A shares in its initial public offering on the Nasdaq Global Select Market, including the underwriters' full option to buy more shares. Gross proceeds were $6.4 billion.",
+    "date": "2026-05-15",
+    "dates": {
+      "filed": "2026-04-17",
+      "completed": "2026-05-15"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_cerebras",
+        "roles": [
+          "issuer"
+        ],
+        "note": "Cerebras Systems Inc."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "gross",
+        "label": "Gross proceeds",
+        "measure": "ipo_proceeds",
+        "value": 6400000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-05-15",
+        "to": "org_cerebras",
+        "sourceId": "src_cerebras_8k_2026_05_15",
+        "quote": "The gross proceeds to the Company from the initial public offering were $6.4 billion, before deducting underwriting discounts and commissions and estimated offering expenses payable by the Company."
+      },
+      {
+        "id": "price",
+        "label": "Offering price per Class A share",
+        "measure": "price_per_share",
+        "value": 185,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-05-15",
+        "sourceId": "src_cerebras_8k_2026_05_15",
+        "quote": "On May 15, 2026, the Company completed its initial public offering of an aggregate of 34,500,000 shares of Class A Common Stock at a price to the public of $185.00 per share, which includes the exercise in full by the underwriters of their option to purchase from the Company an additional 4,500,000 shares of Class A Common Stock."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "shares",
+        "label": "Class A shares sold, including the underwriters' option",
+        "measure": "shares",
+        "value": 34500000,
+        "basis": "exact",
+        "sourceId": "src_cerebras_8k_2026_05_15",
+        "quote": "On May 15, 2026, the Company completed its initial public offering of an aggregate of 34,500,000 shares of Class A Common Stock at a price to the public of $185.00 per share, which includes the exercise in full by the underwriters of their option to purchase from the Company an additional 4,500,000 shares of Class A Common Stock."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Listing",
+        "text": "Class A shares listed on the Nasdaq Global Select Market under the symbol CBRS.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "We have been approved to list our Class A common stock on the Nasdaq Global Select Market under the symbol \"CBRS,\" and this offering is contingent upon the listing of our Class A common stock on the Nasdaq Global Select Market."
+      },
+      {
+        "label": "Underwriters",
+        "text": "Morgan Stanley, Citigroup and Barclays acted as representatives of the underwriters.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "the underwriters named below, for whom Morgan Stanley & Co. LLC, Citigroup Global Markets Inc., and Barclays Capital Inc. are acting as representatives"
+      },
+      {
+        "label": "Estimated net proceeds",
+        "text": "The prospectus estimated net proceeds of about $5,408.5 million, or $6,221.4 million with the option exercised in full.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "We estimate that we will receive net proceeds from this offering of approximately $5,408.5 million (or $6,221.4 million if the underwriters exercise their over-allotment option in full), based upon the initial public offering price of $185.00 per share of Class A common stock, and after deducting underwriting discounts and commissions and estimated offering expenses payable by us."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_cerebras_s1_2026_04_17",
+      "src_cerebras_424b4_2026_05_14",
+      "src_cerebras_8k_2026_05_15"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

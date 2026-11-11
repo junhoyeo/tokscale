@@ -40,13 +40,14 @@
   --color-badge-bg: rgba(133, 202, 255, 0.15);
   --color-badge-text: #85caff;
 
-  /* Compact service UI. These are additive so the landing page and the
-     shared local visualizer can keep their existing theme contract. */
-  --service-canvas: #0d1018;
-  --service-surface: #131822;
-  --service-surface-muted: #191f2b;
-  --service-border: rgba(255, 255, 255, 0.09);
-  --service-border-strong: rgba(255, 255, 255, 0.16);
+  /* Compact service UI (leaderboard, models, capital, profiles, benchmarks).
+     Same black canvas, dark cards and thin rules as the v2 landing below; the
+     names stay separate so the shared local visualizer keeps its own theme. */
+  --service-canvas: var(--v2-canvas);
+  --service-surface: var(--v2-surface);
+  --service-surface-muted: var(--v2-surface-raised);
+  --service-border: var(--v2-rule);
+  --service-border-strong: var(--v2-rule-strong);
   --service-text: #f4f7fb;
   --service-text-muted: #a8b3c5;
   --service-accent: #2f8fff;
@@ -56,14 +57,98 @@
   --service-focus: #75b6ff;
   --background: #000;
   --foreground: #ffffff;
+
+  /* tokscale.ai v2. Additive: black canvas, thin rules, one accent blue,
+     cyan only for numbers that need emphasis. --font-display comes from
+     next/font in app/layout.tsx. */
+  --v2-canvas: #000000;
+  --v2-surface: #07090d;
+  --v2-surface-raised: #0d1016;
+  --v2-rule: rgba(255, 255, 255, 0.1);
+  --v2-rule-strong: rgba(255, 255, 255, 0.18);
+  --v2-text: #f4f7fb;
+  --v2-text-muted: #a3adbd;
+  --v2-text-subtle: #848d9c;
+  --v2-accent: #0073ff;
+  /* Filled controls with white text: #0073ff is 4.3:1 with white, this is 5.2:1. */
+  --v2-accent-strong: #0066e6;
+  --v2-accent-soft: rgba(0, 115, 255, 0.14);
+  --v2-numeric: #53d1f3;
+  --v2-focus: #75b6ff;
+  --v2-font-display: var(--font-display), "Iowan Old Style", Georgia, serif;
+  --v2-font-ui: var(--font-figtree), system-ui, -apple-system, sans-serif;
+  --v2-font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Faint blue light from the top edge, as behind the home hero. Paint it in
+     the hero itself or in a 720px band at the top of a page shell. */
+  --v2-glow: radial-gradient(52% 70% at 50% 0%, rgba(22, 64, 160, 0.26), rgba(22, 64, 160, 0) 72%);
+  /* Hover background of a row or card header that is one link. */
+  --v2-row-hover: rgba(255, 255, 255, 0.04);
 }
 
-* {
+/* Row links. In a table or list where each row is one thing with its own
+   page, the whole row is the link to that page. Mark the row with
+   data-row-link and its primary link (usually the name) with
+   data-row-primary: the link's ::after covers the row, so the row stays one
+   real link (middle click, cmd-click and keyboard work), and the other links
+   and controls in the row sit above it. A <tr> is the containing block in
+   Chromium, WebKit and Gecko. A sticky cell is a containing block too, so a
+   row whose primary link is in a sticky cell adds a data-row-cover link (see
+   the /models table). */
+[data-row-link] {
+  position: relative;
+  cursor: pointer;
+}
+
+[data-row-link]:hover,
+[data-row-link]:has([data-row-primary]:focus-visible) {
+  background-color: var(--v2-row-hover);
+}
+
+[data-row-primary]::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+
+[data-row-link] [data-row-primary]:focus-visible {
+  outline: none;
+}
+
+/* The ring sits just outside the row, so it never covers text that runs to the row's edge. Rows
+   inside a clipping box (a scroller, a card) set --row-focus-offset: -2px. */
+[data-row-link] [data-row-primary]:focus-visible::after {
+  outline: 2px solid var(--v2-focus);
+  outline-offset: var(--row-focus-offset, 0px);
+}
+
+/* Mouse-only cover: aria-hidden and out of the tab order. */
+[data-row-cover] {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+}
+
+[data-row-link] :is(a:not([data-row-primary], [data-row-cover]), button, summary, input, select, textarea) {
+  position: relative;
+  z-index: 2;
+}
+
+/* react-toastify loads after this file and sets --toastify-font-family to
+   sans-serif on :root. Set it on the container so toasts stay on Figtree. */
+.Toastify {
+  --toastify-font-family: var(--font-figtree), system-ui, -apple-system, sans-serif;
+}
+
+/* Figtree is set on the document root and inherited. It used to be forced on
+   every element with `* { font-family: ... !important }`, which blocked any
+   component from choosing another face (for example the v2 display serif).
+   Form controls inherit through the global style in lib/providers. */
+html {
   font-family:
     var(--font-figtree),
     system-ui,
     -apple-system,
-    sans-serif !important;
+    sans-serif;
 }
 
 body {
@@ -134,7 +219,7 @@ a:hover {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--service-canvas);
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
   color: var(--service-text);
 }
 

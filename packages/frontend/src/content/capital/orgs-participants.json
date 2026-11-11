@@ -1,0 +1,187 @@
+{
+  "sources": [
+    {
+      "id": "src_wikidata_q108704611",
+      "url": "https://www.wikidata.org/wiki/Q108704611",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q108704611 (Greenoaks)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    }
+  ],
+  "orgs": [
+    {
+      "id": "org_altimeter_capital",
+      "slug": "altimeter-capital",
+      "name": "Altimeter Capital",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "description": "Technology investment firm that invests in public and private companies.",
+      "ids": {
+        "wikidata": "Q107575346",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/altimeter-capital.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_dragoneer",
+      "slug": "dragoneer",
+      "name": "Dragoneer",
+      "legalNames": [],
+      "aliases": [
+        "Dragoneer Investment Group"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "description": "Growth-stage investment firm.",
+      "ids": {
+        "wikidata": "Q107575343",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/dragoneer.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_greenoaks",
+      "slug": "greenoaks",
+      "name": "Greenoaks",
+      "legalNames": [],
+      "aliases": [
+        "Greenoaks Capital"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "hq": {
+        "country": "US"
+      },
+      "founded": {
+        "date": "2012-11-04",
+        "sourceId": "src_wikidata_q108704611"
+      },
+      "website": "https://www.greenoaks.com",
+      "description": "Global investment firm.",
+      "ids": {
+        "wikidata": "Q108704611",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/greenoaks.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_capital_group",
+      "slug": "capital-group",
+      "name": "Capital Group",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "asset-manager"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Los Angeles",
+        "country": "US"
+      },
+      "website": "https://www.capgroup.com",
+      "description": "Investment management company.",
+      "ids": {
+        "wikidata": "Q505275",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/capital-group.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_d1_capital_partners",
+      "slug": "d1-capital-partners",
+      "name": "D1 Capital Partners",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "description": "Investment firm that invests in public and private companies.",
+      "ids": {
+        "wikidata": "Q106946633",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/d1-capital-partners.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_xn",
+      "slug": "xn",
+      "name": "XN",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "description": "Investment firm.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/xn.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    }
+  ]
+}

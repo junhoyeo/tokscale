@@ -1,0 +1,142 @@
+{
+  "sources": [
+    {
+      "id": "src_coreweave_8k_2026_09_22",
+      "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000432/crwv-20260917.htm",
+      "publisher": "SEC EDGAR (CoreWeave, Inc.)",
+      "type": "sec_filing",
+      "title": "CoreWeave Form 8-K, September 22, 2026 (2.875% convertible senior notes due 2033)",
+      "publishedAt": "2026-09-22",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001769628-26-000432",
+        "cik": "0001769628",
+        "filedAt": "2026-09-22",
+        "periodOfReport": "2026-09-17"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_coreweave_ex99_2026_09_22",
+      "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000432/ex991pricing.htm",
+      "publisher": "SEC EDGAR (CoreWeave, Inc.)",
+      "type": "sec_filing",
+      "title": "CoreWeave press release, September 18, 2026 (Exhibit 99.1): pricing of convertible senior notes",
+      "publishedAt": "2026-09-18",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001769628-26-000432",
+        "cik": "0001769628",
+        "filedAt": "2026-09-22",
+        "periodOfReport": "2026-09-17"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_coreweave_convertible_notes_2026",
+    "slug": "coreweave-convertible-notes-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "CoreWeave $4.2 billion convertible senior notes due 2033",
+    "summary": "CoreWeave sold $4.2 billion of convertible senior notes due 2033 in an upsized private offering, including the initial purchasers' full option. The notes can convert into cash, Class A shares or both, at CoreWeave's election.",
+    "date": "2026-09-22",
+    "dates": {
+      "announced": "2026-09-18",
+      "closed": "2026-09-22"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_coreweave",
+        "roles": [
+          "issuer",
+          "borrower"
+        ],
+        "note": "CoreWeave, Inc."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "notes",
+        "label": "2.875% Convertible Senior Notes due 2033",
+        "measure": "debt_raised",
+        "value": 4200000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-22",
+        "to": "org_coreweave",
+        "term": {
+          "through": "2033-04-01"
+        },
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "On September 22, 2026, CoreWeave, Inc. (\"CoreWeave\") completed its previously announced upsized private offering of $4.2 billion aggregate principal amount of its 2.875% Convertible Senior Notes due 2033 (the \"Notes\") to persons reasonably believed to be qualified institutional buyers pursuant to Rule 144A under the Securities Act of 1933, as amended (the \"Securities Act\"), including $500 million aggregate principal amount of Notes pursuant to the exercise in full of the initial purchasers' option to purchase additional Notes."
+      },
+      {
+        "id": "option",
+        "label": "Notes sold through the initial purchasers' option (included)",
+        "measure": "debt_raised",
+        "value": 500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-22",
+        "to": "org_coreweave",
+        "partOf": "notes",
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "On September 22, 2026, CoreWeave, Inc. (\"CoreWeave\") completed its previously announced upsized private offering of $4.2 billion aggregate principal amount of its 2.875% Convertible Senior Notes due 2033 (the \"Notes\") to persons reasonably believed to be qualified institutional buyers pursuant to Rule 144A under the Securities Act of 1933, as amended (the \"Securities Act\"), including $500 million aggregate principal amount of Notes pursuant to the exercise in full of the initial purchasers' option to purchase additional Notes."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Net proceeds",
+        "text": "$4,137.0 million after the initial purchasers' discounts, before other offering expenses.",
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "The net proceeds from the offering were $4,137.0 million, after deducting the initial purchasers' discounts but before deducting estimated offering expenses payable by CoreWeave."
+      },
+      {
+        "label": "Interest",
+        "text": "2.875% a year, paid every April 1 and October 1.",
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "The Notes bear interest at a rate of 2.875% per year, payable semiannually in arrears on April 1 and October 1 of each year"
+      },
+      {
+        "label": "Maturity",
+        "text": "April 1, 2033, unless converted, redeemed or repurchased earlier.",
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "The Notes will mature on April 1, 2033 (the \"maturity date\"), unless earlier converted, redeemed or repurchased."
+      },
+      {
+        "label": "Conversion",
+        "text": "Initial conversion price of about $97.85 per Class A share.",
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "The conversion rate will initially be 10.2194 shares of CoreWeave's Class A common stock per $1,000 principal amount of Notes (equivalent to an initial conversion price of approximately $97.85 per share of CoreWeave's Class A common stock)."
+      },
+      {
+        "label": "Upsized",
+        "text": "The offering grew from the $3.0 billion first announced.",
+        "sourceId": "src_coreweave_ex99_2026_09_22",
+        "quote": "The offering was upsized from the previously announced offering of $3.0 billion aggregate principal amount of Notes."
+      },
+      {
+        "label": "Capped calls",
+        "text": "CoreWeave spent about $566.2 million on capped call transactions.",
+        "sourceId": "src_coreweave_8k_2026_09_22",
+        "quote": "The cost of the Capped Call Transactions was approximately $566.2 million."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_coreweave_8k_2026_09_22",
+      "src_coreweave_ex99_2026_09_22"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

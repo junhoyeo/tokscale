@@ -1,0 +1,166 @@
+/* Plain CSS so the methodology prose ships in the HTML with no client JS. */
+.prose {
+  max-width: 760px;
+  color: var(--service-text);
+}
+
+.title {
+  margin: 0 0 8px;
+  font-family: var(--font-display, inherit) !important;
+  font-size: 2rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.updated {
+  margin: 0 0 32px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+}
+
+.lead {
+  margin: 0 0 32px;
+  color: var(--service-text-muted);
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.prose h2 {
+  margin: 40px 0 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--service-border);
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  scroll-margin-top: 96px;
+}
+
+.prose p,
+.prose li {
+  color: var(--service-text-muted);
+  font-size: 0.9375rem;
+  line-height: 1.7;
+}
+
+.prose p {
+  margin: 0 0 14px;
+}
+
+.prose ul {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.prose li {
+  margin-bottom: 6px;
+}
+
+.prose strong {
+  color: var(--service-text);
+  font-weight: 600;
+}
+
+.prose code {
+  padding: 1px 5px;
+  border: 1px solid var(--service-border);
+  border-radius: 4px;
+  background: var(--service-surface-muted);
+  color: var(--service-text);
+  font-size: 0.8125rem;
+}
+
+.prose a {
+  color: var(--service-accent-hover);
+  text-decoration: none;
+}
+
+.prose a:hover {
+  text-decoration: underline !important;
+}
+
+.prose a:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--service-focus);
+  outline-offset: 3px;
+}
+
+.prose .toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.prose .toc li {
+  margin: 0;
+}
+
+.toc a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.metrics {
+  margin: 0;
+  border-top: 1px solid var(--service-border);
+}
+
+.metric {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 4px 24px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--service-border);
+  scroll-margin-top: 96px;
+}
+
+.metric dt {
+  color: var(--service-text);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.metric dd {
+  margin: 0;
+}
+
+.metric dd p:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .title {
+    font-size: 1.75rem;
+  }
+
+  .metric {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .prose p,
+  .prose li {
+    font-size: 1rem;
+  }
+
+  .toc a {
+    min-height: 44px;
+  }
+}
+
+@media (pointer: coarse) {
+  .toc a,
+  .prose p a {
+    min-height: 44px;
+  }
+
+  .toc a {
+    display: inline-flex;
+    align-items: center;
+  }
+}

@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => {
   const getSession = vi.fn();
   const getSessionFromHeader = vi.fn();
   const authenticatePersonalToken = vi.fn();
+  const advanceExploreCacheRevision = vi.fn(async () => {});
   const revalidateTag = vi.fn();
   const revalidatePath = vi.fn();
   const revalidateUserGroupLeaderboards = vi.fn();
@@ -57,6 +58,7 @@ const mockState = vi.hoisted(() => {
     getSession,
     getSessionFromHeader,
     authenticatePersonalToken,
+    advanceExploreCacheRevision,
     revalidateTag,
     revalidatePath,
     revalidateUserGroupLeaderboards,
@@ -69,6 +71,7 @@ const mockState = vi.hoisted(() => {
       getSession.mockReset();
       getSessionFromHeader.mockReset();
       authenticatePersonalToken.mockReset();
+      advanceExploreCacheRevision.mockReset();
       revalidateTag.mockReset();
       revalidatePath.mockReset();
       revalidateUserGroupLeaderboards.mockReset();
@@ -89,6 +92,8 @@ const mockState = vi.hoisted(() => {
     },
   };
 });
+
+vi.mock("@/lib/explore/revision", () => ({ advanceExploreCacheRevision: mockState.advanceExploreCacheRevision }));
 
 vi.mock("next/cache", () => ({
   revalidateTag: mockState.revalidateTag,
@@ -220,6 +225,7 @@ describe("DELETE /api/settings/submitted-data", () => {
     });
     expect(mockState.db.delete).toHaveBeenCalledTimes(2);
     expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockState.advanceExploreCacheRevision).toHaveBeenCalledWith(mockState.db);
     expect(mockState.db.delete).toHaveBeenNthCalledWith(1, mockState.tables.submissions);
     expect(mockState.db.delete).toHaveBeenNthCalledWith(2, mockState.tables.submittedDevices);
     expect(mockState.eq).toHaveBeenNthCalledWith(1, "submissions.userId", "user-1");
@@ -229,18 +235,19 @@ describe("DELETE /api/settings/submitted-data", () => {
       left: "submissions.userId",
       right: "user-1",
     });
-    expect(mockState.revalidateTag).toHaveBeenCalledTimes(7);
+    expect(mockState.revalidateTag).toHaveBeenCalledTimes(8);
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "explore", { expire: 0 });
     expect(mockState.revalidateUserGroupLeaderboards).toHaveBeenCalledWith("user-1");
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledTimes(1);
     expect(mockState.revalidateUsernamePaths).toHaveBeenCalledWith("Alice");
     expect(mockState.revalidatePath).toHaveBeenCalledTimes(8);
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(1, "leaderboard", "max");
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "user:alice", "max");
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user-rank", "max");
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(4, "user-rank:alice", "max");
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(5, "embed-user:alice", "max");
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(6, "embed-user:alice:tokens", "max");
-    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(7, "embed-user:alice:cost", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(2, "leaderboard", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(3, "user:alice", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(4, "user-rank", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(5, "user-rank:alice", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(6, "embed-user:alice", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(7, "embed-user:alice:tokens", "max");
+    expect(mockState.revalidateTag).toHaveBeenNthCalledWith(8, "embed-user:alice:cost", "max");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(1, "/leaderboard");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(2, "/profile");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/u/Alice");
@@ -276,6 +283,16 @@ describe("DELETE /api/settings/submitted-data", () => {
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(3, "/u/alice");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(4, "/api/users/alice");
     expect(mockState.revalidatePath).toHaveBeenNthCalledWith(5, "/api/embed/alice/svg");
+  });
+
+  it("fails the mutation when its transactional privacy revision cannot advance", async () => {
+    mockState.getSession.mockResolvedValue({ id: "user-1", username: "alice", displayName: "Alice", avatarUrl: null });
+    mockState.setDeletedRows([{ id: "deleted-1" }]);
+    mockState.advanceExploreCacheRevision.mockRejectedValueOnce(new Error("revision unavailable"));
+    const response = await DELETE(createRequest());
+    expect(response.status).toBe(500);
+    expect(mockState.db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockState.revalidateTag).not.toHaveBeenCalled();
   });
 
   it("returns 500 when deletion fails", async () => {

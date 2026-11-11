@@ -10,6 +10,8 @@ const mockState = vi.hoisted(() => {
   const revalidateUsernamePaths = vi.fn();
   const revalidateUserGroupLeaderboards = vi.fn();
   const getLeaderboardData = vi.fn();
+  const expireExploreCache = vi.fn();
+  const advanceExploreCacheRevision = vi.fn();
 
   const db = {
     transaction: vi.fn(),
@@ -24,6 +26,8 @@ const mockState = vi.hoisted(() => {
     revalidateUsernamePaths,
     revalidateUserGroupLeaderboards,
     getLeaderboardData,
+    expireExploreCache,
+    advanceExploreCacheRevision,
     db,
     reset() {
       authenticatePersonalToken.mockReset();
@@ -34,6 +38,8 @@ const mockState = vi.hoisted(() => {
       revalidateUsernamePaths.mockReset();
       revalidateUserGroupLeaderboards.mockReset();
       getLeaderboardData.mockReset();
+      expireExploreCache.mockReset();
+      advanceExploreCacheRevision.mockReset();
       db.transaction.mockReset();
     },
   };
@@ -107,6 +113,14 @@ vi.mock("@/lib/groups/cache", () => ({
 
 vi.mock("@/lib/leaderboard/getLeaderboard", () => ({
   getLeaderboardData: mockState.getLeaderboardData,
+}));
+
+vi.mock("@/lib/explore/cache", () => ({
+  expireExploreCache: mockState.expireExploreCache,
+}));
+
+vi.mock("@/lib/explore/revision", () => ({
+  advanceExploreCacheRevision: mockState.advanceExploreCacheRevision,
 }));
 
 type ModuleExports = typeof import("../../src/app/api/submit/route");
@@ -360,6 +374,19 @@ describe("POST /api/submit - ledger withholding", () => {
     expect(mockState.revalidatePath).toHaveBeenCalledWith("/");
     expect(mockState.revalidatePath).toHaveBeenCalledWith("/leaderboard");
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"applied":true'));
+  });
+
+  it("advances and expires the explore cache only for a successful hide transition", async () => {
+    const ctx = await submit(excessiveOutput);
+    expect(mockState.advanceExploreCacheRevision).toHaveBeenCalledOnce();
+    expect(mockState.advanceExploreCacheRevision).toHaveBeenCalledWith(ctx.tx);
+    expect(mockState.expireExploreCache).toHaveBeenCalledOnce();
+
+    mockState.advanceExploreCacheRevision.mockClear();
+    mockState.expireExploreCache.mockClear();
+    await submit({ ...excessiveOutput, usersUpdateReturnedRows: [] });
+    expect(mockState.advanceExploreCacheRevision).not.toHaveBeenCalled();
+    expect(mockState.expireExploreCache).not.toHaveBeenCalled();
   });
 
   it("atomically hides physically impossible single-message token volume (1+ billion tokens / 1 msg)", async () => {

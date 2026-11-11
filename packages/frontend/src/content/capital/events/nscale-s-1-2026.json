@@ -1,0 +1,114 @@
+{
+  "sources": [
+    {
+      "id": "src_nscale_s1_2026_09_18",
+      "url": "https://www.sec.gov/Archives/edgar/data/2110365/000119312526395475/ck0002110365-20260918.htm",
+      "publisher": "SEC EDGAR (Nscale Limited)",
+      "type": "sec_filing",
+      "title": "Nscale Limited registration statement on Form S-1, September 18, 2026",
+      "publishedAt": "2026-09-18",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001193125-26-395475",
+        "cik": "0002110365",
+        "filedAt": "2026-09-18"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_nscale_s_1_2026",
+    "slug": "nscale-s-1-2026",
+    "kind": "filing",
+    "types": [
+      "registration"
+    ],
+    "title": "Nscale files for a US initial public offering",
+    "summary": "Nscale filed a registration statement for an initial public offering and plans to list its ordinary shares on the New York Stock Exchange. The filing does not yet give the offering size or the price range.",
+    "date": "2026-09-18",
+    "dates": {
+      "filed": "2026-09-18"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_nscale",
+        "roles": [
+          "issuer",
+          "filer"
+        ],
+        "note": "Nscale Limited"
+      }
+    ],
+    "amounts": [],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Listing plan",
+        "text": "Nscale plans to apply to list its ordinary shares on the NYSE under the symbol NSCL.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "We intend to apply to list our ordinary shares on the New York Stock Exchange (\"NYSE\") under the symbol \"NSCL\"."
+      },
+      {
+        "label": "Name change",
+        "text": "Before the offering, Nscale Limited will re-register as a public limited company named Nscale plc.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "Prior to the consummation of this offering, Nscale Limited will re-register as a public limited company and change its legal name to Nscale plc."
+      },
+      {
+        "label": "Lead bookrunners",
+        "text": "Goldman Sachs, J.P. Morgan and Morgan Stanley.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "Lead Bookrunners Goldman Sachs & Co. LLC* J.P. Morgan* Morgan Stanley"
+      },
+      {
+        "label": "Contracted value",
+        "text": "About $2.6 billion of active and $103.4 billion of active and contracted total contract value as of August 31, 2026.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "As of August 31, 2026, we had approximately $2.6 billion of active and $103.4 billion of active and contracted TCV under long-term take-or-pay contracts with customers, compared to $0.5 billion of active and $38.0 billion of active and contracted TCV as of December 31, 2025."
+      },
+      {
+        "label": "GPUs",
+        "text": "About 25,000 active GPUs and 461,000 active and contracted GPUs as of August 31, 2026.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "As of August 31, 2026, our infrastructure portfolio included approximately 25,000 active GPUs and 461,000 active and contracted GPUs"
+      },
+      {
+        "label": "Capacity",
+        "text": "About 1.37 GW of active and contracted capacity as of August 31, 2026.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "approximately 1.37 GW of active and contracted capacity"
+      },
+      {
+        "label": "Earlier funding",
+        "text": "Nscale says it raised over $3.3 billion through its series financing.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "raised over $3.3 billion through our series financing"
+      },
+      {
+        "label": "Origin",
+        "text": "Nscale was spun out from Arkon Energy in May 2024.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "In May 2024, Nscale was spun out from Arkon Energy."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_nscale_anthropic_2026",
+        "note": "Described in the same registration statement."
+      },
+      {
+        "type": "related",
+        "event": "evt_nscale_microsoft_2026",
+        "note": "Described in the same registration statement."
+      }
+    ],
+    "sourceIds": [
+      "src_nscale_s1_2026_09_18"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

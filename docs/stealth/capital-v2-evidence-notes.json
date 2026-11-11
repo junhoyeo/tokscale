@@ -1,0 +1,259 @@
+{
+ "spacex_10q": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026052535/spcx-20260630.htm",
+  "seen": [
+   "On February 2, 2026 (\"xAI Merger Date\"), the Company completed its acquisition of X.AI Holdings Corp. (\"xAI\"), pursuant to which xAI became a wholly-owned subsidiary of the Company",
+   "on March 28, 2025, xAI completed its acquisition of X Holdings Corp.",
+   "Note 18 - Segments ... three operating and reportable segments: (i) Space, (ii) Connectivity, and (iii) AI",
+   "Three Months Ended June 30, 2026 Space Connectivity AI Total Reportable Segments Revenue $ 962 $ 4,291 $ 2,561 $ 7,814 (USD millions)",
+   "Purchases of property, plant, and equipment ... ( 28,476 ) ( 6,965 ) (six months ended June 30, 2026 vs 2025, USD millions)"
+  ]
+ },
+ "crusoe_form_d": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1924674/000192467426000002/primary_doc.xml",
+  "filed": "2026-09-17",
+  "fields": {
+   "primaryIssuer.yearOfInc.withinFiveYears": "true",
+   "primaryIssuer.yearOfInc.value": "2022",
+   "offeringData.industryGroup.industryGroupType": "Other",
+   "offeringData.issuerSize.revenueRange": "Decline to Disclose",
+   "offeringData.federalExemptionsExclusions.item": "06b",
+   "offeringData.typeOfFiling.newOrAmendment.isAmendment": "false",
+   "offeringData.typeOfFiling.dateOfFirstSale.value": "2026-08-31",
+   "offeringData.durationOfOffering.moreThanOneYear": "false",
+   "offeringData.typesOfSecuritiesOffered.isEquityType": "true",
+   "offeringData.businessCombinationTransaction.isBusinessCombinationTransaction": "false",
+   "offeringData.businessCombinationTransaction.clarificationOfResponse": "",
+   "offeringData.minimumInvestmentAccepted": "0",
+   "offeringData.salesCompensationList": "",
+   "offeringData.offeringSalesAmounts.totalOfferingAmount": "3901017922",
+   "offeringData.offeringSalesAmounts.totalAmountSold": "3108543889",
+   "offeringData.offeringSalesAmounts.totalRemaining": "792474033",
+   "offeringData.offeringSalesAmounts.clarificationOfResponse": "The Total Offering Amount and Total Amount Sold include the amount of certain previously issued simple agreements for future equity.",
+   "offeringData.investors.hasNonAccreditedInvestors": "false",
+   "offeringData.investors.totalNumberAlreadyInvested": "108",
+   "offeringData.salesCommissionsFindersFees.salesCommissions.dollarAmount": "0",
+   "offeringData.salesCommissionsFindersFees.findersFees.dollarAmount": "0",
+   "offeringData.salesCommissionsFindersFees.clarificationOfResponse": "",
+   "offeringData.useOfProceeds.grossProceedsUsed.dollarAmount": "0",
+   "offeringData.useOfProceeds.clarificationOfResponse": "",
+   "offeringData.signatureBlock.authorizedRepresentative": "false",
+   "offeringData.signatureBlock.signature.issuerName": "Crusoe Inc.",
+   "offeringData.signatureBlock.signature.signatureName": "Jamey Seely",
+   "offeringData.signatureBlock.signature.nameOfSigner": "Jamey Seely",
+   "offeringData.signatureBlock.signature.signatureTitle": "Chief Legal Officer and Secretary",
+   "offeringData.signatureBlock.signature.signatureDate": "2026-09-17"
+  }
+ },
+ "ark_venture_nport": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1905088/000094040026036464/primary_doc.xml",
+  "repPdEnd": "2026-07-31",
+  "netAssets": "1184177830.74",
+  "positions_seen": [
+   {
+    "name": "Databricks, Inc.",
+    "shares": 27921.0,
+    "valUSD": 7324052.44,
+    "implied_per_share": 262.31,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Lambda, Inc.",
+    "shares": 180483.0,
+    "valUSD": 6858354.0,
+    "implied_per_share": 38.0,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Crusoe Inc.",
+    "shares": 119035.0,
+    "valUSD": 26925717.0,
+    "implied_per_share": 226.2,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "OpenAI Group PBC",
+    "shares": 10646.0,
+    "valUSD": 7219178.22,
+    "implied_per_share": 678.11,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "OpenAI Group PBC",
+    "shares": 16294.0,
+    "valUSD": 11049153.67,
+    "implied_per_share": 678.11,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Databricks, Inc.",
+    "shares": 33333.0,
+    "valUSD": 8743692.56,
+    "implied_per_share": 262.31,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Databricks, Inc.",
+    "shares": 39474.0,
+    "valUSD": 10354559.15,
+    "implied_per_share": 262.31,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Figure AI Inc.",
+    "shares": 189096.0,
+    "valUSD": 30255360.0,
+    "implied_per_share": 160.0,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "SPACE EXPLORATION TECHNOLOGIES CORP",
+    "shares": 923640.0,
+    "valUSD": 100094866.8,
+    "implied_per_share": 108.37,
+    "fairValLevel": "1"
+   },
+   {
+    "name": "Perplexity AI, Inc.",
+    "shares": 60810.0,
+    "valUSD": 3347304.69,
+    "implied_per_share": 55.05,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Anthropic, Inc.",
+    "shares": 89078.0,
+    "valUSD": 49614780.24,
+    "implied_per_share": 556.98,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Lambda, Inc.",
+    "shares": 277631.0,
+    "valUSD": 10549978.0,
+    "implied_per_share": 38.0,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "OpenAI Group PBC, Series C",
+    "shares": 72707.0,
+    "valUSD": 49303474.64,
+    "implied_per_share": 678.11,
+    "fairValLevel": "3"
+   },
+   {
+    "name": "Studio Type One Soul II LLC (OpenAI)",
+    "shares": 5797.101,
+    "valUSD": 3456711.62,
+    "implied_per_share": 596.28,
+    "fairValLevel": "3"
+   }
+  ]
+ },
+ "anthropic_series_h_newsroom": {
+  "url": "https://www.anthropic.com/news/series-h",
+  "published": "2026-05-28",
+  "seen": [
+   "Anthropic has raised $65 billion in Series H funding led by Altimeter Capital, Dragoneer, Greenoaks, and Sequoia Capital, valuing the company at $965 billion post-money.",
+   "The round was co-led by Capital Group, Coatue, D1 Capital Partners, GIC, ICONIQ, and XN.",
+   "It also includes $15 billion of previously committed investments from hyperscalers, including $5 billion from Amazon.",
+   "our run-rate revenue crossed $47 billion earlier this month."
+  ]
+ },
+ "coreweave_openai_8k": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1769628/000119312525216497/d17274d8k.htm",
+  "filed": "2025-09-25",
+  "seen": [
+   "On September 23, 2025, CoreWeave, Inc. ... and OpenAI OpCo, LLC ... entered into a new order form ... under the existing Master Services Agreement ... dated as of May 8, 2025",
+   "OpenAI has committed to pay the Company up to approximately $6.5 billion through May 31, 2031 under the Order Form."
+  ]
+ },
+ "akamai_anthropic_8k": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1086222/000119312526401048/d288154d8k.htm",
+  "filed": "2026-09-24",
+  "seen": [
+   "On September 18, 2026, Akamai Technologies, Inc. ... and Anthropic, PBC ... entered into Project Plan 2 and Project Plan 3 ... under the existing Master Services Agreement ... dated as of May 5, 2026",
+   "Anthropic has committed to pay the Company approximately $11.6 billion in the aggregate under the Project Plans. Each Project Plan has an initial seven-year term",
+   "the Company issued to Anthropic a warrant ... to purchase up to 387,051 shares ... of the Company\u2019s Series B Non-Voting Convertible Preferred Stock ... at an exercise price of $2,226.60 per Warrant Share"
+  ]
+ },
+ "terawulf_anthropic_8k": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1083301/000110465926080583/tm2619468d1_8k.htm",
+  "filed": "2026-07-06",
+  "seen": [
+   "Raylan Data LLC ... entered into a 20-year lease agreement ... with Anthropic PBC ... as tenant.",
+   "the Landlord will provide Anthropic with approximately 401 MW of critical IT load for high-performance computing (\u201cHPC\u201d) operations at the Company\u2019s data center campus located in Hawesville, Kentucky"
+  ]
+ },
+ "broadcom_anthropic_8k": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1730168/000119312526144028/d87999d8k.htm",
+  "filed": "2026-04-06",
+  "seen": [
+   "Broadcom, Google and Anthropic PBC (\u201cAnthropic\u201d) have expanded their current strategic collaboration under which Anthropic, beginning in 2027, will access through Broadcom approximately 3.5 gigawatts as part of the multiple gigawatts of next generation TPU-based AI compute capacity committed by Anthropic."
+  ]
+ },
+ "nscale_s1": {
+  "url": "https://efts.sec.gov/LATEST/search-index?q=%22Anthropic%22&forms=S-1&ciks=0002110365",
+  "seen": [
+   "NSCALE Ltd (CIK 0002110365) S-1 filed 2026-09-18; exhibit ck0002110365-ex10_25.htm matches \"Anthropic\"; earlier DRS 2026-02-17 and DRS/A x3"
+  ]
+ },
+ "anthropic_s1_search": {
+  "url": "https://efts.sec.gov/LATEST/search-index?q=%22Anthropic%2C+PBC%22&forms=S-1",
+  "seen": [
+   "9 hits, none filed by Anthropic itself (NSCALE, SpaceX, Idea Acquisition Corp., Figma). No public Anthropic S-1 found on 2026-10-20."
+  ]
+ },
+ "edgar_spv_noise": {
+  "url": "https://efts.sec.gov/LATEST/search-index?keysTyped=anthropic",
+  "seen": [
+   "79 entity hits; top 10 are SPVs such as \"WU Anthropic LP\", \"Hiive Anthropic Series I a Series of Hiive Anthropic LLC\", \"HII Anthropic-01, a Series of HII Anthropic, LLC\""
+  ]
+ },
+ "vendor_total_raised_discrepancy_anthropic": {
+  "seen": {
+   "PitchBook https://pitchbook.com/profiles/company/466959-97": "FAQ: \"Anthropic has raised $127B.\"",
+   "Tracxn https://tracxn.com/d/companies/anthropic/__SzoxXDMin-NK5tKB7ks8yHr6S9Mz68pjVCzFEcGFZ08": "\"Total Funding $132B in 19 rounds\"; \"Post Money Valuation $380B as on Jun 01, 2026\"",
+   "Epoch AI https://epoch.ai/data/ai_companies.csv": "\"Total equity funding\" 139404000000 (CC BY 4.0)",
+   "CB Insights https://www.cbinsights.com/company/anthropic": "\"Total Raised $203.455B\"; \"Stage Debt - II | Alive\"; \"Last Raised $42B | 20 days ago\"",
+   "Sacra https://sacra.com/c/anthropic/": "header \"FUNDING $6.98B 2024\"; \"VALUATION $965.00B 2026\""
+  }
+ },
+ "epoch_double_count_example": {
+  "url": "https://epoch.ai/data/ai_companies_funding_rounds.csv",
+  "seen": [
+   "Row \"Amazon Anthropic April 2026\" close 2026-04-20, $5B equity, Type Primary, Confidence Likely",
+   "Row Series H close 2026-05-28 $65B equity at $965B post (source anthropic.com/news/series-h), which per Anthropic \"includes $15 billion of previously committed investments from hyperscalers, including $5 billion from Amazon\"",
+   "Series G note: \"This round also includes a portion of the previously announced investments from Microsoft and NVIDIA.\""
+  ]
+ },
+ "nebius_microsoft_6k": {
+  "url": "https://www.sec.gov/Archives/edgar/data/1513845/000110465925088312/tm2525580d1_ex99-1.htm",
+  "filed": "2025-09-08",
+  "seen": [
+   "Nebius announces multi-billion dollar agreement with Microsoft for AI infrastructure (EX-99.1, Sep 8, 2025)",
+   "6-K body: \"... GPU infrastructure capacity in tranches ... at its new data center in Vineland, New Jersey ... over a five-year term.\"",
+   "6-K body: \"the total contract value is about $17.4 billion through 2031. Microsoft may also acquire additional services and/or capacity under the Agreement, which would increase the total contract value to about $19.4 billion.\""
+  ],
+  "url_6k": "https://www.sec.gov/Archives/edgar/data/1513845/000110465925088312/tm2525580d1_6k.htm"
+ },
+ "anthropic_amazon_2026_04_20": {
+  "url": "https://www.anthropic.com/news/anthropic-amazon-compute",
+  "published": "2026-04-20",
+  "seen": [
+   "Anthropic and Amazon expand collaboration for up to 5 gigawatts of new compute (Published Apr 20, 2026)",
+   "We are committing more than $100 billion over the next ten years to AWS technologies, securing up to 5GW of new capacity to train and run Claude.",
+   "Amazon is investing $5 billion in Anthropic today, with up to an additional $20 billion in the future.",
+   "This builds on the $8 billion Amazon has previously invested.",
+   "Our run-rate revenue has now surpassed $30 billion, up from approximately $9 billion at the end of 2025."
+  ]
+ },
+ "openai_2026_03_round": {
+  "url": "https://openai.com/index/accelerating-the-next-phase-ai/",
+  "seen": [
+   "SoftBank co-led the round alongside a16z, D. ... (sentence truncated in our text extraction)",
+   "For the first time, we extended participation to investors through bank channels, raising over $3 billion from individual investors.",
+   "We have also expanded our existing revolving credit facility to approximately $4.7 billion"
+  ]
+ }
+}

@@ -1,0 +1,110 @@
+{
+  "sources": [
+    {
+      "id": "src_crusoe_form_d_2026_09_17",
+      "url": "https://www.sec.gov/Archives/edgar/data/1924674/000192467426000002/primary_doc.xml",
+      "publisher": "SEC EDGAR (Crusoe Inc.)",
+      "type": "sec_filing",
+      "title": "Crusoe Inc. Form D, filed September 17, 2026",
+      "publishedAt": "2026-09-17",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "D",
+        "accession": "0001924674-26-000002",
+        "cik": "0001924674",
+        "filedAt": "2026-09-17"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_crusoe_form_d_2026",
+    "slug": "crusoe-form-d-2026",
+    "kind": "filing",
+    "types": [
+      "form_d"
+    ],
+    "title": "Crusoe Form D for an equity offering",
+    "summary": "Crusoe filed a Form D notice for an equity offering that began on August 31, 2026. The amounts include earlier simple agreements for future equity (SAFEs). The filing does not name a round or a valuation.",
+    "date": "2026-09-17",
+    "dates": {
+      "filed": "2026-09-17"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_crusoe",
+        "roles": [
+          "issuer",
+          "filer"
+        ],
+        "note": "Crusoe Inc."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "offering",
+        "label": "Total offering amount",
+        "measure": "form_d_offering_amount",
+        "value": 3901017922,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-09-17",
+        "to": "org_crusoe",
+        "sourceId": "src_crusoe_form_d_2026_09_17",
+        "quote": "<totalOfferingAmount>3901017922</totalOfferingAmount>"
+      },
+      {
+        "id": "sold",
+        "label": "Total amount sold",
+        "measure": "form_d_amount_sold",
+        "value": 3108543889,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-09-17",
+        "to": "org_crusoe",
+        "sourceId": "src_crusoe_form_d_2026_09_17",
+        "quote": "<totalAmountSold>3108543889</totalAmountSold>"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "investors",
+        "label": "Investors who have already invested",
+        "measure": "investors",
+        "value": 108,
+        "basis": "exact",
+        "sourceId": "src_crusoe_form_d_2026_09_17",
+        "quote": "<totalNumberAlreadyInvested>108</totalNumberAlreadyInvested>"
+      }
+    ],
+    "facts": [
+      {
+        "label": "First sale",
+        "text": "August 31, 2026.",
+        "sourceId": "src_crusoe_form_d_2026_09_17",
+        "quote": "<dateOfFirstSale> <value>2026-08-31</value> </dateOfFirstSale>"
+      },
+      {
+        "label": "SAFEs included",
+        "text": "Both amounts include earlier simple agreements for future equity.",
+        "sourceId": "src_crusoe_form_d_2026_09_17",
+        "quote": "The Total Offering Amount and Total Amount Sold include the amount of certain previously issued simple agreements for future equity."
+      },
+      {
+        "label": "Security type",
+        "text": "Equity.",
+        "sourceId": "src_crusoe_form_d_2026_09_17",
+        "quote": "<isEquityType>true</isEquityType>"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_crusoe_form_d_2026_09_17"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

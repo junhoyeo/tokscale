@@ -1,0 +1,117 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_series_f",
+      "url": "https://www.anthropic.com/news/anthropic-raises-series-f-at-usd183b-post-money-valuation",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic raises $13B Series F at $183B post-money valuation",
+      "publishedAt": "2025-09-02",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_series_f_2025",
+    "slug": "anthropic-series-f-2025",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "Anthropic Series F",
+    "summary": "Anthropic raised a $13 billion Series F round led by ICONIQ and co-led by Fidelity Management & Research Company and Lightspeed Venture Partners. The round valued Anthropic at $183 billion post-money.",
+    "roundLabel": "Series F",
+    "date": "2025-09-02",
+    "dates": {
+      "announced": "2025-09-02"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_iconiq",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "co_lead"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_coatue",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_gic",
+        "roles": [
+          "investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series F equity",
+        "measure": "equity_raised",
+        "value": 13000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2025-09-02",
+        "to": "org_anthropic",
+        "sourceId": "src_anthropic_series_f",
+        "quote": "Anthropic has completed a Series F fundraising of $13 billion led by ICONIQ."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 183000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-09-02",
+        "sourceId": "src_anthropic_series_f",
+        "quote": "This financing values Anthropic at $183 billion post-money."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Co-leads",
+        "text": "Fidelity Management & Research Company and Lightspeed Venture Partners co-led the round with ICONIQ.",
+        "sourceId": "src_anthropic_series_f",
+        "quote": "Along with ICONIQ, the round was co-led by Fidelity Management & Research Company and Lightspeed Venture Partners."
+      },
+      {
+        "label": "Other named investors",
+        "text": "Altimeter, Baillie Gifford, affiliated funds of BlackRock, Blackstone, Coatue, D1 Capital Partners, General Atlantic, General Catalyst, GIC, Growth Equity at Goldman Sachs Alternatives, Insight Partners, Jane Street, Ontario Teachers' Pension Plan, Qatar Investment Authority, TPG, T. Rowe Price Associates, Inc., T. Rowe Price Investment Management, Inc., WCM Investment Management, and XN.",
+        "sourceId": "src_anthropic_series_f",
+        "quote": "Significant investors in this round include Altimeter, Baillie Gifford, affiliated funds of BlackRock, Blackstone, Coatue, D1 Capital Partners, General Atlantic, General Catalyst, GIC, Growth Equity at Goldman Sachs Alternatives, Insight Partners, Jane Street, Ontario Teachers' Pension Plan, Qatar Investment Authority, TPG, T. Rowe Price Associates, Inc., T. Rowe Price Investment Management, Inc., WCM Investment Management, and XN."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_anthropic_series_f"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

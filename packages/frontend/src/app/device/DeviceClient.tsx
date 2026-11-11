@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import styled from "styled-components";
+import { trackEvent } from "@/lib/analytics/events";
 
 interface User {
   id: string;
@@ -17,6 +18,8 @@ const Container = styled.div`
   justify-content: center;
   padding-left: 16px;
   padding-right: 16px;
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  color: var(--service-text);
 `;
 
 const LoadingContainer = styled.div`
@@ -24,10 +27,12 @@ const LoadingContainer = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  color: var(--service-text);
 `;
 
 const LoadingText = styled.div`
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const CardWrapper = styled.div`
@@ -38,9 +43,9 @@ const CardWrapper = styled.div`
 const Card = styled.div`
   border-radius: 16px;
   border: 1px solid;
-  border-color: var(--color-border-default);
+  border-color: var(--service-border);
   padding: 32px;
-  background-color: var(--color-bg-default);
+  background-color: var(--service-surface);
 `;
 
 const Header = styled.div`
@@ -58,8 +63,8 @@ const IconBox = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(to bottom right, #53d1f3, #3bc4e8);
-  box-shadow: 0 10px 15px -3px rgba(83, 209, 243, 0.25);
+  background: var(--v2-accent-strong);
+  box-shadow: 0 10px 24px -6px rgba(0, 115, 255, 0.35);
 `;
 
 const Icon = styled.svg`
@@ -71,12 +76,12 @@ const Icon = styled.svg`
 const Title = styled.h1`
   font-size: 24px;
   font-weight: bold;
-  color: var(--color-fg-default);
+  color: var(--service-text);
 `;
 
 const Subtitle = styled.p`
   margin-top: 8px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const SignInContainer = styled.div`
@@ -85,7 +90,7 @@ const SignInContainer = styled.div`
 
 const SignInText = styled.p`
   margin-bottom: 24px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const SignInButton = styled.a`
@@ -96,8 +101,8 @@ const SignInButton = styled.a`
   padding: 12px 24px;
   font-weight: 500;
   border-radius: 12px;
-  background-color: var(--color-fg-default);
-  color: var(--color-bg-default);
+  background-color: var(--service-text);
+  color: var(--v2-canvas);
   transition: opacity 0.2s;
   text-decoration: none;
 
@@ -125,24 +130,24 @@ const SuccessIconBox = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: rgba(83, 209, 243, 0.1);
+  background-color: var(--v2-accent-soft);
 `;
 
 const SuccessIcon = styled.svg`
   width: 32px;
   height: 32px;
-  color: #53d1f3;
+  color: var(--v2-focus);
 `;
 
 const SuccessTitle = styled.h2`
   font-size: 20px;
   font-weight: 600;
   margin-bottom: 8px;
-  color: var(--color-fg-default);
+  color: var(--service-text);
 `;
 
 const SuccessText = styled.p`
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const Form = styled.form``;
@@ -154,7 +159,7 @@ const FormGroup = styled.div`
 const FormText = styled.p`
   text-align: center;
   margin-bottom: 16px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const Input = styled.input`
@@ -162,17 +167,16 @@ const Input = styled.input`
   padding: 16px;
   text-align: center;
   font-size: 24px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   letter-spacing: 0.3em;
   border: 1px solid;
-  border-color: var(--color-border-default);
+  border-color: var(--service-border-strong);
   border-radius: 12px;
-  background-color: var(--color-bg-elevated);
-  color: var(--color-fg-default);
+  background-color: var(--service-canvas);
+  color: var(--service-text);
 
   &:focus {
     outline: none;
-    box-shadow: 0 0 0 2px var(--color-primary);
+    box-shadow: 0 0 0 2px var(--v2-focus);
     border-color: transparent;
   }
 
@@ -194,7 +198,7 @@ const SubmitButton = styled.button`
   color: white;
   font-weight: 500;
   border-radius: 12px;
-  background-color: var(--color-primary);
+  background-color: var(--v2-accent-strong);
   border: none;
   cursor: pointer;
   transition: opacity 0.2s;
@@ -213,12 +217,12 @@ const UserInfoText = styled.p`
   text-align: center;
   font-size: 14px;
   margin-top: 16px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const Username = styled.span`
   font-weight: 500;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 export default function DeviceClient() {
@@ -276,14 +280,14 @@ export default function DeviceClient() {
 
   if (isLoading) {
     return (
-      <LoadingContainer style={{ backgroundColor: "var(--color-bg-default)" }}>
+      <LoadingContainer>
         <LoadingText>Loading...</LoadingText>
       </LoadingContainer>
     );
   }
 
   return (
-    <Container style={{ backgroundColor: "var(--color-bg-default)" }}>
+    <Container>
       <CardWrapper>
         <Card>
           <Header>
@@ -310,7 +314,10 @@ export default function DeviceClient() {
               <SignInText>
                 Sign in with GitHub to authorize the CLI.
               </SignInText>
-              <SignInButton href="/api/auth/github?returnTo=/device">
+              <SignInButton
+                href="/api/auth/github?returnTo=/device"
+                onClick={() => trackEvent("sign_in_clicked", { location: "device" })}
+              >
                 <GitHubIcon fill="currentColor" viewBox="0 0 24 24">
                   <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
                 </GitHubIcon>

@@ -1,0 +1,126 @@
+{
+  "sources": [
+    {
+      "id": "src_sb_energy_s1_2026_09_01",
+      "url": "https://www.sec.gov/Archives/edgar/data/2133037/000162828026059639/sbenergy-sx1.htm",
+      "publisher": "SEC EDGAR (SB Energy, Inc.)",
+      "type": "sec_filing",
+      "title": "SB Energy registration statement on Form S-1, filed September 1, 2026",
+      "publishedAt": "2026-08-31",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001628280-26-059639",
+        "cik": "0002133037",
+        "filedAt": "2026-09-01"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_sb_energy_nvidia_investment_2026",
+    "slug": "sb-energy-nvidia-investment-2026",
+    "kind": "financing",
+    "types": [
+      "strategic_investment"
+    ],
+    "title": "NVIDIA invests in SB Energy",
+    "summary": "NVIDIA agreed to invest $3.0 billion in SB Energy. It prepaid $1.5 billion under a forward contract and agreed to buy $1.5 billion of non-voting Class N shares in a private placement when the planned IPO closes.",
+    "date": "2026-08-17",
+    "dates": {
+      "signed": "2026-08-17",
+      "filed": "2026-09-01"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_sb_energy",
+        "roles": [
+          "issuer"
+        ],
+        "note": "SB Energy, Inc."
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "NVIDIA Corporation"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "total",
+        "label": "NVIDIA investment in total",
+        "measure": "equity_investment",
+        "value": 3000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "signed",
+        "asOf": "2026-08-17",
+        "from": "org_nvidia",
+        "to": "org_sb_energy",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "reflecting an investment from NVIDIA of $3.0 billion in total between the Prepaid Forward Contract and the Share Purchase Agreement"
+      },
+      {
+        "id": "prepaid",
+        "label": "Prepaid forward contract (funded through Energy Global)",
+        "measure": "equity_investment",
+        "value": 1500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-08-17",
+        "from": "org_nvidia",
+        "to": "org_sb_energy",
+        "partOf": "total",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "NVIDIA funded the full $1.5 billion under the Prepaid Forward Contract on August 17, 2026, and Energy Global then contributed those proceeds to us."
+      },
+      {
+        "id": "placement",
+        "label": "Private placement of Class N shares at the IPO",
+        "measure": "equity_investment",
+        "value": 1500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "signed",
+        "asOf": "2026-08-17",
+        "from": "org_nvidia",
+        "to": "org_sb_energy",
+        "condition": "Only at the closing of SB Energy's IPO, subject to customary closing conditions",
+        "partOf": "total",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "\"Concurrent Private Placement\" means the private placement of Class N common stock to NVIDIA Corporation under the Share Purchase Agreement dated August 17, 2026, to be effected simultaneously with the closing of this offering, assuming the satisfaction of certain customary closing conditions, at a number of shares equal to $1.5 billion divided by the per-share initial public offering price before underwriting discounts and expenses, rounded down to the nearest whole share."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Prepaid forward terms",
+        "text": "NVIDIA prepaid for Class N shares to be delivered at the IPO price before underwriting discounts and expenses, multiplied by 90%.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "On August 17, 2026, Energy Global entered into the Prepaid Forward Contract with NVIDIA under which NVIDIA prepaid $1.5 billion to Energy Global for our delivery of Class N common stock at the per-share initial public offering price before underwriting discounts and expenses, multiplied by 90%."
+      },
+      {
+        "label": "Class N shares",
+        "text": "Non-voting Class N shares convert one-for-one into common stock when transferred to a non-affiliate.",
+        "sourceId": "src_sb_energy_s1_2026_09_01",
+        "quote": "Each share of Class N common stock is convertible one-for-one into common stock automatically upon transfer to a non-affiliate."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_sb_energy_openai_lease_2026",
+        "note": "NVIDIA is also the residual value guarantor at the PORTS-Pike campus."
+      }
+    ],
+    "sourceIds": [
+      "src_sb_energy_s1_2026_09_01"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

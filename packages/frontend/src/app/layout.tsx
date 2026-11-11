@@ -1,9 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { connection } from "next/server";
-import { JetBrains_Mono, Figtree } from "next/font/google";
+import { JetBrains_Mono, Figtree, Instrument_Serif } from "next/font/google";
 import NextTopLoader from "nextjs-toploader";
 import { ToastContainer } from "react-toastify";
-import { Analytics } from "@vercel/analytics/next";
+import { WebAnalytics } from "@/components/analytics/WebAnalytics";
 import { Providers } from "@/lib/providers";
 import { getRootMetadata } from "@/lib/seo/rootMetadata";
 import "./globals.css";
@@ -11,6 +11,14 @@ import "react-toastify/dist/ReactToastify.css";
 
 const figtree = Figtree({
   variable: "--font-figtree",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+// Display serif for v2 headlines. Exposed as --font-display; UI text stays Figtree.
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-display",
+  weight: "400",
   subsets: ["latin"],
   display: "swap",
 });
@@ -35,14 +43,14 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${figtree.variable} ${jetbrainsMono.variable}`}>
+    <html lang="en" className={`${figtree.variable} ${jetbrainsMono.variable} ${instrumentSerif.variable}`}>
       <body className={figtree.className}>
         <NextTopLoader color="#3B82F6" showSpinner={false} />
         <Providers>
           {children}
         </Providers>
         <ToastContainer position="top-right" />
-        <Analytics />
+        {process.env.VERCEL ? <WebAnalytics /> : null}
       </body>
     </html>
   );

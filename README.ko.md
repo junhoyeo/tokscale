@@ -27,7 +27,7 @@
 [![GitHub Forks](https://img.shields.io/github/forks/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/network/members)
 [![GitHub Stars](https://img.shields.io/github/stars/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/junhoyeo/tokscale?color=0073FF&labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/issues)
-[![License](https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square)](https://github.com/junhoyeo/tokscale/blob/master/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20%2B%20AGPL--3.0-white?labelColor=black&style=flat-square)](#라이선스)
 [![Coverage](https://raw.githubusercontent.com/junhoyeo/tokscale/refs/heads/main/.github/badges/coverage.svg)](https://github.com/junhoyeo/tokscale/issues/403)
 
 [🇺🇸 English](README.md) | [🇰🇷 한국어](README.ko.md) | [🇯🇵 日本語](README.ja.md) | [🇨🇳 简体中文](README.zh-cn.md)
@@ -2170,6 +2170,8 @@ Tokscale은 [LiteLLM의 가격 데이터베이스](https://github.com/BerriAI/li
 6. 브랜치에 푸시 (`git push origin feature/amazing-feature`)
 7. Pull Request 열기
 
+`packages/frontend`를 변경하는 Pull Request는 [기여자 라이선스 계약(CLA)](CLA.md)에 한 번 서명해야 합니다. CLA 체크가 Pull Request에 서명 방법을 댓글로 안내합니다. 자세한 내용은 [CONTRIBUTING.md](CONTRIBUTING.md)를 참고하세요.
+
 ### 개발 가이드라인
 
 - 기존 코드 스타일 따르기
@@ -2195,8 +2197,10 @@ Tokscale은 [LiteLLM의 가격 데이터베이스](https://github.com/BerriAI/li
 </p>
 
 <p align="center">
-  <strong>MIT © <a href="https://github.com/junhoyeo">Junho Yeo</a></strong>
+  <strong>CLI·코어: MIT © <a href="https://github.com/junhoyeo">Junho Yeo</a> · 웹 앱: AGPL-3.0</strong>
 </p>
+
+CLI와 코어 라이브러리(`crates/`)는 [MIT 라이선스](LICENSE)를 따릅니다. `packages/frontend`의 웹 앱은 [GNU AGPL v3.0](packages/frontend/LICENSE)을 따르며, 적용 범위는 [`LICENSING.md`](packages/frontend/LICENSING.md)에 정리되어 있습니다. `packages/frontend/src/content`에서 Tokscale이 정리한 데이터는 [CC BY 4.0](packages/frontend/src/content/LICENSE.md)입니다. Tokscale 이름과 로고는 [상표 정책](TRADEMARKS.md)을 따릅니다.
 
 이 프로젝트가 흥미롭다면 **스타(⭐)**를 눌러주세요.  
 [GitHub에서 저를 팔로우](https://github.com/junhoyeo)하고 함께 빌드해도 좋아요. (이미 1.1k+명이 탑승해 있어요!)

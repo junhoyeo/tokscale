@@ -1,0 +1,182 @@
+{
+  "sources": [
+    {
+      "id": "src_spacex_s1_2026_05_20",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026036936/spaceexplorationtechnologi.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX registration statement on Form S-1, May 20, 2026",
+      "publishedAt": "2026-05-20",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001628280-26-036936",
+        "cik": "0001181412",
+        "filedAt": "2026-05-20"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_424b4_2026_06_12",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026042639/spaceexplorationtechnologi.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX final prospectus (Form 424B4) for its initial public offering, dated June 11, 2026",
+      "publishedAt": "2026-06-11",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "424B4",
+        "accession": "0001628280-26-042639",
+        "cik": "0001181412",
+        "filedAt": "2026-06-12"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_8k_2026_06_15",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026043288/spaceexplorationtechnologi.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 8-K, June 15, 2026 (completion of the initial public offering)",
+      "publishedAt": "2026-06-15",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-043288",
+        "cik": "0001181412",
+        "filedAt": "2026-06-15",
+        "periodOfReport": "2026-06-15"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_10q_2026_06_30",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026052535/spcx-20260630.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 10-Q for the quarter ended June 30, 2026",
+      "publishedAt": "2026-08-04",
+      "retrievedAt": "2026-10-20",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001628280-26-052535",
+        "cik": "0001181412",
+        "filedAt": "2026-08-04",
+        "periodOfReport": "2026-06-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_spacex_ipo_2026",
+    "slug": "spacex-ipo-2026",
+    "kind": "ipo",
+    "types": [
+      "ipo"
+    ],
+    "title": "SpaceX initial public offering",
+    "summary": "SpaceX sold Class A shares in its initial public offering on Nasdaq and Nasdaq Texas, including the underwriters' full option to buy more shares. It completed the offering on June 15, 2026.",
+    "date": "2026-06-15",
+    "dates": {
+      "filed": "2026-05-20",
+      "completed": "2026-06-15"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_spacex",
+        "roles": [
+          "issuer"
+        ],
+        "note": "Space Exploration Technologies Corp."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "gross",
+        "label": "Gross proceeds, with the underwriters' option exercised in full",
+        "measure": "ipo_proceeds",
+        "value": 86249999880,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-06-12",
+        "to": "org_spacex",
+        "sourceId": "src_spacex_424b4_2026_06_12",
+        "quote": "Total Per Share No Exercise Full Exercise Public offering price................................................................ $135.00 $74,999,999,925 $86,249,999,880"
+      },
+      {
+        "id": "net",
+        "label": "Net proceeds after underwriting commissions and offering costs",
+        "measure": "ipo_proceeds",
+        "value": 85675000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-15",
+        "to": "org_spacex",
+        "partOf": "gross",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "On June 15, 2026 the Company completed its IPO, in which the Company issued and sold 638,888,888 shares of its Class A common stock at a public offering price of $135.00 per share, including the full exercise of the underwriters' over-allotment option, which resulted in net proceeds of $85,675 million after deducting the underwriting commissions and offering costs of $575 million."
+      },
+      {
+        "id": "price",
+        "label": "Offering price per Class A share",
+        "measure": "price_per_share",
+        "value": 135,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-06-15",
+        "sourceId": "src_spacex_8k_2026_06_15",
+        "quote": "On June 15, 2026, the Company completed its IPO of 638,888,888 shares of the Company's Class A Common Stock, at an offering price of $135.00 per share, which includes the exercise in full by the Underwriters (as defined below) of their option to purchase from the Company an additional 83,333,333 shares of Class A Common Stock, pursuant to the Registration Statement."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "shares",
+        "label": "Class A shares sold, including the underwriters' option",
+        "measure": "shares",
+        "value": 638888888,
+        "basis": "exact",
+        "sourceId": "src_spacex_8k_2026_06_15",
+        "quote": "On June 15, 2026, the Company completed its IPO of 638,888,888 shares of the Company's Class A Common Stock, at an offering price of $135.00 per share, which includes the exercise in full by the Underwriters (as defined below) of their option to purchase from the Company an additional 83,333,333 shares of Class A Common Stock, pursuant to the Registration Statement."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Listing",
+        "text": "Class A shares listed on The Nasdaq Stock Market and Nasdaq Texas under the symbol SPCX.",
+        "sourceId": "src_spacex_424b4_2026_06_12",
+        "quote": "We have been approved to list our Class A common stock on The Nasdaq Stock Market LLC (\"Nasdaq\") and Nasdaq Texas, LLC (\"Nasdaq Texas\") under the symbol \"SPCX.\""
+      },
+      {
+        "label": "Underwriters",
+        "text": "Goldman Sachs, Morgan Stanley, BofA Securities, Citigroup and J.P. Morgan acted as representatives of the underwriters.",
+        "sourceId": "src_spacex_8k_2026_06_15",
+        "quote": "On June 11, 2026, the Company entered into an Underwriting Agreement (the \"Underwriting Agreement\") with Goldman Sachs & Co. LLC, Morgan Stanley & Co. LLC, BofA Securities, Inc., Citigroup Global Markets Inc. and J.P. Morgan Securities LLC, as representatives of the several underwriters named therein (the \"Underwriters\"), and Deutsche Bank Aktiengesellschaft, relating to the offer and sale of the Class A Common Stock in the IPO."
+      },
+      {
+        "label": "Use of proceeds",
+        "text": "To fund growth, including more AI compute infrastructure, launch infrastructure and satellite capacity.",
+        "sourceId": "src_spacex_8k_2026_06_15",
+        "quote": "As described in the Registration Statement, the Company intends to use the net proceeds from the IPO to fund its growth strategy, including the expansion of the Company's AI compute infrastructure, enhancements to the Company's launch infrastructure and launch vehicles, increases in the scale and capacity of the Company's satellite constellations, and any remaining amounts for general corporate purposes."
+      },
+      {
+        "label": "Offering outside the US",
+        "text": "The IPO also included public offerings in Australia, Canada, the European Economic Area, Japan, Switzerland and the United Kingdom.",
+        "sourceId": "src_spacex_8k_2026_06_15",
+        "quote": "The IPO included, in addition to the public offering of the Class A Common Stock in the United States, public offerings of the Class A Common Stock in Australia, certain provinces and territories of Canada, certain member states of the European Economic Area, Japan, Switzerland, and the United Kingdom (including in the form of Computershare depositary interests) as described in the Registration Statement (such offerings in non-U.S. jurisdictions, collectively, the \"Global Offering\")."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_spacex_s1_2026_05_20",
+      "src_spacex_424b4_2026_06_12",
+      "src_spacex_8k_2026_06_15",
+      "src_spacex_10q_2026_06_30"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

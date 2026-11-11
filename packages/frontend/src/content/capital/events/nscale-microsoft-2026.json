@@ -1,0 +1,102 @@
+{
+  "sources": [
+    {
+      "id": "src_nscale_s1_2026_09_18",
+      "url": "https://www.sec.gov/Archives/edgar/data/2110365/000119312526395475/ck0002110365-20260918.htm",
+      "publisher": "SEC EDGAR (Nscale Limited)",
+      "type": "sec_filing",
+      "title": "Nscale Limited registration statement on Form S-1, September 18, 2026",
+      "publishedAt": "2026-09-18",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001193125-26-395475",
+        "cik": "0002110365",
+        "filedAt": "2026-09-18"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_nscale_microsoft_2026",
+    "slug": "nscale-microsoft-2026",
+    "kind": "deal",
+    "types": [
+      "compute_contract"
+    ],
+    "title": "Microsoft and Nscale GPU statements of work",
+    "summary": "Between September 2025 and April 2026, Microsoft signed statements of work with Nscale for GPU infrastructure, colocation space and cloud services. Payments are up to about $43.8 billion through December 2033, not counting optional extensions.",
+    "date": "2026-09-18",
+    "dates": {
+      "filed": "2026-09-18"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_nscale",
+        "roles": [
+          "provider"
+        ]
+      },
+      {
+        "org": "org_microsoft",
+        "roles": [
+          "buyer"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "contract",
+        "label": "Payments under the statements of work",
+        "measure": "contract_value",
+        "value": 43800000000,
+        "currency": "USD",
+        "basis": "up_to_approximately",
+        "status": "signed",
+        "asOf": "2026-09-18",
+        "from": "org_microsoft",
+        "to": "org_nscale",
+        "term": {
+          "through": "2033-12-31"
+        },
+        "condition": "Subject to delivery and availability of service requirements; excludes optional extensions",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "Between September 2025 and April 2026, we entered into statements of work with Microsoft that provide for payments to us of up to approximately $43.8 billion through December 2033, not including the optional extensions, which are subject to the satisfaction of delivery and availability of service requirements."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Services",
+        "text": "GPU infrastructure, colocation space and cloud services for Microsoft.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "Pursuant to these statements of work, we will provide Microsoft with GPU infrastructure, colocation space, and cloud services."
+      },
+      {
+        "label": "Term",
+        "text": "GPU service terms of five to six years from acceptance of each tranche, with an optional six-month extension at Microsoft's election.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "Each statement of work ends on the last remaining end date of the GPU services provided thereunder, with GPU services terms from five to six years from acceptance of each tranche and an optional six-month extension at Microsoft's election."
+      },
+      {
+        "label": "Stargate Norway",
+        "text": "After OpenAI withdrew from Stargate Norway and Stargate UK in April 2026, Microsoft expanded its agreement to take the extra capacity at Stargate Norway.",
+        "sourceId": "src_nscale_s1_2026_09_18",
+        "quote": "In April 2026, OpenAI withdrew from the Stargate Norway and Stargate UK partnerships, with Microsoft subsequently expanding its agreement with us to take the extra compute capacity at Stargate Norway."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_nscale_s_1_2026",
+        "note": "Disclosed in the Nscale registration statement."
+      }
+    ],
+    "sourceIds": [
+      "src_nscale_s1_2026_09_18"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

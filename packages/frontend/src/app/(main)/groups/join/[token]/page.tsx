@@ -1,5 +1,5 @@
 import { Navigation } from "@/components/layout/Navigation";
-import { ServiceFooter } from "@/components/layout/ServiceFooter";
+import { PublicFooter } from "@/components/layout/PublicFooter";
 import JoinGroupClient from "./JoinGroupClient";
 
 export default async function JoinGroupPage({
@@ -15,7 +15,7 @@ export default async function JoinGroupPage({
       <main className="service-main" id="main-content">
         <JoinGroupClient token={token} />
       </main>
-      <ServiceFooter />
+      <PublicFooter />
     </div>
   );
 }

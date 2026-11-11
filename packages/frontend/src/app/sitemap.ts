@@ -7,6 +7,11 @@ import { db, groups, submissions, users } from "@/lib/db";
 // Keep APP_URL runtime-configurable for reusable self-hosted images.
 export const dynamic = "force-dynamic";
 
+import { listModelKeys, getCommunitySnapshot } from "@/lib/explore";
+import { capitalSitemapEntries } from "@/lib/capital/sitemap";
+import { buildExploreSitemapEntries } from "@/lib/seo/explore";
+import { benchmarksSitemapEntries, modelsCatalogSitemapEntry } from "@/lib/benchmarks/sitemap";
+import { getPublicOrigin } from "@/lib/seo/urls";
 import {
   SITEMAP_GROUP_LIMIT,
   SITEMAP_USER_LIMIT,
@@ -84,8 +89,19 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   // DB is unreachable and there is nothing truthful to report.
   const coreLastModified = latestSubmissionTime(userRows) ?? now;
 
+  const [modelKeys, snapshot] = await Promise.all([
+    loadOrEmpty("models", listModelKeys),
+    getCommunitySnapshot("30d").catch(() => null),
+  ]);
+  const exploreLastModified = snapshot?.coverage.lastDataAt ? new Date(snapshot.coverage.lastDataAt) : null;
+
   return [
     ...buildCoreEntries(coreLastModified),
+    { url: `${getPublicOrigin()}/tracker`, changeFrequency: "monthly", priority: 0.6 },
+    ...buildExploreSitemapEntries(modelKeys, exploreLastModified),
+    modelsCatalogSitemapEntry(exploreLastModified),
+    ...benchmarksSitemapEntries(),
+    ...capitalSitemapEntries(),
     ...buildUserEntries(userRows, now),
     ...buildGroupEntries(groupRows, now),
   ];

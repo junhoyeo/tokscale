@@ -1,0 +1,146 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_amazon_compute",
+      "url": "https://www.anthropic.com/news/anthropic-amazon-compute",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic and Amazon expand collaboration for up to 5 gigawatts of new compute",
+      "publishedAt": "2026-04-20",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_amazon_2026_04",
+    "slug": "anthropic-amazon-2026-04",
+    "kind": "deal",
+    "types": [
+      "compute_commitment",
+      "strategic_investment"
+    ],
+    "title": "Anthropic and Amazon compute agreement and investment",
+    "summary": "Anthropic signed a new agreement with Amazon for up to 5 gigawatts of capacity and committed to spend on AWS technologies over ten years. Amazon invested in Anthropic on the same day, with more possible later.",
+    "date": "2026-04-20",
+    "dates": {
+      "announced": "2026-04-20"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "buyer",
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_amazon",
+        "roles": [
+          "provider",
+          "strategic_investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "compute",
+        "label": "Compute commitment to AWS",
+        "measure": "compute_commitment",
+        "value": 100000000000,
+        "currency": "USD",
+        "basis": "more_than",
+        "status": "announced",
+        "asOf": "2026-04-20",
+        "from": "org_anthropic",
+        "to": "org_amazon",
+        "term": {
+          "years": 10
+        },
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "We are committing more than $100 billion over the next ten years to AWS technologies, securing up to 5GW of new capacity to train and run Claude."
+      },
+      {
+        "id": "investment",
+        "label": "Amazon investment",
+        "measure": "equity_investment",
+        "value": 5000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-04-20",
+        "from": "org_amazon",
+        "to": "org_anthropic",
+        "includedIn": "evt_anthropic_series_h_2026",
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "Amazon is investing $5 billion in Anthropic today, with up to an additional $20 billion in the future."
+      },
+      {
+        "id": "future_investment",
+        "label": "Possible future Amazon investment",
+        "measure": "investment_commitment",
+        "value": 20000000000,
+        "currency": "USD",
+        "basis": "up_to",
+        "status": "announced",
+        "asOf": "2026-04-20",
+        "from": "org_amazon",
+        "to": "org_anthropic",
+        "condition": "In the future; no date or terms stated",
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "Amazon is investing $5 billion in Anthropic today, with up to an additional $20 billion in the future."
+      },
+      {
+        "id": "prior_investment",
+        "label": "Amazon's earlier investments",
+        "measure": "cumulative_investment",
+        "value": 8000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-04-20",
+        "from": "org_amazon",
+        "to": "org_anthropic",
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "This builds on the $8 billion Amazon has previously invested."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "capacity",
+        "label": "Capacity",
+        "measure": "capacity_gw",
+        "value": 5,
+        "basis": "up_to",
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "secure up to 5 gigawatts (GW) of capacity for training and deploying Claude"
+      }
+    ],
+    "facts": [
+      {
+        "label": "Chips",
+        "text": "Graviton and Trainium2 through Trainium4, with an option on later Amazon chips.",
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "The commitment spans Graviton and Trainium2 through Trainium4 chips, with the option to purchase future generations of Amazon's custom silicon as they become available."
+      },
+      {
+        "label": "Timing",
+        "text": "Nearly 1 GW of Trainium2 and Trainium3 capacity online by the end of 2026.",
+        "sourceId": "src_anthropic_amazon_compute",
+        "quote": "nearly 1GW total of Trainium2 and Trainium3 capacity coming online by the end of 2026"
+      }
+    ],
+    "relations": [
+      {
+        "type": "part_of",
+        "event": "evt_anthropic_series_h_2026",
+        "note": "The $5 billion investment is counted in the Series H round."
+      }
+    ],
+    "sourceIds": [
+      "src_anthropic_amazon_compute"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

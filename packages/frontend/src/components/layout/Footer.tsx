@@ -133,7 +133,6 @@ const CopyrightText = styled.p`
   font-size: 18px;
   font-weight: 500;
   line-height: 1.25;
-  font-family: sans-serif;
 
   @media (max-width: 560px) {
     font-size: 14px;
@@ -145,7 +144,6 @@ const GitHubLink = styled.a`
   font-size: 18px;
   font-weight: 500;
   line-height: 1.25;
-  font-family: sans-serif;
   transition: color 0.2s ease-in-out;
 
   &:hover {

@@ -1,0 +1,122 @@
+{
+  "sources": [
+    {
+      "id": "src_fluidstack_form_d_2026_06_30",
+      "url": "https://www.sec.gov/Archives/edgar/data/2104151/000090679126000132/primary_doc.xml",
+      "publisher": "SEC EDGAR (Fluidstack Ltd)",
+      "type": "sec_filing",
+      "title": "Fluidstack Ltd Form D, filed June 30, 2026",
+      "publishedAt": "2026-06-30",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "D",
+        "accession": "0000906791-26-000132",
+        "cik": "0002104151",
+        "filedAt": "2026-06-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_fluidstack_form_d_2026_06",
+    "slug": "fluidstack-form-d-2026-06",
+    "kind": "filing",
+    "types": [
+      "form_d"
+    ],
+    "title": "Fluidstack Form D for an equity offering (filed June 2026)",
+    "summary": "Fluidstack filed a Form D notice for a new equity offering that began on June 15, 2026. The filing does not name a round or a valuation.",
+    "date": "2026-06-30",
+    "dates": {
+      "filed": "2026-06-30"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_fluidstack",
+        "roles": [
+          "issuer",
+          "filer"
+        ],
+        "note": "Fluidstack Ltd"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "offering",
+        "label": "Total offering amount",
+        "measure": "form_d_offering_amount",
+        "value": 1500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-06-30",
+        "to": "org_fluidstack",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<totalOfferingAmount>1500000000</totalOfferingAmount>"
+      },
+      {
+        "id": "sold",
+        "label": "Total amount sold",
+        "measure": "form_d_amount_sold",
+        "value": 729999546,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2026-06-30",
+        "to": "org_fluidstack",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<totalAmountSold>729999546</totalAmountSold>"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "investors",
+        "label": "Investors who have already invested",
+        "measure": "investors",
+        "value": 7,
+        "basis": "exact",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<totalNumberAlreadyInvested>7</totalNumberAlreadyInvested>"
+      }
+    ],
+    "facts": [
+      {
+        "label": "First sale",
+        "text": "June 15, 2026.",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<dateOfFirstSale> <value>2026-06-15</value> </dateOfFirstSale>"
+      },
+      {
+        "label": "Exemption",
+        "text": "Rule 506(b) of Regulation D.",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<federalExemptionsExclusions> <item>06b</item> </federalExemptionsExclusions>"
+      },
+      {
+        "label": "Security type",
+        "text": "Equity.",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<isEquityType>true</isEquityType>"
+      },
+      {
+        "label": "Sales commissions",
+        "text": "An estimated $5,000,000 in sales commissions.",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<salesCommissions> <dollarAmount>5000000</dollarAmount> <isEstimate>true</isEstimate> </salesCommissions>"
+      },
+      {
+        "label": "Previous name",
+        "text": "Flare Social Ltd.",
+        "sourceId": "src_fluidstack_form_d_2026_06_30",
+        "quote": "<issuerPreviousNameList> <previousName>Flare Social Ltd</previousName> </issuerPreviousNameList>"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_fluidstack_form_d_2026_06_30"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

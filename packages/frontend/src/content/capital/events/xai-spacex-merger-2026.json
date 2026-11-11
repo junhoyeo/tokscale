@@ -1,0 +1,85 @@
+{
+  "sources": [
+    {
+      "id": "src_spacex_10q_2026_06_30",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026052535/spcx-20260630.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 10-Q for the quarter ended June 30, 2026",
+      "publishedAt": "2026-08-04",
+      "retrievedAt": "2026-10-20",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001628280-26-052535",
+        "cik": "0001181412",
+        "filedAt": "2026-08-04",
+        "periodOfReport": "2026-06-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_xai_spacex_merger_2026",
+    "slug": "xai-spacex-merger-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "SpaceX completes its acquisition of xAI",
+    "summary": "SpaceX completed its acquisition of X.AI Holdings, the parent of xAI and X, through a share exchange. xAI became a wholly owned subsidiary of SpaceX, which now reports an AI segment.",
+    "date": "2026-02-02",
+    "dates": {
+      "completed": "2026-02-02"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_spacex",
+        "roles": [
+          "acquirer"
+        ]
+      },
+      {
+        "org": "org_xai",
+        "roles": [
+          "target"
+        ],
+        "note": "X.AI Holdings Corp."
+      }
+    ],
+    "amounts": [],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Completion",
+        "text": "Completed on February 2, 2026; xAI became a wholly owned subsidiary of SpaceX.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "On February 2, 2026 (\"xAI Merger Date\"), the Company completed its acquisition of X.AI Holdings Corp. (\"xAI\"), pursuant to which xAI became a wholly-owned subsidiary of the Company (\"xAI Merger\")."
+      },
+      {
+        "label": "Structure",
+        "text": "Both this merger and xAI's earlier merger with X were share exchanges.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "The Mergers were each effected through a share exchange."
+      },
+      {
+        "label": "Earlier merger",
+        "text": "xAI had acquired X Holdings Corp. on March 28, 2025.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "Prior to the xAI Merger, on March 28, 2025, xAI completed its acquisition of X Holdings Corp. (\"X\") and X.AI Corp., in which X and X.AI Corp. became wholly-owned subsidiaries of xAI"
+      },
+      {
+        "label": "Segments",
+        "text": "SpaceX reports three segments: Space, Connectivity and AI.",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "three operating and reportable segments: (i) Space, (ii) Connectivity, and (iii) AI."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_spacex_10q_2026_06_30"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

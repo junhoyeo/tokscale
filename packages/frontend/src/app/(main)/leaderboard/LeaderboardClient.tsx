@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef, useMemo, memo, useCallback } from "react";
 import Link from "next/link";
-import { useRouter } from "nextjs-toploader/app";
 import { useSearchParams, usePathname } from "next/navigation";
 import styled from "styled-components";
 import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
+import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import {
   MetricItem,
   MetricLabel,
@@ -23,6 +23,7 @@ import {
   type LeaderboardSortBy,
 } from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
+import { trackEvent, type AnalyticsEventMap } from "@/lib/analytics/events";
 import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
 
 const Section = styled.div`
@@ -102,7 +103,10 @@ const TableWrapper = styled.div`
   }
 `;
 
+/* Rows are row links (globals.css); the cells have padding, so the focus ring sits inside. */
 const Table = styled.table`
+  --row-focus-offset: -2px;
+
   width: 100%;
 `;
 
@@ -152,13 +156,6 @@ const TableHeaderCell = styled.th`
 const TableBody = styled.tbody``;
 
 const TableRow = styled.tr`
-  cursor: pointer;
-  position: relative;
-  
-  &:hover {
-    background: var(--service-surface);
-  }
-
   &:not(:last-child) td {
     border-bottom: 1px solid var(--service-border);
   }
@@ -220,6 +217,7 @@ const RankBadge = styled.span`
   &[data-rank="3"] { color: #d99a68; }
 `;
 
+/* The row's primary link: the whole row opens the profile (row links, globals.css). */
 const UserContainer = styled(Link)`
   display: flex;
   align-items: center;
@@ -227,11 +225,6 @@ const UserContainer = styled(Link)`
   min-width: 0;
   color: inherit;
   text-decoration: none;
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 3px;
-  }
 `;
 
 const DesktopAvatar = styled.img`
@@ -473,12 +466,14 @@ const CopyIconButton = styled.button`
   }
 `;
 
-const CurrentUserCard = styled.div`
+const CurrentUserCard = styled(Link)`
   margin-bottom: 24px;
   padding: 16px;
   border-radius: 12px;
   border: 1px solid var(--service-accent);
   background: var(--service-accent-soft);
+  color: inherit;
+  text-decoration: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -489,6 +484,11 @@ const CurrentUserCard = styled.div`
     background: var(--service-accent-soft);
     border-color: var(--service-accent);
     opacity: 0.9;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--service-focus);
+    outline-offset: 2px;
   }
 
   @media (max-width: 640px) {
@@ -754,37 +754,6 @@ const DateApplyButton = styled.button`
   }
 `;
 
-const HoverTooltip = styled.span`
-  position: relative;
-  cursor: default;
-
-  &::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    bottom: calc(100% + 8px);
-    left: 50%;
-    transform: translateX(-50%);
-    background-color: #111B2C;
-    color: #e5e5e5;
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0;
-    white-space: nowrap;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
-    z-index: 1000;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-  }
-
-  &:hover::after {
-    opacity: 1;
-  }
-`;
-
 const PaginationNav = styled.nav`
   display: flex;
   align-items: center;
@@ -856,22 +825,17 @@ function isValidLeaderboardData(data: unknown): data is LeaderboardData {
 interface LeaderboardRowProps {
   user: LeaderboardUser;
   isCurrentUser: boolean;
-  onRowClick: (username: string) => void;
 }
 
 const LeaderboardRow = memo(function LeaderboardRow({
   user,
   isCurrentUser,
-  onRowClick,
 }: LeaderboardRowProps) {
   const formattedTokens = useMemo(() => user.totalTokens.toLocaleString('en-US'), [user.totalTokens]);
   const formattedCost = useMemo(() => user.totalCost.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }), [user.totalCost]);
   
   return (
-    <TableRow
-      onClick={() => onRowClick(user.username)}
-      data-current-user={isCurrentUser}
-    >
+    <TableRow data-row-link="" data-current-user={isCurrentUser}>
       <TableCell className="rank-cell">
         <RankBadge data-rank={user.rank <= 3 ? user.rank : undefined}>
           #{user.rank}
@@ -880,7 +844,7 @@ const LeaderboardRow = memo(function LeaderboardRow({
       <TableCell>
         <UserContainer
           href={`/u/${user.username}`}
-          onClick={(event) => event.stopPropagation()}
+          data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
           <DesktopAvatar
@@ -898,19 +862,19 @@ const LeaderboardRow = memo(function LeaderboardRow({
         </UserContainer>
       </TableCell>
       <TableCell className="text-right hidden-cost-mobile">
-        <StatSpan title={formattedCost}>
+        <InstantTooltip as={StatSpan} content={formattedCost}>
           {formatCurrency(user.totalCost)}
-        </StatSpan>
+        </InstantTooltip>
       </TableCell>
       <TableCell className="text-right">
         <CombinedValueContainer>
-          <TokenValue title={formattedTokens}>
+          <InstantTooltip as={TokenValue} content={formattedTokens}>
             <TokenValueFull>{formattedTokens}</TokenValueFull>
             <TokenValueAbbrev>{formatNumber(user.totalTokens)}</TokenValueAbbrev>
-          </TokenValue>
-          <CostValue title={formattedCost}>
+          </InstantTooltip>
+          <InstantTooltip as={CostValue} content={formattedCost}>
             {formatCurrency(user.totalCost)}
-          </CostValue>
+          </InstantTooltip>
         </CombinedValueContainer>
       </TableCell>
     </TableRow>
@@ -927,11 +891,11 @@ function LeaderboardMobileRow({
   sortBy: LeaderboardSortBy;
 }) {
   const primary = sortBy === "cost"
-    ? { label: "Cost", value: formatCurrency(user.totalCost) }
+    ? { label: "Est. cost", value: formatCurrency(user.totalCost) }
     : { label: "Tokens", value: formatNumber(user.totalTokens) };
   const secondary = sortBy === "cost"
     ? `${formatNumber(user.totalTokens)} tokens`
-    : formatCurrency(user.totalCost);
+    : `${formatCurrency(user.totalCost)} est. cost`;
 
   return (
     <MobileRankingRow
@@ -956,7 +920,6 @@ function parsePeriodParam(value: string | null): Period | null {
 }
 
 export default function LeaderboardClient({ initialData, currentUser, initialSortBy }: LeaderboardClientProps) {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const pathname = usePathname();
 
@@ -1156,15 +1119,19 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const sortedUsers = data.users || [];
 
-  const handleCopyCommand = (command: string) => {
-    navigator.clipboard.writeText(command);
-    setCopiedCommand(command);
-    setTimeout(() => setCopiedCommand(null), 2000);
+  const handleCopyCommand = async (
+    command: string,
+    commandName: AnalyticsEventMap["install_command_copied"]["command"],
+  ) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      trackEvent("install_command_copied", { location: "leaderboard", command: commandName });
+      setCopiedCommand(command);
+      setTimeout(() => setCopiedCommand(null), 2000);
+    } catch {
+      setCopiedCommand(null);
+    }
   };
-
-  const handleRowClick = useCallback((username: string) => {
-    router.push(`/u/${username}`);
-  }, [router]);
 
   return (
     <>
@@ -1180,25 +1147,23 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
           </MetricItem>
           <MetricItem>
             <MetricLabel>Tokens</MetricLabel>
-            <MetricValue
-              $accent
-              aria-label={`Tokens ${data.stats.totalTokens.toLocaleString("en-US")}`}
-              title={data.stats.totalTokens.toLocaleString("en-US")}
-            >
-              <HoverTooltip data-tooltip={data.stats.totalTokens.toLocaleString('en-US')}>
+            <MetricValue $accent aria-label={`Tokens ${data.stats.totalTokens.toLocaleString("en-US")}`}>
+              <InstantTooltip content={data.stats.totalTokens.toLocaleString("en-US")} describe={false}>
                 {formatNumber(data.stats.totalTokens)}
-              </HoverTooltip>
+              </InstantTooltip>
             </MetricValue>
           </MetricItem>
           <MetricItem>
-            <MetricLabel>Cost</MetricLabel>
+            <MetricLabel>Est. cost</MetricLabel>
             <MetricValue
-              aria-label={`Cost ${data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}`}
-              title={data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
+              aria-label={`Estimated cost ${data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}`}
             >
-              <HoverTooltip data-tooltip={data.stats.totalCost.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })}>
+              <InstantTooltip
+                content={data.stats.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
+                describe={false}
+              >
                 {formatCurrency(data.stats.totalCost)}
-              </HoverTooltip>
+              </InstantTooltip>
             </MetricValue>
           </MetricItem>
         </MetricStrip>
@@ -1211,17 +1176,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       )}
 
       {currentUser && currentUserRank && (
-        <CurrentUserCard
-          role="link"
-          tabIndex={0}
-          onClick={() => handleRowClick(currentUser.username)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              handleRowClick(currentUser.username);
-            }
-          }}
-        >
+        <CurrentUserCard href={`/u/${currentUser.username}`}>
           <CurrentUserInfo>
             <CurrentUserAvatar
               src={currentUser.avatarUrl || `https://github.com/${currentUser.username}.png`}
@@ -1244,17 +1199,19 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <CurrentUserStat>
               <CurrentUserStatLabel>Tokens</CurrentUserStatLabel>
               <CurrentUserStatValue>
-                <HoverTooltip data-tooltip={currentUserRank.totalTokens.toLocaleString('en-US')}>
+                <InstantTooltip content={currentUserRank.totalTokens.toLocaleString("en-US")}>
                   {formatNumber(currentUserRank.totalTokens)}
-                </HoverTooltip>
+                </InstantTooltip>
               </CurrentUserStatValue>
             </CurrentUserStat>
             <CurrentUserStat>
-              <CurrentUserStatLabel>Cost</CurrentUserStatLabel>
+              <CurrentUserStatLabel>Est. cost</CurrentUserStatLabel>
               <CurrentUserStatValue>
-                <HoverTooltip data-tooltip={currentUserRank.totalCost.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })}>
+                <InstantTooltip
+                  content={currentUserRank.totalCost.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 })}
+                >
                   {formatCurrency(currentUserRank.totalCost)}
-                </HoverTooltip>
+                </InstantTooltip>
               </CurrentUserStatValue>
             </CurrentUserStat>
           </CurrentUserStats>
@@ -1348,7 +1305,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             value={effectiveSortBy}
             options={[
               { value: "tokens", label: "Tokens" },
-              { value: "cost", label: "Cost" },
+              { value: "cost", label: "Est. cost" },
             ]}
             onChange={(value) => {
               setUrlSortOverride(null);
@@ -1400,7 +1357,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                     <tr>
                       <TableHeaderCell className="rank-cell">Rank</TableHeaderCell>
                       <TableHeaderCell>User</TableHeaderCell>
-                      <TableHeaderCell className="text-right hidden-cost-mobile">Cost</TableHeaderCell>
+                      <TableHeaderCell className="text-right hidden-cost-mobile">Est. cost</TableHeaderCell>
                       <TableHeaderCell className="text-right">Tokens</TableHeaderCell>
                     </tr>
                   </TableHead>
@@ -1410,7 +1367,6 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
                         key={user.userId}
                         user={user}
                         isCurrentUser={!!(currentUser && user.username === currentUser.username)}
-                        onRowClick={handleRowClick}
                       />
                     ))}
                   </TableBody>
@@ -1501,7 +1457,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
               <CommandArg>={`${window.location.origin}`}</CommandArg>
               <CopyIconButton
                 type="button"
-                onClick={() => handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`)}
+                onClick={() => void handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`, "api_url")}
                 className={copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? "copied" : ""}
                 aria-label="Copy command"
               >
@@ -1516,7 +1472,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <CommandArg>login</CommandArg>
             <CopyIconButton
               type="button"
-              onClick={() => handleCopyCommand("bunx tokscale login")}
+              onClick={() => void handleCopyCommand("bunx tokscale login", "login")}
               className={copiedCommand === "bunx tokscale login" ? "copied" : ""}
               aria-label="Copy command"
             >
@@ -1530,7 +1486,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <CommandArg>submit</CommandArg>
             <CopyIconButton
               type="button"
-              onClick={() => handleCopyCommand("bunx tokscale submit")}
+              onClick={() => void handleCopyCommand("bunx tokscale submit", "submit")}
               className={copiedCommand === "bunx tokscale submit" ? "copied" : ""}
               aria-label="Copy command"
             >

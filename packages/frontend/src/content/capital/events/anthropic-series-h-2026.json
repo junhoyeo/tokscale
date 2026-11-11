@@ -1,0 +1,221 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_series_h",
+      "url": "https://www.anthropic.com/news/series-h",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic raises $65B in Series H funding at $965B post-money valuation",
+      "publishedAt": "2026-05-28",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_series_h_2026",
+    "slug": "anthropic-series-h-2026",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "Anthropic Series H",
+    "summary": "Anthropic raised a Series H equity round led by Altimeter Capital, Dragoneer, Greenoaks and Sequoia Capital. The round includes investments that hyperscalers had committed earlier, including Amazon's.",
+    "roundLabel": "Series H",
+    "date": "2026-05-28",
+    "dates": {
+      "announced": "2026-05-28"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_altimeter_capital",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_dragoneer",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_greenoaks",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_sequoia_capital",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_capital_group",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_coatue",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_d1_capital_partners",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_gic",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_iconiq",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_xn",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_mgx",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_d_e_shaw_ventures",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as D.E. Shaw Ventures"
+      },
+      {
+        "org": "org_t_rowe_price",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as T. Rowe Price Associates, Inc. and T. Rowe Price Investment Management, Inc."
+      },
+      {
+        "org": "org_amazon",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "Previously committed investment, counted once"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series H equity",
+        "measure": "equity_raised",
+        "value": 65000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-05-28",
+        "to": "org_anthropic",
+        "sourceId": "src_anthropic_series_h",
+        "quote": "Anthropic has raised $65 billion in Series H funding led by Altimeter Capital, Dragoneer, Greenoaks, and Sequoia Capital, valuing the company at $965 billion post-money."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 965000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-05-28",
+        "sourceId": "src_anthropic_series_h",
+        "quote": "Anthropic has raised $65 billion in Series H funding led by Altimeter Capital, Dragoneer, Greenoaks, and Sequoia Capital, valuing the company at $965 billion post-money."
+      },
+      {
+        "id": "hyperscalers",
+        "label": "Previously committed hyperscaler investments (included)",
+        "measure": "equity_investment",
+        "value": 15000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-05-28",
+        "to": "org_anthropic",
+        "partOf": "equity",
+        "sourceId": "src_anthropic_series_h",
+        "quote": "It also includes $15 billion of previously committed investments from hyperscalers, including $5 billion from Amazon."
+      },
+      {
+        "id": "amazon",
+        "label": "Amazon (included)",
+        "measure": "equity_investment",
+        "value": 5000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-05-28",
+        "from": "org_amazon",
+        "to": "org_anthropic",
+        "partOf": "hyperscalers",
+        "sourceId": "src_anthropic_series_h",
+        "quote": "It also includes $15 billion of previously committed investments from hyperscalers, including $5 billion from Amazon."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Other named investors",
+        "text": "AMP PBC, Baillie Gifford, Blackstone, Brookfield, D.E. Shaw Ventures, DST Global, Fidelity Management & Research Company, General Catalyst, Insight Partners, Jane Street, Lightspeed Venture Partners, MGX, NTTVC, NX1 Capital, Situational Awareness LP, T. Rowe Price Associates, Inc., T. Rowe Price Investment Management, Inc., and Temasek.",
+        "sourceId": "src_anthropic_series_h",
+        "quote": "Significant investors in this round include AMP PBC, Baillie Gifford, Blackstone, Brookfield, D.E. Shaw Ventures, DST Global, Fidelity Management & Research Company, General Catalyst, Insight Partners, Jane Street, Lightspeed Venture Partners, MGX, NTTVC, NX1 Capital, Situational Awareness LP, T. Rowe Price Associates, Inc., T. Rowe Price Investment Management, Inc., and Temasek."
+      },
+      {
+        "label": "Strategic infrastructure partners",
+        "text": "Micron, Samsung and SK hynix joined the round as strategic infrastructure partners.",
+        "sourceId": "src_anthropic_series_h",
+        "quote": "Joining them are strategic infrastructure partners — Micron, Samsung, and SK hynix — whose technologies play a critical role in the world's supply of memory, storage, and logic chips."
+      }
+    ],
+    "relations": [
+      {
+        "type": "includes",
+        "event": "evt_anthropic_amazon_2026_04",
+        "note": "Amazon's $5 billion investment of April 20, 2026 is part of this round."
+      }
+    ],
+    "sourceIds": [
+      "src_anthropic_series_h"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

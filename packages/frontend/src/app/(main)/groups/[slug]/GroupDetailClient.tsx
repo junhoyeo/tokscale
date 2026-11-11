@@ -6,6 +6,7 @@ import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { GroupManagement } from "@/components/leaderboard/GroupManagement";
 import { CheckIcon, CopyIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
+import { Select } from "@/components/ui/Select";
 import {
   CompactBadge,
   GroupMark,
@@ -166,6 +167,7 @@ const InviteDescription = styled.p`
 const InviteForm = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  align-items: end;
   gap: 10px;
 
   @media (max-width: 720px) {
@@ -178,6 +180,17 @@ const InviteField = styled.label`
   gap: 6px;
   color: var(--service-text-muted);
   font-size: 0.8125rem;
+
+  /* Controls use the reporting calendar's field size, not the label size. */
+  input {
+    font-size: 0.875rem;
+  }
+
+  @media (max-width: 640px) {
+    input {
+      font-size: 1rem;
+    }
+  }
 `;
 
 const InviteList = styled.ul`
@@ -209,24 +222,17 @@ const Input = styled.input`
   }
 `;
 
-const Select = styled.select`
-  min-height: 36px;
-  padding: 0 12px;
-  border: 1px solid var(--service-border-strong);
-  border-radius: 8px;
-  background: var(--service-surface);
-  color: var(--service-text);
-  font: inherit;
-
-  &:focus-visible {
-    border-color: var(--service-focus);
-    outline: 2px solid var(--service-focus);
-    outline-offset: -1px;
-  }
+const InviteRoleSelect = styled(Select)`
+  --select-width: 100%;
+  --select-height: 36px;
+  --select-padding-x: 12px;
+  --select-font-size: 0.875rem;
+  --select-background: var(--service-surface);
+  --select-border-color: var(--service-border-strong);
 
   @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
+    --select-height: 44px;
+    --select-font-size: 1rem;
   }
 `;
 
@@ -328,7 +334,10 @@ const TableWrapper = styled.div`
   }
 `;
 
+/* Rows are row links (globals.css); the cells have padding, so the focus ring sits inside. */
 const Table = styled.table`
+  --row-focus-offset: -2px;
+
   width: 100%;
 `;
 
@@ -358,17 +367,13 @@ const Td = styled.td`
   }
 `;
 
+/* The row's primary link: the whole row opens the profile (row links, globals.css). */
 const UserCell = styled(Link)`
   display: inline-flex;
   align-items: center;
   gap: 10px;
   color: inherit;
   text-decoration: none;
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 3px;
-  }
 `;
 
 const UserAvatar = styled.img`
@@ -389,6 +394,11 @@ const Muted = styled.span`
 const DesktopRow = styled.tr<{ $current: boolean }>`
   background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "transparent"};
   box-shadow: ${({ $current }) => $current ? "inset 2px 0 0 var(--service-accent)" : "none"};
+
+  /* Your own row keeps its tint under the row-link hover. */
+  &[data-row-link]:hover {
+    background: ${({ $current }) => $current ? "var(--service-accent-soft)" : "var(--v2-row-hover)"};
+  }
 `;
 
 const Pagination = styled.div`
@@ -445,11 +455,12 @@ function GroupRow({
   isCurrentUser: boolean;
 }) {
   return (
-    <DesktopRow $current={isCurrentUser}>
+    <DesktopRow $current={isCurrentUser} data-row-link="">
       <Td>#{user.rank}</Td>
       <Td>
         <UserCell
           href={`/u/${user.username}`}
+          data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
           <UserAvatar src={user.avatarUrl || `https://github.com/${user.username}.png`} alt="" />
@@ -880,15 +891,16 @@ export default function GroupDetailClient({
               onChange={(event) => setInviteUsername(event.target.value)}
               placeholder="Any account"
             /></InviteField>
-            <InviteField>Role<Select
+            <InviteField>Role<InviteRoleSelect
               name="invite-role"
               aria-label="Invite role"
               value={group.membership?.role === "owner" ? inviteRole : "member"}
-              onChange={(event) => setInviteRole(event.target.value as Exclude<GroupRole, "owner">)}
-            >
-              <option value="member">Member</option>
-              {group.membership?.role === "owner" && <option value="admin">Admin</option>}
-            </Select></InviteField>
+              options={[
+                { value: "member", label: "Member" },
+                ...(group.membership?.role === "owner" ? [{ value: "admin", label: "Admin" }] : []),
+              ]}
+              onChange={(next) => setInviteRole(next as Exclude<GroupRole, "owner">)}
+            /></InviteField>
             <InviteField>Maximum joins<Input type="number" min={1} max={1000} step={1}
               value={inviteUsername.trim() ? "1" : maxUses} disabled={!!inviteUsername.trim()}
               onChange={(event) => setMaxUses(event.target.value)} /></InviteField>

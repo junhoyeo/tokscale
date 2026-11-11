@@ -1,0 +1,1290 @@
+/* Capital research section (v2 language).
+   CSS Modules rather than styled-components: these pages are server components,
+   so the prose and tables ship in the HTML with no client JS. */
+
+.page {
+  --cap-text: var(--service-text, #f4f7fb);
+  --cap-muted: var(--service-text-muted, #a8b3c5);
+  --cap-faint: rgba(244, 247, 251, 0.5);
+  --cap-rule: var(--service-border, rgba(255, 255, 255, 0.09));
+  --cap-rule-strong: var(--service-border-strong, rgba(255, 255, 255, 0.16));
+  --cap-accent: #0073ff;
+  --cap-accent-text: #5aa5ff;
+  --cap-cyan: #53d1f3;
+  --cap-display: var(--font-display, inherit);
+
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  color: var(--cap-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.page a {
+  color: inherit;
+}
+
+.page :focus-visible {
+  outline: 2px solid var(--service-focus, #75b6ff);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* ---------- type ---------- */
+
+.display {
+  font-family: var(--cap-display) !important;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+  text-wrap: balance;
+}
+
+.muted {
+  color: var(--cap-muted);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cyan {
+  color: var(--cap-cyan);
+}
+
+.link {
+  color: var(--cap-accent-text) !important;
+  text-decoration: none;
+}
+
+.link:hover {
+  color: var(--cap-text) !important;
+}
+
+/* ---------- hero ---------- */
+
+.hero {
+  max-width: 760px;
+  margin: 24px auto 72px;
+  text-align: center;
+}
+
+.heroTitle {
+  margin: 14px 0 18px;
+  font-size: clamp(2.25rem, 6vw, 4rem);
+}
+
+.heroLede {
+  margin: 0 auto;
+  max-width: 600px;
+  color: var(--cap-muted);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+}
+
+.heroMeta {
+  margin: 20px 0 0;
+  color: var(--cap-faint);
+  font-size: 0.8125rem;
+}
+
+/* ---------- sections and grid ---------- */
+
+.section {
+  padding: 40px 0;
+  border-top: 1px solid var(--cap-rule);
+}
+
+.sectionHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .sectionHead {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+}
+
+.sectionNote {
+  margin: 0;
+  color: var(--cap-muted);
+  font-size: 0.875rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 0;
+}
+
+.grid > * + * {
+  border-left: 1px solid var(--cap-rule);
+  padding-left: 32px;
+}
+
+.grid > *:first-child {
+  padding-right: 32px;
+}
+
+@media (max-width: 860px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .grid > * + * {
+    border-left: 0;
+    border-top: 1px solid var(--cap-rule);
+    padding: 32px 0 0;
+    margin-top: 32px;
+  }
+
+  .grid > *:first-child {
+    padding-right: 0;
+  }
+}
+
+/* ---------- stats ---------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--cap-rule);
+  border-bottom: 1px solid var(--cap-rule);
+}
+
+.stat {
+  padding: 16px 20px 18px 0;
+  min-width: 0;
+}
+
+.stat + .stat {
+  padding-left: 20px;
+  border-left: 1px solid var(--cap-rule);
+}
+
+.statLabel {
+  margin: 0 0 6px;
+  color: var(--cap-muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.statValue {
+  margin: 0;
+  font-size: 1.625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.statSub {
+  margin: 6px 0 0;
+  color: var(--cap-faint);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stat:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .stat:nth-child(n + 3) {
+    border-top: 1px solid var(--cap-rule);
+  }
+
+  .statValue {
+    font-size: 1.375rem;
+  }
+
+  /* Half a phone is too narrow for a long quantity ("≤387,051 shares") on one line. */
+  .statValue .num {
+    white-space: normal;
+  }
+}
+
+/* ---------- lists of filings / rows ---------- */
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: block;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--cap-rule);
+}
+
+/* A row link keeps its top padding, so its hover background does not sit tight on the text. */
+.row:first-child:not([data-row-link]) {
+  padding-top: 0;
+}
+
+.rowTitle {
+  margin: 0 0 4px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.rowMeta {
+  margin: 0;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- chips ---------- */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.chips a {
+  color: var(--cap-text);
+  text-decoration: none;
+}
+
+.chips a:hover {
+  color: var(--cap-accent-text);
+}
+
+/* ---------- breadcrumbs ---------- */
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 28px;
+  padding: 0;
+  list-style: none;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+}
+
+.crumbs li + li::before {
+  content: "/";
+  margin-right: 6px;
+  color: var(--cap-faint);
+}
+
+.crumbs a {
+  text-decoration: none;
+}
+
+.crumbs a:hover {
+  color: var(--cap-text);
+}
+
+/* ---------- prose ---------- */
+
+.prose {
+  max-width: 680px;
+}
+
+.prose h2 {
+  margin: 36px 0 12px;
+  font-family: var(--cap-display) !important;
+  font-size: 1.375rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.prose h2:first-child {
+  margin-top: 0;
+}
+
+.prose p {
+  margin: 0 0 16px;
+  color: rgba(244, 247, 251, 0.86);
+  font-size: 1.0625rem;
+  line-height: 1.7;
+}
+
+.prose a {
+  color: var(--cap-text);
+  text-decoration: underline;
+  text-decoration-color: rgba(90, 165, 255, 0.6);
+  text-underline-offset: 3px;
+}
+
+.prose a:hover {
+  color: var(--cap-accent-text);
+}
+
+.prose ul {
+  margin: 0 0 16px;
+  padding-left: 18px;
+}
+
+.prose .note {
+  margin: 16px 0 0;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.prose li {
+  margin: 0 0 8px;
+  color: var(--cap-muted);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+}
+
+/* ---------- notes and callouts ---------- */
+
+.note {
+  margin: 16px 0 0;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.callout {
+  margin: 0 0 24px;
+  padding: 14px 16px;
+  border-left: 2px solid var(--cap-accent);
+  background: rgba(0, 115, 255, 0.06);
+  color: var(--cap-muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.callout strong {
+  color: var(--cap-text);
+}
+
+.dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 20px;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.dl dt {
+  color: var(--cap-muted);
+}
+
+.dl dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+
+/* =====================================================================
+   Capital v2: sub-navigation, marks, dense tables, feeds, cards, charts
+   ===================================================================== */
+
+/* ---------- sub-navigation ---------- */
+
+.subnav {
+  margin: 0 0 32px;
+  border-bottom: 1px solid var(--cap-rule);
+}
+
+.subnavList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  margin: 0;
+  padding: 0 0 10px;
+  list-style: none;
+}
+
+.subnavList a {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.subnavList a:hover {
+  color: var(--cap-text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.subnavList a[aria-current="page"] {
+  color: var(--cap-text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (pointer: coarse) {
+  .subnavList a {
+    padding: 10px 12px;
+  }
+}
+
+/* ---------- page heads ---------- */
+
+.pageHead {
+  max-width: 860px;
+  margin: 0 0 28px;
+}
+
+.pageTitle {
+  margin: 10px 0 12px;
+  font-size: clamp(2rem, 4.6vw, 3rem);
+}
+
+.lede {
+  margin: 0;
+  max-width: 720px;
+  color: var(--cap-muted);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.metaLine {
+  margin: 14px 0 0;
+  color: var(--cap-faint);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.metaLine > span + span::before {
+  content: "\00B7";
+  margin: 0 8px;
+}
+
+/* ---------- marks (monogram or vendored lab mark) ---------- */
+
+.mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--cap-rule-strong);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--cap-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.markLarge {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  font-size: 1rem;
+}
+
+.mark img {
+  width: 60%;
+  height: 60%;
+  object-fit: contain;
+}
+
+/* The company's own square picture fills the tile; the tile border stays as its edge. */
+.markAvatar {
+  overflow: hidden;
+  background: transparent;
+}
+
+.mark.markAvatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.orgCell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.orgCell > span:last-child {
+  min-width: 0;
+}
+
+/* ---------- dense ledger tables ---------- */
+
+.ledgerTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.ledgerTable caption {
+  padding: 0 0 10px;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  text-align: left;
+}
+
+.ledgerTable thead th {
+  position: sticky;
+  top: 0;
+  /* Above row links and the links raised over them (globals.css). */
+  z-index: 3;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--cap-rule-strong);
+  background: var(--service-canvas, #000);
+  color: var(--cap-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ledgerTable td {
+  height: 40px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--cap-rule);
+  vertical-align: middle;
+}
+
+.ledgerTable th:first-child,
+.ledgerTable td:first-child {
+  padding-left: 0;
+}
+
+.ledgerTable th:last-child,
+.ledgerTable td:last-child {
+  padding-right: 0;
+}
+
+.ledgerTable .right {
+  text-align: right;
+}
+
+.ledgerTable a {
+  text-decoration: none;
+}
+
+.ledgerTable a:hover {
+  color: var(--cap-accent-text);
+}
+
+.cellMain {
+  display: block;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.cellSub {
+  display: block;
+  margin-top: 2px;
+  color: var(--cap-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Model name with its family mark (company profiles, "Models and usage on Tokscale"). */
+.modelCell {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.dash {
+  color: var(--cap-faint);
+}
+
+.subRow td {
+  height: auto;
+  padding-top: 0;
+  color: var(--cap-muted);
+  font-size: 0.75rem;
+}
+
+/* Just above the stacked layout a wide table can run past the page: let its headers wrap. */
+@media (max-width: 900px) {
+  .ledgerTable thead th {
+    white-space: normal;
+  }
+}
+
+/* On phones the ledger table becomes stacked rows: first cell full width, the rest labelled. */
+@media (max-width: 760px) {
+  .ledgerStack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .ledgerStack tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 14px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--cap-rule);
+  }
+
+  .ledgerStack td {
+    display: block;
+    height: auto;
+    padding: 0 !important;
+    border: 0;
+    text-align: left !important;
+  }
+
+  .ledgerStack td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--cap-faint);
+    font-size: 0.6875rem;
+  }
+
+  .ledgerStack td.full {
+    grid-column: 1 / -1;
+    order: -1;
+  }
+
+  .ledgerStack .subRow {
+    display: block;
+    padding-top: 0;
+  }
+
+  .hideMd {
+    display: none !important;
+  }
+
+  /* A stacked row drops cells that only hold "—"; the desktop table keeps them for alignment. */
+  .ledgerStack td.emptyStacked {
+    display: none;
+  }
+}
+
+/* ---------- tags and statuses ---------- */
+
+.tag {
+  display: inline-block;
+  min-width: 64px;
+  color: var(--cap-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.statusText {
+  color: var(--cap-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.reported {
+  color: #ffb27a;
+}
+
+.srcLink {
+  color: var(--cap-accent-text) !important;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.srcLink:hover {
+  color: var(--cap-text) !important;
+}
+
+/* ---------- feed ---------- */
+
+.feed {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feedRow {
+  display: grid;
+  grid-template-columns: 92px 84px minmax(0, 1fr) minmax(120px, auto) 92px;
+  align-items: baseline;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--cap-rule);
+  font-size: 0.875rem;
+}
+
+.feedDate {
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.feedTitle {
+  min-width: 0;
+}
+
+.feedTitle a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.feedTitle a:hover {
+  color: var(--cap-accent-text);
+}
+
+.feedValue {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.feedStatus {
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .feedRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+  }
+
+  .feedDate {
+    grid-column: 1;
+    order: 1;
+  }
+
+  .feedRow .tag {
+    grid-column: 2;
+    order: 2;
+    text-align: right;
+  }
+
+  .feedTitle {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+
+  .feedValue {
+    grid-column: 1;
+    order: 4;
+    text-align: left;
+  }
+
+  .feedStatus {
+    grid-column: 2;
+    order: 5;
+  }
+}
+
+/* ---------- money-type cards ---------- */
+
+.moneyCards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--cap-rule);
+  border-bottom: 1px solid var(--cap-rule);
+}
+
+.moneyCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 18px 20px 20px 0;
+}
+
+.moneyCard + .moneyCard {
+  padding-left: 20px;
+  border-left: 1px solid var(--cap-rule);
+}
+
+.moneyValue {
+  margin: 0;
+  color: var(--cap-cyan);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.moneyCard p {
+  margin: 0;
+}
+
+.moneyCard .more {
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.moneyNote {
+  margin: 10px 0 0;
+  color: var(--cap-faint);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 900px) {
+  .moneyCards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .moneyCard:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .moneyCard:nth-child(n + 3) {
+    border-top: 1px solid var(--cap-rule);
+  }
+}
+
+@media (max-width: 480px) {
+  .moneyCards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .moneyCard,
+  .moneyCard + .moneyCard {
+    padding: 16px 0;
+    border-left: 0;
+  }
+
+  .moneyCard + .moneyCard {
+    border-top: 1px solid var(--cap-rule);
+  }
+}
+
+/* ---------- stack view ---------- */
+
+.stack2 {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stack2 li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--cap-rule);
+  font-size: 0.875rem;
+}
+
+.flowArrow {
+  color: var(--cap-faint);
+}
+
+/* ---------- small multiples ---------- */
+
+.multiples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 18px 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.multiple {
+  min-width: 0;
+}
+
+/* Two small charts per row inside a half-width column (overview). */
+.multiplesTight {
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 16px 20px;
+}
+
+@media (max-width: 560px) {
+  .multiples {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 16px;
+  }
+}
+
+/* Overview: the stack and the capex charts share the row evenly. */
+@media (min-width: 861px) {
+  .gridEven {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.legendRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+
+.legendRow .legendKey {
+  margin-right: 0;
+}
+
+.multipleHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 0.8125rem;
+}
+
+.multipleHead a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.multipleHead a:hover {
+  color: var(--cap-accent-text);
+}
+
+.bars {
+  display: block;
+  width: 100%;
+  height: 56px;
+}
+
+.barFill {
+  fill: var(--cap-accent);
+}
+
+.barDerived {
+  fill: rgba(0, 115, 255, 0.28);
+  stroke: var(--cap-accent);
+  stroke-width: 1;
+}
+
+.multipleFoot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 8px;
+  margin: 4px 0 0;
+  color: var(--cap-faint);
+  font-size: 0.6875rem;
+}
+
+.multipleFoot > span {
+  white-space: nowrap;
+}
+
+.legendKey {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 14px;
+}
+
+.keySolid,
+.keyHollow {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+}
+
+.keySolid {
+  background: var(--cap-accent);
+}
+
+.keyHollow {
+  border: 1px solid var(--cap-accent);
+  background: rgba(0, 115, 255, 0.28);
+}
+
+/* ---------- filters ---------- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 12px;
+  margin: 0 0 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: var(--cap-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--cap-rule-strong);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--cap-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+/* The filter selects are the shared Select component; these set its size and colours. */
+.select {
+  --select-height: 34px;
+  --select-font-size: 0.8125rem;
+  --select-padding-x: 10px;
+  --select-background: rgba(255, 255, 255, 0.03);
+  --select-border-color: var(--cap-rule-strong);
+}
+
+.input {
+  width: 240px;
+  max-width: 100%;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+}
+
+.button {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--cap-rule-strong);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--cap-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.views {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.views a {
+  display: inline-block;
+  padding: 5px 10px;
+  border: 1px solid var(--cap-rule);
+  border-radius: 999px;
+  color: var(--cap-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.views a[aria-current="true"] {
+  border-color: var(--cap-rule-strong);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--cap-text);
+}
+
+@media (max-width: 640px) {
+  .input {
+    width: 100%;
+  }
+
+  .field {
+    flex: 1 1 140px;
+  }
+
+  .input,
+  .button {
+    height: 44px;
+  }
+
+  .select {
+    --select-height: 44px;
+  }
+}
+
+/* ---------- profile ---------- */
+
+.profileHead {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px 18px;
+  align-items: start;
+  margin: 0 0 24px;
+}
+
+.profileTitle {
+  margin: 6px 0 8px;
+  font-size: clamp(2rem, 4.4vw, 2.75rem);
+}
+
+.idLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.idLinks a {
+  color: var(--cap-accent-text);
+  text-decoration: none;
+}
+
+.idLinks a:hover {
+  color: var(--cap-text);
+}
+
+.sectionNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  margin: 24px 0 0;
+  padding: 0 0 12px;
+  list-style: none;
+  border-bottom: 1px solid var(--cap-rule);
+  font-size: 0.8125rem;
+}
+
+.sectionNav a {
+  color: var(--cap-muted);
+  text-decoration: none;
+}
+
+.sectionNav a:hover {
+  color: var(--cap-text);
+}
+
+.factSub a {
+  color: var(--cap-accent-text);
+  text-decoration: none;
+}
+
+.quoteBlock {
+  margin: 6px 0 0;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--cap-rule-strong);
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.chipsInline {
+  display: inline;
+}
+
+.chipsInline > * + *::before {
+  content: "·";
+  margin: 0 7px;
+  color: var(--cap-faint);
+}
+
+.twoCol {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0 40px;
+}
+
+@media (max-width: 860px) {
+  .twoCol {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sourcesOl {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--cap-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.sourcesOl li {
+  margin: 0 0 10px;
+}
+
+.sourcesOl a {
+  color: var(--cap-text);
+  text-decoration: underline;
+  text-decoration-color: var(--cap-rule-strong);
+  text-underline-offset: 3px;
+}
+
+.empty {
+  margin: 0;
+  color: var(--cap-muted);
+  font-size: 0.875rem;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.mobileOnly {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobileOnly {
+    display: inline;
+  }
+}
+
+.nameCol {
+  min-width: 180px;
+}
+
+.notesCol {
+  max-width: 360px;
+}

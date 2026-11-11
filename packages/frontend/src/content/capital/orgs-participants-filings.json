@@ -1,0 +1,40 @@
+{
+  "sources": [],
+  "orgs": [
+    {
+      "id": "org_sb_energy",
+      "slug": "sb-energy",
+      "name": "SB Energy",
+      "legalNames": [
+        "SB Energy, Inc.",
+        "SB Energy, LLC"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "data-centers",
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "city": "Redwood City",
+        "country": "US"
+      },
+      "description": "US company that develops data-center campuses and the power plants that supply them.",
+      "ids": {
+        "secCik": [
+          "0002133037"
+        ],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/sb-energy.webp",
+      "seed": false,
+      "reviewedAt": "2026-10-21"
+    }
+  ]
+}

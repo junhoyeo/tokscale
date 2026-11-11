@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { KeyIcon } from "@/components/ui/Icons";
+import { Select } from "@/components/ui/Select";
 import { Navigation } from "@/components/layout/Navigation";
 import { Footer } from "@/components/layout/Footer";
 import { deviceDisplayLabel } from "@/lib/devices/shared";
@@ -70,14 +71,21 @@ const PageWrapper = styled.div`
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  background: var(--v2-glow) center top / 100% 720px no-repeat var(--service-canvas);
+  color: var(--service-text);
 `;
 
+/* Clears the fixed navigation, like .service-main on the other pages. */
 const MainContent = styled.main`
   flex: 1;
   max-width: 768px;
   margin: 0 auto;
-  padding: 40px 24px;
+  padding: 96px 24px 40px;
   width: 100%;
+
+  @media (max-width: 520px) {
+    padding: 88px 16px 40px;
+  }
 `;
 
 const LoadingMain = styled.main`
@@ -153,29 +161,28 @@ const TextInput = styled.input`
   height: 40px;
   padding: 0 12px;
   border-radius: 6px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-default);
-  color: var(--color-fg-default);
+  border: 1px solid var(--service-border-strong);
+  background: var(--service-canvas);
+  color: var(--service-text);
   font-size: 14px;
 `;
 
-const SelectInput = styled.select`
-  height: 40px;
-  max-width: 360px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-default);
-  color: var(--color-fg-default);
-  font-size: 14px;
+const TimezoneSelect = styled(Select)`
+  --select-height: 40px;
+  --select-max-width: 360px;
+  --select-padding-x: 12px;
+  --select-radius: 6px;
+  --select-background: var(--service-canvas);
+  --select-border-color: var(--service-border-strong);
+  --select-font-size: 14px;
 `;
 
 const PrimaryButton = styled.button`
   height: 40px;
   padding: 0 14px;
   border-radius: 6px;
-  border: 1px solid var(--color-accent-fg);
-  background: var(--color-accent-fg);
+  border: 1px solid var(--v2-accent-strong);
+  background: var(--v2-accent-strong);
   color: #ffffff;
   font-size: 14px;
   font-weight: 600;
@@ -213,7 +220,7 @@ const TokenCode = styled.code`
   white-space: nowrap;
   padding: 10px 12px;
   border-radius: 6px;
-  background: var(--color-bg-default);
+  background: var(--service-canvas);
   font-size: 13px;
 `;
 
@@ -221,9 +228,9 @@ const SecondaryButton = styled.button`
   height: 38px;
   padding: 0 12px;
   border-radius: 6px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-default);
-  color: var(--color-fg-default);
+  border: 1px solid var(--service-border-strong);
+  background: var(--service-surface-muted);
+  color: var(--service-text);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -271,7 +278,7 @@ const TokenInfo = styled.div`
 `;
 
 const IconWrapper = styled.div`
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const DeviceEditRow = styled.div`
@@ -303,9 +310,9 @@ const DangerButton = styled.button`
 const InfoBanner = styled.div`
   padding: 12px 16px;
   border-radius: 6px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-muted);
+  border: 1px solid var(--service-border);
+  background: var(--service-surface-muted);
+  color: var(--service-text-muted);
   font-size: 14px;
 `;
 
@@ -340,7 +347,7 @@ const DangerActionRow = styled.div`
   padding: 16px 0;
 
   &:not(:last-child) {
-    border-bottom: 1px solid var(--color-border-default);
+    border-bottom: 1px solid var(--service-border);
   }
 `;
 
@@ -352,13 +359,13 @@ const DangerActionInfo = styled.div`
 const DangerActionTitle = styled.p`
   font-size: 14px;
   font-weight: 500;
-  color: var(--color-fg-default);
+  color: var(--service-text);
   margin-bottom: 4px;
 `;
 
 const DangerActionDescription = styled.p`
   font-size: 13px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
 `;
 
 const DangerActionButton = styled(DangerButton)`
@@ -383,8 +390,8 @@ const ModalOverlay = styled.div`
 `;
 
 const ModalCard = styled.div`
-  background: var(--color-bg-default);
-  border: 1px solid var(--color-border-default);
+  background: var(--service-surface);
+  border: 1px solid var(--service-border-strong);
   border-radius: 16px;
   padding: 24px;
   max-width: 480px;
@@ -401,7 +408,7 @@ const ModalTitle = styled.h3`
 
 const ModalBody = styled.p`
   font-size: 14px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
   line-height: 1.5;
   margin-bottom: 20px;
 `;
@@ -410,7 +417,7 @@ const ModalBulletList = styled.ul`
   list-style: disc;
   padding-left: 20px;
   margin-bottom: 20px;
-  color: var(--color-fg-muted);
+  color: var(--service-text-muted);
   font-size: 14px;
   line-height: 1.6;
 `;
@@ -419,9 +426,9 @@ const ModalInput = styled.input`
   width: 100%;
   padding: 8px 12px;
   border-radius: 6px;
-  border: 1px solid var(--color-border-default);
-  background: var(--color-bg-subtle);
-  color: var(--color-fg-default);
+  border: 1px solid var(--service-border);
+  background: var(--service-surface-muted);
+  color: var(--service-text);
   font-size: 14px;
   margin-bottom: 16px;
   outline: none;
@@ -443,13 +450,13 @@ const CancelButton = styled.button`
   font-size: 13px;
   font-weight: 500;
   border-radius: 6px;
-  border: 1px solid var(--color-border-default);
+  border: 1px solid var(--service-border);
   background: transparent;
-  color: var(--color-fg-default);
+  color: var(--service-text);
   cursor: pointer;
   transition: all 150ms;
   &:hover {
-    background: var(--color-bg-subtle);
+    background: var(--service-surface-muted);
   }
 `;
 
@@ -479,7 +486,7 @@ const StepDot = styled.div<{ $active: boolean }>`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: ${({ $active }) => ($active ? "#F85149" : "var(--color-border-default)")};
+  background: ${({ $active }) => ($active ? "#F85149" : "var(--service-border)")};
   transition: background 150ms;
 `;
 
@@ -898,10 +905,10 @@ export default function SettingsClient() {
 
   if (isLoading) {
     return (
-      <PageWrapper style={{ backgroundColor: "var(--color-bg-default)" }}>
+      <PageWrapper>
         <Navigation />
         <LoadingMain>
-          <div style={{ color: "var(--color-fg-muted)" }}>Loading...</div>
+          <div style={{ color: "var(--service-text-muted)" }}>Loading...</div>
         </LoadingMain>
         <Footer />
       </PageWrapper>
@@ -913,18 +920,18 @@ export default function SettingsClient() {
   }
 
   return (
-    <PageWrapper style={{ backgroundColor: "var(--color-bg-default)" }}>
+    <PageWrapper>
       <Navigation />
 
       <MainContent>
-        <Title style={{ color: "var(--color-fg-default)" }}>
+        <Title style={{ color: "var(--service-text)" }}>
           Settings
         </Title>
 
         <Section
-          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
         >
-          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+          <SectionTitle style={{ color: "var(--service-text)" }}>
             Profile
           </SectionTitle>
           <ProfileWrapper>
@@ -935,14 +942,14 @@ export default function SettingsClient() {
               height={64}
             />
             <div>
-              <ProfileText style={{ color: "var(--color-fg-default)" }}>
+              <ProfileText style={{ color: "var(--service-text)" }}>
                 {user.displayName || user.username}
               </ProfileText>
-              <SmallText style={{ color: "var(--color-fg-muted)" }}>
+              <SmallText style={{ color: "var(--service-text-muted)" }}>
                 @{user.username}
               </SmallText>
               {user.email && (
-                <SmallText style={{ color: "var(--color-fg-muted)" }}>
+                <SmallText style={{ color: "var(--service-text-muted)" }}>
                   {user.email}
                 </SmallText>
               )}
@@ -954,12 +961,12 @@ export default function SettingsClient() {
         </Section>
 
         <Section
-          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
         >
-          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+          <SectionTitle style={{ color: "var(--service-text)" }}>
             Timezone
           </SectionTitle>
-          <Description style={{ color: "var(--color-fg-muted)" }}>
+          <Description style={{ color: "var(--service-text-muted)" }}>
             Renders the timestamps on profile pages — &ldquo;Updated&rdquo; and
             &ldquo;Joined&rdquo; — in the zone you pick, and is stored only in
             this browser. It does not move usage between days: which day a
@@ -969,47 +976,46 @@ export default function SettingsClient() {
           </Description>
 
           <FieldLabel
+            id="timezone-select-label"
             htmlFor="timezone-select"
-            style={{ color: "var(--color-fg-default)" }}
+            style={{ color: "var(--service-text)" }}
           >
             Display timezone
           </FieldLabel>
-          <SelectInput
+          <TimezoneSelect
             id="timezone-select"
+            aria-labelledby="timezone-select-label"
             value={timezone}
-            onChange={(event) => setTimezone(event.target.value)}
-          >
-            <option value="auto">
-              Auto (browser) — {browserTimeZone}
-            </option>
-            {COMMON_TIMEZONE_GROUPS.map((group) => (
-              <optgroup key={group.region} label={group.region}>
-                {group.zones.map((zone) => (
-                  <option key={zone} value={zone}>
-                    {zone.replace(/_/g, " ")}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-            {timezone !== "auto" &&
+            options={[
+              { value: "auto", label: `Auto (browser) — ${browserTimeZone}` },
+              ...COMMON_TIMEZONE_GROUPS.map((group) => ({
+                label: group.region,
+                options: group.zones.map((zone) => ({
+                  value: zone,
+                  label: zone.replace(/_/g, " "),
+                })),
+              })),
+              ...(timezone !== "auto" &&
               !COMMON_TIMEZONE_GROUPS.some((group) =>
                 group.zones.includes(timezone),
-              ) && (
-                <option value={timezone}>{timezone.replace(/_/g, " ")}</option>
-              )}
-          </SelectInput>
+              )
+                ? [{ value: timezone, label: timezone.replace(/_/g, " ") }]
+                : []),
+            ]}
+            onChange={setTimezone}
+          />
         </Section>
 
         <Section
-          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
         >
-          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+          <SectionTitle style={{ color: "var(--service-text)" }}>
             API Tokens
           </SectionTitle>
-          <Description style={{ color: "var(--color-fg-muted)" }}>
+          <Description style={{ color: "var(--service-text-muted)" }}>
             Create a token for CI or use one generated by{" "}
             <CodeText
-              style={{ backgroundColor: "var(--color-bg-subtle)" }}
+              style={{ backgroundColor: "var(--service-surface-muted)" }}
             >
               tokscale login
             </CodeText>{" "}
@@ -1018,7 +1024,7 @@ export default function SettingsClient() {
 
           <FieldLabel
             htmlFor="token-name"
-            style={{ color: "var(--color-fg-default)" }}
+            style={{ color: "var(--service-text)" }}
           >
             Token name
           </FieldLabel>
@@ -1042,11 +1048,11 @@ export default function SettingsClient() {
 
           {createdToken && (
             <TokenReveal>
-              <SmallText style={{ color: "var(--color-fg-default)", fontWeight: 600 }}>
+              <SmallText style={{ color: "var(--service-text)", fontWeight: 600 }}>
                 Copy this token now. It will not be shown again.
               </SmallText>
               <TokenCodeRow>
-                <TokenCode style={{ color: "var(--color-fg-default)" }}>
+                <TokenCode style={{ color: "var(--service-text)" }}>
                   {createdToken.token}
                 </TokenCode>
                 <SecondaryButton type="button" onClick={handleCopyCreatedToken}>
@@ -1057,7 +1063,7 @@ export default function SettingsClient() {
           )}
 
           {tokens.length === 0 ? (
-            <EmptyState style={{ color: "var(--color-fg-muted)" }}>
+            <EmptyState style={{ color: "var(--service-text-muted)" }}>
               <EmptyIcon>
                 <KeyIcon size={32} />
               </EmptyIcon>
@@ -1065,7 +1071,7 @@ export default function SettingsClient() {
               <EmptyText>
                 Create one here or run{" "}
                 <CodeText
-                  style={{ backgroundColor: "var(--color-bg-subtle)" }}
+                  style={{ backgroundColor: "var(--service-surface-muted)" }}
                 >
                   tokscale login
                 </CodeText>{" "}
@@ -1077,17 +1083,17 @@ export default function SettingsClient() {
               {tokens.map((token) => (
                 <TokenItem
                   key={token.id}
-                  style={{ backgroundColor: "var(--color-bg-elevated)" }}
+                  style={{ backgroundColor: "var(--service-surface-muted)" }}
                 >
                   <TokenInfo>
                     <IconWrapper>
                       <KeyIcon size={20} />
                     </IconWrapper>
                     <div>
-                      <TokenName style={{ color: "var(--color-fg-default)" }}>
+                      <TokenName style={{ color: "var(--service-text)" }}>
                         {token.name}
                       </TokenName>
-                      <SmallText style={{ color: "var(--color-fg-muted)" }}>
+                      <SmallText style={{ color: "var(--service-text-muted)" }}>
                         Created {new Date(token.createdAt).toLocaleDateString()}
                         {token.lastUsedAt && (
                           <> - Last used {new Date(token.lastUsedAt).toLocaleDateString()}</>
@@ -1107,12 +1113,12 @@ export default function SettingsClient() {
         </Section>
 
         <Section
-          style={{ backgroundColor: "var(--color-bg-default)", borderColor: "var(--color-border-default)" }}
+          style={{ backgroundColor: "var(--service-surface)", borderColor: "var(--service-border)" }}
         >
-          <SectionTitle style={{ color: "var(--color-fg-default)" }}>
+          <SectionTitle style={{ color: "var(--service-text)" }}>
             Devices
           </SectionTitle>
-          <Description style={{ color: "var(--color-fg-muted)" }}>
+          <Description style={{ color: "var(--service-text-muted)" }}>
             Machines that have submitted usage data. Rename a device to tell
             your machines apart — the name is shown on your public profile.
           </Description>
@@ -1120,12 +1126,12 @@ export default function SettingsClient() {
           {deviceError && <ErrorText>{deviceError}</ErrorText>}
 
           {devices.length === 0 ? (
-            <EmptyState style={{ color: "var(--color-fg-muted)" }}>
+            <EmptyState style={{ color: "var(--service-text-muted)" }}>
               <p>No devices yet.</p>
               <EmptyText>
                 Run{" "}
                 <CodeText
-                  style={{ backgroundColor: "var(--color-bg-subtle)" }}
+                  style={{ backgroundColor: "var(--service-surface-muted)" }}
                 >
                   bunx tokscale submit
                 </CodeText>{" "}
@@ -1137,7 +1143,7 @@ export default function SettingsClient() {
               {devices.map((device) => (
                 <TokenItem
                   key={device.id}
-                  style={{ backgroundColor: "var(--color-bg-elevated)" }}
+                  style={{ backgroundColor: "var(--service-surface-muted)" }}
                 >
                   {editingDeviceId === device.id ? (
                     <DeviceEditRow>
@@ -1179,10 +1185,10 @@ export default function SettingsClient() {
                     <>
                       <TokenInfo>
                         <div>
-                          <TokenName style={{ color: "var(--color-fg-default)" }}>
+                          <TokenName style={{ color: "var(--service-text)" }}>
                             {device.displayName}
                           </TokenName>
-                          <SmallText style={{ color: "var(--color-fg-muted)" }}>
+                          <SmallText style={{ color: "var(--service-text-muted)" }}>
                             {formatNumber(device.totalTokens)} tokens
                             {" · "}
                             {formatCurrency(device.totalCost)}
@@ -1209,7 +1215,7 @@ export default function SettingsClient() {
         </Section>
 
         <DangerSection
-          style={{ backgroundColor: "var(--color-bg-default)" }}
+          style={{ backgroundColor: "var(--service-surface)" }}
         >
           <DangerSectionTitle>
             Danger Zone

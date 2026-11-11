@@ -268,6 +268,7 @@ describe("applyModerationAction - admin override protection integration", () => 
     (db.transaction as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async (callback: (tx: unknown) => Promise<unknown>) => {
         const tx = {
+          execute: vi.fn().mockResolvedValue([{ revision: "1" }]),
           update: vi.fn().mockReturnValue({
             set: vi.fn().mockReturnValue({
               where: vi.fn().mockReturnValue({
@@ -342,10 +343,12 @@ describe("applyModerationAction - admin override protection integration", () => 
       reason: string;
     }
     let insertedRecord: InsertedAction | null = null;
+    const execute = vi.fn().mockResolvedValue([{ revision: "1" }]);
 
     (db.transaction as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async (callback: (tx: unknown) => Promise<unknown>) => {
         const tx = {
+          execute,
           update: vi.fn().mockReturnValue({
             set: vi.fn().mockReturnValue({
               where: vi.fn().mockReturnValue({
@@ -383,6 +386,11 @@ describe("applyModerationAction - admin override protection integration", () => 
       reason: "Abuse",
       createdAt: expect.any(Object),
     });
+    expect(execute).toHaveBeenCalledTimes(1);
+    const revisionQuery = dialect.sqlToQuery(execute.mock.calls[0][0] as SQL);
+    expect(revisionQuery.sql.replace(/\s+/g, " ")).toContain(
+      "UPDATE explore_cache_revision SET revision = revision + 1 WHERE id = 1"
+    );
   });
 
   it("throws an error if actorUsername or reason is empty or whitespace", async () => {

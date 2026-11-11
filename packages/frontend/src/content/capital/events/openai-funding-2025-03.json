@@ -1,0 +1,169 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_march_funding_updates",
+      "url": "https://openai.com/index/march-funding-updates/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "New funding to build towards AGI",
+      "publishedAt": "2025-03-31",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    },
+    {
+      "id": "src_softbank_openai_2025_04_01",
+      "url": "https://group.softbank/en/news/press/20250401",
+      "publisher": "SoftBank Group",
+      "type": "company_announcement",
+      "title": "Announcement Regarding Follow-on Investments in OpenAI",
+      "publishedAt": "2025-04-01",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_funding_2025_03",
+    "slug": "openai-funding-2025-03",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "OpenAI funding round (March 2025)",
+    "summary": "OpenAI announced $40 billion in new funding at a $300 billion post-money valuation. SoftBank Group signed an agreement to invest up to $40 billion, with part of the money tied to a change in OpenAI's structure.",
+    "date": "2025-03-31",
+    "dates": {
+      "announced": "2025-03-31",
+      "signed": "2025-03-31"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_softbank_group",
+        "roles": [
+          "investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "New funding",
+        "measure": "equity_raised",
+        "value": 40000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-03-31",
+        "to": "org_openai",
+        "sourceId": "src_openai_march_funding_updates",
+        "quote": "Today we're announcing new funding—$40 billion at a $300 billion post-money valuation, which enables us to push the frontiers of AI research even further, scale our compute infrastructure, and deliver increasingly powerful tools for the 500 million people who use ChatGPT every week."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 300000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-03-31",
+        "sourceId": "src_openai_march_funding_updates",
+        "quote": "Today we're announcing new funding—$40 billion at a $300 billion post-money valuation, which enables us to push the frontiers of AI research even further, scale our compute infrastructure, and deliver increasingly powerful tools for the 500 million people who use ChatGPT every week."
+      },
+      {
+        "id": "pre_money",
+        "label": "Pre-money valuation",
+        "measure": "valuation_pre",
+        "value": 260000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-03-31",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "Pre-Money Valuation USD 260.0 billion"
+      },
+      {
+        "id": "softbank_commitment",
+        "label": "SoftBank investment agreement",
+        "measure": "investment_commitment",
+        "value": 40000000000,
+        "currency": "USD",
+        "basis": "up_to",
+        "status": "signed",
+        "asOf": "2025-03-31",
+        "from": "org_softbank_group",
+        "to": "org_openai",
+        "condition": "Up to USD 30.0 billion of the second closing depended on OpenAI completing a recapitalization by the end of 2025 (or early 2026 in some cases); up to USD 10.0 billion could be syndicated to co-investors",
+        "partOf": "equity",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "SoftBank Group Corp. (\"SBG\") today announced that, on March 31, 2025 (U.S. time), it entered into a definitive agreement with OpenAI Global, LLC (\"OpenAI Global\") and its affiliates (collectively, \"OpenAI\"), a U.S.-based artificial intelligence research and development company, to make follow-on investments of up to USD 40.0 billion (approximately JPY 5.98 trillion*1)(the \"Transaction\"), as detailed below."
+      },
+      {
+        "id": "softbank_prior",
+        "label": "SoftBank's earlier investments",
+        "measure": "cumulative_investment",
+        "value": 2200000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2025-04-01",
+        "from": "org_softbank_group",
+        "to": "org_openai",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "Recognizing OpenAI as the partner closest to achieving Artificial General Intelligence (AGI), a key milestone on the path to ASI, and its mission of ensuring AGI benefits all of humanity, SBG has positioned OpenAI as its most important partner and invested USD 2.2 billion in total through SoftBank Vision Fund 2 since September 2024."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Partner",
+        "text": "OpenAI named SoftBank Group as its partner in this funding.",
+        "sourceId": "src_openai_march_funding_updates",
+        "quote": "We're excited to be working in partnership with SoftBank Group—few companies understand how to scale transformative technology like they do."
+      },
+      {
+        "label": "First closing",
+        "text": "SoftBank planned to invest USD 10.0 billion in mid-April 2025.",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "Completion of investment of USD 10.0 billion Mid-April, 2025 (Planned)"
+      },
+      {
+        "label": "Second closing",
+        "text": "SoftBank's second closing was up to USD 30.0 billion if OpenAI completed a recapitalization by the end of 2025, or early 2026 in some cases.",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "Up to USD 30.0 billion if OpenAI Global, the for-profit subsidiary of OpenAI, Inc., completes a recapitalization of its economic waterfall (the \"Funding Conditions\") by the end of 2025, or in certain circumstances, early 2026."
+      },
+      {
+        "label": "If the condition was not met",
+        "text": "The second closing would be USD 10.0 billion if the condition was not met in time.",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "USD 10.0 billion if the Funding Conditions have not been met by the end of 2025, or in certain circumstances, early 2026."
+      },
+      {
+        "label": "Syndication",
+        "text": "SoftBank planned to syndicate USD 10.0 billion of the investment to co-investors.",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "SBG is planning to syndicate out USD 10.0 billion of the up to USD 40.0 billion investment to co-investors."
+      },
+      {
+        "label": "SoftBank's own share",
+        "text": "SoftBank expected its own investment to be up to USD 30.0 billion after syndication.",
+        "sourceId": "src_softbank_openai_2025_04_01",
+        "quote": "Accordingly, SBG's effective investment amount is expected to be up to USD 30.0 billion (approximately JPY 4.49 trillion*1)."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_openai_march_funding_updates",
+      "src_softbank_openai_2025_04_01"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

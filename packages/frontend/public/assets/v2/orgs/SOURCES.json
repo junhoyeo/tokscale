@@ -1,0 +1,363 @@
+{
+  "about": "Square company marks for /capital and the home Capital section, 144x144 WebP. Each is the org's own X profile picture, LinkedIn company logo, or website icon, center-cropped and resized. Trademarks belong to their owners; shown only to identify the company next to its name.",
+  "orgs": {
+    "akamai": {
+      "name": "Akamai Technologies",
+      "source": "X profile picture",
+      "page": "https://x.com/Akamai",
+      "image": "https://pbs.twimg.com/profile_images/1955294443554091008/JEOCQqs1.jpg",
+      "fetched": "2026-10-22"
+    },
+    "alibaba": {
+      "name": "Alibaba Group",
+      "source": "X profile picture",
+      "page": "https://x.com/AlibabaGroup",
+      "image": "https://pbs.twimg.com/profile_images/1567807256091308032/4AXfLwia.jpg",
+      "fetched": "2026-10-22"
+    },
+    "alphabet": {
+      "name": "Alphabet Inc.",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/alphabet-inc/",
+      "image": "https://media.licdn.com/dms/image/v2/C560BAQHOWk8aT2QxNQ/company-logo_400_400/company-logo_400_400/0/1631347525519",
+      "fetched": "2026-10-22"
+    },
+    "altimeter-capital": {
+      "name": "Altimeter Capital",
+      "source": "X profile picture",
+      "page": "https://x.com/AltimeterCap",
+      "image": "https://pbs.twimg.com/profile_images/1950197957262823424/rhTbDJlD.jpg",
+      "fetched": "2026-10-22"
+    },
+    "amazon": {
+      "name": "Amazon",
+      "source": "X profile picture",
+      "page": "https://x.com/amazon",
+      "image": "https://pbs.twimg.com/profile_images/1912984084516831232/BHv0mcPd.jpg",
+      "fetched": "2026-10-22"
+    },
+    "amd": {
+      "name": "AMD",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/amd/",
+      "image": "https://media.licdn.com/dms/image/v2/D560BAQFCdxxVA_xhqQ/company-logo_400_400/B56ZnuIjafHUAc-/0/1760636844195/amd_logo",
+      "fetched": "2026-10-22",
+      "note": "The @AMD X picture is a campaign photo, so the LinkedIn logo is used."
+    },
+    "andreessen-horowitz": {
+      "name": "a16z",
+      "source": "X profile picture",
+      "page": "https://x.com/a16z",
+      "image": "https://pbs.twimg.com/profile_images/1919488160125616128/QAZXTMEj.png",
+      "fetched": "2026-10-22"
+    },
+    "anthropic": {
+      "name": "Anthropic",
+      "source": "X profile picture",
+      "page": "https://x.com/AnthropicAI",
+      "image": "https://pbs.twimg.com/profile_images/1798110641414443008/XP8gyBaY.jpg",
+      "fetched": "2026-10-22"
+    },
+    "ark-venture-fund": {
+      "name": "ARK Invest",
+      "source": "X profile picture",
+      "page": "https://x.com/ARKInvest",
+      "image": "https://pbs.twimg.com/profile_images/1189207021146509313/yvzyuloD.jpg",
+      "fetched": "2026-10-22",
+      "note": "ARK Invest's account; ARK Invest manages the ARK Venture Fund."
+    },
+    "asml": {
+      "name": "ASML",
+      "source": "X profile picture",
+      "page": "https://x.com/ASMLcompany",
+      "image": "https://pbs.twimg.com/profile_images/1746919443903442944/UtgI1uE3.jpg",
+      "fetched": "2026-10-22"
+    },
+    "broadcom": {
+      "name": "Broadcom",
+      "source": "X profile picture",
+      "page": "https://x.com/Broadcom",
+      "image": "https://pbs.twimg.com/profile_images/784468765027110912/tavuddvl.jpg",
+      "fetched": "2026-10-22"
+    },
+    "capital-group": {
+      "name": "Capital Group",
+      "source": "X profile picture",
+      "page": "https://x.com/CapitalGroup",
+      "image": "https://pbs.twimg.com/profile_images/1389315269743374336/RYkQnz_4.jpg",
+      "fetched": "2026-10-22"
+    },
+    "cerebras": {
+      "name": "Cerebras",
+      "source": "X profile picture",
+      "page": "https://x.com/cerebras",
+      "image": "https://pbs.twimg.com/profile_images/1894806880804913152/zLdh072p.jpg",
+      "fetched": "2026-10-22"
+    },
+    "coatue": {
+      "name": "COATUE",
+      "source": "X profile picture",
+      "page": "https://x.com/coatuemgmt",
+      "image": "https://pbs.twimg.com/profile_images/1674180174634516480/miiGAx_g.jpg",
+      "fetched": "2026-10-22"
+    },
+    "constellation-energy": {
+      "name": "Constellation",
+      "source": "X profile picture",
+      "page": "https://x.com/ConstellationEG",
+      "image": "https://pbs.twimg.com/profile_images/535894079511334912/lTyBsctF.jpeg",
+      "fetched": "2026-10-22"
+    },
+    "coreweave": {
+      "name": "CoreWeave",
+      "source": "X profile picture",
+      "page": "https://x.com/CoreWeave",
+      "image": "https://pbs.twimg.com/profile_images/2049523237684690944/zXWk4Luv.jpg",
+      "fetched": "2026-10-22"
+    },
+    "crusoe": {
+      "name": "Crusoe",
+      "source": "X profile picture",
+      "page": "https://x.com/CrusoeAI",
+      "image": "https://pbs.twimg.com/profile_images/2036511946288275459/G_ylpNE9.png",
+      "fetched": "2026-10-22"
+    },
+    "d-e-shaw-ventures": {
+      "name": "The D. E. Shaw Group",
+      "source": "X profile picture",
+      "page": "https://x.com/DEShawGroup",
+      "image": "https://pbs.twimg.com/profile_images/1230895313759633409/Nywy5L5L.jpg",
+      "fetched": "2026-10-22",
+      "note": "The D. E. Shaw group's account; D. E. Shaw Ventures is part of the group."
+    },
+    "d1-capital-partners": {
+      "name": "D1 Capital Partners L.P.",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/d1-capital-partners/",
+      "image": "https://media.licdn.com/dms/image/v2/C4E0BAQGmrV0U-3HSjQ/company-logo_400_400/company-logo_400_400/0/1630611088202/d1_capital_partners_logo",
+      "fetched": "2026-10-22"
+    },
+    "dragoneer": {
+      "name": "Dragoneer Investment Group",
+      "source": "Official website icon",
+      "page": "https://www.dragoneer.com/",
+      "image": "https://cdn.prod.website-files.com/67d468571abba14b3eeb3ed0/68406326cfe9e67ec35b192b_fav_icon_256.png",
+      "fetched": "2026-10-22",
+      "note": "The LinkedIn logo is a wordmark too small to read in a 28px tile; the site icon is the dragon emblem alone."
+    },
+    "fidelity": {
+      "name": "Fidelity Investments",
+      "source": "X profile picture",
+      "page": "https://x.com/Fidelity",
+      "image": "https://pbs.twimg.com/profile_images/1907519319082254336/Se9OAY6C.jpg",
+      "fetched": "2026-10-22"
+    },
+    "fluidstack": {
+      "name": "Fluidstack",
+      "source": "X profile picture",
+      "page": "https://x.com/fluidstack",
+      "image": "https://pbs.twimg.com/profile_images/2110819259555483648/bDfNwwhr.jpg",
+      "fetched": "2026-10-22"
+    },
+    "founders-fund": {
+      "name": "Founders Fund",
+      "source": "X profile picture",
+      "page": "https://x.com/foundersfund",
+      "image": "https://pbs.twimg.com/profile_images/961031551147388928/h77pNMAc.jpg",
+      "fetched": "2026-10-22"
+    },
+    "gic": {
+      "name": "GIC",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/gic/",
+      "image": "https://media.licdn.com/dms/image/v2/C560BAQESmMpWAJblLg/company-logo_400_400/company-logo_400_400/0/1630638209873/gic_logo",
+      "fetched": "2026-10-22"
+    },
+    "greenoaks": {
+      "name": "Greenoaks",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/greenoaks-capital/",
+      "image": "https://media.licdn.com/dms/image/v2/D560BAQGUM8Iysz3j-w/company-logo_400_400/B56Z.0JbcjIcAU-/0/1785433798877/greenoaks_capital_logo",
+      "fetched": "2026-10-22",
+      "note": "The @Greenoaks X picture is a plain green square, so the LinkedIn logo is used."
+    },
+    "iconiq": {
+      "name": "ICONIQ",
+      "source": "X profile picture",
+      "page": "https://x.com/ICONIQCapital",
+      "image": "https://pbs.twimg.com/profile_images/1923037969042243590/Re7XXl6Q.jpg",
+      "fetched": "2026-10-22"
+    },
+    "lambda": {
+      "name": "Lambda",
+      "source": "X profile picture",
+      "page": "https://x.com/LambdaAPI",
+      "image": "https://pbs.twimg.com/profile_images/1846606265046192128/qzcCB5Qm.png",
+      "fetched": "2026-10-22"
+    },
+    "lightspeed-venture-partners": {
+      "name": "Lightspeed",
+      "source": "X profile picture",
+      "page": "https://x.com/lightspeedvp",
+      "image": "https://pbs.twimg.com/profile_images/1918355794333970433/QKku_TuT.jpg",
+      "fetched": "2026-10-22"
+    },
+    "mgx": {
+      "name": "MGX",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/mgxai/",
+      "image": "https://media.licdn.com/dms/image/v2/D4D0BAQGqiVBrrfIHXA/company-logo_400_400/B4DZzCjweIGwAY-/0/1772790681030",
+      "fetched": "2026-10-22"
+    },
+    "microsoft": {
+      "name": "Microsoft",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/microsoft/",
+      "image": "https://media.licdn.com/dms/image/v2/D560BAQH32RJQCl3dDQ/company-logo_400_400/B56ZYQ0mrGGoAc-/0/1744038948046/microsoft_logo",
+      "fetched": "2026-10-22",
+      "note": "The @Microsoft X picture is a campaign photo, so the LinkedIn logo is used."
+    },
+    "moonshot-ai": {
+      "name": "Kimi.ai",
+      "source": "X profile picture",
+      "page": "https://x.com/Kimi_Moonshot",
+      "image": "https://pbs.twimg.com/profile_images/2086719038798102529/diJGKpOE.jpg",
+      "fetched": "2026-10-22",
+      "note": "Moonshot AI's official account, branded Kimi.ai."
+    },
+    "nebius": {
+      "name": "Nebius",
+      "source": "X profile picture",
+      "page": "https://x.com/nebiusai",
+      "image": "https://pbs.twimg.com/profile_images/1709558733313863681/TCOwOckQ.jpg",
+      "fetched": "2026-10-22"
+    },
+    "nscale": {
+      "name": "Nscale",
+      "source": "X profile picture",
+      "page": "https://x.com/nscale",
+      "image": "https://pbs.twimg.com/profile_images/1811011768455462912/hrYyHYEi.jpg",
+      "fetched": "2026-10-22"
+    },
+    "oracle": {
+      "name": "Oracle",
+      "source": "X profile picture",
+      "page": "https://x.com/Oracle",
+      "image": "https://pbs.twimg.com/profile_images/2064381976048459777/d8QDf9lu.png",
+      "fetched": "2026-10-22"
+    },
+    "psg-equity": {
+      "name": "PSG",
+      "source": "X profile picture",
+      "page": "https://x.com/PSG_equity",
+      "image": "https://pbs.twimg.com/profile_images/1349924069899177990/ykQdIw49.jpg",
+      "fetched": "2026-10-22"
+    },
+    "samsung-electronics": {
+      "name": "Samsung Electronics",
+      "source": "X profile picture",
+      "page": "https://x.com/Samsung",
+      "image": "https://pbs.twimg.com/profile_images/1625298793037176833/Cv5sh0b6.jpg",
+      "fetched": "2026-10-22"
+    },
+    "sb-energy": {
+      "name": "SB Energy",
+      "source": "X profile picture",
+      "page": "https://x.com/SBEnergy",
+      "image": "https://pbs.twimg.com/profile_images/2105066675465068544/_HAFiNqW.jpg",
+      "fetched": "2026-10-22"
+    },
+    "sequoia-capital": {
+      "name": "Sequoia Capital",
+      "source": "X profile picture",
+      "page": "https://x.com/sequoia",
+      "image": "https://pbs.twimg.com/profile_images/1468287449130422278/kv_Og2d2.png",
+      "fetched": "2026-10-22"
+    },
+    "softbank-group": {
+      "name": "ソフトバンクグループ株式会社 | SoftBank Group Corp.",
+      "source": "X profile picture",
+      "page": "https://x.com/SoftBank_Group",
+      "image": "https://pbs.twimg.com/profile_images/1820739059733729280/FVaipW50.jpg",
+      "fetched": "2026-10-22"
+    },
+    "spacex": {
+      "name": "SpaceX",
+      "source": "X profile picture",
+      "page": "https://x.com/SpaceX",
+      "image": "https://pbs.twimg.com/profile_images/1697749409851985920/HbrI04tM.jpg",
+      "fetched": "2026-10-22"
+    },
+    "t-rowe-price": {
+      "name": "T. Rowe Price",
+      "source": "X profile picture",
+      "page": "https://x.com/TRowePrice",
+      "image": "https://pbs.twimg.com/profile_images/1724808555692171264/v1rv8w6j.png",
+      "fetched": "2026-10-22"
+    },
+    "talen-energy": {
+      "name": "Talen Energy",
+      "source": "X profile picture",
+      "page": "https://x.com/TalenEnergy",
+      "image": "https://pbs.twimg.com/profile_images/692433034830860289/Q1U_MSTp.png",
+      "fetched": "2026-10-22"
+    },
+    "terawulf": {
+      "name": "TeraWulf",
+      "source": "X profile picture",
+      "page": "https://x.com/TeraWulfInc",
+      "image": "https://pbs.twimg.com/profile_images/2095504713815068673/NZI-VzAA.jpg",
+      "fetched": "2026-10-22"
+    },
+    "thrive-capital": {
+      "name": "Thrive Capital",
+      "source": "X profile picture",
+      "page": "https://x.com/ThriveCapital",
+      "image": "https://pbs.twimg.com/profile_images/2170559616/thrive_logo_mark.jpg",
+      "fetched": "2026-10-22"
+    },
+    "tpg": {
+      "name": "TPG",
+      "source": "X profile picture",
+      "page": "https://x.com/tpg",
+      "image": "https://pbs.twimg.com/profile_images/1675087507141058560/61mV78BQ.jpg",
+      "fetched": "2026-10-22"
+    },
+    "tsmc": {
+      "name": "TSMC",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/tsmc/",
+      "image": "https://media.licdn.com/dms/image/v2/C560BAQESjKpbeGX8vA/company-logo_400_400/company-logo_400_400/0/1630598291484/tsmc_logo",
+      "fetched": "2026-10-22"
+    },
+    "vistra": {
+      "name": "Vistra",
+      "source": "X profile picture",
+      "page": "https://x.com/VistraCorp",
+      "image": "https://pbs.twimg.com/profile_images/1277689275954446343/4_YgvbLI.jpg",
+      "fetched": "2026-10-22"
+    },
+    "x-energy": {
+      "name": "X-energy",
+      "source": "X profile picture",
+      "page": "https://x.com/xenergynuclear",
+      "image": "https://pbs.twimg.com/profile_images/2010714390337552384/wAyuc2Uh.png",
+      "fetched": "2026-10-22"
+    },
+    "xai": {
+      "name": "xAI",
+      "source": "Official website icon",
+      "page": "https://x.ai/",
+      "image": "https://x.ai/icon.png?icon.2jebtfdg6783w.png?dpl=fbd2577c9148b49348ee4f70ee8f644c9b4a8e01",
+      "fetched": "2026-10-22",
+      "note": "x.ai serves the SpaceX X mark since the SpaceX merger; the @xai X picture is blank."
+    },
+    "xn": {
+      "name": "XN",
+      "source": "LinkedIn company logo",
+      "page": "https://www.linkedin.com/company/xn/",
+      "image": "https://media.licdn.com/dms/image/v2/D4E0BAQE28qFDI7kBxQ/company-logo_400_400/B4EaAReWwDI0AU-/0/1786999565614/xn_logo",
+      "fetched": "2026-10-22"
+    }
+  }
+}

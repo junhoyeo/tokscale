@@ -1,0 +1,116 @@
+{
+  "sources": [
+    {
+      "id": "src_lambda_form_d_2022_11_17",
+      "url": "https://www.sec.gov/Archives/edgar/data/1954966/000195496622000001/primary_doc.xml",
+      "publisher": "SEC EDGAR (Lambda, Inc.)",
+      "type": "sec_filing",
+      "title": "Lambda, Inc. Form D, filed November 17, 2022",
+      "publishedAt": "2022-11-17",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "D",
+        "accession": "0001954966-22-000001",
+        "cik": "0001954966",
+        "filedAt": "2022-11-17"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_lambda_form_d_2022",
+    "slug": "lambda-form-d-2022",
+    "kind": "filing",
+    "types": [
+      "form_d"
+    ],
+    "title": "Lambda Form D for an equity offering (filed November 2022)",
+    "summary": "Lambda filed a Form D notice for an equity offering that began on October 31, 2022. The filing does not name a round or a valuation.",
+    "date": "2022-11-17",
+    "dates": {
+      "filed": "2022-11-17"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_lambda",
+        "roles": [
+          "issuer",
+          "filer"
+        ],
+        "note": "Lambda, Inc."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "offering",
+        "label": "Total offering amount",
+        "measure": "form_d_offering_amount",
+        "value": 44412016,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2022-11-17",
+        "to": "org_lambda",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<totalOfferingAmount>44412016</totalOfferingAmount>"
+      },
+      {
+        "id": "sold",
+        "label": "Total amount sold",
+        "measure": "form_d_amount_sold",
+        "value": 39705501,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "filed",
+        "asOf": "2022-11-17",
+        "to": "org_lambda",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<totalAmountSold>39705501</totalAmountSold>"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "investors",
+        "label": "Investors who have already invested",
+        "measure": "investors",
+        "value": 47,
+        "basis": "exact",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<totalNumberAlreadyInvested>47</totalNumberAlreadyInvested>"
+      }
+    ],
+    "facts": [
+      {
+        "label": "First sale",
+        "text": "October 31, 2022.",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<dateOfFirstSale> <value>2022-10-31</value> </dateOfFirstSale>"
+      },
+      {
+        "label": "Exemption",
+        "text": "Rule 506(b) of Regulation D.",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<federalExemptionsExclusions> <item>06b</item> </federalExemptionsExclusions>"
+      },
+      {
+        "label": "Security type",
+        "text": "Equity.",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<isEquityType>true</isEquityType>"
+      },
+      {
+        "label": "Previous name",
+        "text": "Lambda Labs, Inc.",
+        "sourceId": "src_lambda_form_d_2022_11_17",
+        "quote": "<issuerPreviousNameList> <previousName>Lambda Labs, Inc.</previousName> </issuerPreviousNameList>"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_lambda_form_d_2022_11_17"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

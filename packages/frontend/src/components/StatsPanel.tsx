@@ -1,7 +1,7 @@
 "use client";
 
 import styled from "styled-components";
-import type { TokenContributionData, GraphColorPalette } from "@/lib/types";
+import type { TokenContributionData } from "@/lib/types";
 import {
   formatCurrency,
   formatTokenCount,
@@ -15,43 +15,50 @@ import { formatDuration } from "@/lib/format";
 
 interface StatsPanelProps {
   data: TokenContributionData;
-  palette: GraphColorPalette;
   totalActiveTimeMs?: number | null;
   sessionCount?: number | null;
   mcpServers?: string[];
 }
 
-const Container = styled.div`
-  border-radius: 16px;
-  border: 1px solid;
-  padding: 24px;
-  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  transition: box-shadow 0.15s ease-in-out;
-  background-color: var(--color-card-bg);
-  border-color: var(--color-border-default);
+const Container = styled.section`
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--service-border);
+  border-radius: 12px;
+  background: var(--service-surface);
+`;
 
-  &:hover {
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+const Header = styled.header`
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--service-border);
+
+  @media (max-width: 520px) {
+    padding: 12px 14px;
   }
 `;
 
 const Heading = styled.h3`
-  font-size: 14px;
-  font-weight: 700;
-  margin-bottom: 16px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-fg-muted);
+  margin: 0;
+  color: var(--service-text);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 `;
 
-const Grid = styled.div`
+const Body = styled.div`
+  padding: 4px 20px 20px;
+
+  @media (max-width: 520px) {
+    padding: 2px 14px 14px;
+  }
+`;
+
+/* Each fact sits on its own thin rule, so the grid reads as a ledger at every column count. */
+const Grid = styled.dl`
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-
-  @media (max-width: 560px) {
-    gap: 16px;
-  }
+  gap: 0 24px;
+  margin: 0;
 
   @media (max-width: 400px) {
     grid-template-columns: minmax(0, 1fr);
@@ -66,131 +73,137 @@ const Grid = styled.div`
   }
 `;
 
-const SourcesContainer = styled.div`
-  margin-top: 24px;
-  padding-top: 24px;
-  border-top: 1px solid;
-  border-color: var(--color-border-default);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-`;
-
-const SourcesLabel = styled.span`
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-right: 12px;
-  color: var(--color-fg-muted);
-
-  @media (max-width: 480px) {
-    width: 100%;
-    margin-right: 0;
-  }
-`;
-
-const SourceBadge = styled.span<{ $backgroundColor: string }>`
-  font-size: 12px;
-  padding: 6px 12px;
-  border-radius: 9999px;
-  font-weight: 500;
-  transition: all 200ms ease-in-out;
-  background-color: ${props => props.$backgroundColor};
-  color: var(--color-fg-default);
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-
-  &:hover {
-    transform: scale(1.05);
-  }
-`;
-
 const StatItemContainer = styled.div`
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 4px;
-  min-width: 0;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--service-border);
 `;
 
-const StatItemLabel = styled.div`
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-fg-muted);
+const StatItemLabel = styled.dt`
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
   overflow-wrap: anywhere;
 `;
 
-const StatItemValue = styled.div<{ $highlight?: boolean; $color?: string }>`
-  font-weight: 700;
-  letter-spacing: -0.025em;
-  font-size: ${props => props.$highlight ? '20px' : '18px'};
-  color: ${props => props.$color || 'var(--color-fg-default)'};
+const StatItemValue = styled.dd<{ $highlight?: boolean }>`
   min-width: 0;
+  margin: 0;
+  color: ${({ $highlight }) => ($highlight ? "var(--v2-numeric)" : "var(--service-text)")};
+  font-size: ${({ $highlight }) => ($highlight ? "1.25rem" : "1.125rem")};
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
   overflow-wrap: anywhere;
 
   @media (max-width: 400px) {
-    font-size: ${props => props.$highlight ? '18px' : '16px'};
+    font-size: ${({ $highlight }) => ($highlight ? "1.125rem" : "1rem")};
   }
 `;
 
-const StatItemSubValue = styled.div`
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-fg-muted);
+const StatItemSubValue = styled.dd`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
 `;
 
-function BadgeList({ label, items, palette }: { label: string; items: string[]; palette: GraphColorPalette }) {
+const BadgeRow = styled.div`
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 12px;
+  margin-top: 16px;
+
+  @media (max-width: 480px) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+`;
+
+const BadgeLabel = styled.span`
+  padding-top: 4px;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+`;
+
+const Badges = styled.ul`
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+`;
+
+const Badge = styled.li`
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 10px;
+  border: 1px solid var(--service-border);
+  border-radius: 999px;
+  background: var(--service-surface-muted);
+  color: var(--service-text);
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+function BadgeList({ label, items }: { label: string; items: string[] }) {
   return (
-    <SourcesContainer>
-      <SourcesLabel>{label}:</SourcesLabel>
-      {items.map((item) => (
-        <SourceBadge key={item} $backgroundColor={`${palette.grade3}20`}>
-          {item}
-        </SourceBadge>
-      ))}
-    </SourcesContainer>
+    <BadgeRow>
+      <BadgeLabel>{label}</BadgeLabel>
+      <Badges aria-label={label}>
+        {items.map((item) => (
+          <Badge key={item} title={item}>
+            {item}
+          </Badge>
+        ))}
+      </Badges>
+    </BadgeRow>
   );
 }
 
-export function StatsPanel({ data, palette, totalActiveTimeMs, sessionCount, mcpServers }: StatsPanelProps) {
+export function StatsPanel({ data, totalActiveTimeMs, sessionCount, mcpServers }: StatsPanelProps) {
   const { summary, contributions } = data;
   const currentStreak = calculateCurrentStreak(contributions);
   const longestStreak = calculateLongestStreak(contributions);
   const bestDay = findBestDay(contributions);
 
   return (
-    <Container>
-      <Heading>Statistics</Heading>
+    <Container aria-label="Statistics">
+      <Header>
+        <Heading>Statistics</Heading>
+      </Header>
 
-      <Grid>
-        <StatItem label="Total Cost" value={formatCurrency(summary.totalCost)} highlightColor={palette.grade1} highlight />
-        <StatItem label="Total Tokens" value={formatTokenCount(summary.totalTokens)} />
-        <StatItem label="Active Days" value={`${summary.activeDays} / ${summary.totalDays}`} />
-        <StatItem label="Avg / Day" value={formatCurrency(summary.averagePerDay)} />
-        <StatItem label="Current Streak" value={`${currentStreak} day${currentStreak !== 1 ? "s" : ""}`} />
-        <StatItem label="Longest Streak" value={`${longestStreak} day${longestStreak !== 1 ? "s" : ""}`} />
-        {bestDay && dayHasActivity(bestDay) && (
-          <StatItem label="Best Day" value={formatContributionDate(bestDay)} subValue={formatCurrency(bestDay.totals.cost)} />
-        )}
-        <StatItem label="Models" value={summary.models.length.toString()} />
-        {totalActiveTimeMs != null && totalActiveTimeMs > 0 && (
-          <StatItem label="Active Time" value={formatDuration(totalActiveTimeMs)} />
-        )}
-        {sessionCount != null && sessionCount > 0 && (
-          <StatItem label="Sessions" value={sessionCount.toString()} />
-        )}
-      </Grid>
+      <Body>
+        <Grid>
+          <StatItem label="Total cost" value={formatCurrency(summary.totalCost)} highlight />
+          <StatItem label="Total tokens" value={formatTokenCount(summary.totalTokens)} />
+          <StatItem label="Active days" value={`${summary.activeDays} / ${summary.totalDays}`} />
+          <StatItem label="Avg / day" value={formatCurrency(summary.averagePerDay)} />
+          <StatItem label="Current streak" value={`${currentStreak} day${currentStreak !== 1 ? "s" : ""}`} />
+          <StatItem label="Longest streak" value={`${longestStreak} day${longestStreak !== 1 ? "s" : ""}`} />
+          {bestDay && dayHasActivity(bestDay) && (
+            <StatItem label="Best day" value={formatContributionDate(bestDay)} subValue={formatCurrency(bestDay.totals.cost)} />
+          )}
+          <StatItem label="Models" value={summary.models.length.toString()} />
+          {totalActiveTimeMs != null && totalActiveTimeMs > 0 && (
+            <StatItem label="Active time" value={formatDuration(totalActiveTimeMs)} />
+          )}
+          {sessionCount != null && sessionCount > 0 && (
+            <StatItem label="Sessions" value={sessionCount.toString()} />
+          )}
+        </Grid>
 
-      <BadgeList label="Clients" items={summary.clients} palette={palette} />
-      {mcpServers && mcpServers.length > 0 && (
-        <BadgeList label="MCPs" items={mcpServers} palette={palette} />
-      )}
+        <BadgeList label="Clients" items={summary.clients} />
+        {mcpServers && mcpServers.length > 0 && <BadgeList label="MCPs" items={mcpServers} />}
+      </Body>
     </Container>
   );
 }
@@ -199,20 +212,14 @@ interface StatItemProps {
   label: string;
   value: string;
   subValue?: string;
-  highlightColor?: string;
   highlight?: boolean;
 }
 
-function StatItem({ label, value, subValue, highlightColor, highlight }: StatItemProps) {
+function StatItem({ label, value, subValue, highlight }: StatItemProps) {
   return (
     <StatItemContainer>
       <StatItemLabel>{label}</StatItemLabel>
-      <StatItemValue
-        $highlight={highlight}
-        $color={highlight && highlightColor ? highlightColor : undefined}
-      >
-        {value}
-      </StatItemValue>
+      <StatItemValue $highlight={highlight}>{value}</StatItemValue>
       {subValue && <StatItemSubValue>{subValue}</StatItemSubValue>}
     </StatItemContainer>
   );

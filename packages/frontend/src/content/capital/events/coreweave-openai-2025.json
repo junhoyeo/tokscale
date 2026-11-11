@@ -1,0 +1,87 @@
+{
+  "sources": [
+    {
+      "id": "src_coreweave_8k_2025_09_25",
+      "url": "https://www.sec.gov/Archives/edgar/data/1769628/000119312525216497/d17274d8k.htm",
+      "publisher": "SEC EDGAR (CoreWeave, Inc.)",
+      "type": "sec_filing",
+      "title": "CoreWeave Form 8-K, September 25, 2025 (OpenAI order form)",
+      "publishedAt": "2025-09-25",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-25-216497",
+        "cik": "0001769628",
+        "filedAt": "2025-09-25",
+        "periodOfReport": "2025-09-23"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_coreweave_openai_2025",
+    "slug": "coreweave-openai-2025",
+    "kind": "deal",
+    "types": [
+      "compute_contract"
+    ],
+    "title": "OpenAI and CoreWeave order form for cloud capacity",
+    "summary": "OpenAI signed a new order form with CoreWeave for cloud computing capacity under their master services agreement. The commitment runs through May 2031.",
+    "date": "2025-09-23",
+    "dates": {
+      "signed": "2025-09-23",
+      "filed": "2025-09-25"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_coreweave",
+        "roles": [
+          "provider"
+        ]
+      },
+      {
+        "org": "org_openai",
+        "roles": [
+          "buyer"
+        ],
+        "note": "OpenAI OpCo, LLC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "contract",
+        "label": "Commitment under the order form",
+        "measure": "contract_value",
+        "value": 6500000000,
+        "currency": "USD",
+        "basis": "up_to_approximately",
+        "status": "signed",
+        "asOf": "2025-09-23",
+        "from": "org_openai",
+        "to": "org_coreweave",
+        "term": {
+          "through": "2031-05-31"
+        },
+        "condition": "Subject to termination and to delivery and availability requirements",
+        "sourceId": "src_coreweave_8k_2025_09_25",
+        "quote": "Subject to any termination described below and satisfaction of delivery and availability of service requirements, OpenAI has committed to pay the Company up to approximately $6.5 billion through May 31, 2031 under the Order Form."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Framework",
+        "text": "The order form sits under a master services agreement dated May 8, 2025.",
+        "sourceId": "src_coreweave_8k_2025_09_25",
+        "quote": "under the existing Master Services Agreement (\"MSA\") dated as of May 8, 2025"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_coreweave_8k_2025_09_25"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

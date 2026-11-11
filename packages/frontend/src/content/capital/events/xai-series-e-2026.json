@@ -1,0 +1,99 @@
+{
+  "sources": [
+    {
+      "id": "src_xai_series_e",
+      "url": "https://x.ai/news/series-e",
+      "publisher": "xAI",
+      "type": "company_announcement",
+      "title": "xAI Raises $20B Series E",
+      "publishedAt": "2026-01-06",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_xai_series_e_2026",
+    "slug": "xai-series-e-2026",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "xAI Series E",
+    "summary": "xAI raised $20 billion in an upsized Series E round. NVIDIA and Cisco Investments took part as strategic investors.",
+    "roundLabel": "Series E",
+    "date": "2026-01-06",
+    "dates": {
+      "announced": "2026-01-06"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_xai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      },
+      {
+        "org": "org_mgx",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series E equity",
+        "measure": "equity_raised",
+        "value": 20000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-01-06",
+        "to": "org_xai",
+        "sourceId": "src_xai_series_e",
+        "quote": "xAI completed its upsized Series E funding round, exceeding the $15 billion targeted round size, and raised $20 billion."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Target size",
+        "text": "The round was upsized and went past its target size.",
+        "sourceId": "src_xai_series_e",
+        "quote": "xAI completed its upsized Series E funding round, exceeding the $15 billion targeted round size, and raised $20 billion."
+      },
+      {
+        "label": "Named investors",
+        "text": "Valor Equity Partners, Stepstone Group, Fidelity Management & Research Company, Qatar Investment Authority, MGX and Baron Capital Group, among other partners.",
+        "sourceId": "src_xai_series_e",
+        "quote": "Investors participating in the round include Valor Equity Partners, Stepstone Group, Fidelity Management & Research Company, Qatar Investment Authority, MGX and Baron Capital Group, amongst other key partners."
+      },
+      {
+        "label": "Strategic investors",
+        "text": "NVIDIA and Cisco Investments invested as strategic investors.",
+        "sourceId": "src_xai_series_e",
+        "quote": "Strategic investors in the round include NVIDIA and Cisco Investments, who continue to support xAI in rapidly scaling our compute infrastructure and buildout of the largest GPU clusters in the world."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_xai_series_e"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

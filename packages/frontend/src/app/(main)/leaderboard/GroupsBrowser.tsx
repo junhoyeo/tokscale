@@ -11,6 +11,7 @@ import {
   SegmentedControl,
 } from "@/components/leaderboard/RankingUI";
 import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
+import { trackEvent } from "@/lib/analytics/events";
 
 // Inlined view of the groups list that lives under the /leaderboard ?view=groups
 // segmented control. The /groups/[slug], /groups/new, and /groups/join/[token]
@@ -402,7 +403,12 @@ export default function GroupsBrowser({
         {currentUser ? (
           <DirectoryAction href="/groups/new">New group</DirectoryAction>
         ) : (
-          <DirectoryAction href={signInHref}>Sign in</DirectoryAction>
+          <DirectoryAction
+            href={signInHref}
+            onClick={() => trackEvent("sign_in_clicked", { location: "groups_browser" })}
+          >
+            Sign in
+          </DirectoryAction>
         )}
       </Toolbar>
 

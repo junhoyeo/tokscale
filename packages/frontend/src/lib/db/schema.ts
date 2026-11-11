@@ -896,3 +896,21 @@ export type GroupInvite = typeof groupInvites.$inferSelect;
 export type NewGroupInvite = typeof groupInvites.$inferInsert;
 export type ModerationActionRow = typeof moderationActions.$inferSelect;
 export type NewModerationActionRow = typeof moderationActions.$inferInsert;
+
+// ============================================================================
+// EXPLORE PRIVACY CACHE REVISION
+// ============================================================================
+/**
+ * A mutation-owned namespace for public analytics. Increment in the SAME
+ * transaction as a hide/unhide or deletion. Readers fetch this singleton
+ * before consulting Next's cache; late old queries cannot republish into the
+ * current namespace. Keep bigint exact (never cast it to a JS number).
+ */
+export const exploreCacheRevision = pgTable(
+  "explore_cache_revision",
+  {
+    id: integer("id").primaryKey(),
+    revision: bigint("revision", { mode: "bigint" }).notNull().default(sql`0`),
+  },
+  (table) => [check("explore_cache_revision_singleton", sql`${table.id} = 1`)],
+);

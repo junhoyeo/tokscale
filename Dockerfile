@@ -32,6 +32,8 @@ COPY --from=deps /repo/node_modules ./node_modules
 COPY --from=deps /repo/packages/frontend/node_modules ./packages/frontend/node_modules
 COPY packages/frontend ./packages/frontend
 COPY package.json bun.lock ./
+# Inputs for the standalone notice bundle, including linked root policies.
+COPY LICENSE CLA.md TRADEMARKS.md ./
 
 WORKDIR /repo/packages/frontend
 ENV NODE_ENV=production \
@@ -41,7 +43,10 @@ ENV NODE_ENV=production \
 # Database-backed routes are explicitly dynamic, so the image build is
 # independent of a database. DATABASE_URL is supplied only when the container
 # starts, after the Compose database has passed its healthcheck.
-RUN bun run build
+# The local notice hook follows Next's manifest, but the image CMD below needs
+# this fixed monorepo-relative server path.
+RUN bun run build \
+    && test -f .next/standalone/packages/frontend/server.js
 
 # ── 4. runner — minimal production image ──────────────────────────────────────
 FROM oven/bun:1-alpine AS runner
@@ -55,7 +60,8 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     HOME=/home/tokscale
 
-# next standalone bundles server.js + required node_modules under /app
+# next standalone bundles server.js + required node_modules under /app.
+# Copy the entire tree: bun run build also puts the notice bundle in /app/notices.
 COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/.next/standalone ./
 COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/.next/static      ./packages/frontend/.next/static
 COPY --chown=tokscale:tokscale --from=builder /repo/packages/frontend/public            ./packages/frontend/public

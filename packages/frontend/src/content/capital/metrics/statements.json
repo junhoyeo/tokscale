@@ -1,0 +1,154 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_amazon_compute",
+      "url": "https://www.anthropic.com/news/anthropic-amazon-compute",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic and Amazon expand collaboration for up to 5 gigawatts of new compute",
+      "publishedAt": "2026-04-20",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    },
+    {
+      "id": "src_anthropic_series_h",
+      "url": "https://www.anthropic.com/news/series-h",
+      "publisher": "Anthropic",
+      "type": "company_announcement",
+      "title": "Anthropic raises $65B in Series H funding at $965B post-money valuation",
+      "publishedAt": "2026-05-28",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    },
+    {
+      "id": "src_spacex_10q_2026_06_30",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026052535/spcx-20260630.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 10-Q for the quarter ended June 30, 2026",
+      "publishedAt": "2026-08-04",
+      "retrievedAt": "2026-10-20",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001628280-26-052535",
+        "cik": "0001181412",
+        "filedAt": "2026-08-04",
+        "periodOfReport": "2026-06-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "statements": [
+    {
+      "id": "met_anthropic_run_rate_2025_12",
+      "org": "org_anthropic",
+      "label": "Run-rate revenue at the end of 2025",
+      "measure": "revenue_run_rate",
+      "value": 9000000000,
+      "currency": "USD",
+      "basis": "approximately",
+      "status": "announced",
+      "asOf": "2025-12-31",
+      "sourceId": "src_anthropic_amazon_compute",
+      "quote": "Our run-rate revenue has now surpassed $30 billion, up from approximately $9 billion at the end of 2025."
+    },
+    {
+      "id": "met_anthropic_run_rate_2026_04",
+      "org": "org_anthropic",
+      "label": "Run-rate revenue",
+      "measure": "revenue_run_rate",
+      "value": 30000000000,
+      "currency": "USD",
+      "basis": "more_than",
+      "status": "announced",
+      "asOf": "2026-04-20",
+      "sourceId": "src_anthropic_amazon_compute",
+      "quote": "Our run-rate revenue has now surpassed $30 billion, up from approximately $9 billion at the end of 2025."
+    },
+    {
+      "id": "met_anthropic_run_rate_2026_05",
+      "org": "org_anthropic",
+      "label": "Run-rate revenue",
+      "measure": "revenue_run_rate",
+      "value": 47000000000,
+      "currency": "USD",
+      "basis": "more_than",
+      "status": "announced",
+      "asOf": "2026-05-28",
+      "sourceId": "src_anthropic_series_h",
+      "quote": "our run-rate revenue crossed $47 billion earlier this month."
+    },
+    {
+      "id": "met_spacex_ai_segment_revenue_2026_q2",
+      "org": "org_spacex",
+      "label": "AI segment revenue",
+      "measure": "revenue_reported",
+      "value": 2561000000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2026-06-30",
+      "period": {
+        "start": "2026-04-01",
+        "end": "2026-06-30",
+        "label": "Three months ended June 30, 2026"
+      },
+      "sourceId": "src_spacex_10q_2026_06_30",
+      "quote": "Three Months Ended June 30, 2026 Space Connectivity AI Total Reportable Segments Revenue $ 962 $ 4,291 $ 2,561 $ 7,814"
+    },
+    {
+      "id": "met_spacex_ai_segment_capex_2026_q2",
+      "org": "org_spacex",
+      "label": "AI segment capital expenditures",
+      "measure": "capex_actual",
+      "value": 15828000000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2026-06-30",
+      "period": {
+        "start": "2026-04-01",
+        "end": "2026-06-30",
+        "label": "Three months ended June 30, 2026"
+      },
+      "sourceId": "src_spacex_10q_2026_06_30",
+      "quote": "Capital expenditures $ 1,174 $ 1,367 $ 15,828 $ 18,369"
+    },
+    {
+      "id": "met_spacex_ai_segment_revenue_2026_h1",
+      "org": "org_spacex",
+      "label": "AI segment revenue",
+      "measure": "revenue_reported",
+      "value": 3379000000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2026-06-30",
+      "period": {
+        "start": "2026-01-01",
+        "end": "2026-06-30",
+        "label": "Six months ended June 30, 2026"
+      },
+      "sourceId": "src_spacex_10q_2026_06_30",
+      "quote": "Six Months Ended June 30, 2026 Space Connectivity AI Total Reportable Segments Revenue $ 1,581 $ 7,548 $ 3,379 $ 12,508"
+    },
+    {
+      "id": "met_spacex_ai_segment_capex_2026_h1",
+      "org": "org_spacex",
+      "label": "AI segment capital expenditures",
+      "measure": "capex_actual",
+      "value": 23551000000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2026-06-30",
+      "period": {
+        "start": "2026-01-01",
+        "end": "2026-06-30",
+        "label": "Six months ended June 30, 2026"
+      },
+      "sourceId": "src_spacex_10q_2026_06_30",
+      "quote": "Capital expenditures $ 2,226 $ 2,699 $ 23,551 $ 28,476"
+    }
+  ]
+}

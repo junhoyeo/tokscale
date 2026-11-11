@@ -1,0 +1,96 @@
+{
+  "sources": [
+    {
+      "id": "src_broadcom_8k_2026_04_06",
+      "url": "https://www.sec.gov/Archives/edgar/data/1730168/000119312526144028/d87999d8k.htm",
+      "publisher": "SEC EDGAR (Broadcom Inc.)",
+      "type": "sec_filing",
+      "title": "Broadcom Form 8-K, April 6, 2026 (Google TPU agreements and Anthropic compute capacity)",
+      "publishedAt": "2026-04-06",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-144028",
+        "cik": "0001730168",
+        "filedAt": "2026-04-06",
+        "periodOfReport": "2026-04-06"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_broadcom_google_anthropic_2026",
+    "slug": "broadcom-google-anthropic-2026",
+    "kind": "deal",
+    "types": [
+      "chip_supply",
+      "compute_contract"
+    ],
+    "title": "Broadcom, Google and Anthropic expand their TPU collaboration",
+    "summary": "Broadcom agreed to develop and supply custom TPUs for Google. Separately, Broadcom, Google and Anthropic expanded a collaboration under which Anthropic will access TPU-based compute capacity through Broadcom from 2027.",
+    "date": "2026-04-06",
+    "dates": {
+      "announced": "2026-04-06",
+      "filed": "2026-04-06"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_broadcom",
+        "roles": [
+          "provider"
+        ]
+      },
+      {
+        "org": "org_alphabet",
+        "roles": [
+          "partner"
+        ],
+        "note": "Google LLC"
+      },
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "buyer"
+        ],
+        "note": "Anthropic PBC"
+      }
+    ],
+    "amounts": [],
+    "quantities": [
+      {
+        "id": "capacity",
+        "label": "TPU-based compute capacity for Anthropic through Broadcom",
+        "measure": "capacity_gw",
+        "value": 3.5,
+        "basis": "approximately",
+        "term": {
+          "starts": "beginning in 2027"
+        },
+        "condition": "Consumption depends on Anthropic's continued commercial success",
+        "sourceId": "src_broadcom_8k_2026_04_06",
+        "quote": "Separately, Broadcom, Google and Anthropic PBC (\"Anthropic\") have expanded their current strategic collaboration under which Anthropic, beginning in 2027, will access through Broadcom approximately 3.5 gigawatts as part of the multiple gigawatts of next generation TPU-based AI compute capacity committed by Anthropic."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Google agreements",
+        "text": "A long-term agreement to develop and supply custom TPUs for Google, and a supply assurance agreement for networking and other components through up to 2031.",
+        "sourceId": "src_broadcom_8k_2026_04_06",
+        "quote": "Broadcom Inc. (\"Broadcom\") and Google LLC (\"Google\") have entered into a Long Term Agreement for Broadcom to develop and supply custom Tensor Processing Units (\"TPUs\") for Google's future generations of TPUs and a Supply Assurance Agreement for Broadcom to supply networking and other components to be used in Google's next-generation AI racks through up to 2031."
+      },
+      {
+        "label": "Condition",
+        "text": "Anthropic's use of the expanded capacity depends on its continued commercial success.",
+        "sourceId": "src_broadcom_8k_2026_04_06",
+        "quote": "The consumption of such expanded AI compute capacity by Anthropic is dependent on Anthropic's continued commercial success."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_broadcom_8k_2026_04_06"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

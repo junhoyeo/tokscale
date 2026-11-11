@@ -1,0 +1,2210 @@
+{
+  "sources": [
+    {
+      "id": "src_spacex_10q_2026_06_30",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026052535/spcx-20260630.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 10-Q for the quarter ended June 30, 2026",
+      "publishedAt": "2026-08-04",
+      "retrievedAt": "2026-10-20",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001628280-26-052535",
+        "cik": "0001181412",
+        "filedAt": "2026-08-04",
+        "periodOfReport": "2026-06-30"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_spacex_8k_2026_08_14",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000162828026056945/spcx-20260814.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 8-K, August 14, 2026 (completion of the Cursor merger)",
+      "publishedAt": "2026-08-14",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-056945",
+        "cik": "0001181412",
+        "filedAt": "2026-08-14",
+        "periodOfReport": "2026-08-14"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_wikidata_q104158381",
+      "url": "https://www.wikidata.org/wiki/Q104158381",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q104158381 (Vistra)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q116758847",
+      "url": "https://www.wikidata.org/wiki/Q116758847",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q116758847 (Anthropic)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q119718658",
+      "url": "https://www.wikidata.org/wiki/Q119718658",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q119718658 (Mistral AI)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q120599684",
+      "url": "https://www.wikidata.org/wiki/Q120599684",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q120599684 (SpaceXAI)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q121875386",
+      "url": "https://www.wikidata.org/wiki/Q121875386",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q121875386 (CoreWeave)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q125522769",
+      "url": "https://www.wikidata.org/wiki/Q125522769",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q125522769 (Crusoe Energy)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q128896",
+      "url": "https://www.wikidata.org/wiki/Q128896",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q128896 (AMD)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q130270266",
+      "url": "https://www.wikidata.org/wiki/Q130270266",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q130270266 (Moonshot AI)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q131577453",
+      "url": "https://www.wikidata.org/wiki/Q131577453",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q131577453 (DeepSeek)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q132721548",
+      "url": "https://www.wikidata.org/wiki/Q132721548",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q132721548 (Nscale)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q135683783",
+      "url": "https://www.wikidata.org/wiki/Q135683783",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q135683783 (Anysphere, Inc.)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q1359568",
+      "url": "https://www.wikidata.org/wiki/Q1359568",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q1359568 (Alibaba Group)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q137654781",
+      "url": "https://www.wikidata.org/wiki/Q137654781",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q137654781 (TeraWulf)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q1411292",
+      "url": "https://www.wikidata.org/wiki/Q1411292",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q1411292 (Fidelity Investments)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q1439864",
+      "url": "https://www.wikidata.org/wiki/Q1439864",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q1439864 (Founders Fund)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q182477",
+      "url": "https://www.wikidata.org/wiki/Q182477",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q182477 (Nvidia)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q1852025",
+      "url": "https://www.wikidata.org/wiki/Q1852025",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q1852025 (Sequoia Capital)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q193701",
+      "url": "https://www.wikidata.org/wiki/Q193701",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q193701 (SpaceX)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q19900",
+      "url": "https://www.wikidata.org/wiki/Q19900",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q19900 (Oracle Corporation)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q201653",
+      "url": "https://www.wikidata.org/wiki/Q201653",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q201653 (SoftBank Group)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q20687182",
+      "url": "https://www.wikidata.org/wiki/Q20687182",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q20687182 (Talen Energy)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q20800404",
+      "url": "https://www.wikidata.org/wiki/Q20800404",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q20800404 (Alphabet Inc.)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q21708200",
+      "url": "https://www.wikidata.org/wiki/Q21708200",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q21708200 (OpenAI)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q2283",
+      "url": "https://www.wikidata.org/wiki/Q2283",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q2283 (Microsoft)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q380",
+      "url": "https://www.wikidata.org/wiki/Q380",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q380 (Meta Platforms)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q3884",
+      "url": "https://www.wikidata.org/wiki/Q3884",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q3884 (Amazon)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q4034010",
+      "url": "https://www.wikidata.org/wiki/Q4034010",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q4034010 (Andreessen Horowitz)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q415598",
+      "url": "https://www.wikidata.org/wiki/Q415598",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q415598 (Akamai Technologies)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q47120756",
+      "url": "https://www.wikidata.org/wiki/Q47120756",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q47120756 (Nebius Group)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q539627",
+      "url": "https://www.wikidata.org/wiki/Q539627",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q539627 (GIC Private Limited)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q6546580",
+      "url": "https://www.wikidata.org/wiki/Q6546580",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q6546580 (Lightspeed Venture Partners)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q66604886",
+      "url": "https://www.wikidata.org/wiki/Q66604886",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q66604886 (Cerebras)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q713418",
+      "url": "https://www.wikidata.org/wiki/Q713418",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q713418 (TSMC)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    },
+    {
+      "id": "src_wikidata_q790060",
+      "url": "https://www.wikidata.org/wiki/Q790060",
+      "publisher": "Wikidata",
+      "type": "dataset",
+      "title": "Wikidata item Q790060 (Broadcom)",
+      "retrievedAt": "2026-10-21",
+      "license": "CC0"
+    }
+  ],
+  "orgs": [
+    {
+      "id": "org_anthropic",
+      "slug": "anthropic",
+      "name": "Anthropic",
+      "legalNames": [
+        "Anthropic PBC",
+        "Anthropic, PBC"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "statusNote": "Public benefit corporation",
+      "hq": {
+        "city": "San Francisco",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2021-01-26",
+        "sourceId": "src_wikidata_q116758847"
+      },
+      "website": "https://www.anthropic.com",
+      "description": "AI safety and research company that builds the Claude models.",
+      "ids": {
+        "wikidata": "Q116758847",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "Anthropic",
+        "githubOrg": "anthropics"
+      },
+      "labSlugs": [
+        "anthropic"
+      ],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/anthropic.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_openai",
+      "slug": "openai",
+      "name": "OpenAI",
+      "legalNames": [
+        "OpenAI Group PBC",
+        "OpenAI OpCo, LLC"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "statusNote": "Public benefit corporation",
+      "hq": {
+        "city": "San Francisco",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2015-12-08",
+        "sourceId": "src_wikidata_q21708200"
+      },
+      "website": "https://openai.com",
+      "description": "AI research and deployment company that builds the GPT models and ChatGPT.",
+      "ids": {
+        "wikidata": "Q21708200",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "openai",
+        "githubOrg": "openai"
+      },
+      "labSlugs": [
+        "openai"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/openai.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_xai",
+      "slug": "xai",
+      "name": "xAI",
+      "legalNames": [
+        "X.AI Holdings Corp."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "subsidiary",
+      "statusNote": "Part of SpaceX",
+      "parent": {
+        "org": "org_spacex",
+        "since": "2026-02-02",
+        "sourceId": "src_spacex_10q_2026_06_30",
+        "quote": "On February 2, 2026 (\"xAI Merger Date\"), the Company completed its acquisition of X.AI Holdings Corp. (\"xAI\"), pursuant to which xAI became a wholly-owned subsidiary of the Company"
+      },
+      "hq": {
+        "country": "US"
+      },
+      "founded": {
+        "date": "2023-03-09",
+        "sourceId": "src_wikidata_q120599684"
+      },
+      "website": "https://x.ai",
+      "description": "AI company that builds the Grok models. It became a wholly owned subsidiary of SpaceX in 2026.",
+      "ids": {
+        "wikidata": "Q120599684",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "xai-org",
+        "githubOrg": "xai-org"
+      },
+      "labSlugs": [
+        "xai"
+      ],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/xai.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_spacex",
+      "slug": "spacex",
+      "name": "SpaceX",
+      "legalNames": [
+        "Space Exploration Technologies Corp."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Starbase",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2002-03-14",
+        "sourceId": "src_wikidata_q193701"
+      },
+      "website": "https://www.spacex.com",
+      "description": "Launch, satellite internet and AI company. It reports Space, Connectivity and AI segments; xAI and Cursor are its subsidiaries.",
+      "ids": {
+        "wikidata": "Q193701",
+        "secCik": [
+          "0001181412"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "SPCX"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/spacex.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_alphabet",
+      "slug": "alphabet",
+      "name": "Alphabet",
+      "legalNames": [
+        "Alphabet Inc."
+      ],
+      "aliases": [
+        "Google",
+        "Google DeepMind"
+      ],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "hyperscaler",
+        "ai-lab"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Mountain View",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2015-10-02",
+        "sourceId": "src_wikidata_q20800404"
+      },
+      "website": "https://abc.xyz",
+      "description": "Parent of Google, Google Cloud and Google DeepMind, which builds the Gemini models.",
+      "ids": {
+        "wikidata": "Q20800404",
+        "secCik": [
+          "0001652044"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "GOOGL"
+          },
+          {
+            "exchange": "NASDAQ",
+            "symbol": "GOOG"
+          }
+        ],
+        "hfOrg": "google",
+        "githubOrg": "google-deepmind"
+      },
+      "labSlugs": [
+        "google"
+      ],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/alphabet.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_meta",
+      "slug": "meta",
+      "name": "Meta",
+      "legalNames": [
+        "Meta Platforms, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "hyperscaler",
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Menlo Park",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2004-07-29",
+        "sourceId": "src_wikidata_q380"
+      },
+      "website": "https://about.meta.com",
+      "description": "Social media company that builds the open-weight Llama models and large AI data centers.",
+      "ids": {
+        "wikidata": "Q380",
+        "secCik": [
+          "0001326801"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "META"
+          }
+        ],
+        "hfOrg": "meta-llama",
+        "githubOrg": "meta-llama"
+      },
+      "labSlugs": [
+        "meta"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/meta.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_mistral_ai",
+      "slug": "mistral-ai",
+      "name": "Mistral AI",
+      "legalNames": [],
+      "aliases": [
+        "Mistral"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "city": "Paris",
+        "country": "FR"
+      },
+      "founded": {
+        "date": "2023-04-28",
+        "sourceId": "src_wikidata_q119718658"
+      },
+      "website": "https://mistral.ai",
+      "description": "French AI company that builds open-weight and commercial language models.",
+      "ids": {
+        "wikidata": "Q119718658",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "mistralai",
+        "githubOrg": "mistralai"
+      },
+      "labSlugs": [
+        "mistral"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/mistral.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_deepseek",
+      "slug": "deepseek",
+      "name": "DeepSeek",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "city": "Hangzhou",
+        "country": "CN"
+      },
+      "founded": {
+        "date": "2023-05",
+        "sourceId": "src_wikidata_q131577453"
+      },
+      "website": "https://www.deepseek.com",
+      "description": "Chinese AI company that releases open-weight language models.",
+      "ids": {
+        "wikidata": "Q131577453",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "deepseek-ai",
+        "githubOrg": "deepseek-ai"
+      },
+      "labSlugs": [
+        "deepseek"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/deepseek.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_moonshot_ai",
+      "slug": "moonshot-ai",
+      "name": "Moonshot AI",
+      "legalNames": [],
+      "aliases": [
+        "Moonshot"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "city": "Beijing",
+        "country": "CN"
+      },
+      "founded": {
+        "date": "2023-03",
+        "sourceId": "src_wikidata_q130270266"
+      },
+      "website": "https://www.moonshot.ai",
+      "description": "Chinese AI company that builds the Kimi models.",
+      "ids": {
+        "wikidata": "Q130270266",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "moonshotai",
+        "githubOrg": "MoonshotAI"
+      },
+      "labSlugs": [
+        "moonshot-ai"
+      ],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/moonshot-ai.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_zai",
+      "slug": "zai",
+      "name": "Z.ai",
+      "legalNames": [
+        "Knowledge Atlas Technology Joint Stock Co., Ltd."
+      ],
+      "aliases": [
+        "Zhipu",
+        "Zhipu AI",
+        "Knowledge Atlas"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "statusNote": "Listed in Hong Kong",
+      "hq": {
+        "city": "Beijing",
+        "country": "CN"
+      },
+      "website": "https://z.ai",
+      "description": "Chinese AI company that builds the GLM models.",
+      "ids": {
+        "wikidata": "Q129572031",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "zai-org",
+        "githubOrg": "zai-org"
+      },
+      "labSlugs": [
+        "zai"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/zai.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_minimax",
+      "slug": "minimax",
+      "name": "MiniMax",
+      "legalNames": [
+        "MiniMax Group Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "statusNote": "Listed in Hong Kong",
+      "hq": {
+        "city": "Shanghai",
+        "country": "CN"
+      },
+      "website": "https://www.minimax.io",
+      "description": "Chinese AI company that builds language, speech and video models.",
+      "ids": {
+        "wikidata": "Q130263208",
+        "secCik": [],
+        "tickers": [],
+        "hfOrg": "MiniMaxAI",
+        "githubOrg": "MiniMax-AI"
+      },
+      "labSlugs": [
+        "minimax"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/minimax.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_alibaba",
+      "slug": "alibaba",
+      "name": "Alibaba",
+      "legalNames": [
+        "Alibaba Group Holding Limited"
+      ],
+      "aliases": [
+        "Qwen",
+        "Alibaba Cloud"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab",
+        "cloud"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "country": "CN"
+      },
+      "founded": {
+        "date": "1999-06-28",
+        "sourceId": "src_wikidata_q1359568"
+      },
+      "website": "https://www.alibabagroup.com",
+      "description": "Chinese commerce and cloud company whose Qwen team builds open-weight models.",
+      "ids": {
+        "wikidata": "Q1359568",
+        "secCik": [
+          "0001577552"
+        ],
+        "tickers": [
+          {
+            "exchange": "NYSE",
+            "symbol": "BABA"
+          }
+        ],
+        "hfOrg": "Qwen",
+        "githubOrg": "QwenLM"
+      },
+      "labSlugs": [
+        "alibaba"
+      ],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/alibaba.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_cursor",
+      "slug": "cursor",
+      "name": "Cursor",
+      "legalNames": [
+        "Anysphere, Inc."
+      ],
+      "aliases": [
+        "Anysphere"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-app",
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "subsidiary",
+      "statusNote": "Part of SpaceX",
+      "parent": {
+        "org": "org_spacex",
+        "since": "2026-08-14",
+        "sourceId": "src_spacex_8k_2026_08_14",
+        "quote": "Pursuant to the Merger Agreement, on August 14, 2026 (the \"Effective Time\"), the Merger became effective"
+      },
+      "hq": {
+        "city": "San Francisco",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2022",
+        "sourceId": "src_wikidata_q135683783"
+      },
+      "website": "https://cursor.com",
+      "description": "AI code editor company that also trains its own Composer models. It became a wholly owned subsidiary of SpaceX in 2026.",
+      "ids": {
+        "wikidata": "Q135683783",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [
+        "cursor"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/cursor.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_coreweave",
+      "slug": "coreweave",
+      "name": "CoreWeave",
+      "legalNames": [
+        "CoreWeave, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "neocloud"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "country": "US"
+      },
+      "founded": {
+        "date": "2017",
+        "sourceId": "src_wikidata_q121875386"
+      },
+      "website": "https://www.coreweave.com",
+      "description": "Cloud provider that rents GPU capacity to AI labs and enterprises.",
+      "ids": {
+        "wikidata": "Q121875386",
+        "secCik": [
+          "0001769628"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "CRWV"
+          }
+        ],
+        "githubOrg": "coreweave"
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/coreweave.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_nebius",
+      "slug": "nebius",
+      "name": "Nebius",
+      "legalNames": [
+        "Nebius Group N.V."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "neocloud"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Amsterdam",
+        "country": "NL"
+      },
+      "founded": {
+        "date": "2004",
+        "sourceId": "src_wikidata_q47120756"
+      },
+      "website": "https://nebius.com",
+      "description": "AI cloud provider with data centers in Europe and the United States.",
+      "ids": {
+        "wikidata": "Q47120756",
+        "secCik": [
+          "0001513845"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "NBIS"
+          }
+        ],
+        "githubOrg": "nebius"
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/nebius.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_lambda",
+      "slug": "lambda",
+      "name": "Lambda",
+      "legalNames": [
+        "Lambda, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "neocloud"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "country": "US"
+      },
+      "website": "https://lambda.ai",
+      "description": "GPU cloud company for AI training and inference.",
+      "ids": {
+        "secCik": [
+          "0001954966"
+        ],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/lambda.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_crusoe",
+      "slug": "crusoe",
+      "name": "Crusoe",
+      "legalNames": [
+        "Crusoe Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "neocloud",
+        "data-centers"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "city": "Denver",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2018",
+        "sourceId": "src_wikidata_q125522769"
+      },
+      "website": "https://www.crusoe.ai",
+      "description": "AI data-center developer and cloud provider.",
+      "ids": {
+        "wikidata": "Q125522769",
+        "secCik": [
+          "0001924674"
+        ],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/crusoe.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_nscale",
+      "slug": "nscale",
+      "name": "Nscale",
+      "legalNames": [
+        "NSCALE Ltd"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "neocloud"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "country": "GB"
+      },
+      "founded": {
+        "date": "2024-05-29",
+        "sourceId": "src_wikidata_q132721548"
+      },
+      "website": "https://www.nscale.com",
+      "description": "AI cloud and data-center company that filed to list in the United States.",
+      "ids": {
+        "wikidata": "Q132721548",
+        "secCik": [
+          "0002110365"
+        ],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/nscale.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_fluidstack",
+      "slug": "fluidstack",
+      "name": "Fluidstack",
+      "legalNames": [
+        "Fluidstack Ltd"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "neocloud"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "hq": {
+        "country": "GB"
+      },
+      "website": "https://www.fluidstack.io",
+      "description": "GPU cloud provider that builds and runs AI clusters for labs.",
+      "ids": {
+        "secCik": [
+          "0002104151"
+        ],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/fluidstack.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_akamai",
+      "slug": "akamai",
+      "name": "Akamai",
+      "legalNames": [
+        "Akamai Technologies, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "cloud"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "country": "US"
+      },
+      "founded": {
+        "date": "1998",
+        "sourceId": "src_wikidata_q415598"
+      },
+      "website": "https://www.akamai.com",
+      "description": "Content delivery, security and cloud computing company.",
+      "ids": {
+        "wikidata": "Q415598",
+        "secCik": [
+          "0001086222"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "AKAM"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/akamai.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_oracle",
+      "slug": "oracle",
+      "name": "Oracle",
+      "legalNames": [
+        "Oracle Corporation"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "hyperscaler"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Austin",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1977-06-16",
+        "sourceId": "src_wikidata_q19900"
+      },
+      "website": "https://www.oracle.com",
+      "description": "Database and cloud infrastructure company that builds large AI data centers.",
+      "ids": {
+        "wikidata": "Q19900",
+        "secCik": [
+          "0001341439"
+        ],
+        "tickers": [
+          {
+            "exchange": "NYSE",
+            "symbol": "ORCL"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/oracle.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_microsoft",
+      "slug": "microsoft",
+      "name": "Microsoft",
+      "legalNames": [
+        "Microsoft Corporation"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "hyperscaler"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Redmond",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1975-04-04",
+        "sourceId": "src_wikidata_q2283"
+      },
+      "website": "https://www.microsoft.com",
+      "description": "Software and cloud company that runs Azure and invests in AI labs.",
+      "ids": {
+        "wikidata": "Q2283",
+        "secCik": [
+          "0000789019"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "MSFT"
+          }
+        ],
+        "hfOrg": "microsoft",
+        "githubOrg": "microsoft"
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/microsoft.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_amazon",
+      "slug": "amazon",
+      "name": "Amazon",
+      "legalNames": [
+        "Amazon.com, Inc."
+      ],
+      "aliases": [
+        "AWS",
+        "Amazon Web Services"
+      ],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "hyperscaler"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Seattle",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1994-07-05",
+        "sourceId": "src_wikidata_q3884"
+      },
+      "website": "https://www.amazon.com",
+      "description": "Commerce and cloud company that runs Amazon Web Services and invests in AI labs.",
+      "ids": {
+        "wikidata": "Q3884",
+        "secCik": [
+          "0001018724"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "AMZN"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/amazon.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_nvidia",
+      "slug": "nvidia",
+      "name": "NVIDIA",
+      "legalNames": [
+        "NVIDIA Corporation"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Santa Clara",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1993-04-05",
+        "sourceId": "src_wikidata_q182477"
+      },
+      "website": "https://www.nvidia.com",
+      "description": "Chip company whose GPUs power most AI training and inference.",
+      "ids": {
+        "wikidata": "Q182477",
+        "secCik": [
+          "0001045810"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "NVDA"
+          }
+        ],
+        "hfOrg": "nvidia",
+        "githubOrg": "NVIDIA"
+      },
+      "labSlugs": [
+        "nvidia"
+      ],
+      "nportIssuerNames": [],
+      "logo": "/assets/v2/models/nvidia.svg",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_amd",
+      "slug": "amd",
+      "name": "AMD",
+      "legalNames": [
+        "Advanced Micro Devices, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Santa Clara",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1969-05-01",
+        "sourceId": "src_wikidata_q128896"
+      },
+      "website": "https://www.amd.com",
+      "description": "Chip company that makes CPUs and Instinct AI accelerators.",
+      "ids": {
+        "wikidata": "Q128896",
+        "secCik": [
+          "0000002488"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "AMD"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/amd.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_broadcom",
+      "slug": "broadcom",
+      "name": "Broadcom",
+      "legalNames": [
+        "Broadcom Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Palo Alto",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1961",
+        "sourceId": "src_wikidata_q790060"
+      },
+      "website": "https://www.broadcom.com",
+      "description": "Chip and software company that designs custom AI accelerators with cloud partners.",
+      "ids": {
+        "wikidata": "Q790060",
+        "secCik": [
+          "0001730168"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "AVGO"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/broadcom.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_tsmc",
+      "slug": "tsmc",
+      "name": "TSMC",
+      "legalNames": [
+        "Taiwan Semiconductor Manufacturing Company Limited"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "country": "TW"
+      },
+      "founded": {
+        "date": "1987-02-21",
+        "sourceId": "src_wikidata_q713418"
+      },
+      "website": "https://www.tsmc.com",
+      "description": "Contract chip manufacturer that makes most leading AI accelerators.",
+      "ids": {
+        "wikidata": "Q713418",
+        "secCik": [
+          "0001046179"
+        ],
+        "tickers": [
+          {
+            "exchange": "NYSE",
+            "symbol": "TSM"
+          },
+          {
+            "exchange": "TWSE",
+            "symbol": "2330"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/tsmc.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_cerebras",
+      "slug": "cerebras",
+      "name": "Cerebras",
+      "legalNames": [
+        "Cerebras Systems Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "country": "US"
+      },
+      "founded": {
+        "date": "2016",
+        "sourceId": "src_wikidata_q66604886"
+      },
+      "website": "https://www.cerebras.ai",
+      "description": "Chip company that builds wafer-scale AI processors and an inference cloud.",
+      "ids": {
+        "wikidata": "Q66604886",
+        "secCik": [
+          "0002021728"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "CBRS"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/cerebras.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_terawulf",
+      "slug": "terawulf",
+      "name": "TeraWulf",
+      "legalNames": [
+        "TeraWulf Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "data-centers",
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "country": "US"
+      },
+      "founded": {
+        "date": "2021-01",
+        "sourceId": "src_wikidata_q137654781"
+      },
+      "website": "https://www.terawulf.com",
+      "description": "Data-center and power company that leases capacity for AI computing.",
+      "ids": {
+        "wikidata": "Q137654781",
+        "secCik": [
+          "0001083301"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "WULF"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/terawulf.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_vistra",
+      "slug": "vistra",
+      "name": "Vistra",
+      "legalNames": [
+        "Vistra Corp."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Irving",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2016",
+        "sourceId": "src_wikidata_q104158381"
+      },
+      "website": "https://www.vistracorp.com",
+      "description": "Power generation and retail electricity company.",
+      "ids": {
+        "wikidata": "Q104158381",
+        "secCik": [
+          "0001692819"
+        ],
+        "tickers": [
+          {
+            "exchange": "NYSE",
+            "symbol": "VST"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/vistra.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_constellation_energy",
+      "slug": "constellation-energy",
+      "name": "Constellation Energy",
+      "legalNames": [
+        "Constellation Energy Corporation"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Baltimore",
+        "country": "US"
+      },
+      "website": "https://www.constellationenergy.com",
+      "description": "Power company that runs the largest fleet of nuclear plants in the United States.",
+      "ids": {
+        "wikidata": "Q259195",
+        "secCik": [
+          "0001868275"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "CEG"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/constellation-energy.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_talen_energy",
+      "slug": "talen-energy",
+      "name": "Talen Energy",
+      "legalNames": [
+        "Talen Energy Corporation"
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Allentown",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2015",
+        "sourceId": "src_wikidata_q20687182"
+      },
+      "website": "https://www.talenenergy.com",
+      "description": "Power producer with nuclear and gas plants in the eastern United States.",
+      "ids": {
+        "wikidata": "Q20687182",
+        "secCik": [
+          "0001622536"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "TLN"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/talen-energy.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_x_energy",
+      "slug": "x-energy",
+      "name": "X-energy",
+      "legalNames": [
+        "X-Energy, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "public",
+      "hq": {
+        "city": "Greenbelt",
+        "country": "US"
+      },
+      "website": "https://x-energy.com",
+      "description": "Developer of small modular nuclear reactors and their fuel.",
+      "ids": {
+        "wikidata": "Q30633271",
+        "secCik": [
+          "0002088896"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "XE"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/x-energy.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_softbank_group",
+      "slug": "softbank-group",
+      "name": "SoftBank Group",
+      "legalNames": [
+        "SoftBank Group Corp."
+      ],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "country": "JP"
+      },
+      "founded": {
+        "date": "1981-09-03",
+        "sourceId": "src_wikidata_q201653"
+      },
+      "website": "https://group.softbank",
+      "description": "Japanese investment holding company and an investor in AI labs.",
+      "ids": {
+        "wikidata": "Q201653",
+        "secCik": [],
+        "tickers": [
+          {
+            "exchange": "TSE",
+            "symbol": "9984"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/softbank-group.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_sequoia_capital",
+      "slug": "sequoia-capital",
+      "name": "Sequoia Capital",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "vc"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Menlo Park",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1972",
+        "sourceId": "src_wikidata_q1852025"
+      },
+      "website": "https://www.sequoiacap.com",
+      "description": "Venture capital firm.",
+      "ids": {
+        "wikidata": "Q1852025",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/sequoia-capital.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_andreessen_horowitz",
+      "slug": "andreessen-horowitz",
+      "name": "Andreessen Horowitz",
+      "shortName": "a16z",
+      "legalNames": [],
+      "aliases": [
+        "a16z"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "vc"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Menlo Park",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2009-07-06",
+        "sourceId": "src_wikidata_q4034010"
+      },
+      "website": "https://a16z.com",
+      "description": "Venture capital firm.",
+      "ids": {
+        "wikidata": "Q4034010",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/andreessen-horowitz.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_lightspeed_venture_partners",
+      "slug": "lightspeed-venture-partners",
+      "name": "Lightspeed Venture Partners",
+      "shortName": "Lightspeed",
+      "legalNames": [],
+      "aliases": [
+        "Lightspeed"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "vc"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Menlo Park",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2000",
+        "sourceId": "src_wikidata_q6546580"
+      },
+      "website": "https://lsvp.com",
+      "description": "Venture capital firm.",
+      "ids": {
+        "wikidata": "Q6546580",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/lightspeed-venture-partners.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_iconiq",
+      "slug": "iconiq",
+      "name": "ICONIQ",
+      "legalNames": [],
+      "aliases": [
+        "ICONIQ Growth",
+        "ICONIQ Capital"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "hq": {
+        "country": "US"
+      },
+      "website": "https://www.iconiqcapital.com",
+      "description": "Investment firm with a growth equity practice.",
+      "ids": {
+        "wikidata": "Q107360756",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/iconiq.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_coatue",
+      "slug": "coatue",
+      "name": "Coatue",
+      "legalNames": [],
+      "aliases": [
+        "Coatue Management"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "hq": {
+        "country": "US"
+      },
+      "website": "https://www.coatue.com",
+      "description": "Technology investment firm that invests in public and private companies.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/coatue.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_thrive_capital",
+      "slug": "thrive-capital",
+      "name": "Thrive Capital",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "growth"
+      ],
+      "status": "private",
+      "hq": {
+        "country": "US"
+      },
+      "website": "https://thrivecap.com",
+      "description": "Venture and growth investment firm.",
+      "ids": {
+        "wikidata": "Q105962567",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/thrive-capital.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_founders_fund",
+      "slug": "founders-fund",
+      "name": "Founders Fund",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "vc"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "San Francisco",
+        "country": "US"
+      },
+      "founded": {
+        "date": "2005",
+        "sourceId": "src_wikidata_q1439864"
+      },
+      "website": "https://foundersfund.com",
+      "description": "Venture capital firm.",
+      "ids": {
+        "wikidata": "Q1439864",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/founders-fund.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_gic",
+      "slug": "gic",
+      "name": "GIC",
+      "legalNames": [
+        "GIC Private Limited"
+      ],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "sovereign"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Singapore",
+        "country": "SG"
+      },
+      "founded": {
+        "date": "1981-05-22",
+        "sourceId": "src_wikidata_q539627"
+      },
+      "website": "https://www.gic.com.sg",
+      "description": "Singapore's sovereign wealth fund.",
+      "ids": {
+        "wikidata": "Q539627",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/gic.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_mgx",
+      "slug": "mgx",
+      "name": "MGX",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "sovereign"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Abu Dhabi",
+        "country": "AE"
+      },
+      "website": "https://www.mgx.ae",
+      "description": "Abu Dhabi technology investment company focused on AI.",
+      "ids": {
+        "wikidata": "Q131855666",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/mgx.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_fidelity",
+      "slug": "fidelity",
+      "name": "Fidelity",
+      "legalNames": [],
+      "aliases": [
+        "Fidelity Investments"
+      ],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "asset-manager"
+      ],
+      "status": "private",
+      "hq": {
+        "city": "Boston",
+        "country": "US"
+      },
+      "founded": {
+        "date": "1946",
+        "sourceId": "src_wikidata_q1411292"
+      },
+      "website": "https://www.fidelity.com",
+      "description": "Asset manager whose registered funds report holdings of private AI companies.",
+      "ids": {
+        "wikidata": "Q1411292",
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/fidelity.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    },
+    {
+      "id": "org_ark_venture_fund",
+      "slug": "ark-venture-fund",
+      "name": "ARK Venture Fund",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "registered-fund"
+      ],
+      "status": "private",
+      "hq": {
+        "country": "US"
+      },
+      "website": "https://www.ark-funds.com",
+      "description": "Registered interval fund that holds shares of private AI companies.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "avatar": "/assets/v2/orgs/ark-venture-fund.webp",
+      "seed": true,
+      "reviewedAt": "2026-10-21"
+    }
+  ]
+}

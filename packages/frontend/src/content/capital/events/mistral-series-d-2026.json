@@ -1,0 +1,151 @@
+{
+  "sources": [
+    {
+      "id": "src_mistral_series_d",
+      "url": "https://mistral.ai/news/mistral-makes-sovereign-open-weight-ai-to-frontier/",
+      "publisher": "Mistral AI",
+      "type": "company_announcement",
+      "title": "Mistral raises €3B to make sovereign, open-weight AI the technology frontier",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    },
+    {
+      "id": "src_mistral_blog_feed",
+      "url": "https://mistral.ai/rss.xml",
+      "publisher": "Mistral AI",
+      "type": "company_announcement",
+      "title": "Mistral Blog (RSS feed)",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_mistral_series_d_2026",
+    "slug": "mistral-series-d-2026",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "Mistral AI Series D",
+    "summary": "Mistral AI raised €3 billion in a Series D round led by Samsung Electronics, at a post-money valuation of more than €21 billion.",
+    "date": "2026-09-08",
+    "dates": {
+      "announced": "2026-09-08"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_mistral_ai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_samsung_electronics",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
+        "org": "org_scaleup_europe_fund",
+        "roles": [
+          "co_lead"
+        ],
+        "note": "Managed by EQT"
+      },
+      {
+        "org": "org_psg_equity",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_andreessen_horowitz",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as a16z"
+      },
+      {
+        "org": "org_lightspeed_venture_partners",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Lightspeed"
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series D equity",
+        "measure": "equity_raised",
+        "value": 3000000000,
+        "currency": "EUR",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-08",
+        "to": "org_mistral_ai",
+        "sourceId": "src_mistral_series_d",
+        "quote": "Mistral today announced that it has raised €3 billion in a Series D funding round at a post-money valuation of more than €21 billion, the largest equity fundraising round ever completed by a European technology company, three years after the company's launch."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 21000000000,
+        "currency": "EUR",
+        "basis": "more_than",
+        "status": "announced",
+        "asOf": "2026-09-08",
+        "sourceId": "src_mistral_series_d",
+        "quote": "Mistral today announced that it has raised €3 billion in a Series D funding round at a post-money valuation of more than €21 billion, the largest equity fundraising round ever completed by a European technology company, three years after the company's launch."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Lead and co-leads",
+        "text": "Samsung Electronics led the round. Scaleup Europe Fund, managed by EQT, and PSG Equity were co-leads.",
+        "sourceId": "src_mistral_series_d",
+        "quote": "Samsung Electronics led the round, joined by co-leads Scaleup Europe Fund, managed by EQT, and existing investor PSG Equity."
+      },
+      {
+        "label": "New investors",
+        "text": "Advent, funds and accounts managed by BlackRock, and the Grand Duchy of Luxembourg joined as new investors.",
+        "sourceId": "src_mistral_series_d",
+        "quote": "Advent, funds and accounts managed by BlackRock as well as the Grand Duchy of Luxembourg joined the round as new investors."
+      },
+      {
+        "label": "Existing investors",
+        "text": "a16z, ASML, Belfius, BNP Paribas CIB, Bpifrance, Carmignac, DST Global, Eurazeo, General Catalyst, Headline, Hillspire, Index Ventures, Korelya Capital, Lightspeed, NVIDIA, Phoenix Court's Solar fund (home to LocalGlobe, Latitude and Solar) and Salesforce Ventures.",
+        "sourceId": "src_mistral_series_d",
+        "quote": "Existing investors a16z, ASML, Belfius, BNP Paribas CIB, Bpifrance, Carmignac, DST Global, Eurazeo, General Catalyst, Headline, Hillspire, Index Ventures, Korelya Capital, Lightspeed, NVIDIA, Phoenix Court's Solar fund (home to LocalGlobe, Latitude and Solar) and Salesforce Ventures participated in the round."
+      },
+      {
+        "label": "Announcement date",
+        "text": "The announcement page shows no date. Mistral's news feed lists it on September 8, 2026.",
+        "sourceId": "src_mistral_blog_feed",
+        "quote": "Mistral today announced that it has raised €3 billion in a Series D funding round at a post-money valuation of more than €21 billion. Tue, 08 Sep 2026 12:00:22 GMT"
+      }
+    ],
+    "relations": [
+      {
+        "type": "follows",
+        "event": "evt_mistral_series_c_2025",
+        "note": "Follows the Series C round led by ASML."
+      }
+    ],
+    "sourceIds": [
+      "src_mistral_series_d",
+      "src_mistral_blog_feed"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

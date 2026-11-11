@@ -2,9 +2,10 @@
   "name": "@tokscale/frontend",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/package-notices.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",

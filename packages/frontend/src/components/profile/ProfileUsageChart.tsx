@@ -11,6 +11,7 @@ import {
   type PointerEvent,
 } from "react";
 import styled, { css } from "styled-components";
+import { Select } from "@/components/ui/Select";
 import { SOURCE_DISPLAY_NAMES } from "@/lib/constants";
 import type { DailyContribution } from "@/lib/types";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/utils";
@@ -415,49 +416,6 @@ const MetricButton = styled.button<{ $active: boolean }>`
   }
 `;
 
-const SelectControl = styled.label`
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  min-height: 2rem;
-  padding-left: 0.625rem;
-  color: var(--service-text-muted);
-  background: var(--service-surface-muted);
-  border: 1px solid var(--service-border);
-  border-radius: 0.5rem;
-  font-size: 0.75rem;
-
-  &::after {
-    content: "";
-    position: absolute;
-    right: 0.625rem;
-    width: 0.375rem;
-    height: 0.375rem;
-    border-right: 1px solid var(--service-text-muted);
-    border-bottom: 1px solid var(--service-text-muted);
-    transform: translateY(-0.125rem) rotate(45deg);
-    pointer-events: none;
-  }
-
-  &:hover {
-    border-color: var(--service-border-strong);
-  }
-
-  &:focus-within {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 1px;
-  }
-
-  @media (pointer: coarse) {
-    min-height: 2.75rem;
-  }
-`;
-
-const SelectCaption = styled.span`
-  flex: 0 0 auto;
-`;
-
 const NewestFirstControl = styled.label`
   display: inline-flex;
   min-width: 0;
@@ -485,25 +443,14 @@ const NewestFirstControl = styled.label`
   }
 `;
 
-const CompactSelect = styled.select`
-  min-width: 0;
-  max-width: 11rem;
-  height: 100%;
-  padding: 0.25rem 1.75rem 0.25rem 0;
-  appearance: none;
-  color: var(--service-text);
-  background: transparent;
-  border: 0;
-  outline: 0;
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-  color-scheme: dark;
-
-  option {
-    color: var(--service-text);
-    background: var(--service-surface);
-  }
+/** The Select trigger itself is the bordered box; "Display" / "Provider" sit inside it as a prefix. */
+const CompactSelect = styled(Select)`
+  --select-height: 2rem;
+  --select-font-size: 0.75rem;
+  --select-padding-x: 0.625rem;
+  --select-background: var(--service-surface-muted);
+  --select-border-color: var(--service-border);
+  --select-max-width: 15rem;
 `;
 
 const PlotRegion = styled.div`
@@ -1252,21 +1199,19 @@ export function ProfileUsageChart({
             ))}
           </MetricControl>
 
-          <SelectControl>
-            <SelectCaption>Display</SelectCaption>
-            <CompactSelect
-              aria-label="Usage display"
-              value={view}
-              onChange={(event) =>
-                setView(event.currentTarget.value as UsageView)
-              }
-            >
-              <option value="average">
-                {chartData.averageWindowDays}d average
-              </option>
-              <option value="daily">Daily</option>
-            </CompactSelect>
-          </SelectControl>
+          <CompactSelect
+            prefix="Display"
+            aria-label="Usage display"
+            value={view}
+            options={[
+              {
+                value: "average",
+                label: `${chartData.averageWindowDays}d average`,
+              },
+              { value: "daily", label: "Daily" },
+            ]}
+            onChange={(next) => setView(next as UsageView)}
+          />
         </ControlCluster>
 
         <ControlCluster>
@@ -1282,26 +1227,22 @@ export function ProfileUsageChart({
             />
             <span>Newest first</span>
           </NewestFirstControl>
-          <SelectControl>
-            <SelectCaption>Provider</SelectCaption>
-            <CompactSelect
-              name="profile-usage-provider"
-              aria-label="Usage provider"
-              value={selectedProvider}
-              onChange={(event) =>
-                setProviderFilter(
-                  event.currentTarget.value as UsageProviderFilter,
-                )
-              }
-            >
-              <option value={ALL_USAGE_PROVIDERS}>All</option>
-              {providerTotals.map(({ provider }) => (
-                <option key={provider} value={provider}>
-                  {providerName(provider)}
-                </option>
-              ))}
-            </CompactSelect>
-          </SelectControl>
+          <CompactSelect
+            prefix="Provider"
+            name="profile-usage-provider"
+            aria-label="Usage provider"
+            value={selectedProvider}
+            options={[
+              { value: ALL_USAGE_PROVIDERS, label: "All" },
+              ...providerTotals.map(({ provider }) => ({
+                value: provider,
+                label: providerName(provider),
+              })),
+            ]}
+            onChange={(next) =>
+              setProviderFilter(next as UsageProviderFilter)
+            }
+          />
         </ControlCluster>
       </Controls>
 

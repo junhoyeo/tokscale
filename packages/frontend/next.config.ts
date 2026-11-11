@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { CAPITAL_REDIRECTS } from "./src/lib/capital/redirects";
 
 const nextConfig: NextConfig = {
   // Produce a self-contained output directory for Docker / Node deployments.
@@ -27,6 +28,13 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+
+  // Company pages moved under /capital; keep any shared /companies links working.
+  // Removed Capital pages (the 13F pages) send old links to the nearest page that still exists.
+  redirects: async () => [
+    { source: "/companies/:slug", destination: "/capital/companies/:slug", permanent: true },
+    ...CAPITAL_REDIRECTS,
+  ],
 
   // Security headers for production
   headers: async () => [

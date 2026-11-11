@@ -1,0 +1,122 @@
+{
+  "sources": [
+    {
+      "id": "src_akamai_8k_2026_09_24",
+      "url": "https://www.sec.gov/Archives/edgar/data/1086222/000119312526401048/d288154d8k.htm",
+      "publisher": "SEC EDGAR (Akamai Technologies, Inc.)",
+      "type": "sec_filing",
+      "title": "Akamai Technologies Form 8-K, September 24, 2026 (Anthropic Master Services Agreement and warrant)",
+      "publishedAt": "2026-09-24",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-401048",
+        "cik": "0001086222",
+        "filedAt": "2026-09-24",
+        "periodOfReport": "2026-09-18"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_akamai_anthropic_2026",
+    "slug": "akamai-anthropic-2026",
+    "kind": "deal",
+    "types": [
+      "compute_contract",
+      "warrant"
+    ],
+    "title": "Anthropic and Akamai cloud capacity contracts",
+    "summary": "Anthropic signed two project plans with Akamai for dedicated cloud computing capacity, each with an initial seven-year term. Akamai also issued Anthropic a warrant to buy its preferred stock.",
+    "date": "2026-09-18",
+    "dates": {
+      "signed": "2026-09-18",
+      "filed": "2026-09-24"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "buyer"
+        ],
+        "note": "Anthropic, PBC"
+      },
+      {
+        "org": "org_akamai",
+        "roles": [
+          "provider"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "contract",
+        "label": "Aggregate commitment under the two project plans",
+        "measure": "contract_value",
+        "value": 11600000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-09-18",
+        "from": "org_anthropic",
+        "to": "org_akamai",
+        "term": {
+          "years": 7
+        },
+        "condition": "Subject to termination rights and to delivery and service availability requirements",
+        "sourceId": "src_akamai_8k_2026_09_24",
+        "quote": "Subject to any termination described below and satisfaction of certain delivery and service availability requirements, Anthropic has committed to pay the Company approximately $11.6 billion in the aggregate under the Project Plans."
+      },
+      {
+        "id": "warrant_price",
+        "label": "Warrant exercise price per Series B preferred share",
+        "measure": "price_per_share",
+        "value": 2226.6,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "signed",
+        "asOf": "2026-09-18",
+        "sourceId": "src_akamai_8k_2026_09_24",
+        "quote": "at an exercise price of $2,226.60 per Warrant Share"
+      }
+    ],
+    "quantities": [
+      {
+        "id": "warrant_shares",
+        "label": "Warrant shares (Series B non-voting convertible preferred)",
+        "measure": "shares",
+        "value": 387051,
+        "basis": "up_to",
+        "sourceId": "src_akamai_8k_2026_09_24",
+        "quote": "the Company issued to Anthropic a warrant (the \"Warrant\") to purchase up to 387,051 shares (the \"Warrant Shares\") of the Company's Series B Non-Voting Convertible Preferred Stock"
+      }
+    ],
+    "facts": [
+      {
+        "label": "Term",
+        "text": "Each project plan has an initial seven-year term from its service start date.",
+        "sourceId": "src_akamai_8k_2026_09_24",
+        "quote": "Each Project Plan has an initial seven-year term commencing on their respective service start dates."
+      },
+      {
+        "label": "Framework",
+        "text": "The project plans sit under a master services agreement dated May 5, 2026.",
+        "sourceId": "src_akamai_8k_2026_09_24",
+        "quote": "under the existing Master Services Agreement between the Company and Anthropic, dated as of May 5, 2026"
+      },
+      {
+        "label": "Warrant vesting",
+        "text": "The warrant vests in four tranches tied to additional contract value from Anthropic.",
+        "sourceId": "src_akamai_8k_2026_09_24",
+        "quote": "The Warrant will vest and become exercisable in four tranches based upon the commitment by Anthropic to the Company of additional commercial contractual value"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_akamai_8k_2026_09_24"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

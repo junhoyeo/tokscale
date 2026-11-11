@@ -1,0 +1,171 @@
+{
+  "sources": [
+    {
+      "id": "src_cerebras_424b4_2026_05_14",
+      "url": "https://www.sec.gov/Archives/edgar/data/2021728/000162828026035214/cerebras-424b4.htm",
+      "publisher": "SEC EDGAR (Cerebras Systems Inc.)",
+      "type": "sec_filing",
+      "title": "Cerebras final prospectus (Form 424B4) for its initial public offering, dated May 13, 2026",
+      "publishedAt": "2026-05-13",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "424B4",
+        "accession": "0001628280-26-035214",
+        "cik": "0002021728",
+        "filedAt": "2026-05-14"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_cerebras_openai_2025",
+    "slug": "cerebras-openai-2025",
+    "kind": "deal",
+    "types": [
+      "compute_contract",
+      "debt_facility",
+      "warrant"
+    ],
+    "title": "OpenAI and Cerebras inference compute agreement",
+    "summary": "OpenAI agreed to buy AI inference compute capacity from Cerebras under a multi-year master relationship agreement and can buy more later. OpenAI also lent Cerebras $1.0 billion and received a warrant to buy Cerebras shares.",
+    "date": "2025-12-24",
+    "dates": {
+      "signed": "2025-12-24"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_cerebras",
+        "roles": [
+          "provider",
+          "borrower"
+        ],
+        "note": "Cerebras Systems Inc."
+      },
+      {
+        "org": "org_openai",
+        "roles": [
+          "buyer",
+          "lender"
+        ],
+        "note": "OpenAI OpCo, LLC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "contract",
+        "label": "Value of the multi-year deal",
+        "measure": "contract_value",
+        "value": 20000000000,
+        "currency": "USD",
+        "basis": "more_than",
+        "status": "signed",
+        "asOf": "2026-05-13",
+        "from": "org_openai",
+        "to": "org_cerebras",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "In January 2026, we announced a multi-year deal with OpenAI valued at more than $20 billion dollars."
+      },
+      {
+        "id": "loan",
+        "label": "Working capital loan from OpenAI",
+        "measure": "debt_raised",
+        "value": 1000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-05-13",
+        "from": "org_openai",
+        "to": "org_cerebras",
+        "term": {
+          "through": "2032-12-31"
+        },
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "In January 2026, OpenAI advanced to us the $1.0 billion Working Capital Loan to accelerate our engineering development, manufacturing scale-up, and data center expansion."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "committed",
+        "label": "Committed AI inference compute capacity (MW)",
+        "measure": "it_load_mw",
+        "value": 750,
+        "basis": "exact",
+        "term": {
+          "years": 3
+        },
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "OpenAI has committed to purchase 750MW of Cerebras inference compute capacity over the next three years."
+      },
+      {
+        "id": "additional",
+        "label": "Additional capacity OpenAI may buy (GW)",
+        "measure": "capacity_gw",
+        "value": 1.25,
+        "basis": "exact",
+        "condition": "Only if OpenAI exercises its option; deployment by the end of 2030",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "In addition to the Committed Capacity, which we are contractually obligated to deliver and OpenAI is contractually obligated to purchase, OpenAI has the option to purchase an additional 1.25GW of AI inference compute capacity (the \"Additional Capacity\") for deployment in tranches by the end of 2030."
+      },
+      {
+        "id": "warrant_shares",
+        "label": "Warrant shares (Class N common stock)",
+        "measure": "shares",
+        "value": 33445026,
+        "basis": "up_to",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "Pursuant to the OpenAI Warrant, OpenAI has the right to purchase up to 33,445,026 shares of our Class N common stock at an exercise price of $0.00001 per share."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Signing",
+        "text": "The master relationship agreement was signed on December 24, 2025.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "We signed the MRA with OpenAI on December 24, 2025."
+      },
+      {
+        "label": "Agreement",
+        "text": "OpenAI OpCo, LLC agreed to buy committed AI inference compute capacity and related services, including engineering collaboration.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "In December 2025, we entered into a Master Relationship Agreement (the \"MRA\") with OpenAI OpCo, LLC (\"OpenAI\"), under which OpenAI agreed to purchase 750MW of AI inference compute capacity (the \"Committed Capacity\") and related services, including collaboration on engineering development and integrations."
+      },
+      {
+        "label": "Term",
+        "text": "Capacity is deployed in tranches from 2026 through 2028. Each tranche runs three or four years, and OpenAI can extend it to five years in total.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "We expect to deploy the Committed Capacity in tranches during 2026 through 2028, with each tranche of deployed capacity having a term of three or four years that is extendable by OpenAI to a maximum of five years in total."
+      },
+      {
+        "label": "Delivery",
+        "text": "Cerebras began delivering capacity to OpenAI on January 23, 2026.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "On January 23, 2026, we began delivering capacity to OpenAI, and on February 12, 2026, OpenAI's Codex-Spark model, powered by Cerebras infrastructure, was made available to the public."
+      },
+      {
+        "label": "Termination right",
+        "text": "OpenAI can end part or all of the agreement if Cerebras misses delivery timelines or service levels.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "If we fail to deliver such capacity on the stated timelines, or if we experience a certain level of failure with respect to our service levels, OpenAI has the right to terminate a portion or all of the agreement."
+      },
+      {
+        "label": "Loan maturity",
+        "text": "The working capital loan matures no later than December 31, 2032.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "The Working Capital Loan is subject to a secured promissory note with a maturity date of no later than December 31, 2032"
+      },
+      {
+        "label": "Warrant vesting",
+        "text": "The warrant vests in full only if OpenAI buys all of the additional capacity, for a total of 2GW.",
+        "sourceId": "src_cerebras_424b4_2026_05_14",
+        "quote": "The OpenAI Warrant will only fully vest if OpenAI exercises all options to purchase Additional Capacity under the MRA, such that a total of 2GW of AI inference compute capacity and related services is purchased by OpenAI."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_cerebras_424b4_2026_05_14"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

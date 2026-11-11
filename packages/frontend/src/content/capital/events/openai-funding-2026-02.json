@@ -1,0 +1,261 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_scaling_ai_for_everyone",
+      "url": "https://openai.com/index/scaling-ai-for-everyone/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "Scaling AI for everyone",
+      "publishedAt": "2026-02-27",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    },
+    {
+      "id": "src_softbank_openai_2026_02_27",
+      "url": "https://group.softbank/en/news/press/20260227",
+      "publisher": "SoftBank Group",
+      "type": "company_announcement",
+      "title": "Follow-on Investments in OpenAI",
+      "publishedAt": "2026-02-27",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    },
+    {
+      "id": "src_softbank_openai_2026_10_01",
+      "url": "https://group.softbank/en/news/press/20261001",
+      "publisher": "SoftBank Group",
+      "type": "company_announcement",
+      "title": "Execution of Follow-on Investment (Third Tranche) in OpenAI",
+      "publishedAt": "2026-10-01",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_funding_2026_02",
+    "slug": "openai-funding-2026-02",
+    "kind": "financing",
+    "types": [
+      "equity_round",
+      "strategic_investment"
+    ],
+    "title": "OpenAI investment from SoftBank, NVIDIA and Amazon (February 2026)",
+    "summary": "OpenAI announced $110 billion in new investment at a $730 billion pre-money valuation, including $30 billion from SoftBank, $30 billion from NVIDIA and $50 billion from Amazon. This money is part of the funding round that OpenAI closed in March.",
+    "date": "2026-02-27",
+    "dates": {
+      "announced": "2026-02-27"
+    },
+    "status": "announced",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_softbank_group",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_amazon",
+        "roles": [
+          "strategic_investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "New investment",
+        "measure": "equity_raised",
+        "value": 110000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-27",
+        "to": "org_openai",
+        "includedIn": "evt_openai_funding_2026_03",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "Today we're announcing $110B in new investment at a $730B pre-money valuation."
+      },
+      {
+        "id": "pre_money",
+        "label": "Pre-money valuation",
+        "measure": "valuation_pre",
+        "value": 730000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-27",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "Today we're announcing $110B in new investment at a $730B pre-money valuation."
+      },
+      {
+        "id": "softbank",
+        "label": "SoftBank",
+        "measure": "equity_investment",
+        "value": 30000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-27",
+        "from": "org_softbank_group",
+        "to": "org_openai",
+        "partOf": "equity",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "This includes $30B from SoftBank, $30B from NVIDIA, and $50B from Amazon."
+      },
+      {
+        "id": "nvidia",
+        "label": "NVIDIA",
+        "measure": "equity_investment",
+        "value": 30000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-27",
+        "from": "org_nvidia",
+        "to": "org_openai",
+        "partOf": "equity",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "This includes $30B from SoftBank, $30B from NVIDIA, and $50B from Amazon."
+      },
+      {
+        "id": "amazon",
+        "label": "Amazon",
+        "measure": "equity_investment",
+        "value": 50000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-27",
+        "from": "org_amazon",
+        "to": "org_openai",
+        "partOf": "equity",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "This includes $30B from SoftBank, $30B from NVIDIA, and $50B from Amazon."
+      },
+      {
+        "id": "softbank_prior",
+        "label": "SoftBank's earlier investments",
+        "measure": "cumulative_investment",
+        "value": 34600000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-02-27",
+        "from": "org_softbank_group",
+        "to": "org_openai",
+        "sourceId": "src_softbank_openai_2026_02_27",
+        "quote": "SBG has invested an aggregate of USD 34.6 billion in OpenAI through SoftBank Vision Fund 2 since September 2024."
+      },
+      {
+        "id": "softbank_cumulative",
+        "label": "SoftBank's total investment after the third tranche",
+        "measure": "cumulative_investment",
+        "value": 64600000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-10-01",
+        "from": "org_softbank_group",
+        "to": "org_openai",
+        "sourceId": "src_softbank_openai_2026_10_01",
+        "quote": "As a result, SBG's cumulative investment in OpenAI totals USD 64.6 billion, and its ownership interest is approximately 13%."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "inference",
+        "label": "NVIDIA dedicated inference capacity",
+        "measure": "capacity_gw",
+        "value": 3,
+        "basis": "exact",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "We are also expanding our long standing collaboration with NVIDIA, including the use of 3 GW of dedicated inference capacity and 2 GW of training on Vera Rubin systems."
+      },
+      {
+        "id": "training",
+        "label": "NVIDIA training capacity on Vera Rubin systems",
+        "measure": "capacity_gw",
+        "value": 2,
+        "basis": "exact",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "We are also expanding our long standing collaboration with NVIDIA, including the use of 3 GW of dedicated inference capacity and 2 GW of training on Vera Rubin systems."
+      }
+    ],
+    "facts": [
+      {
+        "label": "More investors",
+        "text": "OpenAI expected more financial investors to join as the round went on.",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "Additional financial investors are expected to join as the round progresses."
+      },
+      {
+        "label": "Amazon and NVIDIA",
+        "text": "OpenAI also signed a strategic partnership with Amazon and secured inference compute with NVIDIA.",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "We've also signed a strategic partnership with Amazon and secured next generation inference compute with NVIDIA."
+      },
+      {
+        "label": "OpenAI Foundation stake",
+        "text": "OpenAI says the round raises the value of the OpenAI Foundation's stake in OpenAI Group to over $180 billion.",
+        "sourceId": "src_openai_scaling_ai_for_everyone",
+        "quote": "The valuation from this new round increases the value of the OpenAI Foundation's stake in OpenAI Group to over $180 billion, further strengthening what was already one of the most well-resourced nonprofits in history, and expands its capacity to fund philanthropy in areas such as health breakthroughs and AI resilience."
+      },
+      {
+        "label": "SoftBank agreement",
+        "text": "SoftBank signed a definitive agreement on February 27, 2026 (U.S. time) to invest USD 30.0 billion through SoftBank Vision Fund 2.",
+        "sourceId": "src_softbank_openai_2026_02_27",
+        "quote": "SoftBank Group Corp. (\"SBG\") today announced that, on February 27, 2026 (U.S. time), it entered into a definitive agreement with OpenAI Group PBC (\"OpenAI\"), a U.S.-based company, to participate in OpenAI's fundraising round, and to make follow-on investments of USD 30.0 billion (JPY 4,674.3 billion*1) via SoftBank Vision Fund 2 (the \"Follow-on Investment\")."
+      },
+      {
+        "label": "SoftBank tranches",
+        "text": "SoftBank planned three tranches of USD 10 billion on April 1, July 1 and October 1, 2026 (Japan time).",
+        "sourceId": "src_softbank_openai_2026_02_27",
+        "quote": "Investment by SBG USD 10 billion USD 10 billion USD 10 billion SBG's investment timing April 1, 2026 (Japan time) July 1, 2026 (Japan time) October 1, 2026 (Japan time)"
+      },
+      {
+        "label": "Securities",
+        "text": "SoftBank receives preferred shares that convert into OpenAI common shares upon an IPO or a related listing.",
+        "sourceId": "src_softbank_openai_2026_02_27",
+        "quote": "Type of securities to be acquired Preferred Shares (automatically convertible into common shares of OpenAI upon an IPO or related listing transaction)"
+      },
+      {
+        "label": "Closing conditions",
+        "text": "SoftBank's investment was subject to customary closing conditions.",
+        "sourceId": "src_softbank_openai_2026_02_27",
+        "quote": "The Follow-on Investment is subject to the satisfaction of customary closing conditions."
+      },
+      {
+        "label": "SoftBank completed",
+        "text": "SoftBank says it completed the USD 30.0 billion investment with the third tranche on October 1, 2026 (Japan time).",
+        "sourceId": "src_softbank_openai_2026_10_01",
+        "quote": "Following the Third Tranche Investment, SBG has now completed the USD 30.0 billion follow-on investments in OpenAI previously announced."
+      }
+    ],
+    "relations": [
+      {
+        "type": "part_of",
+        "event": "evt_openai_funding_2026_03",
+        "note": "This investment is counted in the funding round that OpenAI closed on March 31, 2026."
+      }
+    ],
+    "sourceIds": [
+      "src_openai_scaling_ai_for_everyone",
+      "src_softbank_openai_2026_02_27",
+      "src_softbank_openai_2026_10_01"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

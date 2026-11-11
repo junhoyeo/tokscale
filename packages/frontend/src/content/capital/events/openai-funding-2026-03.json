@@ -1,0 +1,233 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_accelerating_the_next_phase_ai",
+      "url": "https://openai.com/index/accelerating-the-next-phase-ai/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "OpenAI raises $122 billion to accelerate the next phase of AI",
+      "publishedAt": "2026-03-31",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_funding_2026_03",
+    "slug": "openai-funding-2026-03",
+    "kind": "financing",
+    "types": [
+      "equity_round",
+      "debt_facility"
+    ],
+    "title": "OpenAI funding round (March 2026)",
+    "summary": "OpenAI closed a funding round with $122 billion in committed capital at an $852 billion post-money valuation, co-led by SoftBank with a16z, D. E. Shaw Ventures, MGX, TPG and accounts advised by T. Rowe Price. OpenAI also expanded its revolving credit facility to about $4.7 billion.",
+    "date": "2026-03-31",
+    "dates": {
+      "announced": "2026-03-31",
+      "closed": "2026-03-31"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "issuer",
+          "borrower"
+        ]
+      },
+      {
+        "org": "org_softbank_group",
+        "roles": [
+          "co_lead",
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_andreessen_horowitz",
+        "roles": [
+          "co_lead"
+        ],
+        "note": "Named as a16z"
+      },
+      {
+        "org": "org_d_e_shaw_ventures",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_mgx",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_tpg",
+        "roles": [
+          "co_lead"
+        ]
+      },
+      {
+        "org": "org_t_rowe_price",
+        "roles": [
+          "co_lead"
+        ],
+        "note": "Accounts advised by T. Rowe Price Associates, Inc."
+      },
+      {
+        "org": "org_amazon",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_microsoft",
+        "roles": [
+          "investor"
+        ],
+        "note": "Continued participation as a long-term partner"
+      },
+      {
+        "org": "org_coatue",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      },
+      {
+        "org": "org_sequoia_capital",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_thrive_capital",
+        "roles": [
+          "investor"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Committed capital",
+        "measure": "equity_raised",
+        "value": 122000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-03-31",
+        "to": "org_openai",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "Today, we closed our latest funding round with $122 billion in committed capital at a post money valuation of $852 billion."
+      },
+      {
+        "id": "post_money",
+        "label": "Post-money valuation",
+        "measure": "valuation_post",
+        "value": 852000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-03-31",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "Today, we closed our latest funding round with $122 billion in committed capital at a post money valuation of $852 billion."
+      },
+      {
+        "id": "individual_investors",
+        "label": "From individual investors through bank channels",
+        "measure": "equity_raised",
+        "value": 3000000000,
+        "currency": "USD",
+        "basis": "more_than",
+        "status": "closed",
+        "asOf": "2026-03-31",
+        "to": "org_openai",
+        "partOf": "equity",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "For the first time, we extended participation to investors through bank channels, raising over $3 billion from individual investors."
+      },
+      {
+        "id": "credit_facility",
+        "label": "Revolving credit facility (expanded, undrawn at close)",
+        "measure": "debt_raised",
+        "value": 4700000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "closed",
+        "asOf": "2026-03-31",
+        "to": "org_openai",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "We have also expanded our existing revolving credit facility to approximately $4.7 billion, which gives us added flexibility as we continue to invest at scale."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Anchor investors",
+        "text": "Amazon, NVIDIA and SoftBank anchored the round, and Microsoft continued to take part.",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "The round was anchored by our strategic partners Amazon, NVIDIA, and SoftBank, with continued participation from our long-term partner, Microsoft."
+      },
+      {
+        "label": "Co-leads",
+        "text": "SoftBank co-led the round with a16z, D. E. Shaw Ventures, MGX, TPG and accounts advised by T. Rowe Price Associates, Inc.",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "SoftBank co-led the round alongside a16z, D. E. Shaw Ventures, MGX, TPG, and accounts advised by T. Rowe Price Associates, Inc."
+      },
+      {
+        "label": "Other named investors",
+        "text": "Altimeter, Appaloosa LP, ARK Invest, affiliated funds of BlackRock, Blackstone, Coatue, D1 Capital Partners, Dragoneer, Fidelity Management & Research Company, Goanna Capital, Insight Partners, The Paragon Group, Sands Capital, Sequoia Capital, Sound Ventures, Temasek, Thrive Capital, UC Investments (University of California CIO Office) and Winslow Capital.",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "There was also significant participation from a diverse set of global institutions including Altimeter, Appaloosa LP, ARK Invest, affiliated funds of BlackRock, Blackstone, Coatue, D1 Capital Partners, Dragoneer, Fidelity Management & Research Company, Goanna Capital, Insight Partners, The Paragon Group, Sands Capital, Sequoia Capital, Sound Ventures, Temasek, Thrive Capital, UC Investments (University of California CIO Office), and Winslow Capital."
+      },
+      {
+        "label": "ARK Invest ETFs",
+        "text": "OpenAI said it will be included in several exchange-traded funds managed by ARK Invest.",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "Today, we're also announcing that OpenAI will be included in several exchange-traded funds managed by ARK Invest, further broadening ownership and giving more people the opportunity to share in the upside economics of OpenAI and the AI era."
+      },
+      {
+        "label": "Credit facility lenders",
+        "text": "JPMorgan Chase, Citi, Goldman Sachs, Morgan Stanley, Wells Fargo, Mizuho, Royal Bank of Canada, SMBC, UBS, HSBC and Santander.",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "The facility is supported by a global syndicate including JPMorgan Chase, Citi, Goldman Sachs, Morgan Stanley, Wells Fargo, Mizuho, Royal Bank of Canada, SMBC, UBS, HSBC, and Santander."
+      },
+      {
+        "label": "Credit facility undrawn",
+        "text": "The credit facility was undrawn at close.",
+        "sourceId": "src_openai_accelerating_the_next_phase_ai",
+        "quote": "The facility remains undrawn at close."
+      }
+    ],
+    "relations": [
+      {
+        "type": "includes",
+        "event": "evt_openai_funding_2026_02",
+        "note": "The $110 billion announced on February 27, 2026 from SoftBank, NVIDIA and Amazon is part of this round."
+      },
+      {
+        "type": "includes",
+        "event": "evt_openai_credit_facility_2024",
+        "note": "OpenAI says it expanded its existing revolving credit facility. The $4 billion facility of October 2024 is counted in the expanded amount."
+      }
+    ],
+    "sourceIds": [
+      "src_openai_accelerating_the_next_phase_ai"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

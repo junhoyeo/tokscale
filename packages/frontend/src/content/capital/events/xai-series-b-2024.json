@@ -1,0 +1,93 @@
+{
+  "sources": [
+    {
+      "id": "src_xai_series_b",
+      "url": "https://x.ai/news/series-b",
+      "publisher": "xAI",
+      "type": "company_announcement",
+      "title": "Series B funding round",
+      "publishedAt": "2024-05-26",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_xai_series_b_2024",
+    "slug": "xai-series-b-2024",
+    "kind": "financing",
+    "types": [
+      "equity_round"
+    ],
+    "title": "xAI Series B",
+    "summary": "xAI announced a $6 billion Series B round with investors including Valor Equity Partners, Vy Capital, Andreessen Horowitz, Sequoia Capital and Fidelity Management & Research Company.",
+    "roundLabel": "Series B",
+    "date": "2024-05-26",
+    "dates": {
+      "announced": "2024-05-26"
+    },
+    "status": "announced",
+    "participants": [
+      {
+        "org": "org_xai",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_andreessen_horowitz",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_sequoia_capital",
+        "roles": [
+          "investor"
+        ]
+      },
+      {
+        "org": "org_fidelity",
+        "roles": [
+          "investor"
+        ],
+        "note": "Named as Fidelity Management & Research Company"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "equity",
+        "label": "Series B equity",
+        "measure": "equity_raised",
+        "value": 6000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2024-05-26",
+        "to": "org_xai",
+        "sourceId": "src_xai_series_b",
+        "quote": "xAI is pleased to announce our series B funding round of $6 billion."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Named investors",
+        "text": "Valor Equity Partners, Vy Capital, Andreessen Horowitz, Sequoia Capital, Fidelity Management & Research Company, Prince Alwaleed Bin Talal and Kingdom Holding, among others.",
+        "sourceId": "src_xai_series_b",
+        "quote": "Our Series B funding round of $6 billion with participation from key investors including Valor Equity Partners, Vy Capital, Andreessen Horowitz, Sequoia Capital, Fidelity Management & Research Company, Prince Alwaleed Bin Talal and Kingdom Holding, amongst others."
+      },
+      {
+        "label": "Use of funds",
+        "text": "xAI said it would use the money to bring its first products to market, build infrastructure and fund research.",
+        "sourceId": "src_xai_series_b",
+        "quote": "The funds from the round will be used to take xAI's first products to market, build advanced infrastructure, and accelerate the research and development of future technologies."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_xai_series_b"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

@@ -1,5 +1,8 @@
+/** @vitest-environment jsdom */
+
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { ProfileUsageChart } from "../../src/components/profile/ProfileUsageChart";
 import type { DailyContribution } from "../../src/lib/types";
 
@@ -29,6 +32,10 @@ function contribution(date: string, input: number): DailyContribution {
   };
 }
 
+afterEach(() => {
+  cleanup();
+});
+
 describe("ProfileUsageChart", () => {
   it("renders an unset preference in chronological order", () => {
     const markup = renderToStaticMarkup(
@@ -49,7 +56,7 @@ describe("ProfileUsageChart", () => {
     );
   });
 
-  it("renders display and provider select controls with provider options", () => {
+  it("renders display and provider select controls", () => {
     const markup = renderToStaticMarkup(
       <ProfileUsageChart
         contributions={[
@@ -58,15 +65,36 @@ describe("ProfileUsageChart", () => {
       />,
     );
 
-    expect(markup).toMatch(
-      /<select[^>]*aria-label="Usage display"[^>]*>[\s\S]*?<option[^>]*value="average"[^>]*>[\s\S]*?<option[^>]*value="daily"[^>]*>Daily<\/option>/,
+    expect(markup).toMatch(/<button[^>]*role="combobox"[^>]*aria-label="Usage display"/);
+    expect(markup).toMatch(/<button[^>]*role="combobox"[^>]*aria-label="Usage provider"/);
+    expect(markup).toMatch(/<input type="hidden" name="profile-usage-provider" value="all"\/>/);
+  });
+
+  it("lists every provider in the provider select and switches the filter", () => {
+    render(
+      <ProfileUsageChart
+        contributions={[
+          contribution("2026-01-01", 10),
+        ]}
+      />,
     );
-    expect(markup).toContain('name="profile-usage-provider"');
-    expect(markup).toContain('aria-label="Usage provider"');
-    expect(markup).toContain('value="all"');
-    expect(markup).toContain('>All</option>');
-    expect(markup).toContain('value="claude"');
-    expect(markup).toContain('>Claude Code</option>');
+
+    const display = screen.getByRole("combobox", { name: "Usage display" });
+    display.focus();
+    fireEvent.keyDown(display, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["30d average", "Daily"]);
+    fireEvent.keyDown(display, { key: "Escape" });
+
+    const provider = screen.getByRole("combobox", { name: "Usage provider" });
+    provider.focus();
+    fireEvent.keyDown(provider, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["All", "Claude Code"]);
+    fireEvent.keyDown(provider, { key: "ArrowDown" });
+    fireEvent.keyDown(provider, { key: "Enter" });
+
+    const hidden = document.querySelector('input[name="profile-usage-provider"]') as HTMLInputElement;
+    expect(hidden.value).toBe("claude");
+    expect(provider.getAttribute("aria-expanded")).toBe("false");
   });
 });
 

@@ -1,0 +1,128 @@
+{
+  "sources": [
+    {
+      "id": "src_nscale_s1_2026_09_18",
+      "url": "https://www.sec.gov/Archives/edgar/data/2110365/000119312526395475/ck0002110365-20260918.htm",
+      "publisher": "SEC EDGAR (Nscale Limited)",
+      "type": "sec_filing",
+      "title": "Nscale Limited registration statement on Form S-1, September 18, 2026",
+      "publishedAt": "2026-09-18",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001193125-26-395475",
+        "cik": "0002110365",
+        "filedAt": "2026-09-18"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_cerebras_424b4_2026_05_14",
+      "url": "https://www.sec.gov/Archives/edgar/data/2021728/000162828026035214/cerebras-424b4.htm",
+      "publisher": "SEC EDGAR (Cerebras Systems Inc.)",
+      "type": "sec_filing",
+      "title": "Cerebras final prospectus (Form 424B4) for its initial public offering, dated May 13, 2026",
+      "publishedAt": "2026-05-13",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "424B4",
+        "accession": "0001628280-26-035214",
+        "cik": "0002021728",
+        "filedAt": "2026-05-14"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "statements": [
+    {
+      "id": "met_nscale_revenue_2026_06",
+      "org": "org_nscale",
+      "label": "Revenue, six months ended June 30, 2026",
+      "measure": "revenue_reported",
+      "value": 140600000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2026-06-30",
+      "period": {
+        "start": "2026-01-01",
+        "end": "2026-06-30",
+        "label": "Six months ended June 30, 2026"
+      },
+      "sourceId": "src_nscale_s1_2026_09_18",
+      "quote": "For the six months ended June 30, 2026 and 2025, we generated revenues of $140.6 million and $10.4 million, respectively, representing an increase of 1,252%."
+    },
+    {
+      "id": "met_nscale_revenue_2025_12",
+      "org": "org_nscale",
+      "label": "Revenue, year ended December 31, 2025",
+      "measure": "revenue_reported",
+      "value": 33000000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2025-12-31",
+      "period": {
+        "start": "2025-01-01",
+        "end": "2025-12-31",
+        "label": "Year ended December 31, 2025"
+      },
+      "sourceId": "src_nscale_s1_2026_09_18",
+      "quote": "Revenue for the year ended December 31, 2025 increased 73%, from $19.1 million in 2024 to $33.0 million in 2025."
+    },
+    {
+      "id": "met_nscale_revenue_2024_12",
+      "org": "org_nscale",
+      "label": "Revenue, year ended December 31, 2024",
+      "measure": "revenue_reported",
+      "value": 19100000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2024-12-31",
+      "period": {
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+        "label": "Year ended December 31, 2024"
+      },
+      "sourceId": "src_nscale_s1_2026_09_18",
+      "quote": "Revenue for the year ended December 31, 2025 increased 73%, from $19.1 million in 2024 to $33.0 million in 2025."
+    },
+    {
+      "id": "met_cerebras_revenue_2025_12",
+      "org": "org_cerebras",
+      "label": "Revenue, year ended December 31, 2025",
+      "measure": "revenue_reported",
+      "value": 510000000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2025-12-31",
+      "period": {
+        "start": "2025-01-01",
+        "end": "2025-12-31",
+        "label": "Year ended December 31, 2025"
+      },
+      "sourceId": "src_cerebras_424b4_2026_05_14",
+      "quote": "Our revenue increased from $290.3 million for the year ended December 31, 2024 to $510.0 million for the year ended December 31, 2025."
+    },
+    {
+      "id": "met_cerebras_revenue_2024_12",
+      "org": "org_cerebras",
+      "label": "Revenue, year ended December 31, 2024",
+      "measure": "revenue_reported",
+      "value": 290300000,
+      "currency": "USD",
+      "basis": "exact",
+      "status": "filed",
+      "asOf": "2024-12-31",
+      "period": {
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+        "label": "Year ended December 31, 2024"
+      },
+      "sourceId": "src_cerebras_424b4_2026_05_14",
+      "quote": "Our revenue increased from $290.3 million for the year ended December 31, 2024 to $510.0 million for the year ended December 31, 2025."
+    }
+  ]
+}

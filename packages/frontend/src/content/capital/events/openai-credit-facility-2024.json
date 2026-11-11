@@ -1,0 +1,91 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_new_credit_facility",
+      "url": "https://openai.com/index/new-credit-facility-enhances-financial-flexibility/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "New Credit Facility Enhances Financial Flexibility",
+      "publishedAt": "2024-10-03",
+      "retrievedAt": "2026-10-21",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_credit_facility_2024",
+    "slug": "openai-credit-facility-2024",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "OpenAI revolving credit facility (October 2024)",
+    "summary": "OpenAI set up a $4 billion revolving credit facility with a group of banks. The facility was undrawn when it closed.",
+    "date": "2024-10-03",
+    "dates": {
+      "announced": "2024-10-03"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "borrower"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "facility",
+        "label": "Revolving credit facility (undrawn at closing)",
+        "measure": "debt_raised",
+        "value": 4000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2024-10-03",
+        "to": "org_openai",
+        "includedIn": "evt_openai_funding_2026_03",
+        "sourceId": "src_openai_new_credit_facility",
+        "quote": "In addition to securing $6.6 billion in new funding from leading investors, we have established a new $4 billion credit facility with JPMorgan Chase, Citi, Goldman Sachs, Morgan Stanley, Santander, Wells Fargo, SMBC, UBS, and HSBC."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Lenders",
+        "text": "JPMorgan Chase, Citi, Goldman Sachs, Morgan Stanley, Santander, Wells Fargo, SMBC, UBS and HSBC.",
+        "sourceId": "src_openai_new_credit_facility",
+        "quote": "In addition to securing $6.6 billion in new funding from leading investors, we have established a new $4 billion credit facility with JPMorgan Chase, Citi, Goldman Sachs, Morgan Stanley, Santander, Wells Fargo, SMBC, UBS, and HSBC."
+      },
+      {
+        "label": "Undrawn",
+        "text": "The facility is revolving and was undrawn at closing.",
+        "sourceId": "src_openai_new_credit_facility",
+        "quote": "This is a revolving credit facility that is undrawn at closing."
+      },
+      {
+        "label": "Liquidity",
+        "text": "OpenAI said it then had access to over $10 billion in liquidity.",
+        "sourceId": "src_openai_new_credit_facility",
+        "quote": "This means we now have access to over $10 billion in liquidity, which gives us the flexibility to invest in new initiatives and operate with full agility as we scale."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_openai_funding_2024_10",
+        "note": "Announced one day after the October 2024 funding round."
+      },
+      {
+        "type": "related",
+        "event": "evt_openai_funding_2026_03",
+        "note": "In March 2026 OpenAI said it expanded its existing revolving credit facility to about $4.7 billion. This amount is counted there."
+      }
+    ],
+    "sourceIds": [
+      "src_openai_new_credit_facility"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}

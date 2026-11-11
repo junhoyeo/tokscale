@@ -1,0 +1,117 @@
+{
+  "sources": [
+    {
+      "id": "src_nebius_6k_2025_09_08",
+      "url": "https://www.sec.gov/Archives/edgar/data/1513845/000110465925088312/tm2525580d1_6k.htm",
+      "publisher": "SEC EDGAR (Nebius Group N.V.)",
+      "type": "sec_filing",
+      "title": "Nebius Group Form 6-K, September 8, 2025 (commercial agreement with Microsoft)",
+      "publishedAt": "2025-09-08",
+      "retrievedAt": "2026-10-21",
+      "filing": {
+        "form": "6-K",
+        "accession": "0001104659-25-088312",
+        "cik": "0001513845",
+        "filedAt": "2025-09-08"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_nebius_microsoft_2025",
+    "slug": "nebius-microsoft-2025",
+    "kind": "deal",
+    "types": [
+      "compute_contract"
+    ],
+    "title": "Microsoft and Nebius GPU capacity agreement",
+    "summary": "A Nebius subsidiary agreed to provide Microsoft with dedicated GPU capacity at its new data center in Vineland, New Jersey, over a five-year term. Microsoft may buy more capacity under the same agreement.",
+    "date": "2025-09-08",
+    "dates": {
+      "signed": "2025-09-08",
+      "filed": "2025-09-08"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_nebius",
+        "roles": [
+          "provider"
+        ],
+        "note": "Nebius, Inc."
+      },
+      {
+        "org": "org_microsoft",
+        "roles": [
+          "buyer"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "contract",
+        "label": "Total contract value",
+        "measure": "contract_value",
+        "value": 17400000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2025-09-08",
+        "from": "org_microsoft",
+        "to": "org_nebius",
+        "term": {
+          "years": 5
+        },
+        "condition": "Subject to deployment and availability of the GPU services",
+        "sourceId": "src_nebius_6k_2025_09_08",
+        "quote": "Subject to the satisfaction of the deployment and availability of the GPU Services, the total contract value is about $17.4 billion through 2031."
+      },
+      {
+        "id": "contract_with_options",
+        "label": "Total contract value if Microsoft buys more",
+        "measure": "contract_value",
+        "value": 19400000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2025-09-08",
+        "from": "org_microsoft",
+        "to": "org_nebius",
+        "term": {
+          "years": 5
+        },
+        "condition": "If Microsoft acquires additional services or capacity",
+        "alternativeTo": "contract",
+        "sourceId": "src_nebius_6k_2025_09_08",
+        "quote": "Microsoft may also acquire additional services and/or capacity under the Agreement, which would increase the total contract value to about $19.4 billion."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Site and term",
+        "text": "Dedicated GPU capacity at a new data center in Vineland, New Jersey, over a five-year term.",
+        "sourceId": "src_nebius_6k_2025_09_08",
+        "quote": "pursuant to which the Company will provide Microsoft access to dedicated GPU infrastructure capacity in tranches (each, a \"GPU Service\") at its new data center in Vineland, New Jersey (the \"Data Center\") over a five-year term."
+      },
+      {
+        "label": "Deployment",
+        "text": "In several tranches during 2025 and 2026.",
+        "sourceId": "src_nebius_6k_2025_09_08",
+        "quote": "The GPU Services will be deployed in several tranches during 2025 and 2026."
+      },
+      {
+        "label": "Start condition",
+        "text": "Obligations start once Nebius confirms it has secured any additional financing needed.",
+        "sourceId": "src_nebius_6k_2025_09_08",
+        "quote": "The obligations of the parties under the Agreement will commence upon the confirmation by Nebius to Microsoft that it has secured any additional financing required in respect of the capital expenditures under the Agreement."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_nebius_6k_2025_09_08"
+    ],
+    "reviewedAt": "2026-10-21",
+    "corrections": []
+  }
+}
