@@ -9,6 +9,7 @@
 //! access tokens stay in memory and are never written back.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, Result};
@@ -58,18 +59,43 @@ struct ParsedPlanInfo {
     included_reset_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct LocalCursorAuth {
     access_token: String,
     refresh_token: Option<String>,
     email: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+// Hand-written so `{:?}` never prints the Cursor OAuth tokens.
+impl fmt::Debug for LocalCursorAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalCursorAuth")
+            .field("access_token", &REDACTED)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| REDACTED),
+            )
+            .field("email", &self.email)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 struct RefreshedCursorAuth {
     access_token: String,
     refresh_token: String,
 }
+
+impl fmt::Debug for RefreshedCursorAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RefreshedCursorAuth")
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .finish()
+    }
+}
+
+const REDACTED: &str = "<redacted>";
 
 type RefreshKey = [u8; 32];
 static REFRESHED_AUTH: OnceLock<Mutex<HashMap<RefreshKey, RefreshedCursorAuth>>> = OnceLock::new();
@@ -922,6 +948,34 @@ mod tests {
     use super::*;
     use crate::commands::usage::test_server::spawn_server;
     use serde_json::json;
+
+    #[test]
+    fn debug_output_redacts_cursor_tokens() {
+        let local = LocalCursorAuth {
+            access_token: "ACCESS_SECRET".into(),
+            refresh_token: Some("REFRESH_SECRET".into()),
+            email: Some("user@example.com".into()),
+        };
+        let refreshed = RefreshedCursorAuth {
+            access_token: "ACCESS_SECRET".into(),
+            refresh_token: "REFRESH_SECRET".into(),
+        };
+        for out in [
+            format!("{local:?}"),
+            format!("{refreshed:?}"),
+            format!("{local:#?}"),
+        ] {
+            assert!(!out.contains("ACCESS_SECRET"), "{out}");
+            assert!(!out.contains("REFRESH_SECRET"), "{out}");
+            assert!(out.contains("<redacted>"), "{out}");
+        }
+        assert!(format!("{local:?}").contains("user@example.com"));
+        let no_refresh = LocalCursorAuth {
+            refresh_token: None,
+            ..local
+        };
+        assert!(format!("{no_refresh:?}").contains("refresh_token: None"));
+    }
 
     #[test]
     fn parse_plan_window_from_total_percent_used() {
