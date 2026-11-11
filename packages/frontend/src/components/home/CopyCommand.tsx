@@ -3,9 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import styled, { css, keyframes } from "styled-components";
 import { CheckIcon, CopyIcon } from "@/components/ui/Icons";
+import { trackEvent } from "@/lib/analytics/events";
+
+type CopyCommandAnalytics =
+  | { event: "install_command_copied"; location: "home" | "tracker_hero" | "tracker_footer" }
+  | { event: "readme_snippet_copied"; location: "tracker_embed" };
 
 interface CopyCommandProps {
   command: string;
+  analytics: CopyCommandAnalytics;
   /** Accessible name for the copy button, e.g. "Copy install command". */
   label?: string;
   prompt?: boolean;
@@ -15,7 +21,14 @@ interface CopyCommandProps {
   typed?: boolean;
 }
 
-export function CopyCommand({ command, label = "Copy command", prompt = true, wrap = false, typed = false }: CopyCommandProps) {
+export function CopyCommand({
+  command,
+  analytics,
+  label = "Copy command",
+  prompt = true,
+  wrap = false,
+  typed = false,
+}: CopyCommandProps) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -26,6 +39,11 @@ export function CopyCommand({ command, label = "Copy command", prompt = true, wr
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(command);
+      if (analytics.event === "install_command_copied") {
+        trackEvent(analytics.event, { location: analytics.location, command: "install" });
+      } else {
+        trackEvent(analytics.event, { location: analytics.location });
+      }
       setCopied(true);
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(() => setCopied(false), 1600);

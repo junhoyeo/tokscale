@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db, deviceCodes } from "@/lib/db";
 import { eq, and, gt, isNull } from "drizzle-orm";
 import { getSessionFromRequest } from "@/lib/auth/requestSession";
+import { trackServerEvent } from "@/lib/analytics/server";
 
 export async function POST(request: Request) {
   try {
@@ -52,6 +53,7 @@ export async function POST(request: Request) {
       );
     }
 
+    trackServerEvent("cli_authorized", request);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Device authorize error:", error);

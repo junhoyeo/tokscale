@@ -4,6 +4,7 @@ import { db, groupMembers, groups } from "@/lib/db";
 import { getSessionFromRequest } from "@/lib/auth/requestSession";
 import { generateUniqueGroupSlug } from "@/lib/groups/slugs";
 import { listPublicGroups, listUserGroups } from "@/lib/groups/queries";
+import { trackServerEvent } from "@/lib/analytics/server";
 
 const BROWSER_SESSION_OPTIONS = { allowAuthorizationHeader: false } as const;
 
@@ -87,6 +88,7 @@ export async function POST(request: Request) {
     });
 
     revalidatePath("/groups");
+    trackServerEvent("group_created", request);
     return NextResponse.json(createdGroup, { status: 201 });
   } catch (error) {
     console.error("Create group error:", error);

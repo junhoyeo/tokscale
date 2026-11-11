@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { toast } from "react-toastify";
 import { Select } from "@/components/ui/Select";
+import { trackEvent, type AnalyticsEventMap } from "@/lib/analytics/events";
 import {
   EMBED_TEMPLATES,
   resolvePalette,
@@ -176,9 +177,14 @@ export function ProfileEmbedDialog({
   );
   const previewUrl = useMemo(() => buildEmbedPreviewPath(embedUrl), [embedUrl]);
 
-  const copyToClipboard = async (value: string, label: string) => {
+  const copyToClipboard = async (
+    value: string,
+    label: string,
+    format: AnalyticsEventMap["profile_embed_copied"]["format"],
+  ) => {
     try {
       await navigator.clipboard.writeText(value);
+      trackEvent("profile_embed_copied", { format });
       toast.success(`${label} copied`);
     } catch {
       toast.error(`Failed to copy ${label.toLowerCase()}`);
@@ -530,13 +536,13 @@ export function ProfileEmbedDialog({
                 <InlineActions>
                   <InlineActionButton
                     type="button"
-                    onClick={() => copyToClipboard(embedUrl, "Image URL")}
+                    onClick={() => copyToClipboard(embedUrl, "Image URL", "url")}
                   >
                     Copy image URL
                   </InlineActionButton>
                   <InlineActionButton
                     type="button"
-                    onClick={() => copyToClipboard(htmlSnippet, "HTML snippet")}
+                    onClick={() => copyToClipboard(htmlSnippet, "HTML snippet", "html")}
                   >
                     Copy HTML
                   </InlineActionButton>
@@ -549,7 +555,7 @@ export function ProfileEmbedDialog({
                 <PrimaryButton
                   type="button"
                   onClick={() =>
-                    copyToClipboard(markdownSnippet, "Markdown snippet")
+                    copyToClipboard(markdownSnippet, "Markdown snippet", "markdown")
                   }
                 >
                   Copy markdown

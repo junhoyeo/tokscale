@@ -3,7 +3,7 @@ import { connection } from "next/server";
 import { JetBrains_Mono, Figtree, Instrument_Serif } from "next/font/google";
 import NextTopLoader from "nextjs-toploader";
 import { ToastContainer } from "react-toastify";
-import { Analytics } from "@vercel/analytics/next";
+import { WebAnalytics } from "@/components/analytics/WebAnalytics";
 import { Providers } from "@/lib/providers";
 import { getRootMetadata } from "@/lib/seo/rootMetadata";
 import "./globals.css";
@@ -50,7 +50,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           {children}
         </Providers>
         <ToastContainer position="top-right" />
-        <Analytics />
+        {process.env.VERCEL ? <WebAnalytics /> : null}
       </body>
     </html>
   );

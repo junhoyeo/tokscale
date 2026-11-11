@@ -4,9 +4,14 @@ import Image from "next/image";
 import Link from "next/link";
 import styled from "styled-components";
 import { TOKSCALE_DISCORD_URL, TOKSCALE_INSTAGRAM_URL, TOKSCALE_X_URL } from "@/lib/community";
+import { trackEvent, type AnalyticsEventMap } from "@/lib/analytics/events";
 
 export const GITHUB_URL = "https://github.com/junhoyeo/tokscale";
 export const SPONSOR_URL = "https://github.com/sponsors/junhoyeo";
+
+function trackFooterLink(target: AnalyticsEventMap["outbound_link_clicked"]["target"]) {
+  trackEvent("outbound_link_clicked", { target, location: "public_footer" });
+}
 
 /** Compact v2 footer for public pages. */
 export function PublicFooter() {
@@ -19,19 +24,36 @@ export function PublicFooter() {
           </Link>
         </Brand>
         <Links aria-label="Footer">
-          <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+          <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" onClick={() => trackFooterLink("github")}>
             GitHub
           </a>
-          <a href={TOKSCALE_DISCORD_URL} target="_blank" rel="noopener noreferrer">
+          <a
+            href={TOKSCALE_DISCORD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => trackFooterLink("discord")}
+          >
             Discord
           </a>
-          <a href={TOKSCALE_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Tokscale on X">
+          <a
+            href={TOKSCALE_X_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Tokscale on X"
+            onClick={() => trackFooterLink("x")}
+          >
             X
           </a>
-          <a href={TOKSCALE_INSTAGRAM_URL} target="_blank" rel="noopener noreferrer" aria-label="Tokscale on Instagram">
+          <a
+            href={TOKSCALE_INSTAGRAM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Tokscale on Instagram"
+            onClick={() => trackFooterLink("instagram")}
+          >
             Instagram
           </a>
-          <a href={SPONSOR_URL} target="_blank" rel="noopener noreferrer">
+          <a href={SPONSOR_URL} target="_blank" rel="noopener noreferrer" onClick={() => trackFooterLink("sponsor")}>
             Sponsor
           </a>
           <Link href="/privacy">Privacy</Link>

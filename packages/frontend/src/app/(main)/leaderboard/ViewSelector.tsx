@@ -13,6 +13,7 @@ import {
   type LeaderboardView,
 } from "./views";
 import { Eyebrow } from "@/components/ui/Eyebrow";
+import { trackEvent } from "@/lib/analytics/events";
 
 // Top-of-page segmented control that swaps between the Humans, Models, Agents
 // and Groups views. Pure-link nav (no client state), so SSR + back/forward
@@ -116,6 +117,7 @@ export default function ViewSelector({ current, searchParams }: ViewSelectorProp
             href={buildLeaderboardViewHref(activeSearchParams, view)}
             $active={current === view}
             aria-current={current === view ? "page" : undefined}
+            onClick={() => trackEvent("leaderboard_view_selected", { view })}
           >
             {LEADERBOARD_VIEW_LABELS[view]}
           </TouchSegment>

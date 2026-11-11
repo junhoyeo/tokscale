@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "nextjs-toploader/app";
 import styled from "styled-components";
 import { SecondaryActionLink } from "@/components/leaderboard/RankingUI";
+import { trackEvent } from "@/lib/analytics/events";
 
 interface InvitePreview {
   group: {
@@ -161,6 +162,7 @@ export default function JoinGroupClient({ token }: { token: string }) {
       const payload = await response.json();
 
       if (response.status === 401) {
+        trackEvent("sign_in_clicked", { location: "join_group" });
         window.location.href = `/api/auth/github?returnTo=/groups/join/${token}`;
         return;
       }

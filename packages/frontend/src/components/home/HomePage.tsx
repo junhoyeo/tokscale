@@ -85,7 +85,11 @@ export function HomePage({ snapshot, featuredHuman, humansCoverage, models, mode
                 Tokscale reads the session logs your coding agents already keep, on your machine. Nothing leaves it
                 until you submit.
               </Lead>
-              <CopyCommand command="bunx tokscale@latest" label="Copy the command to run Tokscale" />
+              <CopyCommand
+                command="bunx tokscale@latest"
+                analytics={{ event: "install_command_copied", location: "home" }}
+                label="Copy the command to run Tokscale"
+              />
               <PrimaryButton href="/tracker">Start tracking</PrimaryButton>
             </ClosingInner>
           </Container>

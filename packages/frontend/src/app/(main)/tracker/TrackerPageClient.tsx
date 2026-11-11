@@ -19,6 +19,7 @@ import {
 } from "@/components/home/primitives";
 import { TwinkleArt } from "@/components/home/TwinkleArt";
 import { compactNumber, wholeNumber } from "@/components/home/format";
+import { trackEvent } from "@/lib/analytics/events";
 import { AgentsGrid } from "./AgentsGrid";
 // import { EmbedShowcase } from "./EmbedShowcase"; // README embed section is hidden for now (see below).
 import { FlowDiagram } from "./FlowDiagram";
@@ -80,9 +81,21 @@ export function TrackerPageClient({ agents, stats }: { agents: SupportedAgent[];
                 Tokscale reads the session logs your coding agents already keep and shows tokens, models, and
                 estimated cost on your machine. Submit when you want a public profile.
               </HeroLead>
-              <CopyCommand command="bunx tokscale@latest" label="Copy the command to run Tokscale" typed />
+              <CopyCommand
+                command="bunx tokscale@latest"
+                analytics={{ event: "install_command_copied", location: "tracker_hero" }}
+                label="Copy the command to run Tokscale"
+                typed
+              />
               <HeroLinks>
-                <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+                <a
+                  href={GITHUB_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() =>
+                    trackEvent("outbound_link_clicked", { target: "github", location: "tracker_docs" })
+                  }
+                >
                   Read the docs on GitHub <span aria-hidden="true">↗</span>
                 </a>
                 <Link href="/local">Open the local viewer</Link>
@@ -226,7 +239,14 @@ export function TrackerPageClient({ agents, stats }: { agents: SupportedAgent[];
                 </li>
                 <li>
                   The CLI is MIT licensed and the web app is AGPL-3.0.{" "}
-                  <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+                  <a
+                    href={GITHUB_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() =>
+                      trackEvent("outbound_link_clicked", { target: "github", location: "tracker_source" })
+                    }
+                  >
                     Read the source
                   </a>{" "}
                   or self-host with Docker Compose.
@@ -274,7 +294,11 @@ export function TrackerPageClient({ agents, stats }: { agents: SupportedAgent[];
             <ClosingInner>
               <SectionTitle id="tracker-closing-title">Start with one command.</SectionTitle>
               <Lead>No account needed to look at your own usage.</Lead>
-              <CopyCommand command="bunx tokscale@latest" label="Copy the command to run Tokscale" />
+              <CopyCommand
+                command="bunx tokscale@latest"
+                analytics={{ event: "install_command_copied", location: "tracker_footer" }}
+                label="Copy the command to run Tokscale"
+              />
               <PrimaryButton href="/leaderboard">See who else is building</PrimaryButton>
             </ClosingInner>
           </Container>

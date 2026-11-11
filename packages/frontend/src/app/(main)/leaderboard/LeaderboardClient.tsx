@@ -23,6 +23,7 @@ import {
   type LeaderboardSortBy,
 } from "@/lib/leaderboard/constants";
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
+import { trackEvent, type AnalyticsEventMap } from "@/lib/analytics/events";
 import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
 
 const Section = styled.div`
@@ -1118,10 +1119,18 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
 
   const sortedUsers = data.users || [];
 
-  const handleCopyCommand = (command: string) => {
-    navigator.clipboard.writeText(command);
-    setCopiedCommand(command);
-    setTimeout(() => setCopiedCommand(null), 2000);
+  const handleCopyCommand = async (
+    command: string,
+    commandName: AnalyticsEventMap["install_command_copied"]["command"],
+  ) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      trackEvent("install_command_copied", { location: "leaderboard", command: commandName });
+      setCopiedCommand(command);
+      setTimeout(() => setCopiedCommand(null), 2000);
+    } catch {
+      setCopiedCommand(null);
+    }
   };
 
   return (
@@ -1448,7 +1457,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
               <CommandArg>={`${window.location.origin}`}</CommandArg>
               <CopyIconButton
                 type="button"
-                onClick={() => handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`)}
+                onClick={() => void handleCopyCommand(`export TOKSCALE_API_URL=${window.location.origin}`, "api_url")}
                 className={copiedCommand === `export TOKSCALE_API_URL=${window.location.origin}` ? "copied" : ""}
                 aria-label="Copy command"
               >
@@ -1463,7 +1472,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <CommandArg>login</CommandArg>
             <CopyIconButton
               type="button"
-              onClick={() => handleCopyCommand("bunx tokscale login")}
+              onClick={() => void handleCopyCommand("bunx tokscale login", "login")}
               className={copiedCommand === "bunx tokscale login" ? "copied" : ""}
               aria-label="Copy command"
             >
@@ -1477,7 +1486,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
             <CommandArg>submit</CommandArg>
             <CopyIconButton
               type="button"
-              onClick={() => handleCopyCommand("bunx tokscale submit")}
+              onClick={() => void handleCopyCommand("bunx tokscale submit", "submit")}
               className={copiedCommand === "bunx tokscale submit" ? "copied" : ""}
               aria-label="Copy command"
             >

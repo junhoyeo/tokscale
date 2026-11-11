@@ -6,6 +6,7 @@ import Image from "next/image";
 import { usePathname } from "next/navigation";
 import styled, { css, keyframes } from "styled-components";
 import { GearIcon, PersonIcon, SignOutIcon } from "@/components/ui/Icons";
+import { trackEvent } from "@/lib/analytics/events";
 
 interface User {
   id: string;
@@ -562,7 +563,10 @@ export function Navigation() {
             ) : user ? (
               <UserMenu user={user} />
             ) : (
-              <SignInLink href="/api/auth/github">
+              <SignInLink
+                href="/api/auth/github"
+                onClick={() => trackEvent("sign_in_clicked", { location: "desktop_nav" })}
+              >
                 <GitHubMark />
                 Sign in
               </SignInLink>
@@ -623,7 +627,10 @@ export function Navigation() {
               </MobileActionButton>
             </>
           ) : (
-            <MobileSignIn href="/api/auth/github">
+            <MobileSignIn
+              href="/api/auth/github"
+              onClick={() => trackEvent("sign_in_clicked", { location: "mobile_nav" })}
+            >
               <GitHubMark size={18} />
               Sign in with GitHub
             </MobileSignIn>

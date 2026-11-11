@@ -70,7 +70,7 @@ describe("local viewer data input", () => {
     fireEvent.change(textarea, { target: { value: JSON.stringify(data) } });
     expect(parse).toHaveProperty("disabled", false);
     fireEvent.click(parse);
-    expect(onDataLoaded).toHaveBeenCalledWith(data);
+    expect(onDataLoaded).toHaveBeenCalledWith(data, "paste");
   });
 
   it("parses with Ctrl+Enter or Cmd+Enter", () => {
@@ -133,7 +133,7 @@ describe("local viewer data input", () => {
     );
     const { onDataLoaded } = setup();
     fireEvent.click(screen.getByRole("button", { name: "Load sample data" }));
-    await waitFor(() => expect(onDataLoaded).toHaveBeenCalledWith(data));
+    await waitFor(() => expect(onDataLoaded).toHaveBeenCalledWith(data, "sample"));
     expect(fetch).toHaveBeenCalledWith("/sample-data.json");
   });
 
@@ -145,7 +145,7 @@ describe("local viewer data input", () => {
     expect(input?.accept).toBe(".json,application/json");
     const file = new File([JSON.stringify(data)], "usage.json", { type: "application/json" });
     fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
-    await waitFor(() => expect(onDataLoaded).toHaveBeenCalledWith(data));
+    await waitFor(() => expect(onDataLoaded).toHaveBeenCalledWith(data, "file"));
   });
 
   it.each(["chosen", "dropped"] as const)("rejects an oversized %s export before reading it", async (source) => {
@@ -201,7 +201,7 @@ describe("local viewer data input", () => {
 
     await act(async () => readers[1].resolve(JSON.stringify(second)));
     expect(onDataLoaded).toHaveBeenCalledTimes(1);
-    expect(onDataLoaded).toHaveBeenLastCalledWith(second);
+    expect(onDataLoaded).toHaveBeenLastCalledWith(second, "file");
 
     await act(async () => readers[0].resolve(JSON.stringify(first)));
     expect(onDataLoaded).toHaveBeenCalledTimes(1);
@@ -246,7 +246,7 @@ describe("local viewer data input", () => {
     expect(card.textContent).toContain("Drop the export to load it");
     fireEvent.drop(card, { dataTransfer });
     expect(card.textContent).not.toContain("Drop the export to load it");
-    await waitFor(() => expect(onDataLoaded).toHaveBeenCalledWith(data));
+    await waitFor(() => expect(onDataLoaded).toHaveBeenCalledWith(data, "drop"));
   });
 
   it("refuses a dropped file that is not JSON", async () => {
