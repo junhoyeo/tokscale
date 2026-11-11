@@ -92,23 +92,7 @@ pub fn save_credentials(credentials: &Credentials) -> Result<()> {
     let path = get_credentials_path()?;
     let json = serde_json::to_string_pretty(credentials)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(json.as_bytes())?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json)?;
-    }
+    crate::commands::usage::helpers::atomic_write_secret(&path, json.as_bytes())?;
 
     Ok(())
 }
@@ -753,6 +737,46 @@ mod tests {
         unsafe {
             env::remove_var("HOME");
         }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn saving_credentials_replaces_public_files_and_does_not_follow_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = TempDir::new().unwrap();
+        let _home = TestEnvGuard::set("HOME", dir.path());
+        let path = get_credentials_path().unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "old fixture").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let creds = Credentials {
+            token: "synthetic-test-token".into(),
+            username: "fixture".into(),
+            avatar_url: None,
+            created_at: "2026-10-09T00:00:00Z".into(),
+        };
+        save_credentials(&creds).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(load_credentials().unwrap().username, "fixture");
+
+        let target = dir.path().join("unrelated-file");
+        fs::write(&target, "must remain unchanged").unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&target, &path).unwrap();
+        save_credentials(&creds).unwrap();
+        assert!(!fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(target).unwrap(), "must remain unchanged");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

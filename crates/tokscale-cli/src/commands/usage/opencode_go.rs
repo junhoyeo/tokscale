@@ -133,9 +133,9 @@ fn is_entitlement_error(body: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn window_to_metric(label: &str, w: &WindowMetric) -> UsageMetric {
-    let used = w.percent.unwrap_or(0.0).clamp(0.0, 100.0);
-    UsageMetric {
+fn window_to_metric(label: &str, w: &WindowMetric) -> Option<UsageMetric> {
+    let used = w.percent.filter(|pct| pct.is_finite())?.clamp(0.0, 100.0);
+    Some(UsageMetric {
         label: label.into(),
         used_percent: used,
         remaining_percent: 100.0 - used,
@@ -145,7 +145,7 @@ fn window_to_metric(label: &str, w: &WindowMetric) -> UsageMetric {
             .filter(|s| *s == "rate-limited")
             .map(|_| "rate-limited".into()),
         resets_at: w.resets_at.clone(),
-    }
+    })
 }
 
 fn usage_metrics(resp: &ApiResponse) -> Vec<UsageMetric> {
@@ -154,13 +154,13 @@ fn usage_metrics(resp: &ApiResponse) -> Vec<UsageMetric> {
     };
     let mut metrics = Vec::new();
     if let Some(ref w) = usage.rolling {
-        metrics.push(window_to_metric("Rolling", w));
+        metrics.extend(window_to_metric("Rolling", w));
     }
     if let Some(ref w) = usage.weekly {
-        metrics.push(window_to_metric("Weekly", w));
+        metrics.extend(window_to_metric("Weekly", w));
     }
     if let Some(ref w) = usage.monthly {
-        metrics.push(window_to_metric("Monthly", w));
+        metrics.extend(window_to_metric("Monthly", w));
     }
     metrics
 }
@@ -286,8 +286,14 @@ fn fetch_blocking_with_cap(
         let body: ApiResponse = serde_json::from_slice(&body)
             .context("Failed to parse the OpenCode Go usage response")?;
         let metrics = usage_metrics(&body);
+        if metrics.is_empty() {
+            anyhow::bail!(
+                "OpenCode Go returned no parseable usage (quota response format may have changed)"
+            );
+        }
 
         Ok(vec![UsageOutput {
+            freshness: None,
             provider: "OpenCode Go".into(),
             account: None,
             credential_source: None,
@@ -446,7 +452,7 @@ mod tests {
             percent: Some(42.5),
             resets_at: Some("2026-09-01T00:00:00Z".into()),
         };
-        let m = window_to_metric("Rolling", &w);
+        let m = window_to_metric("Rolling", &w).unwrap();
         assert_eq!(m.label, "Rolling");
         assert!((m.used_percent - 42.5).abs() < f64::EPSILON);
         assert!((m.remaining_percent - 57.5).abs() < f64::EPSILON);
@@ -461,7 +467,7 @@ mod tests {
             percent: Some(100.0),
             resets_at: None,
         };
-        let m = window_to_metric("Weekly", &w);
+        let m = window_to_metric("Weekly", &w).unwrap();
         assert_eq!(m.remaining_label.as_deref(), Some("rate-limited"));
     }
 
@@ -472,7 +478,7 @@ mod tests {
             percent: Some(150.0),
             resets_at: None,
         };
-        let m = window_to_metric("X", &over);
+        let m = window_to_metric("X", &over).unwrap();
         assert_eq!(m.used_percent, 100.0);
         assert_eq!(m.remaining_percent, 0.0);
 
@@ -481,21 +487,19 @@ mod tests {
             percent: Some(-10.0),
             resets_at: None,
         };
-        let m = window_to_metric("X", &under);
+        let m = window_to_metric("X", &under).unwrap();
         assert_eq!(m.used_percent, 0.0);
         assert_eq!(m.remaining_percent, 100.0);
     }
 
     #[test]
-    fn window_to_metric_missing_percent_defaults_to_zero() {
+    fn window_to_metric_missing_percent_is_unknown() {
         let w = WindowMetric {
             status: None,
             percent: None,
             resets_at: None,
         };
-        let m = window_to_metric("Rolling", &w);
-        assert_eq!(m.used_percent, 0.0);
-        assert_eq!(m.remaining_percent, 100.0);
+        assert!(window_to_metric("Rolling", &w).is_none());
     }
 
     #[test]
@@ -527,6 +531,58 @@ mod tests {
     fn usage_metrics_empty_when_no_usage() {
         let resp: ApiResponse = serde_json::from_str(r#"{}"#).unwrap();
         assert!(usage_metrics(&resp).is_empty());
+    }
+
+    #[test]
+    fn known_quota_opencode_prunes_absent_null_and_preserves_zero() {
+        for unknown in [serde_json::json!({}), serde_json::json!({"percent":null})] {
+            let resp: ApiResponse = serde_json::from_value(serde_json::json!({"usage":{
+                "rolling":unknown,"weekly":{"percent":0,"resetsAt":"2026-11-01"}}}))
+            .unwrap();
+            let metrics = usage_metrics(&resp);
+            assert_eq!(metrics.len(), 1);
+            assert_eq!(metrics[0].label, "Weekly");
+            assert_eq!(metrics[0].remaining_percent, 100.0);
+            assert_eq!(metrics[0].resets_at.as_deref(), Some("2026-11-01"));
+        }
+        for percent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let resp = ApiResponse {
+                usage: Some(UsageData {
+                    rolling: Some(WindowMetric {
+                        status: None,
+                        percent: Some(percent),
+                        resets_at: None,
+                    }),
+                    weekly: None,
+                    monthly: None,
+                }),
+            };
+            assert!(usage_metrics(&resp).is_empty());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn known_quota_opencode_no_usable_response_errors() {
+        for body in [r#"{}"#, r#"{"usage":{"rolling":{"percent":null}}}"#] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let auth = write_auth(tmp.path(), "sk-test");
+            let _guard = EnvVarGuard::remove("OPENCODE_API_KEY");
+            let (url, _) = spawn_usage_server(200, body);
+            assert!(fetch_blocking(&url, &auth)
+                .unwrap_err()
+                .to_string()
+                .contains("no parseable usage"));
+        }
+
+        // Positive control: a reported 0% is usage, not an unknown quota.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let auth = write_auth(tmp.path(), "sk-test");
+        let _guard = EnvVarGuard::remove("OPENCODE_API_KEY");
+        let (url, _) = spawn_usage_server(200, r#"{"usage":{"rolling":{"percent":0}}}"#);
+        let outputs = fetch_blocking(&url, &auth).unwrap();
+        assert_eq!(outputs[0].metrics.len(), 1);
+        assert_eq!(outputs[0].metrics[0].remaining_percent, 100.0);
     }
 
     #[test]

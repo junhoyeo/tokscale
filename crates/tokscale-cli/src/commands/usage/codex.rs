@@ -1242,9 +1242,12 @@ async fn consume_reset_credit(
     parse_chatgpt_json_response(resp, "Codex reset request").await
 }
 
-fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
-    let pct = window.used_percent.unwrap_or(0.0).clamp(0.0, 100.0);
-    UsageMetric {
+fn metric_from_window(label: &str, window: &Window) -> Option<UsageMetric> {
+    let pct = window
+        .used_percent
+        .filter(|pct| pct.is_finite())?
+        .clamp(0.0, 100.0);
+    Some(UsageMetric {
         label: label.into(),
         used_percent: pct,
         remaining_percent: 100.0 - pct,
@@ -1253,7 +1256,7 @@ fn metric_from_window(label: &str, window: &Window) -> UsageMetric {
             .reset_at
             .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
             .map(|dt| dt.to_rfc3339()),
-    }
+    })
 }
 
 fn rate_limit_window_label(window: &Window) -> Option<String> {
@@ -1299,11 +1302,11 @@ fn push_rate_limit_metrics(
     let label_prefix = prefix.map(str::trim).filter(|label| !label.is_empty());
     if let Some(ref w) = rate_limit.primary_window {
         let label = metric_label(label_prefix, w, "5h", "5h");
-        metrics.push(metric_from_window(&label, w));
+        metrics.extend(metric_from_window(&label, w));
     }
     if let Some(ref w) = rate_limit.secondary_window {
         let label = metric_label(label_prefix, w, "Weekly", "week");
-        metrics.push(metric_from_window(&label, w));
+        metrics.extend(metric_from_window(&label, w));
     }
 }
 
@@ -1391,7 +1394,7 @@ async fn fetch_with_auth_async(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
 
-    let client = tokscale_core::http::client();
+    let client = super::helpers::http_client()?;
     let mut effective_tokens = tokens.clone();
     let mut effective_access_token = access_token.clone();
     let resp = match fetch_usage(
@@ -1480,18 +1483,43 @@ async fn fetch_with_auth_async(
         }
     }
 
-    let credit_status = resp.credits.map(|credits| UsageCreditStatus {
-        balance: json_scalar_string(credits.balance),
-        has_credits: credits.has_credits,
-        unlimited: credits.unlimited,
-        overage_limit_reached: credits.overage_limit_reached,
-    });
-    let spend_control = resp.spend_control.map(|control| UsageSpendControl {
-        individual_limit: json_scalar_string(control.individual_limit),
-        reached: control.reached,
-    });
+    // An object whose fields are all absent carries no status; dropping it
+    // keeps "credits: {}" from passing as a known balance.
+    let credit_status = resp
+        .credits
+        .map(|credits| UsageCreditStatus {
+            balance: json_scalar_string(credits.balance),
+            has_credits: credits.has_credits,
+            unlimited: credits.unlimited,
+            overage_limit_reached: credits.overage_limit_reached,
+        })
+        .filter(|credits| {
+            credits.balance.is_some()
+                || credits.has_credits.is_some()
+                || credits.unlimited.is_some()
+                || credits.overage_limit_reached.is_some()
+        });
+    let spend_control = resp
+        .spend_control
+        .map(|control| UsageSpendControl {
+            individual_limit: json_scalar_string(control.individual_limit),
+            reached: control.reached,
+        })
+        .filter(|control| control.individual_limit.is_some() || control.reached.is_some());
+
+    // A plan alone still identifies the account; the report layer warns that
+    // its quota is unknown instead of hiding the card.
+    if metrics.is_empty()
+        && reset_credits.is_none()
+        && credit_status.is_none()
+        && spend_control.is_none()
+        && plan.is_none()
+    {
+        anyhow::bail!("Codex returned no parseable usage or credit status");
+    }
 
     Ok(UsageOutput {
+        freshness: None,
         provider: provider_name,
         account,
         credential_source: None,
@@ -1703,11 +1731,34 @@ fn fetch_all_report_with_opencode_fallback_at(
         UsageFetchReport::default()
     };
 
-    if has_opencode_auth_candidate_at(auth_path) {
+    let report = if has_opencode_auth_candidate_at(auth_path) {
         append_opencode_fallback_at(report, auth_path, endpoints)
     } else {
         report
+    };
+    warn_plan_only_outputs(report)
+}
+
+/// Codex sometimes answers with a plan but no quota windows or credits. Keep
+/// that card (Grok keeps plan-only cards too) and add a warning that its
+/// quota is unknown.
+fn warn_plan_only_outputs(mut report: UsageFetchReport) -> UsageFetchReport {
+    for output in &report.outputs {
+        let plan_only = output.metrics.is_empty()
+            && output.reset_credits.is_none()
+            && output.credit_status.is_none()
+            && output.spend_control.is_none();
+        if plan_only {
+            report.diagnostics.push(UsageFetchDiagnostic::with_kind(
+                "Codex",
+                output.account.clone(),
+                UsageFetchDiagnosticKind::FetchFailed,
+                UsageFetchDiagnosticSeverity::Warning,
+                "Codex returned a plan but no quota windows or credit status; quota is unknown",
+            ));
+        }
     }
+    report
 }
 
 fn load_credentials_store_for_fetch_intent(
@@ -1821,7 +1872,7 @@ async fn consume_reset_credit_with_auth_async(
         .access_token
         .clone()
         .ok_or_else(|| anyhow::anyhow!("No Codex access token."))?;
-    let client = tokscale_core::http::client();
+    let client = super::helpers::http_client()?;
     let redeem_request_id = uuid::Uuid::new_v4().to_string();
 
     match consume_reset_credit(
@@ -2199,6 +2250,134 @@ mod tests {
         assert_eq!(usage.email.as_deref(), Some("plus@example.com"));
         assert!(usage.additional_rate_limits.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn known_quota_codex_prunes_unknown_windows_and_preserves_zero() {
+        for unknown in [
+            serde_json::json!({}),
+            serde_json::json!({"used_percent": null}),
+        ] {
+            let limit: RateLimit = serde_json::from_value(serde_json::json!({
+                "primary_window": unknown,
+                "secondary_window": {"used_percent": 0, "reset_at": 1782413780}
+            }))
+            .unwrap();
+            let mut metrics = Vec::new();
+            push_rate_limit_metrics(&mut metrics, None, &limit);
+            assert_eq!(metric_labels(&metrics), ["Weekly"]);
+            assert_eq!(metrics[0].remaining_percent, 100.0);
+            assert!(metrics[0].resets_at.is_some());
+        }
+    }
+
+    #[test]
+    fn known_quota_codex_rejects_nonfinite_windows() {
+        for percent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut window: Window = serde_json::from_str("{}").unwrap();
+            window.used_percent = Some(percent);
+            let limit = RateLimit {
+                primary_window: Some(window),
+                secondary_window: None,
+            };
+            let mut metrics = Vec::new();
+            push_rate_limit_metrics(&mut metrics, None, &limit);
+            assert!(metrics.is_empty());
+        }
+    }
+
+    #[test]
+    fn known_quota_codex_no_usable_response_errors_but_credit_only_survives() {
+        for (body, usable) in [
+            (r#"{}"#, false),
+            (
+                r#"{"rate_limit":{"primary_window":{"used_percent":null}},"credits":{}}"#,
+                false,
+            ),
+            (r#"{"credits":{"balance":"0","has_credits":false}}"#, true),
+            (
+                r#"{"rate_limit_reset_credits":{"available_count":0}}"#,
+                true,
+            ),
+            (r#"{"credits":{},"spend_control":{}}"#, false),
+            (r#"{"plan_type":"plus"}"#, true),
+            (
+                r#"{"plan_type":"plus","credits":{},"spend_control":{}}"#,
+                true,
+            ),
+        ] {
+            let (base, _) = spawn_server(move |path, _| {
+                if path == USAGE_PATH {
+                    (200, body.to_string())
+                } else {
+                    (200, r#"{"available_count":null}"#.to_string())
+                }
+            });
+            let endpoints = CodexEndpoints {
+                usage: format!("{base}{USAGE_PATH}"),
+                reset_credits: format!("{base}{RESET_CREDITS_PATH}"),
+                token: format!("{base}{TOKEN_PATH}"),
+            };
+            let auth = serde_json::from_str(CODEX_AUTH_FIXTURE).unwrap();
+            let result = fetch_with_auth_at(
+                &endpoints,
+                auth,
+                CredentialSource::File(PathBuf::from("fixture.json")),
+                "Codex".into(),
+                None,
+            );
+            if usable {
+                let output = result.unwrap();
+                assert!(output.metrics.is_empty(), "{body}");
+                if output.plan.is_some() {
+                    // Empty objects must not read as a known credit status, or
+                    // the card would escape the unknown-quota warning.
+                    assert!(output.credit_status.is_none(), "{body}");
+                    assert!(output.spend_control.is_none(), "{body}");
+                }
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no parseable usage"));
+            }
+        }
+    }
+
+    #[test]
+    fn plan_only_codex_cards_carry_an_unknown_quota_warning() {
+        let plan_only = UsageOutput {
+            freshness: None,
+            provider: "Codex".into(),
+            account: None,
+            credential_source: None,
+            plan: Some("plus".into()),
+            email: None,
+            metrics: Vec::new(),
+            reset_credits: None,
+            credit_status: None,
+            spend_control: None,
+        };
+        let with_credits = UsageOutput {
+            credit_status: Some(UsageCreditStatus {
+                balance: Some("0".into()),
+                has_credits: Some(false),
+                unlimited: None,
+                overage_limit_reached: None,
+            }),
+            ..plan_only.clone()
+        };
+        let report = warn_plan_only_outputs(UsageFetchReport {
+            outputs: vec![with_credits, plan_only],
+            diagnostics: Vec::new(),
+        });
+        assert_eq!(report.outputs.len(), 2, "the plan-only card is kept");
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0].severity,
+            UsageFetchDiagnosticSeverity::Warning
+        );
+        assert!(report.diagnostics[0].message.contains("quota is unknown"));
     }
 
     #[test]

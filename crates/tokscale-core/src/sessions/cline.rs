@@ -254,7 +254,7 @@ pub fn parse_cline_cli_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning: 0,
             },
             cost,
-            file.agent.clone(),
+            file.agent.as_deref(),
         )
         .with_billing(
             Some(&current_provider),
@@ -266,7 +266,9 @@ pub fn parse_cline_cli_file(path: &Path) -> Vec<UnifiedMessage> {
         );
         message.dedup_key = Some(dedup_key);
         message.is_turn_start = pending_turn_start;
-        message.session_title = session_title.clone();
+        message.session_title = session_title
+            .as_deref()
+            .map(crate::sessions::SharedStr::from);
         message.set_workspace(workspace_key.clone(), workspace_label.clone());
         if reported_cost.is_some() {
             message.mark_provider_reported_cost();

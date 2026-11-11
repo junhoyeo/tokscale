@@ -2,10 +2,13 @@ import type { ClientBreakdownData } from "./helpers";
 import {
   ANTIGRAVITY_FAMILY,
   antigravityPriorCoverage,
+  validateAntigravityRecountProof,
+  type AntigravityRecountProofs,
 } from "./antigravityStateCoverage";
 import {
   foldParserClientSnapshot,
   SUPPORTED_VERSIONED_PARSERS,
+  type ClientRecountProof,
   type DeviceParserStates,
   type IncomingParserContribution,
 } from "./parserHighWater";
@@ -34,10 +37,28 @@ const COVERAGE_FIELDS = [
   "messages",
 ] as const;
 
+/**
+ * The generation the family declared before `SUPPORTED_VERSIONED_PARSERS`
+ * registered the corrected usage-field mapping. Every CLI released before
+ * then declares it, and the receiver deploys first, so it stays accepted from
+ * a device until a snapshot of the registered generation has replaced that
+ * device's stored layout.
+ */
+const PREVIOUS_GENERATION = 1;
+
 export interface AntigravityTransitionPlan {
   mode: "status-quo" | "freeze" | "replace";
+  /**
+   * The generation of the snapshot that last replaced this device's family
+   * layout, so it also names the units of the stored cells. A freeze never
+   * moves it to the registered generation. The one freeze that writes a
+   * different value pins the members that declared a generation newer than
+   * the registered one, which keeps the device frozen until the receiver
+   * registers it.
+   */
   parserVersions?: Record<string, number>;
   layouts?: FamilyLayouts;
+  recountCostReduction?: number;
   warning?: string;
 }
 
@@ -87,6 +108,7 @@ export function planAntigravityTransition(args: {
   incomingVersions?: Record<string, number>;
   persistedVersions?: Record<string, number>;
   parserStates?: DeviceParserStates;
+  recountProofs?: Record<string, ClientRecountProof>;
   fullHistory: boolean;
   isBackfill: boolean;
   contributions: Array<IncomingParserContribution & { totals?: { costIsComplete?: boolean } }>;
@@ -100,9 +122,24 @@ export function planAntigravityTransition(args: {
   const unknownStoredGeneration = ANTIGRAVITY_FAMILY.some((client) =>
     (ownValue(args.persistedVersions, client) ?? 0) > SUPPORTED_VERSIONED_PARSERS[client]
   );
+  // Every member, because a replace pins all three at once. A single pinned
+  // member is left over from a submit an earlier receiver froze as a future
+  // generation: it changed no cell, so the layout is still the previous
+  // generation's.
+  const transitioned = ANTIGRAVITY_FAMILY.every((client) =>
+    ownValue(args.persistedVersions, client) === SUPPORTED_VERSIONED_PARSERS[client]
+  );
+  const declaresRegistered = ANTIGRAVITY_FAMILY.every((client) =>
+    ownValue(args.incomingVersions, client) === SUPPORTED_VERSIONED_PARSERS[client]
+  );
+  const declaresPrevious = ANTIGRAVITY_FAMILY.every((client) =>
+    ownValue(args.incomingVersions, client) === PREVIOUS_GENERATION
+  );
   const unsupportedIncoming = ANTIGRAVITY_FAMILY.some((client) => {
     const incoming = ownValue(args.incomingVersions, client);
-    return incoming !== undefined && incoming !== SUPPORTED_VERSIONED_PARSERS[client];
+    return incoming !== undefined
+      && incoming !== SUPPORTED_VERSIONED_PARSERS[client]
+      && incoming !== PREVIOUS_GENERATION;
   });
   const incomingFutureVersions = Object.fromEntries(
     ANTIGRAVITY_FAMILY.flatMap((client) => {
@@ -112,32 +149,45 @@ export function planAntigravityTransition(args: {
         : [];
     }),
   );
+  const generationPins = (registered: boolean) =>
+    Object.fromEntries(
+      ANTIGRAVITY_FAMILY.map((client) => [
+        client,
+        registered ? SUPPORTED_VERSIONED_PARSERS[client] : PREVIOUS_GENERATION,
+      ]),
+    );
   const parserVersions = unknownStoredGeneration
     ? undefined
     : unsupportedIncoming
       ? Object.keys(incomingFutureVersions).length > 0
         ? incomingFutureVersions
         : undefined
-      : Object.fromEntries(
-          ANTIGRAVITY_FAMILY.map((client) => [
-            client,
-            SUPPORTED_VERSIONED_PARSERS[client],
-          ]),
-        );
-  const freeze = (reason: string): AntigravityTransitionPlan => ({
+      : generationPins(transitioned);
+  const freeze = (
+    reason: string,
+    remedy = "Submit antigravity, antigravity-cli, and antigravity-extension together with a full-history scan to update them.",
+  ): AntigravityTransitionPlan => ({
     mode: "freeze",
     parserVersions,
-    warning: `Preserved Antigravity sources together: ${reason}. No Antigravity token or cost changes were applied. Submit antigravity, antigravity-cli, and antigravity-extension together with a full-history scan to update them.`,
+    warning: `Preserved Antigravity sources together: ${reason}. No Antigravity token or cost changes were applied. ${remedy}`,
   });
 
+  if (declaresPrevious && transitioned && !unknownStoredGeneration) {
+    // The stored layout is in the registered generation's units. This CLI
+    // counts the same history differently, so its snapshot must not replace
+    // the layout or undo a correction. Checked first: no rescan with this
+    // CLI can help, so the scan-scope remedy below would mislead.
+    return freeze(
+      "this device already submitted Antigravity usage with a newer Tokscale CLI, which counts it differently",
+      "Update the Tokscale CLI on this device to keep submitting Antigravity usage.",
+    );
+  }
   if (
     unknownStoredGeneration ||
     unsupportedIncoming ||
     args.isBackfill ||
     !args.fullHistory ||
-    !ANTIGRAVITY_FAMILY.every((client) =>
-      ownValue(args.incomingVersions, client) === SUPPORTED_VERSIONED_PARSERS[client]
-    )
+    !(declaresRegistered || declaresPrevious)
   ) {
     return freeze("all three sources must declare the supported generation in a full-history scan");
   }
@@ -156,7 +206,30 @@ export function planAntigravityTransition(args: {
     ])
   ) as FamilyLayouts;
 
-  const previous = antigravityPriorCoverage(args.existingDays, args.parserStates);
+  // A recount proof corrects stored cells at the one submit that moves the
+  // device to the registered generation, while every stored cell still holds
+  // what the previous generation counted. Afterwards the stored cells are in
+  // the registered generation's units, and equal counts no longer show which
+  // rows they came from, so a proof must not lower them.
+  const recountProofs =
+    declaresRegistered && !transitioned ? args.recountProofs : undefined;
+  const validatedProofs: AntigravityRecountProofs = {};
+  for (const client of ANTIGRAVITY_FAMILY) {
+    const validated = validateAntigravityRecountProof(
+      client,
+      ownValue(recountProofs, client),
+      layouts[client],
+    );
+    if (validated) {
+      validatedProofs[client] = validated;
+    }
+  }
+
+  const previous = antigravityPriorCoverage(
+    args.existingDays,
+    args.parserStates,
+    validatedProofs,
+  );
   if (previous.unverifiable) {
     return freeze("a prior Antigravity parser high-water state cannot be verified");
   }
@@ -182,8 +255,11 @@ export function planAntigravityTransition(args: {
 
   return {
     mode: "replace",
-    parserVersions,
+    parserVersions: generationPins(declaresRegistered),
     layouts,
+    ...(previous.recountCostReduction > 0
+      ? { recountCostReduction: previous.recountCostReduction }
+      : {}),
     warning: pricingIncomplete
       ? "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again. Some models could not be priced: tokens are credited, costs stay partial and floored at the credited lifetime until a fully priced snapshot replaces them."
       : "Reconciled Antigravity desktop, CLI, and IDE extension usage together from one family snapshot; source changes were transferred, not added again.",

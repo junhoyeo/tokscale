@@ -11,11 +11,9 @@
 //! `GetCascadeTrajectoryGeneratorMetadata`. The repository has no `.proto` /
 //! prost decoder (the IDE path receives JSON because the language server does
 //! the proto→JSON conversion), so this module ships a tiny wire-format reader
-//! and pulls only the few fields it needs. The field numbers below were
-//! reverse-engineered from real databases and cross-checked across 6 sessions
-//! / 140 turns (`#9 + #10 == #3`, i.e. output + thinking == total output;
-//! `#5`/cacheRead only appears once a cached prefix exists and grows with the
-//! conversation):
+//! and pulls only the few fields it needs (`#9 + #10 == #3`, i.e.
+//! thinking + response output == total output; `#5`/cacheRead only appears once
+//! a cached prefix exists and grows with the conversation):
 //!
 //! - `gen_metadata.#1`            → chatModel message
 //!   - `#19` (string, optional)  → responseModel (e.g. `gemini-3-flash-a`)
@@ -39,13 +37,15 @@
 //!       chance of passing as a date. Constraining it to the session's own span
 //!       cuts that by orders of magnitude, because a turn cannot happen before
 //!       the conversation it belongs to nor after the moment we read the file.
-//!   - `#4`                      → usage message
-//!     - `#1` (varint, const)    → fixed system-prompt tokens (≈1132)
-//!     - `#2` (varint)           → newly-processed (non-cached) input tokens
-//!     - `#5` (varint)           → cacheRead tokens
-//!     - `#9` (varint)           → output (text) tokens
-//!     - `#10` (varint)          → thinking / reasoning tokens
-//!     - `#11` (string)          → responseId (dedup key)
+//!   - `#4`                      → usage message (`ModelUsageStats`)
+//!     - `#1` (varint, enum)     → `model` (`MODEL_PLACEHOLDER_*`, e.g. 1132 for M132)
+//!     - `#2` (varint)           → `input_tokens` (non-cached input tokens)
+//!     - `#3` (varint)           → `output_tokens` (total output: `#9 + #10`)
+//!     - `#4` (varint)           → `cache_write_tokens`
+//!     - `#5` (varint)           → `cache_read_tokens`
+//!     - `#9` (varint)           → `thinking_output_tokens` (reasoning tokens)
+//!     - `#10` (varint)          → `response_output_tokens` (text output tokens)
+//!     - `#11` (string)          → `response_id` (dedup key)
 //! - `trajectory_metadata_blob.#2` = `{#1: seconds, #2: nanos}` → created-at
 //! - `trajectory_metadata_blob.#1.#1` (string)                  → workspace URI
 //!
@@ -58,7 +58,7 @@
 //! server-supplied name that gets renamed (`Gemini 3 Flash` → `Gemini 3.5 Flash
 //! (High)`) and could be localized.
 
-use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on};
+use super::utils::{open_readonly_sqlite_opt, sqlite_for_each_row_on, SqliteScan};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{pricing, provider_identity, TokenBreakdown};
 use rusqlite::Connection;
@@ -68,11 +68,19 @@ use std::path::Path;
 
 /// Bump when parsing behavior for Antigravity generation databases changes.
 /// The CLI and IDE extension clients share this parser and cache generation.
-pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 1;
+pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 2;
 
 /// Parse an Antigravity CLI conversation database.
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
     parse_antigravity_db_file(path, "antigravity-cli")
+}
+
+/// Parse an Antigravity CLI conversation database along with the legacy v1
+/// token attribution for submission recount proofs.
+pub fn parse_antigravity_cli_file_with_v1(
+    path: &Path,
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
+    parse_antigravity_db_file_with_v1(path, "antigravity-cli")
 }
 
 /// Parse an Antigravity IDE extension conversation database.
@@ -80,9 +88,32 @@ pub fn parse_antigravity_extension_file(path: &Path) -> Vec<UnifiedMessage> {
     parse_antigravity_db_file(path, "antigravity-extension")
 }
 
+/// Parse an Antigravity IDE extension conversation database along with the
+/// legacy v1 token attribution for submission recount proofs.
+pub fn parse_antigravity_extension_file_with_v1(
+    path: &Path,
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
+    parse_antigravity_db_file_with_v1(path, "antigravity-extension")
+}
+
 fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMessage> {
+    parse_antigravity_db_file_inner(path, client, false).0
+}
+
+fn parse_antigravity_db_file_with_v1(
+    path: &Path,
+    client: &'static str,
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
+    parse_antigravity_db_file_inner(path, client, true)
+}
+
+fn parse_antigravity_db_file_inner(
+    path: &Path,
+    client: &'static str,
+    include_v1: bool,
+) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool) {
     let Some(conn) = open_readonly_sqlite_opt(path) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new(), false);
     };
 
     let session_id = path
@@ -101,7 +132,7 @@ fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMe
     // Quiet: a database without `gen_metadata` is not an Antigravity generation
     // database at all, so there is nothing to warn about.
     let mut rows: Vec<(Option<i64>, Vec<u8>)> = Vec::new();
-    sqlite_for_each_row_on(
+    let scan = sqlite_for_each_row_on(
         &conn,
         path,
         "SELECT idx, data FROM gen_metadata ORDER BY idx",
@@ -113,6 +144,14 @@ fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMe
             Ok(())
         },
     );
+    // A scan that failed or stopped midway leaves usage unread. The caller
+    // must not declare this client's history complete then: the rest of the
+    // family's snapshot could otherwise replace what this file still holds.
+    let read_complete = match scan {
+        SqliteScan::Ran => true,
+        SqliteScan::NotPrepared => !has_gen_metadata(&conn),
+        SqliteScan::NotOpened | SqliteScan::NotExecuted | SqliteScan::Incomplete => false,
+    };
     let session_models = SessionModels::from_blobs(rows.iter().map(|(_, blob)| blob.as_slice()));
     let ctx = GenContext {
         client,
@@ -125,6 +164,8 @@ fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMe
 
     let mut messages = Vec::new();
     let mut seen_response_ids: HashSet<String> = HashSet::new();
+    let mut v1_messages = Vec::new();
+    let mut seen_v1_response_ids: HashSet<String> = HashSet::new();
     for (gen_idx, blob) in &rows {
         // `fallback_ms` is the per-row timestamp fallback; each row prefers its
         // own per-generation wall-clock stamp (see `parse_gen_metadata`).
@@ -137,9 +178,33 @@ fn parse_antigravity_db_file(path: &Path, client: &'static str) -> Vec<UnifiedMe
             }
             messages.push(message);
         }
+        if include_v1 {
+            if let Some(mut v1_message) =
+                parse_gen_metadata_with_mode(blob, &ctx, &mut seen_v1_response_ids, *gen_idx, true)
+            {
+                if meta.workspace_key.is_some() {
+                    v1_message
+                        .set_workspace(meta.workspace_key.clone(), meta.workspace_label.clone());
+                }
+                v1_messages.push(v1_message);
+            }
+        }
     }
 
-    messages
+    (messages, v1_messages, read_complete)
+}
+
+/// Whether the database has the `gen_metadata` table Antigravity writes. A
+/// lookup that fails counts as present, so the file is reported unread
+/// rather than empty.
+fn has_gen_metadata(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+         WHERE type = 'table' AND name = 'gen_metadata')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
 }
 
 /// Model attribution recovered from the conversation as a whole, for rows whose
@@ -306,23 +371,54 @@ fn parse_gen_metadata(
     seen_response_ids: &mut HashSet<String>,
     gen_idx: Option<i64>,
 ) -> Option<UnifiedMessage> {
+    parse_gen_metadata_with_mode(blob, ctx, seen_response_ids, gen_idx, false)
+}
+
+fn parse_gen_metadata_with_mode(
+    blob: &[u8],
+    ctx: &GenContext<'_>,
+    seen_response_ids: &mut HashSet<String>,
+    gen_idx: Option<i64>,
+    v1_compat: bool,
+) -> Option<UnifiedMessage> {
     let chat_model = message_field(blob, 1)?;
     let usage = message_field(chat_model, 4)?;
 
-    // input = fixed system prompt (#1) + newly-processed input (#2). The
-    // constant #1 is, to the best of our reverse-engineering, the agent's fixed
-    // system prompt and counts as billable input; if an official schema later
-    // contradicts this, only the input total needs revisiting.
     // Clamp untrusted u64 varints into i64 (a corrupt/malicious blob could
-    // encode a value > i64::MAX, which `as i64` would wrap to a negative count)
-    // and combine with saturating_add so totals never overflow.
+    // encode a value > i64::MAX, which `as i64` would wrap to a negative count).
     let to_i64 = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
-    let input = to_i64(varint_field(usage, 1).unwrap_or(0))
-        .saturating_add(to_i64(varint_field(usage, 2).unwrap_or(0)));
-    let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
-    let output = to_i64(varint_field(usage, 9).unwrap_or(0));
-    let reasoning = to_i64(varint_field(usage, 10).unwrap_or(0));
-    if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 {
+    let (input, output, cache_read, cache_write, reasoning) = if v1_compat {
+        let input = to_i64(varint_field(usage, 1).unwrap_or(0))
+            .saturating_add(to_i64(varint_field(usage, 2).unwrap_or(0)));
+        let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
+        let output = to_i64(varint_field(usage, 9).unwrap_or(0));
+        let reasoning = to_i64(varint_field(usage, 10).unwrap_or(0));
+        (input, output, cache_read, 0, reasoning)
+    } else {
+        // ModelUsageStats protobuf fields:
+        //   #1: model enum (MODEL_PLACEHOLDER_*) — NOT a token count
+        //   #2: input_tokens
+        //   #3: output_tokens (total output = #9 + #10)
+        //   #4: cache_write_tokens
+        //   #5: cache_read_tokens
+        //   #9: thinking_output_tokens (reasoning)
+        //   #10: response_output_tokens (text output)
+        let input = to_i64(varint_field(usage, 2).unwrap_or(0));
+        let total_output = to_i64(varint_field(usage, 3).unwrap_or(0));
+        let cache_write = to_i64(varint_field(usage, 4).unwrap_or(0));
+        let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
+        let reasoning = to_i64(varint_field(usage, 9).unwrap_or(0));
+        let resp_out = to_i64(varint_field(usage, 10).unwrap_or(0));
+        let output = if resp_out > 0 {
+            resp_out
+        } else if total_output > 0 {
+            total_output.saturating_sub(reasoning)
+        } else {
+            0
+        };
+        (input, output, cache_read, cache_write, reasoning)
+    };
+    if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 && reasoning == 0 {
         return None;
     }
 
@@ -381,7 +477,7 @@ fn parse_gen_metadata(
             input,
             output,
             cache_read,
-            cache_write: 0,
+            cache_write,
             cache_write_1h: 0,
             reasoning,
         },
@@ -1144,11 +1240,11 @@ mod tests {
     fn build_row(model: Option<&str>, display: Option<&str>, response_id: &str) -> Vec<u8> {
         // usage message (#4 of chatModel)
         let mut usage = Vec::new();
-        usage.extend(enc_varint(1, 1132)); // fixed system prompt
-        usage.extend(enc_varint(2, 500)); // new input
-        usage.extend(enc_varint(5, 16000)); // cacheRead
-        usage.extend(enc_varint(9, 300)); // output
-        usage.extend(enc_varint(10, 40)); // thinking
+        usage.extend(enc_varint(1, 1132)); // model enum (MODEL_PLACEHOLDER_M132)
+        usage.extend(enc_varint(2, 500)); // input_tokens
+        usage.extend(enc_varint(5, 16000)); // cache_read_tokens
+        usage.extend(enc_varint(9, 40)); // thinking_output_tokens
+        usage.extend(enc_varint(10, 300)); // response_output_tokens
         usage.extend(enc_len(11, response_id.as_bytes())); // responseId
 
         // chatModel message (#1 of gen_metadata)
@@ -1197,9 +1293,11 @@ mod tests {
         // A corrupt/malicious blob encoding a varint > i64::MAX must clamp to a
         // non-negative i64 (saturating), never wrap `as i64` to a negative count.
         let mut usage = Vec::new();
-        usage.extend(enc_varint(1, u64::MAX)); // huge fixed system prompt
-        usage.extend(enc_varint(2, 10)); // + small input -> saturating_add
-        usage.extend(enc_varint(9, u64::MAX)); // huge output
+        usage.extend(enc_varint(1, 1132)); // model enum (ignored for token counts)
+        usage.extend(enc_varint(2, u64::MAX)); // huge input_tokens
+        usage.extend(enc_varint(4, u64::MAX)); // huge cache_write_tokens
+        usage.extend(enc_varint(9, u64::MAX)); // huge thinking_output_tokens
+        usage.extend(enc_varint(10, u64::MAX)); // huge response_output_tokens
         usage.extend(enc_len(11, b"resp-overflow"));
         let mut chat_model = Vec::new();
         chat_model.extend(enc_len(4, &usage));
@@ -1208,8 +1306,10 @@ mod tests {
 
         let mut seen = HashSet::new();
         let msg = parse_isolated_row(&blob, "s", 1_000, &mut seen).expect("parses");
+        assert_eq!(msg.tokens.input, i64::MAX);
         assert_eq!(msg.tokens.output, i64::MAX);
-        assert_eq!(msg.tokens.input, i64::MAX); // saturating_add, not negative
+        assert_eq!(msg.tokens.cache_write, i64::MAX);
+        assert_eq!(msg.tokens.reasoning, i64::MAX);
         assert!(msg.tokens.input >= 0 && msg.tokens.output >= 0);
     }
 
@@ -1249,7 +1349,7 @@ mod tests {
         assert_eq!(message.model_id, "gemini-3.5-flash-high");
         assert_eq!(message.provider_id, "google");
         assert_eq!(message.session_id, "session-test");
-        assert_eq!(message.tokens.input, 1632); // 1132 + 500
+        assert_eq!(message.tokens.input, 500);
         assert_eq!(message.tokens.cache_read, 16000);
         assert_eq!(message.tokens.output, 300);
         assert_eq!(message.tokens.reasoning, 40);
@@ -1274,7 +1374,7 @@ mod tests {
         assert_eq!(messages[0].client, "antigravity-extension");
         assert_eq!(messages[0].session_id, "extension-conversation");
         assert_eq!(messages[0].dedup_key.as_deref(), Some("resp-1"));
-        assert_eq!(messages[0].tokens.input, 1632);
+        assert_eq!(messages[0].tokens.input, 500);
     }
 
     #[test]
@@ -2409,20 +2509,26 @@ mod tests {
 
     #[test]
     fn output_and_thinking_map_to_fields_9_and_10() {
-        // Lock the field-mapping contract asserted by the module doc-comment:
-        // `#9 + #10 == #3` (output + thinking == stored total output). Build a
-        // synthetic blob where #9=output, #10=thinking, #3=output+thinking and
-        // verify the parsed message keeps #9 as output and #10 as reasoning.
-        let output = 300u64;
+        // Lock the ModelUsageStats field-mapping contract:
+        //   #1 = model enum (ignored for token counts)
+        //   #2 = input_tokens
+        //   #3 = output_tokens (#9 + #10)
+        //   #4 = cache_write_tokens
+        //   #5 = cache_read_tokens
+        //   #9 = thinking_output_tokens (reasoning)
+        //   #10 = response_output_tokens (output)
         let thinking = 40u64;
-        let total_output = output + thinking; // #3
+        let output = 300u64;
+        let total_output = thinking + output; // #3
 
         let mut usage = Vec::new();
-        usage.extend(enc_varint(1, 1132)); // fixed system prompt
-        usage.extend(enc_varint(2, 500)); // new input
-        usage.extend(enc_varint(3, total_output)); // stored total output (#3)
-        usage.extend(enc_varint(9, output)); // output (#9)
-        usage.extend(enc_varint(10, thinking)); // thinking (#10)
+        usage.extend(enc_varint(1, 1132)); // model enum (MODEL_PLACEHOLDER_M132)
+        usage.extend(enc_varint(2, 500)); // input_tokens (#2)
+        usage.extend(enc_varint(3, total_output)); // output_tokens (#3)
+        usage.extend(enc_varint(4, 125)); // cache_write_tokens (#4)
+        usage.extend(enc_varint(5, 16000)); // cache_read_tokens (#5)
+        usage.extend(enc_varint(9, thinking)); // thinking_output_tokens (#9)
+        usage.extend(enc_varint(10, output)); // response_output_tokens (#10)
         usage.extend(enc_len(11, b"invariant-1"));
 
         let mut chat_model = Vec::new();
@@ -2432,6 +2538,9 @@ mod tests {
 
         let mut seen = HashSet::new();
         let message = parse_isolated_row(&blob, "session", 0, &mut seen).unwrap();
+        assert_eq!(message.tokens.input, 500);
+        assert_eq!(message.tokens.cache_write, 125);
+        assert_eq!(message.tokens.cache_read, 16000);
         assert_eq!(message.tokens.output, output as i64);
         assert_eq!(message.tokens.reasoning, thinking as i64);
         // The contract: the two component fields sum to the stored total.
@@ -2439,6 +2548,188 @@ mod tests {
             (message.tokens.output + message.tokens.reasoning) as u64,
             total_output
         );
+    }
+
+    #[test]
+    fn output_falls_back_to_field_3_when_fields_9_and_10_are_absent() {
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, 1132)); // model enum
+        usage.extend(enc_varint(2, 200)); // input_tokens
+        usage.extend(enc_varint(3, 150)); // output_tokens (#3 only)
+        usage.extend(enc_len(11, b"fallback-3"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let message = parse_isolated_row(&blob, "session", 0, &mut seen).unwrap();
+        assert_eq!(message.tokens.input, 200);
+        assert_eq!(message.tokens.output, 150);
+        assert_eq!(message.tokens.reasoning, 0);
+    }
+
+    #[test]
+    fn failed_zero_token_generation_with_model_enum_is_skipped_by_v2_and_retained_in_v1_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed-turn.db");
+
+        // A failed generation that wrote only #1 (model enum = 1026) and #11 (responseId),
+        // with no #19 responseModel and 0 actual tokens.
+        let mut failed_usage = Vec::new();
+        failed_usage.extend(enc_varint(1, 1026));
+        failed_usage.extend(enc_len(11, b"failed-resp"));
+        let mut failed_chat = Vec::new();
+        failed_chat.extend(enc_len(4, &failed_usage));
+        let failed_blob = enc_len(1, &failed_chat);
+
+        write_conversation(&path, &[failed_blob, build_gen_metadata()]);
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert_eq!(v2_messages.len(), 1);
+        assert_eq!(v2_messages[0].dedup_key.as_deref(), Some("resp-1"));
+        assert_eq!(v2_messages[0].tokens.input, 500);
+        assert_eq!(v2_messages[0].tokens.output, 300);
+        assert_eq!(v2_messages[0].tokens.reasoning, 40);
+
+        // Legacy v1 treated #1 as 1026 input tokens and emitted a phantom row.
+        assert_eq!(v1_messages.len(), 2);
+        assert_eq!(v1_messages[0].dedup_key.as_deref(), Some("failed-resp"));
+        assert_eq!(v1_messages[0].tokens.input, 1026);
+        assert_eq!(v1_messages[1].dedup_key.as_deref(), Some("resp-1"));
+        assert_eq!(v1_messages[1].tokens.input, 1632);
+        assert_eq!(v1_messages[1].tokens.output, 40);
+        assert_eq!(v1_messages[1].tokens.reasoning, 300);
+    }
+
+    #[test]
+    fn parse_gen_metadata_falls_back_to_total_output_sub_reasoning_when_field_10_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.db");
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(2, 100));
+        usage.extend(enc_varint(3, 340)); // total_output (#3)
+        usage.extend(enc_varint(9, 40)); // reasoning (#9)
+        usage.extend(enc_len(11, b"resp-fallback"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        write_conversation(&path, &[blob]);
+        let (v2_messages, _, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert_eq!(v2_messages.len(), 1);
+        assert_eq!(v2_messages[0].tokens.input, 100);
+        // output falls back to 340 - 40 = 300
+        assert_eq!(v2_messages[0].tokens.output, 300);
+        assert_eq!(v2_messages[0].tokens.reasoning, 40);
+    }
+
+    #[test]
+    fn unreadable_database_returns_false_status() {
+        let nonexistent = Path::new("/path/to/nonexistent/chat.db");
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(nonexistent);
+        assert!(!ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn database_without_gen_metadata_is_a_complete_empty_read() {
+        // Not a generation database, so it holds no usage this parser could
+        // miss. Reporting it unread would withhold the whole family's submit.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (id integer);")
+            .unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn unrelated_view_named_gen_metadata_is_a_complete_empty_read() {
+        // Antigravity writes `gen_metadata` as a table. A same-named view
+        // without its columns belongs to some other database.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE notes (body text);
+                 CREATE VIEW gen_metadata AS SELECT body AS summary FROM notes;",
+            )
+            .unwrap();
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn gen_metadata_that_cannot_be_queried_is_an_unreadable_source() {
+        // The table exists, so the conversation has usage, but the column
+        // this parser selects is gone. A file reported as read while its rows
+        // were not would let the rest of the family's snapshot replace the
+        // history this file still holds.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drifted.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, payload blob);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, payload) VALUES (0, ?1)",
+            params![build_gen_metadata()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (v2_messages, v1_messages, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(!ok);
+        assert!(v2_messages.is_empty());
+        assert!(v1_messages.is_empty());
+    }
+
+    #[test]
+    fn gen_metadata_scan_that_fails_while_stepping_is_an_unreadable_source() {
+        // `abs` of the smallest integer fails when the statement is stepped,
+        // the way a damaged page does: the query prepares and then cannot
+        // finish, whether or not it yielded rows first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("damaged.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE rows (idx integer, data blob);
+             CREATE VIEW gen_metadata AS
+                 SELECT idx,
+                        CASE WHEN idx = 1 THEN abs(-9223372036854775807 - 1) ELSE data END AS data
+                 FROM rows;",
+        )
+        .unwrap();
+        for idx in 0..2 {
+            conn.execute(
+                "INSERT INTO rows (idx, data) VALUES (?1, ?2)",
+                params![
+                    idx,
+                    build_row(Some("gemini-3-flash-a"), None, &format!("resp-{idx}"))
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let (_, _, ok) = parse_antigravity_cli_file_with_v1(&path);
+        assert!(!ok);
     }
 
     #[test]

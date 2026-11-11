@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::helpers::capitalize;
-use super::{UsageMetric, UsageOutput};
+use super::{UsageFetchReport, UsageFreshness, UsageMetric, UsageOutput};
+#[path = "claude_state.rs"]
+mod state;
 
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -111,13 +113,29 @@ fn remove_own_staging_files(path: &Path) {
     }
 }
 
-fn write_cooldown_with_now<F>(
+/// Keep lock retries bounded without tying tests to scheduler or fsync latency.
+fn try_lock_cooldown<F>(lock: &fs::File, mut wait: F) -> bool
+where
+    F: FnMut(std::time::Duration),
+{
+    for _ in 0..10 {
+        if lock.try_lock_exclusive().is_ok() {
+            return true;
+        }
+        wait(std::time::Duration::from_millis(5));
+    }
+    false
+}
+
+fn write_cooldown_with_now<F, W>(
     path: &Path,
     record: &PersistedCooldown,
     now: F,
+    wait: W,
 ) -> std::io::Result<()>
 where
     F: FnOnce() -> u64,
+    W: FnMut(std::time::Duration),
 {
     let parent = path
         .parent()
@@ -132,15 +150,7 @@ where
         .open(lock_path)?;
     // Contention is bounded: preserve the longer cross-process cooldown when
     // possible, but never let a stuck cache lock hang an interactive refresh.
-    let mut locked = false;
-    for _ in 0..10 {
-        if lock.try_lock_exclusive().is_ok() {
-            locked = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    if !locked {
+    if !try_lock_cooldown(&lock, wait) {
         return Ok(());
     }
     let lock_now = now();
@@ -189,9 +199,10 @@ fn write_cooldown_at(
     record: &PersistedCooldown,
     lock_now: u64,
 ) -> std::io::Result<()> {
-    write_cooldown_with_now(path, record, || lock_now)
+    write_cooldown_with_now(path, record, || lock_now, std::thread::sleep)
 }
 
+#[cfg(test)]
 fn set_cooldown(path: &Path, retry_after_secs: u64, now: u64) {
     set_cooldown_with_now(path, retry_after_secs, now, now_epoch_secs);
 }
@@ -223,7 +234,7 @@ where
             })
             .or_insert_with(|| record.clone());
     }
-    let _ = write_cooldown_with_now(path, &record, current_now);
+    let _ = write_cooldown_with_now(path, &record, current_now, std::thread::sleep);
 }
 
 #[cfg(test)]
@@ -234,11 +245,16 @@ fn set_cooldown_at(path: &Path, retry_after_secs: u64, now: u64, current_now: u6
 /// RFC 9110 allows `Retry-After` as delta-seconds or as an HTTP-date; a date
 /// already in the past counts as zero. Both forms are clamped to
 /// [`MAX_RETRY_AFTER_SECS`].
+#[cfg(test)]
 fn parse_retry_after(value: &str) -> Option<u64> {
+    parse_retry_after_at(value, now_epoch_secs())
+}
+
+fn parse_retry_after_at(value: &str, now: u64) -> Option<u64> {
     let secs = value.parse::<u64>().ok().or_else(|| {
         chrono::DateTime::parse_from_rfc2822(value)
             .ok()
-            .map(|d| (d.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64)
+            .map(|d| (d.timestamp().max(0) as u64).saturating_sub(now))
     })?;
     Some(secs.min(MAX_RETRY_AFTER_SECS))
 }
@@ -398,7 +414,7 @@ pub fn has_credentials() -> bool {
     credentials_path().exists() || read_keychain().is_ok()
 }
 
-/// How [`fetch_blocking`] obtains Claude Code's credential document. Injected
+/// How [`fetch_policy`] obtains Claude Code's credential document. Injected
 /// so tests can also drive the Keychain-sourced shape -- credentials present,
 /// no file on disk -- which no test can produce through [`read_credentials`]
 /// because the Keychain is a real macOS service.
@@ -482,12 +498,30 @@ fn read_credentials() -> Result<Credentials> {
     )
 }
 
+#[derive(Debug)]
+enum FetchError {
+    Limited(Option<String>),
+    Other(anyhow::Error),
+}
+impl From<reqwest::Error> for FetchError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Other(error.into())
+    }
+}
+#[cfg(test)]
+fn usage_client(timeout: std::time::Duration) -> anyhow::Result<reqwest::Client> {
+    // Bound the complete request, including response-body reads, while retaining
+    // the shared proxy and TLS configuration.
+    Ok(tokscale_core::http::client_builder()
+        .timeout(timeout)
+        .build()?)
+}
+
 async fn fetch_usage(
     client: &reqwest::Client,
     usage_url: &str,
     token: &str,
-    cooldown_file: &Path,
-) -> Result<UsageResponse> {
+) -> std::result::Result<UsageResponse, FetchError> {
     let resp = client
         .get(usage_url)
         .header("Authorization", format!("Bearer {token}"))
@@ -497,24 +531,21 @@ async fn fetch_usage(
         .send()
         .await?;
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        anyhow::bail!(
-            "Claude usage unavailable: stored access token was rejected (HTTP {status}). \
-             Run 'claude' so Claude Code can refresh its own login, then retry."
-        );
-    }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let wait = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(parse_retry_after)
-            .unwrap_or(5);
-        set_cooldown(cooldown_file, wait, now_epoch_secs());
-        anyhow::bail!("Claude usage rate-limited (HTTP 429), cooling down for {wait}s");
+        return Err(FetchError::Limited(
+            resp.headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+        ));
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(FetchError::Other(anyhow::anyhow!("Claude usage unavailable: stored access token was rejected (HTTP {status}). Run 'claude' so Claude Code can refresh its own login, then retry.")));
     }
     if !status.is_success() {
-        anyhow::bail!("Claude usage request failed (HTTP {status})");
+        return Err(FetchError::Other(anyhow::anyhow!(
+            "Claude usage request failed (HTTP {status})"
+        )));
     }
     Ok(resp.json().await?)
 }
@@ -680,73 +711,837 @@ fn usage_metrics(resp: &UsageResponse) -> Vec<UsageMetric> {
 /// The whole Claude usage path, with the only two things a test cannot supply
 /// for real -- the usage endpoint and the credential source -- as parameters.
 /// The destructive refresh-and-write this module was fixed for lived in exactly
-/// this orchestration, so it is the layer the tests must enter; [`fetch`] is one
+/// this orchestration, so it is the layer the tests must enter; [`fetch_report`] is one
 /// call with the production values and holds no logic that could diverge.
+#[cfg(test)]
 fn fetch_blocking(usage_url: &str, read: CredentialReader) -> Result<UsageOutput> {
-    fetch_blocking_in(usage_url, read, &crate::paths::get_cache_dir())
+    // Isolated test state prevents credential fixtures from touching real caches.
+    let temp = tempfile::tempdir()?;
+    fetch_blocking_in(usage_url, read, temp.path())
 }
-
+#[cfg(test)]
 fn fetch_blocking_in(
     usage_url: &str,
     read: CredentialReader,
     cache_dir: &Path,
 ) -> Result<UsageOutput> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let creds = read()?;
-        let oauth = creds.claude_ai_oauth.ok_or_else(|| {
-            anyhow::anyhow!("No Claude OAuth credentials. Run 'claude' to log in.")
-        })?;
-        let access_token = oauth
-            .access_token
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("No Claude access token."))?;
-        let cooldown_file = cooldown_path_in(cache_dir, &cooldown_key(access_token));
-        if let Some(remaining) = cooldown_remaining(&cooldown_file, now_epoch_secs()) {
-            anyhow::bail!("Claude usage rate-limited — retry in {remaining}s.");
-        }
-        let plan = oauth.subscription_type.as_ref().map(|s| {
-            let tier = oauth
-                .rate_limit_tier
-                .as_deref()
-                .and_then(|t| t.rsplit('_').next());
-            match tier {
-                Some(mult) => format!("{} {}", capitalize(s), mult),
-                None => capitalize(s),
-            }
-        });
-
-        let client = tokscale_core::http::client();
-        let resp = fetch_usage(&client, usage_url, access_token, &cooldown_file).await?;
-
-        let metrics = usage_metrics(&resp);
-
-        Ok(UsageOutput {
-            provider: "Claude".into(),
-            account: None,
-            credential_source: None,
-            plan,
-            email: None,
-            metrics,
-            reset_credits: None,
-            credit_status: None,
-            spend_control: None,
-        })
+    let report = fetch_report_at(usage_url, read, cache_dir, now_epoch_secs());
+    report.outputs.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(report
+            .diagnostics
+            .first()
+            .map(|d| d.message.clone())
+            .unwrap_or_else(|| "Claude unavailable".into()))
     })
 }
 
-pub fn fetch() -> Result<UsageOutput> {
-    fetch_blocking(USAGE_URL, read_credentials)
+fn limited_report(state: &state::State, now: u64, message: String) -> UsageFetchReport {
+    let mut report = UsageFetchReport::from_error("Claude", None, anyhow::anyhow!(message));
+    report.outputs.extend(state.sample(now, true));
+    report
 }
-
+#[cfg(test)]
+fn fetch_report_at(
+    usage_url: &str,
+    read: CredentialReader,
+    cache_dir: &Path,
+    now: u64,
+) -> UsageFetchReport {
+    fetch_report_with_clock(usage_url, read, cache_dir, || now)
+}
+fn fetch_report_with_clock(
+    usage_url: &str,
+    read: CredentialReader,
+    cache_dir: &Path,
+    clock: impl Fn() -> u64,
+) -> UsageFetchReport {
+    match fetch_policy(usage_url, read, cache_dir, clock(), clock) {
+        Ok(report) => report,
+        Err(error) => UsageFetchReport::from_error("Claude", None, error),
+    }
+}
+fn fetch_policy(
+    usage_url: &str,
+    read: CredentialReader,
+    cache_dir: &Path,
+    now: u64,
+    clock: impl Fn() -> u64,
+) -> Result<UsageFetchReport> {
+    let creds = read()?;
+    let token = access_token(&creds).ok_or_else(|| anyhow::anyhow!("No Claude access token."))?;
+    let key = cooldown_key(token);
+    let path = state::path(cache_dir, &key);
+    let cached = state::load(&path, now);
+    let local_lock = state::memory_lock(&path);
+    let Ok(_guard) = local_lock.try_lock() else {
+        return Ok(limited_report(
+            &cached,
+            clock(),
+            "Claude usage request already in progress; retry shortly".into(),
+        ));
+    };
+    let _disk_guard = match state::disk_lock(&path) {
+        Ok(lock) => Some(lock),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return Ok(limited_report(
+                &cached,
+                clock(),
+                "Claude usage request already in progress; retry shortly".into(),
+            ))
+        }
+        Err(_) => {
+            let now = clock();
+            let wait = cached.until.saturating_sub(now).max(
+                cooldown_remaining(&cooldown_path_in(cache_dir, &key), now).unwrap_or_default(),
+            );
+            let message = if wait > 0 {
+                format!("rate-limited; retry in {wait}s; restore cache directory access")
+            } else {
+                "Claude usage request coordination unavailable; restore cache directory access and retry".into()
+            };
+            return Ok(limited_report(&cached, now, message));
+        }
+    };
+    let now = clock();
+    let mut state = state::load(&path, now);
+    let cooldown_file = cooldown_path_in(cache_dir, &key);
+    let wait = cooldown_remaining(&cooldown_file, now)
+        .unwrap_or_default()
+        .max(state.until.saturating_sub(now));
+    if wait > 0 {
+        return Ok(limited_report(
+            &state,
+            now,
+            format!("rate-limited; retry in {wait}s"),
+        ));
+    }
+    if let Some(sample) = state.fresh(now) {
+        return Ok(UsageFetchReport::from_outputs(vec![sample]));
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let response = rt.block_on(fetch_usage(
+        &super::helpers::http_client()?,
+        usage_url,
+        token,
+    ));
+    let now = clock();
+    match response {
+        Err(FetchError::Limited(header)) => {
+            let wait = state.limited(
+                header
+                    .as_deref()
+                    .and_then(|value| parse_retry_after_at(value, now)),
+                now,
+            );
+            state::save(&path, &mut state, now);
+            set_cooldown_with_now(&cooldown_file, wait, now, || now);
+            Ok(limited_report(
+                &state,
+                now,
+                format!("HTTP 429; retry in {wait}s"),
+            ))
+        }
+        Err(FetchError::Other(error)) => {
+            // Rejected or unavailable credentials must not remain eligible on startup.
+            state.sample = None;
+            state::save(&path, &mut state, now);
+            Err(error)
+        }
+        Ok(resp) => {
+            let oauth = creds.claude_ai_oauth.as_ref().unwrap();
+            let plan = oauth.subscription_type.as_ref().map(|s| {
+                match oauth
+                    .rate_limit_tier
+                    .as_deref()
+                    .and_then(|t| t.rsplit('_').next())
+                {
+                    Some(mult) => format!("{} {}", capitalize(s), mult),
+                    None => capitalize(s),
+                }
+            });
+            let output = UsageOutput {
+                provider: "Claude".into(),
+                account: None,
+                credential_source: None,
+                freshness: Some(UsageFreshness {
+                    fetched_at: now,
+                    stale: false,
+                }),
+                plan,
+                email: None,
+                metrics: usage_metrics(&resp),
+                reset_credits: None,
+                credit_status: None,
+                spend_control: None,
+            };
+            state.sample = Some(output.clone());
+            state.failures = 0;
+            state.until = 0;
+            state::save(&path, &mut state, now);
+            Ok(UsageFetchReport::from_outputs(vec![output]))
+        }
+    }
+}
+pub fn fetch_report() -> UsageFetchReport {
+    fetch_report_with_clock(
+        USAGE_URL,
+        read_credentials,
+        &crate::paths::get_cache_dir(),
+        now_epoch_secs,
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     use crate::commands::usage::test_server::{spawn_server, Seen};
+
+    fn assert_request_timeout(partial_body: bool) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "client never connected");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            // macOS can inherit the listener's nonblocking flag on accept.
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            if partial_body {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{").unwrap();
+            }
+            let _ = released.recv_timeout(Duration::from_secs(3));
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                fetch_usage(
+                    &usage_client(Duration::from_millis(100)).unwrap(),
+                    &url,
+                    "test-token",
+                ),
+            )
+            .await
+        });
+        let _ = release.send(());
+        server.join().unwrap();
+        let response = result.expect("HTTP client must time out before the watchdog");
+        let Err(FetchError::Other(error)) = response else {
+            panic!("expected an HTTP timeout, got {response:?}");
+        };
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+    }
+
+    #[test]
+    fn request_times_out_waiting_for_headers() {
+        assert_request_timeout(false);
+    }
+
+    #[test]
+    fn request_times_out_reading_response_body() {
+        assert_request_timeout(true);
+    }
+
+    #[test]
+    fn policy_reuses_success_then_recovers_from_rate_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, log) = spawn_server(|_, n| {
+            if n == 1 {
+                (429, "{}".into())
+            } else {
+                (200, USAGE_BODY.into())
+            }
+        });
+        let read = |now| fetch_report_at(&url, keychain_credentials, temp.path(), now);
+        let first = read(1000);
+        assert_eq!(first.outputs.len(), 1);
+        assert_eq!(
+            read(1030).outputs[0].freshness.as_ref().unwrap().fetched_at,
+            1000
+        );
+        assert_eq!(log.lock().unwrap().len(), 1);
+        let limited = read(1060);
+        assert!(limited.outputs[0].freshness.as_ref().unwrap().stale);
+        assert_eq!(
+            limited.outputs[0].freshness.as_ref().unwrap().fetched_at,
+            1000
+        );
+        assert!(limited.diagnostics[0].message.contains("60s"));
+        assert_eq!(read(1100).outputs.len(), 1);
+        assert_eq!(log.lock().unwrap().len(), 2);
+        let recovered = read(1120);
+        assert!(recovered.diagnostics.is_empty());
+        assert_eq!(
+            recovered.outputs[0].freshness.as_ref().unwrap().fetched_at,
+            1120
+        );
+        assert_eq!(log.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn policy_rechecks_clock_after_request_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+        fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        let calls = std::sync::atomic::AtomicU64::new(0);
+        let report = fetch_report_with_clock(&url, keychain_credentials, temp.path(), || {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                1030
+            } else {
+                4601
+            }
+        });
+        assert_eq!(log.lock().unwrap().len(), 2);
+        assert_eq!(
+            report.outputs[0].freshness.as_ref().unwrap().fetched_at,
+            4601
+        );
+    }
+
+    #[test]
+    fn policy_timestamps_sample_and_cooldown_at_response_completion() {
+        for status in [200, 429] {
+            let temp = tempfile::tempdir().unwrap();
+            let (url, _) = spawn_server(move |_, _| {
+                (
+                    status,
+                    if status == 200 {
+                        USAGE_BODY.into()
+                    } else {
+                        "{}".into()
+                    },
+                )
+            });
+            let clock = std::sync::atomic::AtomicU64::new(0);
+            let report = fetch_report_with_clock(&url, keychain_credentials, temp.path(), || {
+                if clock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                    1000
+                } else {
+                    1060
+                }
+            });
+            if status == 200 {
+                assert_eq!(
+                    report.outputs[0].freshness.as_ref().unwrap().fetched_at,
+                    1060
+                );
+            } else {
+                let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+                assert_eq!(state::load(&path, 1060).until, 1120);
+            }
+        }
+    }
+
+    #[test]
+    fn policy_http_date_uses_injected_clock() {
+        let temp = tempfile::tempdir().unwrap();
+        let url = super::super::test_server::spawn_raw_server(|_| {
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: Thu, 01 Jan 1970 00:17:40 GMT\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec()
+        });
+        let result = fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        assert!(
+            result.diagnostics[0].message.contains("60s"),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn policy_progressive_backoff_persists_and_success_resets() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, log) = spawn_server(|_, n| {
+            if n == 3 {
+                (200, USAGE_BODY.into())
+            } else {
+                (429, "{}".into())
+            }
+        });
+        for (now, wait) in [(1000, 60), (1060, 120), (1180, 240)] {
+            let r = fetch_report_at(&url, keychain_credentials, temp.path(), now);
+            assert!(r.diagnostics[0].message.contains(&format!("{wait}s")));
+            let _ = fetch_report_at(&url, keychain_credentials, temp.path(), now + 1);
+        }
+        assert_eq!(log.lock().unwrap().len(), 3);
+        assert_eq!(
+            fetch_report_at(&url, keychain_credentials, temp.path(), 1420)
+                .outputs
+                .len(),
+            1
+        );
+        let limited = fetch_report_at(&url, keychain_credentials, temp.path(), 1480);
+        assert!(limited.diagnostics[0].message.contains("60s"));
+    }
+
+    /// Serves `429` with the given `Retry-After` value on every request and
+    /// counts how many requests actually reached the server.
+    fn spawn_limited_server(retry_after: &'static str) -> (String, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let seen = calls.clone();
+        let url = super::super::test_server::spawn_raw_server(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            format!(
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {retry_after}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .into_bytes()
+        });
+        (url, calls)
+    }
+
+    #[test]
+    fn policy_zero_retry_after_blocks_requests_until_backoff_elapses() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, calls) = spawn_limited_server("0");
+        for (now, message, requests) in [
+            (1000, "HTTP 429; retry in 60s", 1),
+            (1030, "rate-limited; retry in 30s", 1),
+            (1060, "HTTP 429; retry in 120s", 2),
+            (1120, "rate-limited; retry in 60s", 2),
+            (1180, "HTTP 429; retry in 240s", 3),
+        ] {
+            let report = fetch_report_at(&url, keychain_credentials, temp.path(), now);
+            let diagnostic = &report.diagnostics[0].message;
+            assert!(diagnostic.contains(message), "at {now}: {diagnostic}");
+            assert!(
+                !diagnostic.contains("retry in 0s"),
+                "at {now}: {diagnostic}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), requests, "at {now}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn policy_zero_retry_after_cooldown_survives_restart() {
+        clear_cooldown();
+        let temp = tempfile::tempdir().unwrap();
+        let (url, calls) = spawn_limited_server("0");
+        let key = cooldown_key("stale-access-token");
+        fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // A new tokscale process starts with only what is on disk.
+        state::forget_memory(&state::path(temp.path(), &key));
+        clear_cooldown();
+        assert_eq!(
+            cooldown_remaining(&cooldown_path_in(temp.path(), &key), 1030),
+            Some(30)
+        );
+        let report = fetch_report_at(&url, keychain_credentials, temp.path(), 1030);
+        assert!(
+            report.diagnostics[0].message.contains("retry in 30s"),
+            "{:?}",
+            report.diagnostics
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn policy_past_http_date_retry_after_backs_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, calls) = spawn_limited_server("Thu, 01 Jan 1970 00:00:01 GMT");
+        let report = fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        assert!(
+            report.diagnostics[0]
+                .message
+                .contains("HTTP 429; retry in 60s"),
+            "{:?}",
+            report.diagnostics
+        );
+        fetch_report_at(&url, keychain_credentials, temp.path(), 1030);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn policy_excludes_expired_future_other_tokens_and_missing_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, _) = spawn_server(|_, n| {
+            if n == 0 {
+                (200, USAGE_BODY.into())
+            } else {
+                (429, "{}".into())
+            }
+        });
+        assert_eq!(
+            fetch_report_at(&url, keychain_credentials, temp.path(), 1000)
+                .outputs
+                .len(),
+            1
+        );
+        fn other() -> Result<Credentials> {
+            parse_credentials_json(r#"{"claudeAiOauth":{"accessToken":"another"}}"#)
+        }
+        fn missing() -> Result<Credentials> {
+            anyhow::bail!("missing")
+        }
+        assert!(fetch_report_at(&url, other, temp.path(), 1010)
+            .outputs
+            .is_empty());
+        assert!(fetch_report_at(&url, missing, temp.path(), 1010)
+            .outputs
+            .is_empty());
+        assert!(
+            fetch_report_at(&url, keychain_credentials, temp.path(), 999)
+                .outputs
+                .is_empty()
+        );
+        assert!(
+            fetch_report_at(&url, keychain_credentials, temp.path(), 4601)
+                .outputs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn policy_invalid_retry_after_persists_progressive_one_hour_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let seen = calls.clone();
+        let url = super::super::test_server::spawn_raw_server(move |_| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: invalid\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec()
+        });
+        let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+        let mut now = 1000;
+        for (index, wait) in [60, 120, 240, 480, 960, 1920, 3600, 3600]
+            .into_iter()
+            .enumerate()
+        {
+            state::forget_memory(&path);
+            let report = fetch_report_at(&url, keychain_credentials, temp.path(), now);
+            assert!(report.diagnostics[0].message.contains(&format!("{wait}s")));
+            let during = fetch_report_at(&url, keychain_credentials, temp.path(), now + 1);
+            assert!(during.diagnostics[0]
+                .message
+                .contains(&format!("{}s", wait - 1)));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                index as u64 + 1
+            );
+            now += wait;
+        }
+    }
+
+    #[test]
+    fn policy_never_falls_back_on_auth_or_transport_failures() {
+        for status in [401, 403, 500] {
+            let temp = tempfile::tempdir().unwrap();
+            let (url, _) = spawn_server(move |_, n| {
+                if n == 0 {
+                    (200, USAGE_BODY.into())
+                } else {
+                    (status, "{}".into())
+                }
+            });
+            assert_eq!(
+                fetch_report_at(&url, keychain_credentials, temp.path(), 1000)
+                    .outputs
+                    .len(),
+                1
+            );
+            assert!(
+                fetch_report_at(&url, keychain_credentials, temp.path(), 1060)
+                    .outputs
+                    .is_empty()
+            );
+            let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+            assert!(state::load(&path, 1060).sample(1060, true).is_none());
+        }
+    }
+
+    #[test]
+    fn policy_rejects_semantically_corrupt_samples() {
+        for invalid_provider in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let (url, log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+            fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+            let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if invalid_provider {
+                value["sample"]["provider"] = serde_json::json!("Other account");
+            } else {
+                value["sample"]["freshness"]["fetched_at"] = serde_json::json!(1001);
+            }
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            state::forget_memory(&path);
+            let result = fetch_report_at(&url, keychain_credentials, temp.path(), 1030);
+            assert_eq!(result.outputs[0].provider, "Claude");
+            assert_eq!(log.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn policy_corrupt_state_fails_open_and_durable_sample_survives_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+        let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "invalid json").unwrap();
+        assert_eq!(
+            fetch_report_at(&url, keychain_credentials, temp.path(), 1000)
+                .outputs
+                .len(),
+            1
+        );
+        state::forget_memory(&path);
+        let cached = fetch_report_at(&url, keychain_credentials, temp.path(), 1030);
+        assert_eq!(
+            cached.outputs[0].freshness.as_ref().unwrap().fetched_at,
+            1000
+        );
+        assert_eq!(log.lock().unwrap().len(), 1);
+        state::forget_memory(&path);
+        assert_eq!(
+            fetch_report_at(&url, keychain_credentials, temp.path(), 1060)
+                .outputs
+                .len(),
+            1
+        );
+        assert_eq!(log.lock().unwrap().len(), 2);
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(!raw.contains("stale-access-token"));
+        assert!(!raw.contains("refreshToken"));
+    }
+
+    #[test]
+    fn policy_concurrent_callers_issue_one_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, log) = spawn_server(|_, _| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            (200, USAGE_BODY.into())
+        });
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    fetch_report_at(&url, keychain_credentials, temp.path(), 1000)
+                });
+            }
+            barrier.wait();
+        });
+        assert_eq!(log.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn policy_bounded_request_contention_and_memory_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+        let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+        let lock = state::disk_lock(&path).unwrap();
+        let started = std::time::Instant::now();
+        let report = fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        assert!(report.outputs.is_empty());
+        assert!(report.diagnostics[0].message.contains("in progress"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(log.lock().unwrap().is_empty());
+        drop(lock);
+        let blocked = temp.path().join("not-a-directory");
+        fs::write(&blocked, "blocked").unwrap();
+        let first = fetch_report_at(&url, keychain_credentials, &blocked, 1000);
+        assert!(first.outputs.is_empty());
+        assert!(first.diagnostics[0].message.contains("cache"));
+        let second = fetch_report_at(&url, keychain_credentials, &blocked, 1030);
+        assert!(second.outputs.is_empty());
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn policy_same_second_auth_rejection_survives_failed_state_write() {
+        for status in [401, 403] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+            let server_path = path.clone();
+            let backup = path.with_extension("backup");
+            let server_backup = backup.clone();
+            let calls = std::sync::atomic::AtomicU64::new(0);
+            let url = super::super::test_server::spawn_raw_server(move |_| {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (code, body) = match n {
+                    0 => (200, USAGE_BODY),
+                    _ => {
+                        fs::rename(&server_path, &server_backup).unwrap();
+                        fs::create_dir(&server_path).unwrap();
+                        (status, "{}")
+                    }
+                };
+                format!(
+                    "HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .into_bytes()
+            });
+            assert_eq!(
+                fetch_report_at(&url, keychain_credentials, temp.path(), 1000)
+                    .outputs
+                    .len(),
+                1
+            );
+            // Another writer persisted the quota sample at 1060 and left the
+            // account eligible, so the next request lands in that same second.
+            let mut disk: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            disk["observed_at"] = serde_json::json!(1060);
+            fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+            state::forget_memory(&path);
+            assert!(
+                fetch_report_at(&url, keychain_credentials, temp.path(), 1060)
+                    .outputs
+                    .is_empty()
+            );
+            fs::remove_dir(&path).unwrap();
+            fs::rename(&backup, &path).unwrap();
+            assert!(
+                state::load(&path, 1060).sample(1060, true).is_none(),
+                "rejected quota resurrected from equal-time disk state"
+            );
+            // A counter collision must also prefer the invalidation over quota.
+            let mut disk: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            disk["revision"] = serde_json::json!(disk["revision"].as_u64().unwrap() + 1);
+            fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+            assert!(state::load(&path, 1060).sample(1060, true).is_none());
+        }
+    }
+
+    #[test]
+    fn policy_newer_disk_invalidation_beats_same_second_memory_sample() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, _) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+        fetch_report_at(&url, keychain_credentials, temp.path(), 1000);
+        let path = state::path(temp.path(), &cooldown_key("stale-access-token"));
+        let mut disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        disk["revision"] = serde_json::json!(disk["revision"].as_u64().unwrap_or(0) + 1);
+        disk["sample"] = serde_json::Value::Null;
+        fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+        assert!(state::load(&path, 1000).sample(1000, true).is_none());
+    }
+
+    #[test]
+    fn policy_lock_io_failure_blocks_http_across_processes() {
+        const CACHE_ENV: &str = "TOKSCALE_TEST_CLAUDE_LOCK_CACHE";
+        const URL_ENV: &str = "TOKSCALE_TEST_CLAUDE_LOCK_URL";
+        if let Some(path) = std::env::var_os(CACHE_ENV) {
+            let report = fetch_report_at(
+                &std::env::var(URL_ENV).unwrap(),
+                keychain_credentials,
+                Path::new(&path),
+                1000,
+            );
+            assert!(report.outputs.is_empty());
+            assert!(report.diagnostics[0]
+                .message
+                .contains("cache directory access"));
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("cache");
+        fs::write(&blocked, "blocked").unwrap();
+        let (url, log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            children.push(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","commands::usage::claude::tests::policy_lock_io_failure_blocks_http_across_processes"])
+                .env(CACHE_ENV,&blocked).env(URL_ENV,&url)
+                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+                .spawn().unwrap());
+        }
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn policy_retains_success_when_storage_fails_after_lock_acquisition() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let sample_path = state::path(&cache, &cooldown_key("stale-access-token"));
+        let server_sample_path = sample_path.clone();
+        let (url, log) = spawn_server(move |_, _| {
+            // A directory at the JSON destination prevents atomic replacement
+            // without moving the directory containing the open request lock.
+            fs::create_dir(&server_sample_path).unwrap();
+            (200, USAGE_BODY.into())
+        });
+        assert_eq!(
+            fetch_report_at(&url, keychain_credentials, &cache, 1000)
+                .outputs
+                .len(),
+            1
+        );
+        assert!(sample_path.is_dir(), "the sample write must have failed");
+        let fresh = fetch_report_at(&url, keychain_credentials, &cache, 1030);
+        assert_eq!(fresh.outputs.len(), 1);
+        assert!(!fresh.outputs[0].freshness.as_ref().unwrap().stale);
+        assert!(fresh.diagnostics.is_empty());
+        // The request has completed, so its lock file can now be replaced on
+        // Windows too. This separately simulates unavailable coordination.
+        let lock_path = sample_path.with_extension("request.lock");
+        fs::remove_file(&lock_path).unwrap();
+        fs::create_dir(&lock_path).unwrap();
+        let cached = fetch_report_at(&url, keychain_credentials, &cache, 1030);
+        assert_eq!(
+            cached.outputs[0].freshness.as_ref().unwrap().fetched_at,
+            1000
+        );
+        assert!(cached.outputs[0].freshness.as_ref().unwrap().stale);
+        assert!(cached.diagnostics[0]
+            .message
+            .contains("cache directory access"));
+        assert_eq!(log.lock().unwrap().len(), 1);
+        assert!(fetch_report_at(&url, keychain_credentials, &cache, 4601)
+            .outputs
+            .is_empty());
+        // Fixing access restores coordinated requests instead of permanent lockout.
+        fs::remove_dir(&lock_path).unwrap();
+        fs::remove_dir(&sample_path).unwrap();
+        let (recovered_url, recovered_log) = spawn_server(|_, _| (200, USAGE_BODY.into()));
+        assert_eq!(
+            fetch_report_at(&recovered_url, keychain_credentials, &cache, 4601)
+                .outputs
+                .len(),
+            1
+        );
+        assert_eq!(recovered_log.lock().unwrap().len(), 1);
+    }
 
     /// A Claude Code credential document with the fields tokscale models
     /// (`accessToken`, `expiresAt`, `subscriptionType`, `rateLimitTier`), the
@@ -1822,11 +2617,23 @@ mod tests {
     fn cooldown_still_blocks_http_when_cache_cannot_be_written() {
         clear_cooldown();
         let temp = tempfile::tempdir().unwrap();
-        let blocked_cache = temp.path().join("not-a-directory");
-        fs::write(&blocked_cache, "file blocks cache creation").unwrap();
-        let (usage_url, log) = spawn_usage_server(429);
+        let blocked_cache = temp.path().join("cache");
+        fs::create_dir_all(&blocked_cache).unwrap();
+        let sample_path = state::path(&blocked_cache, &cooldown_key("stale-access-token"));
+        let cooldown_file = cooldown_path_in(&blocked_cache, &cooldown_key("stale-access-token"));
+        let server_sample_path = sample_path.clone();
+        let server_cooldown_file = cooldown_file.clone();
+        let (usage_url, log) = spawn_server(move |_, _| {
+            // Block both JSON destinations after acquiring the request lock.
+            // Renaming its open parent directory would fail on Windows.
+            fs::create_dir(&server_sample_path).unwrap();
+            fs::create_dir_all(&server_cooldown_file).unwrap();
+            (429, "{}".into())
+        });
         let first = fetch_blocking_in(&usage_url, keychain_credentials, &blocked_cache);
         assert!(first.unwrap_err().to_string().contains("HTTP 429"));
+        assert!(sample_path.is_dir());
+        assert!(cooldown_file.is_dir());
         let second = fetch_blocking_in(&usage_url, keychain_credentials, &blocked_cache);
         assert!(second.unwrap_err().to_string().contains("retry in"));
         assert_eq!(log.lock().unwrap().len(), 1);
@@ -1884,11 +2691,19 @@ mod tests {
     fn shorter_update_does_not_shorten_active_cooldown() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cooldown.json");
-        set_cooldown_at(&path, 30, 1_000, 1_000);
-        set_cooldown_at(&path, 90, 1_000, 1_000);
-        set_cooldown_at(&path, 10, 1_000, 1_000);
-        clear_cooldown();
-        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        // Each uncontended write must persist the maximum, in either order.
+        // Clear memory after every write so it cannot hide a shortened disk record.
+        for waits in [[30, 90, 10], [90, 30, 10]] {
+            clear_cooldown();
+            let _ = fs::remove_file(&path);
+            let mut longest = 0;
+            for wait in waits {
+                set_cooldown_at(&path, wait, 1_000, 1_000);
+                longest = longest.max(wait);
+                clear_cooldown();
+                assert_eq!(cooldown_remaining(&path, 1_000), Some(longest));
+            }
+        }
     }
 
     #[test]
@@ -1909,18 +2724,23 @@ mod tests {
         };
 
         write_cooldown_at(&path, &newer, 1_010).unwrap();
-        write_cooldown_with_now(&path, &older, || {
-            let lock = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path.with_extension("lock"))
-                .unwrap();
-            assert!(
-                lock.try_lock_exclusive().is_err(),
-                "clock sampled after lock acquisition"
-            );
-            1_020
-        })
+        write_cooldown_with_now(
+            &path,
+            &older,
+            || {
+                let lock = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path.with_extension("lock"))
+                    .unwrap();
+                assert!(
+                    lock.try_lock_exclusive().is_err(),
+                    "clock sampled after lock acquisition"
+                );
+                1_020
+            },
+            std::thread::sleep,
+        )
         .unwrap();
         assert_eq!(read_cooldown(&path, 1_020), Some(80));
 
@@ -2018,8 +2838,63 @@ mod tests {
     }
 
     #[test]
+    fn cooldown_lock_stops_after_its_retry_budget() {
+        // Use separate opens: cloned handles can share flock locks on Unix.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+        let mut waits = Vec::new();
+        assert!(!try_lock_cooldown(&contender, |duration| {
+            waits.push(duration);
+            assert!(waits.len() <= 10, "lock acquisition exceeded retry budget");
+        }));
+        assert_eq!(waits, vec![std::time::Duration::from_millis(5); 10]);
+        holder.unlock().unwrap();
+    }
+
+    #[test]
+    fn cooldown_lock_can_succeed_on_its_last_attempt() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.path())
+            .unwrap();
+        holder.lock_exclusive().unwrap();
+        let mut waits = 0;
+        assert!(try_lock_cooldown(&contender, |_| {
+            waits += 1;
+            if waits == 9 {
+                holder.unlock().unwrap();
+            }
+        }));
+        assert_eq!(waits, 9);
+        assert!(holder.try_lock_exclusive().is_err());
+        contender.unlock().unwrap();
+        assert!(try_lock_cooldown(&holder, |_| panic!(
+            "free lock must not wait"
+        )));
+        holder.unlock().unwrap();
+    }
+
+    #[test]
     #[serial_test::serial]
     fn contended_writer_leaves_committed_and_staging_files_untouched() {
+        clear_cooldown();
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cooldown.json");
         let committed = PersistedCooldown {
@@ -2041,28 +2916,40 @@ mod tests {
             .unwrap();
         lock.lock_exclusive().unwrap();
 
-        write_cooldown_at(
-            &path,
-            &PersistedCooldown {
-                version: COOLDOWN_VERSION,
-                issued_at: 1_000,
-                expires_at: 1_090,
-            },
-            1_000,
-        )
-        .unwrap();
+        // The held lock forces persistence to exhaust its bounded retry budget.
+        // The process must still enforce the longer cooldown in memory.
+        set_cooldown_at(&path, 90, 1_000, 1_000);
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        set_cooldown_at(&path, 30, 1_000, 1_000);
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
 
         assert_eq!(fs::read_to_string(&staging).unwrap(), "active writer");
         assert_eq!(fs::read_to_string(&legacy).unwrap(), "active legacy writer");
-        assert_eq!(read_cooldown(&path, 1_000), Some(60));
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            serde_json::to_vec(&committed).unwrap()
+        );
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_000), Some(60));
         lock.unlock().unwrap();
     }
 
     #[test]
     #[serial_test::serial]
-    fn concurrent_writers_preserve_the_later_cooldown() {
+    fn concurrent_writers_preserve_the_later_cooldown_in_memory_when_disk_is_locked() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cooldown.json");
+        clear_cooldown();
+        // Hold the lock until both workers finish. Neither can persist, regardless
+        // of thread scheduling or coverage overhead, so this tests the memory max.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut workers = Vec::new();
         for wait in [30, 90] {
@@ -2077,8 +2964,88 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        clear_cooldown();
         assert_eq!(cooldown_remaining(&path, 1_000), Some(90));
+        assert!(
+            !path.exists(),
+            "contended writers must not commit without a lock"
+        );
+        clear_cooldown();
+        assert_eq!(cooldown_remaining(&path, 1_000), None);
+        lock.unlock().unwrap();
+    }
+
+    /// Two writers contend for the disk lock and both commit. The first holds
+    /// the lock, paused in its `now` hook (sampled after acquisition); the
+    /// second loses its first attempt and is parked in its injected wait until
+    /// the first has committed. Channels drive every step, so neither thread
+    /// scheduling nor fsync latency decides what reaches the disk -- unlike a
+    /// real 5 ms sleep, the parked wait cannot run out the retry budget.
+    #[test]
+    fn contending_writers_both_persist_and_keep_the_longer_cooldown() {
+        use std::sync::mpsc;
+        for (first, second) in [(30, 90), (90, 30)] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("cooldown.json");
+            let record = |wait: u64| PersistedCooldown {
+                version: COOLDOWN_VERSION,
+                issued_at: 1_000,
+                expires_at: 1_000 + wait,
+            };
+
+            let (first_locked_tx, first_locked) = mpsc::channel();
+            let (release_first_tx, release_first) = mpsc::channel::<()>();
+            let first_writer = {
+                let path = path.clone();
+                let record = record(first);
+                std::thread::spawn(move || {
+                    write_cooldown_with_now(
+                        &path,
+                        &record,
+                        move || {
+                            first_locked_tx.send(()).unwrap();
+                            release_first.recv().unwrap();
+                            1_000
+                        },
+                        |_| panic!("the first writer must find the lock free"),
+                    )
+                })
+            };
+            first_locked.recv().unwrap();
+
+            let (second_waiting_tx, second_waiting) = mpsc::channel();
+            let (resume_second_tx, resume_second) = mpsc::channel::<()>();
+            let second_writer = {
+                let path = path.clone();
+                let record = record(second);
+                std::thread::spawn(move || {
+                    let mut waits = 0;
+                    write_cooldown_with_now(
+                        &path,
+                        &record,
+                        || 1_000,
+                        move |_| {
+                            waits += 1;
+                            assert_eq!(waits, 1, "the second writer must retry exactly once");
+                            second_waiting_tx.send(()).unwrap();
+                            resume_second.recv().unwrap();
+                        },
+                    )
+                })
+            };
+            // The second writer has tried the lock and lost.
+            second_waiting.recv().unwrap();
+            release_first_tx.send(()).unwrap();
+            first_writer.join().unwrap().unwrap();
+            assert_eq!(read_cooldown(&path, 1_000), Some(first));
+
+            resume_second_tx.send(()).unwrap();
+            second_writer.join().unwrap().unwrap();
+            assert_eq!(
+                read_cooldown(&path, 1_000),
+                Some(first.max(second)),
+                "{first}s then {second}s"
+            );
+        }
     }
 
     /// RFC 9110 also allows `Retry-After` as an HTTP-date. That form must

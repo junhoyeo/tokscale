@@ -308,7 +308,11 @@ fn inferred_provider_from_model_inner(
         return Some("xai");
     }
 
-    if contains_family(&lower, "deepseek", delimit_family_names) {
+    if contains_family(&lower, "deepseek", delimit_family_names)
+        || contains_delimited(&lower, "dfmodel")
+        || contains_delimited(&lower, "df_model")
+        || contains_delimited(&lower, "df-model")
+    {
         return Some("deepseek");
     }
 
@@ -331,7 +335,18 @@ fn inferred_provider_from_model_inner(
         return Some("meta");
     }
 
-    if contains_family(&lower, "qwen", delimit_family_names) {
+    if contains_family(&lower, "qwen", delimit_family_names)
+        || contains_versioned_family(&lower, "qmodel")
+        || contains_delimited(&lower, "qmodel")
+        || contains_delimited(&lower, "qmodelpreview")
+        || contains_delimited(&lower, "qmodellatest")
+        || contains_delimited(&lower, "qmodel38max")
+        || contains_delimited(&lower, "qfmodel")
+        || contains_delimited(&lower, "qf_model")
+        || contains_delimited(&lower, "qf-model")
+        || lower.starts_with("qmodel_")
+        || lower.starts_with("qmodel-")
+    {
         return Some("qwen");
     }
 
@@ -361,7 +376,11 @@ fn inferred_provider_from_model_inner(
         return Some("xiaomi");
     }
     // GLM (Zhipu AI / Zai) — `glm-4.6`, `glm-5.2` etc.
-    if contains_versioned_family(&lower, "glm") {
+    if contains_versioned_family(&lower, "glm")
+        || contains_delimited(&lower, "gfmodel")
+        || contains_delimited(&lower, "gf_model")
+        || contains_delimited(&lower, "gf-model")
+    {
         return Some("zai");
     }
 
@@ -570,6 +589,12 @@ mod tests {
         assert_eq!(inferred_provider_from_model("co4pilot-v2"), None);
         assert_eq!(inferred_provider_from_model("metadata-model"), None);
         assert_eq!(inferred_provider_from_model("metamorphic-v1"), None);
+        assert_eq!(inferred_provider_from_model("antiqmodelpreview"), None);
+        assert_eq!(inferred_provider_from_model("myqmodellatestapp"), None);
+        assert_eq!(inferred_provider_from_model("preqmodel38maxpost"), None);
+        assert_eq!(inferred_provider_from_model("qmodelpreview"), Some("qwen"));
+        assert_eq!(inferred_provider_from_model("qmodellatest"), Some("qwen"));
+        assert_eq!(inferred_provider_from_model("qmodel38max"), Some("qwen"));
     }
 
     #[test]
@@ -594,6 +619,24 @@ mod tests {
             ("kimi2", "moonshotai"),
             ("mimo2", "xiaomi"),
             ("glm5", "zai"),
+            ("dfmodel", "deepseek"),
+            ("df_model", "deepseek"),
+            ("df-model", "deepseek"),
+            ("qmodel", "qwen"),
+            ("qmodelpreview", "qwen"),
+            ("qmodellatest", "qwen"),
+            ("qfmodel", "qwen"),
+            ("qf_model", "qwen"),
+            ("qf-model", "qwen"),
+            ("qmodel_38max", "qwen"),
+            ("qmodel38max", "qwen"),
+            ("qmodel_latest", "qwen"),
+            ("qmodel-latest", "qwen"),
+            ("qmodel_preview", "qwen"),
+            ("qmodel-preview", "qwen"),
+            ("gfmodel", "zai"),
+            ("gf_model", "zai"),
+            ("gf-model", "zai"),
         ];
         for (model, provider) in genuine {
             assert_eq!(
@@ -614,6 +657,9 @@ mod tests {
             "remixtralized",
             "collamated",
             "unqwened-model",
+            "antiqmodelpreview",
+            "myqmodellatestapp",
+            "preqmodel38maxpost",
             "defugued",
             "skimimoed",
             "glimmer",

@@ -121,6 +121,8 @@
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json` (same path on Windows; override the root via `VIBE_HOME`) |
 | <img width="48px" src="https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png" alt="Proma" /> | [Proma](https://github.com/proma-ai/Proma) | `~/.proma/agent-sessions/`, `~/.proma/sdk-config/{sessions,projects}/`; `~/.proma-dev/` |
+| <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
+| <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl` (override roots via `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR`) |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
 
@@ -193,7 +195,7 @@ In the age of AI-assisted development, **tokens are the new energy**. They power
   - GitHub-style contribution graph with configurable color themes
   - Real-time filtering and sorting
   - Zero flicker rendering
-- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, and Mistral Vibe, Proma
+- **Multi-platform support** - Track usage across OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Proma, BB, and Qoder
 - **Real-time pricing** - Fetches current pricing from LiteLLM with 1-hour disk cache; automatic OpenRouter fallback and Cursor model pricing for newly released models
 - **Detailed breakdowns** - Input, output, cache read/write, and reasoning token tracking
 - **Native Rust core** - All parsing and aggregation done in Rust for 10x faster processing
@@ -464,7 +466,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `proma`.
+Possible values: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `proma`, `bb`, `qoder`.
 
 > **Breaking change (v4.0.0):** The per-client boolean flags (`--opencode`, `--claude`, `--codex`, etc.) have been removed and now error. Use the canonical `--client`/`-c` flag instead — e.g. `tokscale --client opencode,claude`.
 
@@ -660,7 +662,7 @@ Scheduled runs are non-interactive: they never prompt for GitHub auth or star co
 
 ### Cursor IDE Commands
 
-Cursor IDE support uses Cursor's usage-events API. Tokscale caches usage at `~/.config/tokscale/cursor-cache/usage.json` for the active account and `usage.account-<sha256-of-exact-account-id>.json` for each other account, with verified ownership metadata. Unmarked legacy JSON/CSV caches are preserved in `cursor-cache/archive/` before sync or an account change; see the migration details below. Tokscale does not parse local Cursor Agent CLI state under `~/.cursor`, and it does not treat the desktop SQLite DB as a usage ledger.
+Cursor IDE support uses Cursor's usage-events API. Tokscale caches usage at `~/.config/tokscale/cursor-cache/usage.json` (or `${TOKSCALE_CONFIG_DIR}/cursor-cache/` when overridden) for the active account and `usage.account-<sha256-of-exact-account-id>.json` for each other account, with verified ownership metadata. Unmarked legacy JSON/CSV caches are preserved in `cursor-cache/archive/` before sync or an account change; see the migration details below. Tokscale does not parse local Cursor Agent CLI state under `~/.cursor`, and it does not treat the desktop SQLite DB as a usage ledger.
 
 When the Cursor desktop app is installed and signed in, reports, submit, and wrapped can import `cursorAuth/accessToken` from `state.vscdb` when no Cursor login is saved yet. Wrapped only does this when Cursor is included in the requested clients. Reports skip syncing while the usage cache is fresh. Whenever a sync runs, including explicit `tokscale cursor sync`, it refreshes the desktop token when available and can switch the active account to that desktop login. A saved login remains usable when no desktop session is available. Usage rows still come only from Cursor's usage-events API, not from local `~/.cursor` transcripts.
 
@@ -722,6 +724,8 @@ On the first sync or account change after upgrading, unmarked legacy JSON and CS
 When you log out, Tokscale moves cached usage to `cursor-cache/archive/` so it is no longer aggregated. Use `--purge-cache` to delete cached usage instead.
 
 `tokscale cursor sync` downloads each saved account's usage history page by page and gives each account one overall time budget. By default the budget starts at 120 seconds and grows with the number of usage events Cursor reports for the account, up to 1800 seconds (30 minutes). To use a fixed budget instead, pass `--timeout <SECONDS>` for one run, or save `cursor.syncTimeoutSeconds` in `settings.json` (by default `~/.config/tokscale/settings.json`; see [Configuration](#configuration) for Windows, `XDG_CONFIG_HOME` and `TOKSCALE_CONFIG_DIR`). Both take a whole number of seconds from 1 to 86400. If the setting holds any other value, `tokscale cursor sync` run without `--timeout` prints a warning and uses the default budget. The flag takes precedence over the setting, and the setting takes precedence over the default budget.
+
+`tokscale submit` also syncs Cursor usage before uploading. It defaults to a 15-second budget, honors `cursor.syncTimeoutSeconds` from `settings.json` when configured, and accepts `--timeout <SECONDS>` (or `--cursor-timeout <SECONDS>`) to override the budget for that submission.
 
 ```json
 {
@@ -859,7 +863,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | Requires Codex CLI installed and authenticated. |
 | `gemini` | `gemini -p` | Requires Gemini CLI installed and authenticated. |
 | `kiro` | `kiro --non-interactive` | Requires Kiro CLI installed and authenticated. |
-| `minimax` | (HTTP API) | OpenAI-compatible chat-completions API, so no CLI is needed. Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN`. Defaults to `MiniMax-M3` on the global endpoint (`https://api.minimax.io/v1`); set `MINIMAX_API_REGION=cn` to use `https://api.minimaxi.com/v1`, and `MINIMAX_MODEL` to select another model (for example `MiniMax-M2.7`). |
+| `minimax` | (HTTP API) | OpenAI-compatible chat-completions API, so no CLI is needed. Set `MINIMAX_API_KEY` or `MINIMAX_API_TOKEN`. Defaults to `MiniMax-M3.1-Flash` on the global endpoint (`https://api.minimax.io/v1`); set `MINIMAX_API_REGION=cn` to use `https://api.minimaxi.com/v1`, and `MINIMAX_MODEL` to select another model (for example `MiniMax-M3`). |
 
 **How it works:**
 
@@ -1022,7 +1026,7 @@ Tokscale stores settings in `settings.json` in its config directory. By default 
 | `light.writeCache` | boolean | `false` | When true, `tokscale --light` overwrites the TUI cache atomically after rendering. CLI flags `--write-cache` / `--no-write-cache` override per-invocation. |
 | `minutelyTabEnabled` | boolean | `false` | Show the per-minute Minutely tab in the TUI and aggregate per-minute usage during data loading. Default-off because minute-granularity is a niche/diagnostic view for most users and the per-minute bucketing has a non-trivial cost on large datasets. |
 | `autosubmit` | object | disabled | Saved `tokscale autosubmit` state: interval, client/date filters, scheduler backend, last run time, and last error. Prefer `tokscale autosubmit enable/status/disable` over editing this object by hand. |
-| `cursor.syncTimeoutSeconds` | number | unset | Overall time budget, in seconds (1-86400), for each account's usage download in `tokscale cursor sync`. When unset, the budget starts at 120 s and grows with the number of usage events Cursor reports, up to 1800 s. `tokscale cursor sync --timeout <SECONDS>` overrides it for one run. See [Cursor IDE Commands](#cursor-ide-commands). |
+| `cursor.syncTimeoutSeconds` | number | unset | Overall time budget, in seconds (1-86400), for each account's usage download in `tokscale cursor sync` and pre-report sync in `tokscale submit`. When unset, the budget starts at 120 s and grows with the number of usage events Cursor reports (15 s default during submit). `tokscale cursor sync --timeout <SECONDS>` and `tokscale submit --timeout <SECONDS>` override it for one run. See [Cursor IDE Commands](#cursor-ide-commands). |
 | `scanner.extraScanPaths` | object | `{}` | Additional per-client scan roots for sessions outside Tokscale's default home-root locations |
 | `scanner.machineLabels` | object | `{}` | Machine label for each folder, as `{ "<folder>": "<label>" }`. Session files under a folder count toward its label in `--group-by machine,model`; the longest matching folder wins. See [Per-machine usage](#per-machine-usage). |
 | `scanner.localMachineLabel` | string | `"local"` | Machine label for session files under no `scanner.machineLabels` folder |
@@ -1110,7 +1114,7 @@ Environment variables override config file values. For CI/CD or one-off use:
 | `TOKSCALE_NATIVE_TIMEOUT_MS` | `300000` (5 min) | Overrides `nativeTimeoutMs` config |
 | `TOKSCALE_API_TOKEN` | unset | Tokscale personal API token for non-interactive `submit` and `delete-submitted-data` runs. Create one from Settings > API Tokens or save it locally with `tokscale login --token tt_xxx`. |
 | `TOKSCALE_EXTRA_DIRS` | unset | One-off extra session roots as `client:/abs/path,client:/abs/path` |
-| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, `antigravity-cache/`, and `trae-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
+| `TOKSCALE_CONFIG_DIR` | unset | Overrides the config directory root (where `settings.json`, `star-cache.json`, `cache/`, `cursor-cache/`, `antigravity-cache/`, and `trae-cache/` live). Absolute path recommended; relative paths resolve against the process CWD. Useful for CI sandboxes or pinning a non-default location. When set, tokscale will not fall back to the legacy macOS `~/Library/Application Support/tokscale/` path. |
 | `TOKSCALE_CODEX_MAX_DECODED_BYTES` | `1073741824` (1 GiB) | Sets the decoded-size ceiling, in bytes, for compressed Codex `.jsonl.zst` rollouts. Accepts positive integers below `u64::MAX`; invalid values use the default. Raising it increases the work Tokscale permits for one archive. |
 | `TOKSCALE_FM_DEBUG` | unset | When set, prints Apple Foundation Models diagnostics (macOS version gate, dlopen dylib path, load/symbol errors) to stderr to explain why on-device apple-fm did or didn't engage. |
 | `TOKSCALE_RECOVERY_DISABLE` | unset | When set, disables the local usage recovery ledger (`recovered-usage-v1.json`) even if the file exists. |
@@ -1207,7 +1211,7 @@ The frontend provides a GitHub-style contribution graph visualization:
 - **Interactive tooltips**: Hover for detailed daily breakdowns
 - **Day breakdown panel**: Click to see per-source and per-model details
 - **Year filtering**: Navigate between years
-- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma)
+- **Source filtering**: Filter by platform (OpenCode, Claude, Codex, MiniMax Code, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder)
 - **Stats panel**: Total cost, tokens, active days, streaks
 - **FOUC prevention**: Theme applied before React hydrates (no flash)
 
@@ -1639,6 +1643,8 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | Native browser session usage across accounts; only `messages.jsonl`, excluding artifacts, memory and passwords. |
 | Mistral Vibe | `$VIBE_HOME/logs/session/` (fallback: `~/.vibe/logs/session/`) | `%VIBE_HOME%\logs\session\` (fallback: `%USERPROFILE%\.vibe\logs\session\`) | Same `~/.vibe` root on all platforms; reads each session directory's `meta.json` cumulative `stats`, never the `messages.jsonl` transcript |
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | Pi SDK usage takes precedence over display mirrors; legacy Claude SDK logs and standalone display journals remain supported. See [accounting and limits](docs/proma.md). |
+| BB | `$BB_DATA_DIR` (fallback: `~/.bb/`), `~/.bb-dev/` | `%BB_DATA_DIR%` (fallback: `%USERPROFILE%\.bb\`), `%USERPROFILE%\.bb-dev\` | Parses `bb.db` SQLite database (`threads` and `events` tables). Accurately extracts prompt cache and reasoning token breakdowns across orchestrated agent harnesses. BB runs Claude Code and Codex under your normal homes, so a response they also logged is counted once, under `claude` or `codex`; `--client bb` alone still shows everything BB recorded. |
+| Qoder | `$QODER_CONFIG_DIR/projects/` (fallback: `~/.qoder/projects/`), `$QODERCN_CONFIG_DIR/projects/` (fallback: `~/.qoder-cn/projects/`) | `%QODER_CONFIG_DIR%\projects\` (fallback: `%USERPROFILE%\.qoder\projects\`), `%QODERCN_CONFIG_DIR%\projects\` (fallback: `%USERPROFILE%\.qoder-cn\projects\`) | Parses Qoder and Qoder CN JSONL session and subagent transcripts; merges multi-block assistant fragments and estimates tokens from conversation content when managed-model token counts are zeroed out |
 | MiniMax Code | `~/.config/tokscale/headless/mcode/` | `%APPDATA%\tokscale\headless\mcode\` | Headless capture only; Tokscale reads its own capture directory rather than MiniMax Code's shared Desktop/Runtime store, which does not identify the originating surface. Override the root with `TOKSCALE_HEADLESS_DIR` |
 
 > **Devin Desktop agent support**: Local usage parsing works for ACP-connected agents (e.g. Cascade/Windsurf, claude-code, opencode) that emit `usage_update` events in the NDJSON stream. The default **devin-cloud** agent does not emit local `usage_update` events — its usage stays server-side and cannot be tracked by tokscale without an account-level API.
@@ -1966,13 +1972,18 @@ Hindsight writes no local session logs of its own. Running `tokscale hindsight s
 
 Location: `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. [Oh My Pi](https://github.com/can1357/oh-my-pi) writes the same session format under `~/.omp/agent/sessions/` and is tracked as its own `omp` client.
 
-JSONL format with session header and message entries:
+JSONL format with session, message, and usage entries:
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+{"type":"usage","id":"usage_001","parentId":"msg_001","timestamp":"2026-01-01T00:00:02.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":0,"totalTokens":100}}
 ```
 
 Pi also bills work that is not an assistant reply: `/compact` writes a `compaction` record, branch summarization a `branch_summary` record, and standalone accounting (e.g. cache warming) a `usage` record, while a `toolResult` message can carry usage for the call behind it. Tokscale counts each of those as its own request and preserves its reported cost when present. A current-format standalone `usage` record names its billed provider and model explicitly, while an older model-less one inherits the session's current selection (the last `model_change` or reply). Model-less tool results, compactions, and branch summaries stay in Pi's separate `tools/summaries` bucket instead of being charged to the preceding conversation model. A record without usage bills nothing.
+
+Tokscale accepts any `kind` in native standalone [UsageEntry](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md#usageentry) records. Standalone usage also counts for Prime Agent without entering assistant completion matching.
+
+Copied usage records retain their deduplication identity without colliding with assistant messages. Kimchi keeps session-scoped identities. After an upgrade, Tokscale invalidates the parser cache and reads the sessions again.
 
 ### Senpi (OmO Native)
 

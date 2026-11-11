@@ -48,6 +48,9 @@ pub struct ClaudeEntry {
     /// Optional billing or routing provider emitted by wrappers around Claude Code.
     #[serde(rename = "providerId", alias = "provider_id", alias = "provider")]
     pub provider_id: Option<String>,
+    /// The entry's own id. Agent SDK hosts record it as a turn checkpoint.
+    #[serde(default)]
+    pub uuid: Option<String>,
 }
 
 /// Meta sidecar written next to nested-layout sidechain transcripts.
@@ -594,6 +597,9 @@ struct ClaudeParseStart {
     consumed_offset: u64,
     messages: Vec<UnifiedMessage>,
     state: ClaudeParseState,
+    /// The row of the user turn still open at the checkpoint, if any (see
+    /// `turn_row` in `parse_claude_lines`).
+    turn_row: Option<usize>,
 }
 
 const CLAUDE_READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -647,6 +653,7 @@ pub(crate) fn resume_claude_file(
     for &(index, cache_write_1h) in &checkpoint.unclamped_cache_write_1h {
         messages.get_mut(index)?.tokens.cache_write_1h = cache_write_1h;
     }
+    let turn_row = open_turn_row(&messages, &checkpoint.state);
 
     let mut reader = BufReader::with_capacity(CLAUDE_READ_BUFFER_BYTES, file);
     let mut prefix_hasher = Sha256::new();
@@ -677,6 +684,7 @@ pub(crate) fn resume_claude_file(
             consumed_offset: checkpoint.consumed_offset,
             messages,
             state: checkpoint.state.clone(),
+            turn_row,
         },
         &mut parent_cache,
     ))
@@ -709,6 +717,10 @@ fn parse_claude_file_internal(
             context.metadata_provider_hint.as_deref(),
         );
         if !json_messages.is_empty() {
+            let mut json_messages = json_messages;
+            for message in &mut json_messages {
+                message.claude_entry_uuid = crate::sessions::ClaudeEntryUuid::Absent;
+            }
             return ClaudeParse {
                 messages: json_messages,
                 checkpoint: None,
@@ -739,9 +751,35 @@ fn parse_claude_file_internal(
                 provider_confidences: Vec::with_capacity(64),
                 ..ClaudeParseState::default()
             },
+            turn_row: None,
         },
         parent_cache,
     )
+}
+
+/// The row of the user turn a checkpoint leaves open, rebuilt from the
+/// checkpointed rows rather than stored, so the checkpoint layout and digest
+/// stay as they were.
+///
+/// A turn is open when no human prompt has followed its first response
+/// (`pending_turn_start` is false). Its rows start at the last row marked as
+/// a turn start, and the row a later entry-only line (a `<synthetic>` notice)
+/// would update is the last one of them that has an entry uuid: the same row
+/// a full parse would be holding at that offset.
+fn open_turn_row(messages: &[UnifiedMessage], state: &ClaudeParseState) -> Option<usize> {
+    if state.pending_turn_start {
+        return None;
+    }
+    let turn_start = messages.iter().rposition(|message| message.is_turn_start)?;
+    messages[turn_start..]
+        .iter()
+        .rposition(|message| {
+            matches!(
+                message.claude_entry_uuid,
+                crate::sessions::ClaudeEntryUuid::Known(_)
+            )
+        })
+        .map(|offset| turn_start + offset)
 }
 
 /// Maps each dedup key to the index of its first message, as the parse loop
@@ -786,6 +824,7 @@ fn parse_claude_lines(
         mut consumed_offset,
         mut messages,
         state,
+        turn_row: open_turn_row,
     } = start;
     let ClaudeParseState {
         mut session_id,
@@ -822,6 +861,14 @@ fn parse_claude_lines(
     //
     // Sidechain detection state is resolved lazily on the first parseable entry.
     let mut processed_hashes = claude_dedup_index(&messages);
+    // Rows this pass creates get an explicit entry-uuid state below; rows a
+    // resume brought from the cache keep theirs.
+    let fresh_from = messages.len();
+    // The row of the current user turn's latest response. A later assistant
+    // entry that adds no row of its own (a `<synthetic>` notice, a fallback
+    // note) still ends the turn, so it moves that row's entry uuid. A resume
+    // rebuilds it from the checkpointed rows (`open_turn_row`).
+    let mut turn_row: Option<usize> = open_turn_row;
     let mut headless_state = ClaudeHeadlessState::default();
     let mut buffer = Vec::with_capacity(4096);
     let mut raw_line = Vec::with_capacity(4096);
@@ -913,6 +960,7 @@ fn parse_claude_lines(
 
                 if entry.entry_type == "user" && is_human_turn(trimmed) {
                     pending_turn_start = true;
+                    turn_row = None;
                 }
 
                 if let Some(tool_message) = tool_result_message {
@@ -941,9 +989,24 @@ fn parse_claude_lines(
 
             // Only process assistant messages with usage data
             if entry.entry_type == "assistant" {
+                let line_uuid = entry
+                    .uuid
+                    .as_deref()
+                    .map(crate::sessions::ClaudeEntryUuid::from_entry_uuid);
+                // Inline sidechain entries in a main transcript belong to a
+                // subagent, not to the user turn.
+                let tracks_turn = !entry.is_sidechain || sidechain_agent.is_some();
+                let ends_turn_row = |messages: &mut Vec<UnifiedMessage>| {
+                    if let (true, Some(index), Some(uuid)) = (tracks_turn, turn_row, line_uuid) {
+                        messages[index].claude_entry_uuid = uuid;
+                    }
+                };
                 let message = match entry.message {
                     Some(m) => m,
-                    None => continue,
+                    None => {
+                        ends_turn_row(&mut messages);
+                        continue;
+                    }
                 };
 
                 if let Some(model) = message.model.as_deref() {
@@ -952,6 +1015,7 @@ fn parse_claude_lines(
                         last_provider_hint = None;
                         pending_request_start_timestamp_ms = None;
                         suppress_unattributed_tool_results = true;
+                        ends_turn_row(&mut messages);
                         continue;
                     }
                     suppress_unattributed_tool_results = false;
@@ -965,7 +1029,10 @@ fn parse_claude_lines(
 
                 let usage = match message.usage {
                     Some(u) => u,
-                    None => continue,
+                    None => {
+                        ends_turn_row(&mut messages);
+                        continue;
+                    }
                 };
 
                 let billing_identity = super::BillingIdentity::from_explicit(
@@ -1054,7 +1121,10 @@ fn parse_claude_lines(
                 } else {
                     let raw_model = match message.model {
                         Some(m) => m,
-                        None => continue,
+                        None => {
+                            ends_turn_row(&mut messages);
+                            continue;
+                        }
                     };
                     let provider_choice = claude_provider_choice(
                         &raw_model,
@@ -1112,7 +1182,9 @@ fn parse_claude_lines(
                     unified.billing_identity = billing_identity;
                     unified.preserve_pricing_model(&raw_model);
                     unified.duration_ms = duration_ms;
-                    unified.agent = sidechain_agent.clone();
+                    unified.agent = sidechain_agent
+                        .clone()
+                        .map(crate::sessions::SharedStr::from);
                     unified.set_workspace(workspace_key.clone(), workspace_label.clone());
                     // Mark the first assistant response after a user message as a turn start
                     if pending_turn_start {
@@ -1130,6 +1202,13 @@ fn parse_claude_lines(
                     pending_request_start_timestamp_ms = None;
                     messages.len() - 1
                 };
+
+                if let Some(uuid) = line_uuid {
+                    messages[parent_idx].claude_entry_uuid = uuid;
+                }
+                if tracks_turn {
+                    turn_row = Some(parent_idx);
+                }
 
                 let parent = &messages[parent_idx];
                 let advisors = claude_advisor_messages(&usage, parent);
@@ -1166,7 +1245,7 @@ fn parse_claude_lines(
                             split_reporting_dedup_keys.insert(key.clone());
                         }
                     }
-                    advisor.provider_id = choice.id;
+                    advisor.provider_id = choice.id.into();
                     messages.push(advisor);
                     provider_confidences.push(choice.confidence);
                 }
@@ -1216,6 +1295,11 @@ fn parse_claude_lines(
     }
 
     reconcile_advisor_billing(&mut messages);
+    for message in messages.iter_mut().skip(fresh_from) {
+        if message.claude_entry_uuid == crate::sessions::ClaudeEntryUuid::Unknown {
+            message.claude_entry_uuid = crate::sessions::ClaudeEntryUuid::Absent;
+        }
+    }
 
     // Duplicate assembly is done, so the documented invariant
     // (`cache_write_1h` never exceeds `cache_write`) is restored here. An
@@ -1780,7 +1864,7 @@ fn extract_claude_tool_result_message(
         context.client_id,
         model,
         provider_choice.id,
-        context.session_id.to_string(),
+        context.session_id,
         timestamp,
         TokenBreakdown {
             input: usage.input_tokens,
@@ -1798,7 +1882,9 @@ fn extract_claude_tool_result_message(
     .with_billing(provider_hint.as_deref(), billing_origin)
     .with_pricing_model(&raw_model);
     message.message_count = 0;
-    message.agent = context.sidechain_agent;
+    message.agent = context
+        .sidechain_agent
+        .map(crate::sessions::SharedStr::from);
     message.set_workspace(context.workspace_key, context.workspace_label);
     Some(message)
 }
@@ -2168,7 +2254,7 @@ fn extract_claude_headless_message(
             client_id,
             model,
             provider_id,
-            session_id.to_string(),
+            session_id,
             timestamp,
             {
                 let cache_write = extract_i64(usage.get("cache_creation_input_tokens"))
@@ -2331,13 +2417,13 @@ fn claude_provider_choice_from_hint(
 }
 
 fn update_claude_provider_id(
-    existing: &mut String,
+    existing: &mut crate::sessions::SharedStr,
     existing_confidence: &mut u8,
     candidate: ClaudeProviderChoice,
 ) {
     if candidate.confidence > *existing_confidence {
         *existing_confidence = candidate.confidence;
-        *existing = candidate.id;
+        *existing = crate::sessions::SharedStr::from(candidate.id);
     }
 }
 
@@ -2411,7 +2497,7 @@ fn finalize_headless_state(
         client_id,
         model,
         provider_id,
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: state.input.max(0),
@@ -2436,6 +2522,87 @@ mod tests {
     use crate::paths::json_path_literal;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[test]
+    fn rows_keep_the_last_entry_uuid_of_their_turn() {
+        use crate::sessions::ClaudeEntryUuid;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let lines = [
+            r#"{"type":"user","uuid":"u-1","timestamp":"2026-09-21T10:00:00.000Z","message":{"role":"user","content":"hi"}}"#,
+            // One response written as two content-block entries.
+            r#"{"type":"assistant","uuid":"aaaaaaaa-0000-4000-8000-000000000001","timestamp":"2026-09-21T10:00:01.000Z","requestId":"req_a","message":{"id":"msg_a","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"x"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            r#"{"type":"assistant","uuid":"aaaaaaaa-0000-4000-8000-000000000002","timestamp":"2026-09-21T10:00:02.000Z","requestId":"req_a","message":{"id":"msg_a","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            r#"{"type":"user","uuid":"u-2","timestamp":"2026-09-21T10:01:00.000Z","message":{"role":"user","content":"again"}}"#,
+            // A notice in the next turn must not move the previous turn's row.
+            r#"{"type":"assistant","uuid":"aaaaaaaa-0000-4000-8000-000000000003","timestamp":"2026-09-21T10:01:01.000Z","message":{"id":"msg_s","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}],"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-21T10:01:02.000Z","requestId":"req_b","message":{"id":"msg_b","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":20,"output_tokens":2}}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let messages = parse_claude_file_with_home(&path, None);
+        let by_key: HashMap<_, _> = messages
+            .iter()
+            .map(|message| {
+                (
+                    message.dedup_key.clone().unwrap(),
+                    message.claude_entry_uuid,
+                )
+            })
+            .collect();
+        assert_eq!(
+            by_key["msg_a:req_a"],
+            ClaudeEntryUuid::from_entry_uuid("aaaaaaaa-0000-4000-8000-000000000002")
+        );
+        assert_eq!(
+            by_key["msg_b:req_b"],
+            ClaudeEntryUuid::Absent,
+            "no entry uuid"
+        );
+        assert_eq!(
+            ClaudeEntryUuid::from_entry_uuid("AAAAAAAA-0000-4000-8000-000000000002"),
+            ClaudeEntryUuid::from_entry_uuid("aaaaaaaa-0000-4000-8000-000000000002"),
+            "hex case does not change the identity"
+        );
+        assert_ne!(
+            ClaudeEntryUuid::from_entry_uuid("not-a-uuid"),
+            ClaudeEntryUuid::from_entry_uuid("not-a-uuid-2")
+        );
+    }
+
+    #[test]
+    fn resumed_parse_moves_the_open_turn_row_like_a_full_parse() {
+        use crate::sessions::ClaudeEntryUuid;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let prefix = concat!(
+            r#"{"type":"user","uuid":"u-1","timestamp":"2026-09-21T10:00:00.000Z","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-4000-8000-000000000001","timestamp":"2026-09-21T10:00:01.000Z","requestId":"req_a","message":{"id":"msg_a","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "\n",
+        );
+        // Written after the checkpoint, still in the same user turn.
+        let notice = concat!(
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-4000-8000-000000000002","timestamp":"2026-09-21T10:00:02.000Z","message":{"id":"msg_s","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}],"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            "\n",
+        );
+        std::fs::write(&path, prefix).unwrap();
+        let first = parse_claude_file_with_checkpoint(&path, None);
+        let checkpoint = first.checkpoint.expect("a complete line checkpoints");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(notice.as_bytes())
+            .unwrap();
+        let resumed = resume_claude_file(&path, None, &checkpoint, &first.messages)
+            .expect("an appended file resumes");
+        let full = parse_claude_file_with_checkpoint(&path, None);
+        assert_eq!(
+            resumed.messages[0].claude_entry_uuid,
+            ClaudeEntryUuid::from_entry_uuid("bbbbbbbb-0000-4000-8000-000000000002")
+        );
+        assert_eq!(resumed.messages, full.messages);
+    }
 
     #[test]
     fn is_human_turn_counts_html_user_prompt() {
@@ -3210,6 +3377,7 @@ mod tests {
                 agent_id: None,
                 session_id: None,
                 provider_id: None,
+                uuid: None,
             },
             last_model: Some("<synthetic>"),
             last_provider_hint: None,
@@ -3458,8 +3626,14 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
-        assert_eq!(messages[0].workspace_label, Some("myproject".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("myproject"))
+        );
+        assert_eq!(
+            messages[0].workspace_label,
+            Some(crate::sessions::SharedStr::from("myproject"))
+        );
     }
 
     #[test]
@@ -3571,7 +3745,10 @@ mod tests {
         let messages = parse_claude_file(&path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].workspace_key, Some("myproject".to_string()));
+        assert_eq!(
+            messages[0].workspace_key,
+            Some(crate::sessions::SharedStr::from("myproject"))
+        );
         assert_eq!(messages[0].tokens.input, 10);
     }
 
@@ -3624,7 +3801,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Explore".to_string()),
+            Some(crate::sessions::SharedStr::from("Explore")),
             "Should resolve agent name from meta sidecar and normalize"
         );
         assert_eq!(
@@ -3648,7 +3825,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent")),
             "Without meta sidecar, should fall back to generic label"
         );
         assert_eq!(messages[0].session_id, "parent-uuid-002");
@@ -3716,7 +3893,7 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_write, 40);
         assert_eq!(
             messages[0].agent,
-            Some("Workflow Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Workflow Subagent")),
             "Tier 1 meta sidecar next to the deep nested transcript should resolve the name"
         );
     }
@@ -3786,7 +3963,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some(crate::sessions::SharedStr::from("Code Reviewer")),
             "Tier 2 must resolve the agent name across the deep workflows/<wf>/ nesting"
         );
         assert_eq!(messages[0].session_id, parent_session_id);
@@ -3805,7 +3982,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent")),
             "Legacy flat layout has no meta → Tier 3 fallback"
         );
         assert_eq!(
@@ -3856,9 +4033,18 @@ mod tests {
         assert_eq!(msgs3[0].session_id, "shared-parent-uuid");
 
         // Agent names should differ
-        assert_eq!(msgs1[0].agent, Some("Explore".to_string()));
-        assert_eq!(msgs2[0].agent, Some("Executor".to_string()));
-        assert_eq!(msgs3[0].agent, Some("Claude Code Subagent".to_string()));
+        assert_eq!(
+            msgs1[0].agent,
+            Some(crate::sessions::SharedStr::from("Explore"))
+        );
+        assert_eq!(
+            msgs2[0].agent,
+            Some(crate::sessions::SharedStr::from("Executor"))
+        );
+        assert_eq!(
+            msgs3[0].agent,
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent"))
+        );
     }
 
     #[test]
@@ -3890,8 +4076,14 @@ mod tests {
         assert_eq!(total_cache_write, 150, "cache_write: 100 + 50");
 
         // Both messages should have the same agent
-        assert_eq!(messages[0].agent, Some("Code Reviewer".to_string()));
-        assert_eq!(messages[1].agent, Some("Code Reviewer".to_string()));
+        assert_eq!(
+            messages[0].agent,
+            Some(crate::sessions::SharedStr::from("Code Reviewer"))
+        );
+        assert_eq!(
+            messages[1].agent,
+            Some(crate::sessions::SharedStr::from("Code Reviewer"))
+        );
     }
 
     #[test]
@@ -3954,7 +4146,7 @@ mod tests {
         );
         assert_eq!(
             messages[0].agent,
-            Some("Architect".to_string()),
+            Some(crate::sessions::SharedStr::from("Architect")),
             "Deduped message should retain agent"
         );
         assert_eq!(messages[0].session_id, "parent-dedup");
@@ -3978,7 +4170,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some(crate::sessions::SharedStr::from("Code Reviewer")),
             "Should strip oh-my-claudecode: prefix and normalize"
         );
     }
@@ -3995,7 +4187,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Claude Code Subagent".to_string()),
+            Some(crate::sessions::SharedStr::from("Claude Code Subagent")),
             "Still detected as sidechain"
         );
         // session_id should be the file stem (fallback)
@@ -4042,7 +4234,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Document Specialist".to_string()),
+            Some(crate::sessions::SharedStr::from("Document Specialist")),
             "Tier 2 should recover agent name from parent tool_use"
         );
         assert_eq!(messages[0].session_id, parent_session_id);
@@ -4081,7 +4273,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Explore".to_string()),
+            Some(crate::sessions::SharedStr::from("Explore")),
             "Tier 2 should work for flat layout too"
         );
     }
@@ -4127,7 +4319,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             messages[0].agent,
-            Some("Code Reviewer".to_string()),
+            Some(crate::sessions::SharedStr::from("Code Reviewer")),
             "Tier 1 (meta sidecar) should take precedence over Tier 2 (parent lookup)"
         );
     }
@@ -4193,7 +4385,10 @@ mod tests {
         let messages = parse_claude_file(&sidechain_path);
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].agent, Some("Writer".to_string()));
+        assert_eq!(
+            messages[0].agent,
+            Some(crate::sessions::SharedStr::from("Writer"))
+        );
     }
 
     #[test]
@@ -4270,12 +4465,12 @@ mod tests {
 
         assert_eq!(
             msgs_a[0].agent,
-            Some("Explore".to_string()),
+            Some(crate::sessions::SharedStr::from("Explore")),
             "First agent should be explore"
         );
         assert_eq!(
             msgs_b[0].agent,
-            Some("Executor".to_string()),
+            Some(crate::sessions::SharedStr::from("Executor")),
             "Second agent should be executor"
         );
     }

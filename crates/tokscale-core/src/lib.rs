@@ -38,7 +38,7 @@ pub use sessionize::{
     compute_daily_active_time, compute_daily_active_time_in, compute_time_metrics, sessionize,
     SessionInterval, TimeMetrics, DEFAULT_IDLE_GAP_MS,
 };
-pub use sessions::{CostSource, UnifiedMessage};
+pub use sessions::{CostSource, SharedStr, UnifiedMessage};
 
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -58,6 +58,28 @@ static RETENTION_PROVENANCE_REBUILDS: std::sync::atomic::AtomicUsize =
 /// assert on its own transcript while others run alongside it.
 #[cfg(test)]
 static CLAUDE_RESUMED_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Runs between a SQLite lane's scan and its stability re-check, so a test can
+/// commit a write exactly where a live client does: after the scan has read
+/// the database, before the loader decides whether that read was stable.
+#[cfg(test)]
+type PathScopedSqliteScanHook = Option<(PathBuf, fn(&Path))>;
+
+#[cfg(test)]
+static AFTER_SQLITE_SCAN_HOOK: Mutex<PathScopedSqliteScanHook> = Mutex::new(None);
+
+#[cfg(test)]
+fn run_after_sqlite_scan_hook(path: &Path) {
+    let hook = AFTER_SQLITE_SCAN_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|(expected_path, _)| expected_path == path)
+        .map(|(_, hook)| *hook);
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
 
 /// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
 ///
@@ -90,8 +112,8 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
 /// This is `normalize_syntactic` with **no alias folding**: purely structural
 /// canonicalization (lowercase, strip a `(reasoning-tier)` suffix, strip a
 /// trailing `-YYYYMMDD` date, rewrite `.`→`-` inside claude version numbers, and
-/// fold an `anthropic/claude-…` prefix). It never consults the user's
-/// machine-local `modelAliases`.
+/// fold a first-party `<provider>/` prefix such as `anthropic/claude-…`). It
+/// never consults the user's machine-local `modelAliases`.
 ///
 /// Every path that submits, uploads, exports as raw data, or persists a model id
 /// MUST use this, not [`normalize_model_for_grouping`]. A machine-local alias
@@ -132,7 +154,8 @@ pub fn model_name_for_grouping(client: &str, provider_id: &str, model_id: &str) 
 
 /// Structural-only model-name normalization: lowercase, strip a
 /// `(reasoning-tier)` suffix, strip a trailing `-YYYYMMDD` date, rewrite `.`→`-`
-/// inside claude version numbers, and fold an `anthropic/claude-…` prefix.
+/// inside claude version numbers, and fold a first-party `<provider>/` prefix
+/// (see [`strip_first_party_provider_prefix`]).
 ///
 /// This is the syntactic half of [`normalize_model_for_grouping`] /
 /// [`canonical_model_id`]. It is also used by [`model_alias::ModelAliasResolver`]
@@ -174,6 +197,8 @@ pub(crate) fn normalize_syntactic(model_id: &str) -> String {
 
     if let Some(canonical) = normalize_anthropic_prefixed_claude_model(&name) {
         name = canonical;
+    } else if let Some(bare) = strip_first_party_provider_prefix(&name) {
+        name = bare.to_string();
     }
 
     name
@@ -194,6 +219,28 @@ fn normalize_anthropic_prefixed_claude_model(model_id: &str) -> Option<String> {
     }
 
     Some(format!("claude-{family}-{major}-{minor}"))
+}
+
+/// Drop a `<provider>/` prefix when the prefix names the vendor that makes the
+/// model after it: `anthropic/claude-opus-5-5`, `openai-codex/gpt-6.1-sol`.
+///
+/// The prefix must canonicalize to the same provider that
+/// [`provider_identity::inferred_provider_from_model_delimited`] reads from the
+/// model family. The delimited form matches a family word only at a word
+/// boundary, so `mistral/demistralized` is not a Mistral model. Gateway
+/// spellings of one vendor (`openai-codex`, `x-ai`) fold while router labels
+/// (`cohere/north-mini-code:free`, `cline-free/…`), resellers (`openrouter/…`,
+/// `azure/gpt-4o`) and nested paths keep their prefix: for those the slash is
+/// part of the model name.
+fn strip_first_party_provider_prefix(model_id: &str) -> Option<&str> {
+    let (prefix, model) = model_id.split_once('/')?;
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    let prefix_provider = provider_identity::canonical_provider(prefix)?;
+    let model_provider = provider_identity::inferred_provider_from_model_delimited(model)
+        .and_then(provider_identity::canonical_provider)?;
+    (prefix_provider == model_provider).then_some(model)
 }
 
 fn retain_for_requested_clients(
@@ -363,15 +410,15 @@ impl ModelPerformance {
 pub struct ParsedMessage {
     pub estimate_status: sessions::EstimateStatus,
     pub billing_identity: sessions::BillingIdentity,
-    pub pricing_model_id: Option<String>,
-    pub client: String,
-    pub model_id: String,
-    pub provider_id: String,
-    pub session_id: String,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
+    pub pricing_model_id: Option<SharedStr>,
+    pub client: SharedStr,
+    pub model_id: SharedStr,
+    pub provider_id: SharedStr,
+    pub session_id: SharedStr,
+    pub workspace_key: Option<SharedStr>,
+    pub workspace_label: Option<SharedStr>,
     pub timestamp: i64,
-    pub date: String,
+    pub date: SharedStr,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
@@ -382,7 +429,7 @@ pub struct ParsedMessage {
     pub reasoning: i64,
     pub duration_ms: Option<i64>,
     pub message_count: i32,
-    pub agent: Option<String>,
+    pub agent: Option<SharedStr>,
     /// Cost in USD as the parser reported it. This lane applies no pricing, so
     /// the figure is only meaningful when `cost_source` is
     /// [`CostSource::ProviderReported`]; consumers price every other row from
@@ -390,7 +437,7 @@ pub struct ParsedMessage {
     /// authoritative cost.
     pub cost: f64,
     pub cost_source: CostSource,
-    pub service_tier: Option<String>,
+    pub service_tier: Option<SharedStr>,
 }
 
 pub struct ParsedMessages {
@@ -715,14 +762,37 @@ pub struct RecountProofCell {
 
 impl RecountProofCell {
     fn add(&mut self, message: &UnifiedMessage) {
-        self.tokens.input += message.tokens.input.max(0);
-        self.tokens.output += message.tokens.output.max(0);
-        self.tokens.cache_read += message.tokens.cache_read.max(0);
-        self.tokens.cache_write += message.tokens.cache_write.max(0);
-        self.tokens.cache_write_1h += message.tokens.cache_write_1h.max(0);
-        self.tokens.reasoning += message.tokens.reasoning.max(0);
-        self.cost += message.cost.max(0.0);
-        self.messages += message.message_count.max(0);
+        self.tokens.input = self
+            .tokens
+            .input
+            .saturating_add(message.tokens.input.max(0));
+        self.tokens.output = self
+            .tokens
+            .output
+            .saturating_add(message.tokens.output.max(0));
+        self.tokens.cache_read = self
+            .tokens
+            .cache_read
+            .saturating_add(message.tokens.cache_read.max(0));
+        self.tokens.cache_write = self
+            .tokens
+            .cache_write
+            .saturating_add(message.tokens.cache_write.max(0));
+        self.tokens.cache_write_1h = self
+            .tokens
+            .cache_write_1h
+            .saturating_add(message.tokens.cache_write_1h.max(0));
+        self.tokens.reasoning = self
+            .tokens
+            .reasoning
+            .saturating_add(message.tokens.reasoning.max(0));
+        let cost = if message.cost.is_finite() {
+            message.cost.max(0.0)
+        } else {
+            0.0
+        };
+        self.cost = (self.cost + cost).min(f64::MAX);
+        self.messages = self.messages.saturating_add(message.message_count.max(0));
     }
 }
 
@@ -791,6 +861,16 @@ impl RecountProofBuilder {
         self.cell(date, model_id).previous.add(message);
     }
 
+    /// A row counted by the previous parser generation.
+    fn record_previous(&mut self, date: &str, model_id: &str, message: &UnifiedMessage) {
+        self.cell(date, model_id).previous.add(message);
+    }
+
+    /// A row counted by the current parser generation.
+    fn record_corrected(&mut self, date: &str, model_id: &str, message: &UnifiedMessage) {
+        self.cell(date, model_id).corrected.add(message);
+    }
+
     fn finish(self) -> ClientRecountProof {
         self.proof
     }
@@ -810,29 +890,33 @@ pub struct UnpricedSubmissionUsage {
 
 /// Submission clients the receiver only admits from a complete snapshot:
 /// the versioned-parser high-water set (`SUPPORTED_VERSIONED_PARSERS` on the
-/// receiver) plus the atomic MiMo and Antigravity source families. A
-/// date-filtered submission cannot shrink their coverage without freezing
-/// their stored history — a partial window for one of these is not
-/// submittable at all — so the submission graph keeps their messages
-/// regardless of `since`/`until`/`year`, and the scan scope names them in
-/// `fullHistoryClients`.
+/// receiver) plus the atomic MiMo and Antigravity source families, less
+/// [`COMPLETE_DAY_SUBMIT_CLIENTS`]. A date-filtered submission cannot shrink
+/// their coverage without freezing their stored history — a partial window
+/// for one of these is not submittable at all — so the submission graph keeps
+/// their messages regardless of `since`/`until`/`year`, and the scan scope
+/// names them in `fullHistoryClients`.
 ///
-/// Devin CLI is in the set since its generation-2 registration: without
-/// full-history authority its submissions freeze, and its recount proof only
-/// rides on a snapshot declared complete. A database that partly failed to
-/// read is handled after the scan, when `source_reads` withholds the
-/// declaration from exactly that client.
+/// A source that partly failed to read is handled after the scan, when
+/// `source_reads` withholds the declaration from exactly that client.
 pub const FULL_HISTORY_SUBMIT_CLIENTS: &[&str] = &[
     "amp",
     "antigravity",
     "antigravity-cli",
     "antigravity-extension",
     "copilot",
-    "devin-cli",
     "droid",
     "micode",
     "micode-desktop",
 ];
+
+/// Versioned submission clients whose growth the receiver budgets per day
+/// (`PER_DAY_GROWTH_CLIENTS`). A date-filtered submission ships only their
+/// window and names them in `completeDayClients`, since every day it dates was
+/// read in full. The receiver credits those days once a full-history
+/// submission has set the client's baseline, and applies their recount proofs
+/// only from a full-history submission.
+pub const COMPLETE_DAY_SUBMIT_CLIENTS: &[&str] = &["cursor", "devin-cli"];
 
 #[derive(Debug, Clone, Default)]
 pub struct ReportOptions {
@@ -1107,8 +1191,9 @@ struct StreamingParseOutcome {
     source_reads: BTreeMap<String, SourceReadSummary>,
 }
 
-/// The day key and model id a message will carry once `flush_message` has
-/// applied the parse tail to it, or `None` when that tail drops the message.
+/// The day key and model id a contribution will carry after `flush_message`
+/// applies the parse tail and the graph fold canonicalizes its model, or `None`
+/// when that tail drops the message.
 ///
 /// A recount proof has to be keyed exactly like the contributions it
 /// accompanies, and those are built after normalization and rebucketing. Rows
@@ -1128,11 +1213,13 @@ fn flushed_message_identity(
     {
         return None;
     }
-    let mut model_id = message.model_id.clone();
-    let mut provider_id = message.provider_id.clone();
-    if context.include_synthetic {
-        sessions::synthetic::normalize_synthetic_gateway_fields(&mut model_id, &mut provider_id);
-    }
+    let normalized_model = context
+        .include_synthetic
+        .then(|| {
+            sessions::synthetic::synthetic_gateway_fields(&message.model_id, &message.provider_id)
+        })
+        .flatten()
+        .map(|fields| fields.model_id);
     let date = match &context.timezone {
         Some(timezone) => {
             let mut rebucketed = message.clone();
@@ -1141,7 +1228,14 @@ fn flushed_message_identity(
         }
         None => message.date.clone(),
     };
-    Some((date, model_id))
+    Some((
+        date.to_string(),
+        canonical_model_id(
+            normalized_model
+                .as_deref()
+                .unwrap_or(message.model_id.as_str()),
+        ),
+    ))
 }
 
 fn parse_all_messages_with_pricing_with_env_strategy(
@@ -1301,6 +1395,174 @@ impl RecordedCodexTurns {
     }
 }
 
+/// The Claude turns the Claude lane counts in this report, by the transcript
+/// entry `uuid` BB records as a turn's `providerCheckpointId`.
+///
+/// Only rows of sessions BB names are collected, so a report without BB
+/// mirror rows keeps nothing here. Rows are taken before the cross-file merge:
+/// a forked transcript's copy of a response may be the one the merge keeps,
+/// and either copy's entry stands for the same counted response.
+#[derive(Debug, Default)]
+struct ClaudeTurnCoverage {
+    /// Entry uuids of counted rows (see [`sessions::ClaudeEntryUuid`]).
+    entry_uuids: HashSet<[u8; 16]>,
+    /// Counted rows loaded from a cache written before rows kept their entry
+    /// uuid, by session, keyed by their dedup key.
+    unresolved: HashMap<String, HashSet<String>>,
+    /// Dedup keys of counted rows whose entry uuid state is recorded. A row
+    /// in `unresolved` with one of these keys is the same response.
+    resolved_keys: HashSet<String>,
+    /// Sessions still holding counted rows whose entry cannot be identified.
+    /// See [`Self::covers`].
+    legacy_sessions: HashSet<String>,
+}
+
+impl ClaudeTurnCoverage {
+    /// Note a Claude row the lane counts in this report.
+    fn observe(&mut self, message: &UnifiedMessage, bb_sessions: &HashSet<String>) {
+        if !bb_sessions.contains(message.session_id.as_str()) {
+            return;
+        }
+        match message.claude_entry_uuid {
+            sessions::ClaudeEntryUuid::Known(uuid) => {
+                self.entry_uuids.insert(uuid);
+                if let Some(key) = &message.dedup_key {
+                    self.resolved_keys.insert(key.clone());
+                }
+            }
+            sessions::ClaudeEntryUuid::Absent => {
+                if let Some(key) = &message.dedup_key {
+                    self.resolved_keys.insert(key.clone());
+                }
+            }
+            sessions::ClaudeEntryUuid::Unknown => match &message.dedup_key {
+                Some(key) => {
+                    self.unresolved
+                        .entry(message.session_id.to_string())
+                        .or_default()
+                        .insert(key.clone());
+                }
+                None => {
+                    self.legacy_sessions.insert(message.session_id.to_string());
+                }
+            },
+        }
+    }
+
+    /// Resolve the rows a legacy cache served without entry uuids.
+    ///
+    /// Where the transcript still holds the response, a fresh parse of that
+    /// session's files (the transcript and its subagent files, among the
+    /// paths this scan counts) gives its entry uuid. Only sessions BB names
+    /// and that still have such rows are read, and only once per scan. What
+    /// is left is history Claude Code already rewrote out of the transcript,
+    /// which marks the session for the fallback in [`Self::covers`].
+    fn resolve_legacy_rows(&mut self, claude_paths: &[PathBuf], home_dir: &Path) {
+        for (session, keys) in std::mem::take(&mut self.unresolved) {
+            let mut keys: HashSet<String> = keys
+                .into_iter()
+                .filter(|key| !self.resolved_keys.contains(key))
+                .collect();
+            if keys.is_empty() {
+                continue;
+            }
+            for path in claude_paths.iter().filter(|path| {
+                path.file_stem()
+                    .is_some_and(|stem| stem == session.as_str())
+                    || path
+                        .parent()
+                        .is_some_and(|dir| dir.iter().any(|part| part == session.as_str()))
+            }) {
+                for message in
+                    sessions::claudecode::parse_claude_file_with_home(path, Some(home_dir))
+                {
+                    let Some(key) = message.dedup_key.as_ref() else {
+                        continue;
+                    };
+                    if keys.remove(key) {
+                        if let Some(uuid) = message.claude_entry_uuid.known() {
+                            self.entry_uuids.insert(uuid);
+                        }
+                    }
+                }
+                if keys.is_empty() {
+                    break;
+                }
+            }
+            if !keys.is_empty() {
+                self.legacy_sessions.insert(session);
+            }
+        }
+    }
+
+    /// True when the Claude lane counted the turn a BB row mirrors.
+    ///
+    /// Per turn: the turn's checkpoint is the entry uuid of a counted row.
+    ///
+    /// One bounded fallback, for sessions that still hold counted rows from
+    /// a cache written before this rule, whose transcript no longer has their
+    /// entries: there an unmatched BB row of that session is taken as
+    /// counted too. Those rows are history the cache kept after Claude Code
+    /// compacted or deleted the transcript, and the BB turns they mirror
+    /// cannot be matched to them, so keeping those BB rows would count that
+    /// history twice. The cost is a BB-only turn in such a session (one the
+    /// transcript lost before Tokscale ever read it). Every row parsed from
+    /// now on keeps its entry uuid in the cache, so no other session is
+    /// affected and the set of such sessions does not grow.
+    fn covers(&self, session: &str, checkpoint: Option<&str>) -> bool {
+        checkpoint
+            .and_then(|checkpoint| sessions::ClaudeEntryUuid::from_entry_uuid(checkpoint).known())
+            .is_some_and(|uuid| self.entry_uuids.contains(&uuid))
+            || self.legacy_sessions.contains(session)
+    }
+}
+
+/// True when the provider's own log of a BB row's response is counted in this
+/// report, so the BB row must not be counted again.
+///
+/// BB runs Claude through the Agent SDK with `persistSession: true` and Codex
+/// through app-server with `ephemeral: false`, both under the user's normal
+/// homes, so each response it drives is also in a Claude transcript or a
+/// Codex rollout that the claude or codex lane reads. The provider's record
+/// wins: it is per request with the exact model and usage, while BB keeps a
+/// Claude turn as one aggregate of the SDK result and prunes older
+/// `thread/tokenUsage/updated` rows. Its usage is reported under `claude` or
+/// `codex`, as it was before BB support, and the BB row stays wherever it is
+/// the one record of that turn in the report.
+///
+/// The match is per turn, on the exact provider identity BB stores on the
+/// row (see the `sessions::bb` module docs), never on time or token counts:
+///
+/// - Codex: the rollout recorded usage under the thread id and the turn's
+///   `providerCheckpointId` ([`RecordedCodexTurns`], which only holds
+///   threads counted under codex in this report).
+/// - Claude: the `providerCheckpointId` is the entry uuid of a counted Claude
+///   row ([`ClaudeTurnCoverage`], including its legacy-cache fallback).
+///
+/// A BB row whose turn has no checkpoint yet (still running) stays counted.
+/// A client filter that leaves out the provider keeps the BB rows: `--bb`
+/// alone reports everything BB recorded, `--claude` alone reports the
+/// transcripts, and any report that includes both counts each response once.
+fn bb_row_recorded_by_provider(
+    message: &UnifiedMessage,
+    claude_turns: &ClaudeTurnCoverage,
+    recorded_codex_turns: &RecordedCodexTurns,
+) -> bool {
+    let Some(mirror) = message
+        .dedup_key
+        .as_deref()
+        .and_then(sessions::bb::provider_mirror_from_dedup_key)
+    else {
+        return false;
+    };
+    match mirror.provider {
+        sessions::bb::BbMirrorProvider::Claude => claude_turns.covers(mirror.session, mirror.turn),
+        sessions::bb::BbMirrorProvider::Codex => {
+            recorded_codex_turns.covers(mirror.session, mirror.turn)
+        }
+    }
+}
+
 struct FlushContext<'a> {
     pricing: Option<&'a pricing::PricingService>,
     include_all: bool,
@@ -1353,12 +1615,7 @@ fn flush_retained_message<S: MessageSink>(
     estimate_source: Option<EstimateSource>,
 ) {
     if context.include_synthetic {
-        let raw_model = message.model_id.clone();
-        sessions::synthetic::normalize_synthetic_gateway_fields(
-            &mut message.model_id,
-            &mut message.provider_id,
-        );
-        message.preserve_pricing_model(&raw_model);
+        message.normalize_synthetic_gateway();
     }
 
     if let Some(timezone) = &context.timezone {
@@ -1366,7 +1623,7 @@ fn flush_retained_message<S: MessageSink>(
     }
 
     if let (None, Some(local)) = (&message.machine_label, context.local_machine_label) {
-        message.machine_label = Some(local.to_string());
+        message.machine_label = Some(SharedStr::from(local));
     }
 
     sink.accept_with_estimate_source(message, estimate_source);
@@ -1514,7 +1771,7 @@ fn parse_all_messages_deferred(
 fn codex_missing_usage_warning(missing_files: usize, inspected_files: usize) -> Option<String> {
     (missing_files > 0).then(|| {
         format!(
-            "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients. Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
+            "Warning: {missing_files} of {inspected_files} inspected rollout files contain Codex activity but no supported usage records for the selected clients (for example, sessions interrupted before a usage event was recorded). Recorded token totals omit these files. This source-completeness diagnostic covers inspected files independently of the selected report dates."
         )
     })
 }
@@ -2349,13 +2606,49 @@ fn parse_all_messages_streaming<S: MessageSink>(
     ) where
         F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
     {
+        parse_cached_lane_deduped_with_fingerprint(
+            scan_result,
+            source_cache,
+            pricing,
+            all_messages,
+            machine_labeler,
+            scan_client,
+            message_cache::SourceFingerprint::check_path_samples_only,
+            parse,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_cached_lane_deduped_with_fingerprint<F, FingerprintFn>(
+        scan_result: &scanner::ScanResult,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        all_messages: &mut Vec<UnifiedMessage>,
+        machine_labeler: &machine_label::MachineLabeler,
+        scan_client: ClientId,
+        fingerprint_from_path: FingerprintFn,
+        parse: F,
+    ) where
+        F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
+        FingerprintFn: Fn(
+                &Path,
+                Option<&message_cache::SourceFingerprint>,
+            ) -> Option<message_cache::FingerprintStatus>
+            + Sync,
+    {
         let cache_identity = message_cache::CacheIdentity::for_client(scan_client);
         let outcomes: Vec<CachedParseOutcome> = scan_result
             .get(scan_client)
             .par_iter()
             .map(|path| {
-                let mut outcome =
-                    load_or_parse_source(cache_identity, path, source_cache, pricing, &parse);
+                let mut outcome = load_or_parse_source_with_fingerprint(
+                    cache_identity,
+                    path,
+                    source_cache,
+                    pricing,
+                    &fingerprint_from_path,
+                    &parse,
+                );
                 machine_labeler.label_messages(path, &mut outcome.messages);
                 outcome
             })
@@ -2595,6 +2888,67 @@ fn parse_all_messages_streaming<S: MessageSink>(
         )
     }
 
+    fn load_or_parse_bb_sqlite_source(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> CachedParseOutcome {
+        load_or_parse_source_with_fingerprint_and_policy(
+            message_cache::CacheIdentity::for_client(ClientId::Bb),
+            path,
+            source_cache,
+            pricing,
+            HistoryRetention::LiveFileOnly,
+            message_cache::SourceFingerprint::check_sqlite_path,
+            |path, _| {
+                let scan = sessions::bb::scan_bb_sqlite(path);
+                (scan.messages, scan.complete)
+            },
+        )
+    }
+
+    /// A request dedup key is not a SQLite row identity. Cached messages do
+    /// not retain row ids, and count/sum watermarks cannot detect in-place
+    /// edits. Reparse changed databases rather than merging an ambiguous
+    /// suffix: the raw recount must retain every persisted request copy.
+    fn load_or_parse_devin_cli_source(
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+    ) -> (CachedParseOutcome, bool) {
+        // Only admitted current-generation entries may inherit completeness
+        // without decoding rows. Failed fingerprints and every fresh parse
+        // overwrite this verdict, including legacy-cache fallback returns.
+        let complete = std::cell::Cell::new(false);
+        let outcome = load_or_parse_source_with_fingerprint_and_policy(
+            message_cache::CacheIdentity::for_client(ClientId::DevinCli),
+            path,
+            source_cache,
+            pricing,
+            HistoryRetention::LiveFileOnly,
+            |path, cached| {
+                let status = message_cache::SourceFingerprint::check_sqlite_path(path, cached);
+                complete.set(status.is_some());
+                status
+            },
+            |path, before| {
+                let (messages, read_complete) = sessions::devin::scan_devin_cli_sqlite(path);
+                // An internally consistent SELECT is not complete-history
+                // authority if the surrounding database snapshot changed.
+                // Do not let a second probe certify a different read instead.
+                let stable = before.is_some_and(|before| {
+                    matches!(
+                        message_cache::SourceFingerprint::check_sqlite_path(path, Some(before)),
+                        Some(message_cache::FingerprintStatus::Unchanged)
+                    )
+                });
+                complete.set(read_complete && stable);
+                (messages, complete.get())
+            },
+        );
+        (outcome, complete.get())
+    }
+
     /// MiMo rows and exact provenance are one cache payload. A warm hit never
     /// opens SQLite, and a cold read collects both in one reader snapshot.
     fn load_or_parse_micode_source(
@@ -2638,6 +2992,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
         let source = sessions::micode::parse_micode_source(path);
+        #[cfg(test)]
+        run_after_sqlite_scan_hook(path);
         // A concurrent writer can commit after the read snapshot began. Never
         // label that older pair with a newer database/WAL fingerprint.
         let stable = before.as_ref().is_some_and(|fingerprint| {
@@ -2662,10 +3018,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
             None
         };
         let invalidate = !stable || !source.complete || source.messages.is_empty();
-        let preserve_legacy_bytes = cached
+        let legacy = cached
             .as_ref()
             .is_some_and(|entry| entry.billing_identity_generation == 0);
-        if (!stable || !source.complete) && preserve_legacy_bytes {
+        // A failed identity migration must not discard an old amount, so a
+        // read that stopped partway replays the legacy entry. A complete read
+        // is returned even when MiMo wrote during it: it reflects the database
+        // at least as recently as the legacy entry does, and the write only
+        // keeps it out of the cache. Replaying the legacy entry there instead
+        // would freeze usage for as long as MiMo keeps writing.
+        if !source.complete && legacy {
             if let Some(mut entry) = cached {
                 for message in &mut entry.messages {
                     message.refresh_derived_fields();
@@ -2681,7 +3043,10 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 );
             }
         }
-        (source, cache_entry, invalidate && !preserve_legacy_bytes)
+        // A stable read that could not replace the legacy entry (one that found
+        // no rows) keeps it; a read that raced a write retires it like any
+        // other entry the database has moved past.
+        (source, cache_entry, invalidate && !(legacy && stable))
     }
 
     /// OpenCode's SQLite lane, where a warm scan reads only the rows that
@@ -2706,13 +3071,24 @@ fn parse_all_messages_streaming<S: MessageSink>(
             pricing: Option<&pricing::PricingService>,
             fallback: Option<message_cache::CachedSourceEntry>,
         ) -> CachedParseOutcome {
+            #[cfg(test)]
+            run_after_sqlite_scan_hook(path);
             let stable = fingerprint.as_ref().is_some_and(|f| {
                 matches!(
                     message_cache::SourceFingerprint::check_sqlite_path(path, Some(f)),
                     Some(message_cache::FingerprintStatus::Unchanged)
                 )
             });
-            if !scan.complete || !stable {
+            // Only a scan that stopped partway replays a legacy entry, which
+            // may hold usage the readable prefix does not. A complete scan
+            // reflects the database at least as recently as that entry, so it
+            // is returned even when OpenCode wrote while it ran. The write only
+            // keeps it out of the cache: the scan reads its metadata high-water
+            // (which detects session renames) after the rows, so that mark
+            // could record a change the parsed messages do not reflect. A
+            // database in active use can be written during every scan, so
+            // replaying the entry there would freeze its usage indefinitely.
+            if !scan.complete {
                 if let Some(entry) = fallback.filter(|entry| entry.billing_identity_generation == 0)
                 {
                     return CachedParseOutcome {
@@ -3033,6 +3409,8 @@ fn parse_all_messages_streaming<S: MessageSink>(
         SourceCachePolicy::InMemory => message_cache::SourceMessageCache::default(),
     };
     let mut all_messages: Vec<UnifiedMessage> = Vec::new();
+    let mut recount_proofs: BTreeMap<String, ClientRecountProof> = BTreeMap::new();
+    let mut source_reads: BTreeMap<String, SourceReadSummary> = BTreeMap::new();
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
     // Labels the messages of each source file under a `machineLabels` folder.
@@ -3082,7 +3460,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         for message in messages {
             if let Some(key) = message.dedup_key.as_ref() {
                 opencode_sqlite_locations
-                    .entry(message.session_id.clone())
+                    .entry(message.session_id.to_string())
                     .or_default()
                     .insert(key.clone());
                 if !opencode_seen.insert(key.clone()) {
@@ -3162,6 +3540,24 @@ fn parse_all_messages_streaming<S: MessageSink>(
         apply_pricing_if_available(&mut message, pricing);
         flush_message(message, &flush_context, sink);
     }
+
+    // BB is read ahead of the Claude lane so that lane knows which sessions
+    // BB mirrors (see `ClaudeTurnCoverage`); its rows are emitted further down.
+    let mut bb_messages: Vec<UnifiedMessage> = Vec::new();
+    for db_path in &scan_result.bb_dbs {
+        let CachedParseOutcome {
+            mut messages,
+            cache_entry,
+            ..
+        } = load_or_parse_bb_sqlite_source(db_path, &source_cache, pricing);
+        machine_labeler.label_messages(db_path, &mut messages);
+        bb_messages.extend(messages);
+        if let Some(entry) = cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    let bb_messages = sessions::bb::dedup_bb_messages(bb_messages);
+    let bb_claude_sessions = sessions::bb::claude_sessions_named(&bb_messages);
 
     let claude_home = PathBuf::from(home_dir);
     let mut claude_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -3263,8 +3659,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
     let mut claude_messages: Vec<(bool, bool, UnifiedMessage)> = Vec::new();
     let mut claude_keyed_indices: HashMap<String, usize> = HashMap::new();
+    let mut claude_turns = ClaudeTurnCoverage::default();
     for outcome in claude_outcomes {
         for message in outcome.messages {
+            if !bb_claude_sessions.is_empty() && matches_flush_filter(&message, &flush_context) {
+                claude_turns.observe(&message, &bb_claude_sessions);
+            }
             let Some(key) = message.dedup_key.clone().filter(|key| !key.is_empty()) else {
                 claude_messages.push((false, false, message));
                 continue;
@@ -3309,6 +3709,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     for index in sessions::claudecode::reconcile_advisor_billing(&mut claude_messages) {
         apply_pricing_if_available(&mut claude_messages[index], pricing);
     }
+    claude_turns.resolve_legacy_rows(scan_result.get(ClientId::Claude), &claude_home);
     all_messages.extend(claude_messages);
     flush_lane(&mut all_messages, &flush_context, sink);
 
@@ -3357,7 +3758,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         for message in outcome.messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
                 if owned_thread.is_none() {
-                    owned_thread = Some(message.session_id.clone());
+                    owned_thread = Some(message.session_id.to_string());
                 }
                 openclaw_owned_rollouts.push(message);
             } else if should_keep_deduped_message(&mut codex_seen, &message) {
@@ -3395,8 +3796,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
     // Correlate successful Responses-only OpenCodex combo attempts with
     // physical models. This changes attribution, never token-counted rows.
-    if sessions::opencodex::attribute_codex_messages(home_dir, use_env_roots, &mut all_messages) > 0
-    {
+    let (opencodex_attributed, opencodex_claims) =
+        sessions::opencodex::attribute_codex_messages_with_claims(
+            home_dir,
+            use_env_roots,
+            &mut all_messages,
+        );
+    let magpie_attributed = sessions::magpie::attribute_codex_responses(
+        home_dir,
+        use_env_roots,
+        &mut all_messages,
+        &opencodex_claims,
+    );
+    if opencodex_attributed + magpie_attributed > 0 {
         apply_pricing_to_messages(&mut all_messages, pricing);
     }
 
@@ -3418,11 +3830,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
     for message in &mut all_messages {
         apply_pricing_if_available(message, pricing);
     }
-    let copilot_otel_sessions: HashSet<String> = all_messages
+    let copilot_otel_sessions: HashSet<SharedStr> = all_messages
         .iter()
         .filter(|message| message.client == "copilot")
         .map(|message| message.session_id.clone())
         .collect();
+    let mut copilot_desktop_sessions: HashSet<SharedStr> = HashSet::new();
     if let Some(db_path) = &scan_result.copilot_desktop_db {
         let mut desktop_msgs = sessions::copilot_desktop::parse_copilot_desktop_db(db_path);
         machine_labeler.label_messages(db_path, &mut desktop_msgs);
@@ -3431,24 +3844,52 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 .into_iter()
                 .filter(|message| !copilot_otel_sessions.contains(&message.session_id))
                 .map(|mut message| {
+                    copilot_desktop_sessions.insert(message.session_id.clone());
                     apply_pricing_if_available(&mut message, pricing);
                     message
                 }),
         );
     }
-    if let Some(db_path) = &scan_result.copilot_session_store_db {
-        let mut session_store_msgs =
-            sessions::copilot_session_store::parse_copilot_session_store_db(db_path);
-        machine_labeler.label_messages(db_path, &mut session_store_msgs);
+    let mut copilot_cli_turn_timestamps: HashMap<SharedStr, Vec<i64>> = HashMap::new();
+    for file_path in &scan_result.copilot_session_state_files {
+        let mut state_msgs =
+            sessions::copilot_session_state::parse_copilot_session_state_file(file_path);
+        machine_labeler.label_messages(file_path, &mut state_msgs);
         all_messages.extend(
-            session_store_msgs
+            state_msgs
                 .into_iter()
-                .filter(|message| !copilot_otel_sessions.contains(&message.session_id))
+                .filter(|message| {
+                    !copilot_otel_sessions.contains(&message.session_id)
+                        && !copilot_desktop_sessions.contains(&message.session_id)
+                })
                 .map(|mut message| {
+                    copilot_cli_turn_timestamps
+                        .entry(message.session_id.clone())
+                        .or_default()
+                        .push(message.timestamp);
                     apply_pricing_if_available(&mut message, pricing);
                     message
                 }),
         );
+    }
+    let copilot_cli_turn_index =
+        sessions::copilot_session_state::SessionStateTurnIndex::new(copilot_cli_turn_timestamps);
+    if let Some(db_path) = &scan_result.copilot_session_store_db {
+        let mut session_store_msgs =
+            sessions::copilot_session_store::parse_copilot_session_store_db(db_path);
+        machine_labeler.label_messages(db_path, &mut session_store_msgs);
+        for mut message in session_store_msgs {
+            if copilot_otel_sessions.contains(&message.session_id)
+                || copilot_desktop_sessions.contains(&message.session_id)
+            {
+                continue;
+            }
+            if copilot_cli_turn_index.overlaps(&message.session_id, message.timestamp) {
+                continue;
+            }
+            apply_pricing_if_available(&mut message, pricing);
+            all_messages.push(message);
+        }
     }
     {
         let existing_dedup_keys: HashSet<String> = all_messages
@@ -3459,7 +3900,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let mut existing_copilot_session_timestamps: HashMap<String, HashSet<i64>> = HashMap::new();
         for message in all_messages.iter().filter(|m| m.client == "copilot") {
             existing_copilot_session_timestamps
-                .entry(message.session_id.clone())
+                .entry(message.session_id.to_string())
                 .or_default()
                 .insert(message.timestamp);
         }
@@ -3470,29 +3911,36 @@ fn parse_all_messages_streaming<S: MessageSink>(
         // request-heavy source, then feed each VS Code message through the same
         // tail instead of rebuilding `all_messages`.
         flush_lane(&mut all_messages, &flush_context, sink);
-        // One file per call, so each message knows the file it came from.
-        for path in &scan_result.copilot_vscode_sessions {
-            let machine_label = machine_labeler.configured_label_for(path);
-            sessions::copilot_vscode::parse_copilot_vscode_sessions_into(
-                std::slice::from_ref(path),
-                &mut |mut message| {
-                    let key_unique = message
-                        .dedup_key
-                        .as_deref()
-                        .is_none_or(|key| !existing_dedup_keys.contains(key));
-                    let session_timestamp_unique = existing_copilot_session_timestamps
-                        .get(message.session_id.as_str())
-                        .is_none_or(|timestamps| !timestamps.contains(&message.timestamp));
-                    if !key_unique || !session_timestamp_unique {
-                        return;
-                    }
+        // One call for the whole lane: files that hold copies of the same
+        // session are grouped so a request stored in both is counted once.
+        let machine_labels: HashMap<&Path, Option<&str>> = scan_result
+            .copilot_vscode_sessions
+            .iter()
+            .map(|path| (path.as_path(), machine_labeler.configured_label_for(path)))
+            .collect();
+        sessions::copilot_vscode::parse_copilot_vscode_sessions_into(
+            &scan_result.copilot_vscode_sessions,
+            &mut |path, mut message| {
+                let key_unique = message
+                    .dedup_key
+                    .as_deref()
+                    .is_none_or(|key| !existing_dedup_keys.contains(key));
+                let session_timestamp_unique = existing_copilot_session_timestamps
+                    .get(message.session_id.as_str())
+                    .is_none_or(|timestamps| !timestamps.contains(&message.timestamp));
+                if !key_unique || !session_timestamp_unique {
+                    return;
+                }
 
-                    message.machine_label = machine_label.map(str::to_string);
-                    apply_pricing_if_available(&mut message, pricing);
-                    flush_message(message, &flush_context, sink);
-                },
-            );
-        }
+                message.machine_label = machine_labels
+                    .get(path)
+                    .copied()
+                    .flatten()
+                    .map(SharedStr::from);
+                apply_pricing_if_available(&mut message, pricing);
+                flush_message(message, &flush_context, sink);
+            },
+        );
     }
 
     let gemini_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
@@ -3527,15 +3975,74 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    parse_cached_lane(
-        &scan_result,
-        &mut source_cache,
-        pricing,
-        &mut all_messages,
-        &machine_labeler,
-        ClientId::Cursor,
-        sessions::cursor::parse_cursor_file,
-    );
+    // Cursor generation 1 counted every accepted cache row. Generation 2
+    // collapses the repeated running snapshots of one usageEventId, per cache
+    // file, and matches a legacy id-less row to an identified event by parsed
+    // (session, model, timestamp). Keep the raw keyed rows in the source cache
+    // so cold and warm scans can build the same proof from the same messages.
+    if include_synthetic || clients.iter().any(|client| client == "cursor") {
+        let cursor_paths = scan_result.get(ClientId::Cursor);
+        // Readability comes from the lane's own parse. A warm cache hit serves
+        // the rows of an unchanged file, so no history is missing there; only a
+        // parse can find a source that no longer reads. Probing every source
+        // again would reparse each Cursor cache on every scan.
+        let cursor_outcomes: Vec<(CachedParseOutcome, bool)> = cursor_paths
+            .par_iter()
+            .map(|path| {
+                let unreadable = std::cell::Cell::new(false);
+                let mut outcome = load_or_parse_source(
+                    message_cache::CacheIdentity::for_client(ClientId::Cursor),
+                    path,
+                    &source_cache,
+                    pricing,
+                    |path| {
+                        let parsed = sessions::cursor::parse_cursor_file_checked(path);
+                        unreadable.set(parsed.is_none());
+                        parsed.unwrap_or_default()
+                    },
+                );
+                machine_labeler.label_messages(path, &mut outcome.messages);
+                (outcome, unreadable.get())
+            })
+            .collect();
+        let unreadable = cursor_outcomes
+            .iter()
+            .filter(|(_, unreadable)| *unreadable)
+            .count();
+        source_reads.insert(
+            ClientId::Cursor.as_str().to_string(),
+            SourceReadSummary {
+                discovered: cursor_paths.len(),
+                unreadable,
+            },
+        );
+
+        let mut cursor_proof = RecountProofBuilder::default();
+        for (outcome, _) in cursor_outcomes {
+            let keep = sessions::cursor::cursor_event_snapshot_keep_mask(&outcome.messages);
+            for (message, kept) in outcome.messages.into_iter().zip(keep) {
+                if let Some((date, model_id)) = flushed_message_identity(&message, &flush_context) {
+                    if kept {
+                        cursor_proof.record_kept(&date, &model_id, &message);
+                    } else if sessions::cursor::is_cursor_event_dedup_key(
+                        message.dedup_key.as_deref(),
+                    ) {
+                        cursor_proof.record_duplicate(&date, &model_id, &message);
+                    }
+                }
+                if kept {
+                    all_messages.push(message);
+                }
+            }
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
+        }
+        let proof = cursor_proof.finish();
+        if !proof.is_empty() {
+            recount_proofs.insert(ClientId::Cursor.as_str().to_string(), proof);
+        }
+    }
 
     parse_cached_lane_deduped(
         &scan_result,
@@ -3765,13 +4272,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
                     // The location says whose usage this is even when an older
                     // OpenClaw did not announce itself as the originator.
-                    message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                    message.client = sessions::codex::OPENCLAW_CLIENT_ID.into();
                     if let Some(thread) = &thread_from_name {
-                        message.session_id = thread.clone();
+                        message.session_id = thread.clone().into();
                     }
                 }
                 if recorded_thread.is_none() {
-                    recorded_thread = Some(message.session_id.clone());
+                    recorded_thread = Some(message.session_id.to_string());
                 }
                 rollout_messages.push(message);
             }
@@ -3841,7 +4348,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 {
                     mirrored_thread_sessions
                         .entry(mirror.thread.to_string())
-                        .or_insert_with(|| message.session_id.clone());
+                        .or_insert_with(|| message.session_id.to_string());
                     if recorded_codex_turns.covers(mirror.thread, mirror.turn) {
                         continue;
                     }
@@ -3857,8 +4364,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
             }
         }
         for mut message in rollout_messages {
-            if let Some(session_id) = mirrored_thread_sessions.get(&message.session_id).cloned() {
-                message.session_id = session_id;
+            if let Some(session_id) = mirrored_thread_sessions
+                .get(message.session_id.as_str())
+                .cloned()
+            {
+                message.session_id = session_id.into();
             }
             if should_keep_deduped_message(&mut openclaw_seen, &message) {
                 all_messages.push(message);
@@ -3982,15 +4492,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::senpi::parse_senpi_file,
     );
 
-    parse_cached_lane_deduped(
+    let mut omp_messages = Vec::new();
+    parse_cached_lane(
         &scan_result,
         &mut source_cache,
         pricing,
-        &mut all_messages,
+        &mut omp_messages,
         &machine_labeler,
         ClientId::Omp,
         sessions::omp::parse_omp_file,
     );
+    all_messages.extend(reconcile_omp_responses(
+        home_dir,
+        use_env_roots,
+        omp_messages,
+        pricing,
+    ));
 
     let proma_outcomes: Vec<_> = scan_result
         .get(ClientId::Proma)
@@ -4205,6 +4722,13 @@ fn parse_all_messages_streaming<S: MessageSink>(
             source_cache.insert(entry);
         }
     }
+
+    // BB (get-bb/bb) rows, read before the Claude lane. A row whose turn the
+    // Claude or Codex lane above counted is dropped; see
+    // `bb_row_recorded_by_provider`.
+    all_messages.extend(bb_messages.into_iter().filter(|message| {
+        !bb_row_recorded_by_provider(message, &claude_turns, &recorded_codex_turns)
+    }));
 
     // Keep the whole source's accounting state while streaming its records.
     // Partial input must not become a warm cache that suppresses future retries.
@@ -4423,6 +4947,18 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::qwen::parse_qwen_file,
     );
 
+    // Parse Qoder and Qoder CN JSONL transcripts
+    parse_cached_lane_deduped_with_fingerprint(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        &machine_labeler,
+        ClientId::Qoder,
+        message_cache::SourceFingerprint::check_qoder_path_with_meta_samples_only,
+        sessions::qoder::parse_qoder_file,
+    );
+
     let roocode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::RooCode)
         .par_iter()
@@ -4593,33 +5129,23 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // be configured through scanner extra roots, so parse and dedupe all of
     // them instead of silently ignoring non-default databases.
     let mut devin_cli_session_ids: HashSet<String> = HashSet::new();
-    let mut recount_proofs: BTreeMap<String, ClientRecountProof> = BTreeMap::new();
-    let mut source_reads: BTreeMap<String, SourceReadSummary> = BTreeMap::new();
     if include_devin_cli {
-        let devin_cli_outcomes: Vec<CachedParseOutcome> = scan_result
+        let devin_cli_outcomes: Vec<(CachedParseOutcome, bool)> = scan_result
             .devin_dbs
             .par_iter()
             .map(|db_path| {
-                let mut outcome = load_or_parse_sqlite_source(
-                    message_cache::CacheIdentity::for_client(ClientId::DevinCli),
-                    db_path,
-                    &source_cache,
-                    pricing,
-                    sessions::devin::parse_devin_cli_sqlite,
-                );
+                let (mut outcome, complete) =
+                    load_or_parse_devin_cli_source(db_path, &source_cache, pricing);
                 machine_labeler.label_messages(db_path, &mut outcome.messages);
-                outcome
+                (outcome, complete)
             })
             .collect();
-        // The parser cannot report a failed open or query: both yield an
-        // empty row set, which is indistinguishable from a database with no
-        // usage. Probe each discovered database separately (a warm cache
-        // never calls the parser) so submission can withhold full-history
-        // authority instead of letting a half-read history pass as complete.
-        let unreadable = scan_result
-            .devin_dbs
+        // Preserve the verdict of the exact read that supplied these rows;
+        // a separate COUNT(*) probe cannot detect row conversion failures or
+        // prove that it saw the same database snapshot.
+        let unreadable = devin_cli_outcomes
             .iter()
-            .filter(|db_path| !sessions::devin::devin_cli_source_is_readable(db_path))
+            .filter(|(_, complete)| !complete)
             .count();
         source_reads.insert(
             ClientId::DevinCli.as_str().to_string(),
@@ -4634,7 +5160,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         // subtract exactly the over-count instead of trusting a lower total.
         let mut devin_cli_seen = HashSet::new();
         let mut devin_cli_proof = RecountProofBuilder::default();
-        for outcome in devin_cli_outcomes {
+        for (outcome, _) in devin_cli_outcomes {
             for message in outcome.messages {
                 let kept = should_keep_deduped_message(&mut devin_cli_seen, &message);
                 if let Some((date, model_id)) = flushed_message_identity(&message, &flush_context) {
@@ -4653,7 +5179,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 if !kept {
                     continue;
                 }
-                devin_cli_session_ids.insert(message.session_id.clone());
+                devin_cli_session_ids.insert(message.session_id.to_string());
                 all_messages.push(message);
             }
             if let Some(entry) = outcome.cache_entry {
@@ -4745,11 +5271,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
         all_messages.extend(crush_messages);
     }
 
-    all_messages.extend(parse_antigravity_family_messages(
-        &scan_result,
-        pricing,
-        &machine_labeler,
-    ));
+    let (antigravity_messages, antigravity_recount_proofs) =
+        parse_antigravity_family_messages_with_recount_proofs(
+            &scan_result,
+            pricing,
+            &machine_labeler,
+            &flush_context,
+            &mut source_reads,
+        );
+    all_messages.extend(antigravity_messages);
+    recount_proofs.extend(antigravity_recount_proofs);
 
     // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
     let trae_messages: Vec<UnifiedMessage> = scan_result
@@ -4851,7 +5382,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 outcome
                     .messages
                     .into_iter()
-                    .filter(|message| !devin_cli_session_ids.contains(&message.session_id)),
+                    .filter(|message| !devin_cli_session_ids.contains(message.session_id.as_str())),
             );
             if let Some(entry) = outcome.cache_entry {
                 source_cache.insert(entry);
@@ -4947,7 +5478,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
 }
 
 fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
-    let mut latest_by_session: HashMap<String, UnifiedMessage> = HashMap::new();
+    let mut latest_by_session: HashMap<SharedStr, UnifiedMessage> = HashMap::new();
 
     for message in messages.drain(..) {
         let session_id = message.session_id.clone();
@@ -5000,7 +5531,7 @@ fn merge_workbuddy_messages(
     // session that merely shares a day with unrelated detailed activity. Both
     // parsers derive `session_id` from the same WorkBuddy session identifier, so
     // the keys are directly comparable.
-    let detailed_sessions: HashSet<String> = detailed_messages
+    let detailed_sessions: HashSet<SharedStr> = detailed_messages
         .iter()
         .filter(|message| !message.session_id.is_empty())
         .map(|message| message.session_id.clone())
@@ -5216,24 +5747,50 @@ pub fn workspace_label_overrides<'a>(
     rollup: WorktreeRollup,
     labeler: &mut WorkspaceLabeler,
 ) -> HashMap<String, String> {
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    let mut labels = WorkspaceLabelCollector::default();
     for msg in messages {
+        labels.observe(msg, rollup, labeler);
+    }
+    labels.overrides(labeler)
+}
+
+/// [`workspace_label_overrides`] fed one message at a time, for a caller that
+/// folds messages as they arrive and cannot walk them a second time.
+#[derive(Default)]
+struct WorkspaceLabelCollector {
+    /// Workspace keys already bucketed: only the first message of each key
+    /// contributes a label.
+    seen: HashSet<String>,
+    /// Grouping key -> base label of the first message that reached it.
+    base: BTreeMap<String, String>,
+}
+
+impl WorkspaceLabelCollector {
+    fn observe(
+        &mut self,
+        msg: &UnifiedMessage,
+        rollup: WorktreeRollup,
+        labeler: &mut WorkspaceLabeler,
+    ) {
         let Some(key) = msg.workspace_key.as_deref() else {
-            continue;
+            return;
         };
-        if !seen.insert(key) {
-            continue;
+        if self.seen.contains(key) {
+            return;
         }
+        self.seen.insert(key.to_string());
         let (group_key, _, label) = workspace_bucket(msg, rollup, labeler);
-        base.entry(group_key).or_insert(label);
+        self.base.entry(group_key).or_insert(label);
     }
 
-    disambiguate_workspace_labels(
-        base.iter()
-            .map(|(key, label)| (key.as_str(), label.as_str())),
-        labeler,
-    )
+    fn overrides(self, labeler: &mut WorkspaceLabeler) -> HashMap<String, String> {
+        disambiguate_workspace_labels(
+            self.base
+                .iter()
+                .map(|(key, label)| (key.as_str(), label.as_str())),
+            labeler,
+        )
+    }
 }
 
 /// Rewrite `labeled` — (grouping key, base label) pairs — so no two keys share a
@@ -5364,30 +5921,72 @@ fn aggregate_model_usage_entries(
     aggregate_model_usage_entries_with_rollup(messages, group_by, WorktreeRollup::default())
 }
 
+/// Collecting form of [`ModelUsageFold`], kept as the test surface for its
+/// aggregation rules. The model report folds messages as the parse emits them
+/// and never collects them; see [`ModelReportSink`].
+#[cfg(test)]
 fn aggregate_model_usage_entries_with_rollup(
     messages: Vec<UnifiedMessage>,
     group_by: &GroupBy,
     rollup: WorktreeRollup,
 ) -> Vec<ModelUsage> {
-    let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
-    let mut labeler = WorkspaceLabeler::default();
+    let mut fold = ModelUsageFold::new(group_by, rollup);
+    for msg in &messages {
+        fold.add(msg);
+    }
+    fold.finish()
+}
 
-    // Bucketing a workspace resolves its label, which reads the filesystem. Every
-    // other grouping discards that label a few lines below, so skip the work rather
-    // than paying it on `tokscale --light`, `monthly`, and every TUI refresh.
-    let needs_workspace = matches!(group_by, GroupBy::WorkspaceModel);
-    let label_overrides = if needs_workspace {
-        workspace_label_overrides(&messages, rollup, &mut labeler)
-    } else {
-        HashMap::new()
-    };
+/// A model-report row while messages are still being folded into it.
+struct ModelUsageRow {
+    usage: ModelUsage,
+    /// Workspace grouping key of the message that opened the row. Its
+    /// disambiguated label is only known once every message has been seen.
+    workspace_group_key: String,
+}
 
-    for msg in messages {
+/// Folds messages into model-report rows one message at a time.
+///
+/// A row only keeps running sums, so a caller fed by the parse can drop each
+/// message as soon as it is folded instead of holding the whole history first.
+/// The one rule that looks across messages, workspace label disambiguation,
+/// depends only on the first message seen for each workspace key. It is
+/// collected on the way and applied in [`Self::finish`], which gives the same
+/// labels as resolving it before the fold: a row's label depends only on its
+/// grouping key.
+///
+/// Messages must arrive in the order the collecting path would have held them.
+/// Costs are `f64` sums, so a different order could change their last bits.
+struct ModelUsageFold {
+    group_by: GroupBy,
+    rollup: WorktreeRollup,
+    labeler: WorkspaceLabeler,
+    workspace_labels: WorkspaceLabelCollector,
+    rows: HashMap<String, ModelUsageRow>,
+}
+
+impl ModelUsageFold {
+    fn new(group_by: &GroupBy, rollup: WorktreeRollup) -> Self {
+        Self {
+            group_by: group_by.clone(),
+            rollup,
+            labeler: WorkspaceLabeler::default(),
+            workspace_labels: WorkspaceLabelCollector::default(),
+            rows: HashMap::new(),
+        }
+    }
+
+    fn add(&mut self, msg: &UnifiedMessage) {
+        let group_by = &self.group_by;
+        // Bucketing a workspace resolves its label, which reads the filesystem. Every
+        // other grouping discards that label a few lines below, so skip the work rather
+        // than paying it on `tokscale --light`, `monthly`, and every TUI refresh.
+        let needs_workspace = matches!(group_by, GroupBy::WorkspaceModel);
         let normalized = model_name_for_grouping(&msg.client, &msg.provider_id, &msg.model_id);
         let (workspace_group_key, workspace_key, workspace_label) = if needs_workspace {
-            let (group_key, key, label) = workspace_bucket(&msg, rollup, &mut labeler);
-            let label = label_overrides.get(&group_key).cloned().unwrap_or(label);
-            (group_key, key, label)
+            self.workspace_labels
+                .observe(msg, self.rollup, &mut self.labeler);
+            workspace_bucket(msg, self.rollup, &mut self.labeler)
         } else {
             (String::new(), None, String::new())
         };
@@ -5403,7 +6002,7 @@ fn aggregate_model_usage_entries_with_rollup(
                 format!("{}:{}:{}", msg.client, msg.session_id, normalized)
             }
             GroupBy::MachineModel => {
-                let machine = message_machine_label(&msg);
+                let machine = message_machine_label(msg);
                 format!("{}:{}:{}", machine.len(), machine, normalized)
             }
         };
@@ -5412,44 +6011,48 @@ fn aggregate_model_usage_entries_with_rollup(
             GroupBy::Model | GroupBy::WorkspaceModel | GroupBy::MachineModel
         );
         let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
-        let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
-            client: msg.client.clone(),
-            merged_clients: if merge_clients {
-                Some(msg.client.clone())
-            } else {
-                None
+        let row = self.rows.entry(key).or_insert_with(|| ModelUsageRow {
+            usage: ModelUsage {
+                client: msg.client.to_string(),
+                merged_clients: if merge_clients {
+                    Some(msg.client.to_string())
+                } else {
+                    None
+                },
+                workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
+                    workspace_key.clone()
+                } else {
+                    None
+                },
+                workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
+                    Some(workspace_label.clone())
+                } else {
+                    None
+                },
+                session_id: if session_grouped {
+                    Some(msg.session_id.to_string())
+                } else {
+                    None
+                },
+                machine: if matches!(group_by, GroupBy::MachineModel) {
+                    Some(message_machine_label(msg).to_string())
+                } else {
+                    None
+                },
+                model: normalized.clone(),
+                provider: msg.provider_id.to_string(),
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+                message_count: 0,
+                cost: 0.0,
+                performance: ModelPerformance::default(),
             },
-            workspace_key: if matches!(group_by, GroupBy::WorkspaceModel) {
-                workspace_key.clone()
-            } else {
-                None
-            },
-            workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
-                Some(workspace_label.clone())
-            } else {
-                None
-            },
-            session_id: if session_grouped {
-                Some(msg.session_id.clone())
-            } else {
-                None
-            },
-            machine: if matches!(group_by, GroupBy::MachineModel) {
-                Some(message_machine_label(&msg).to_string())
-            } else {
-                None
-            },
-            model: normalized.clone(),
-            provider: msg.provider_id.clone(),
-            input: 0,
-            output: 0,
-            cache_read: 0,
-            cache_write: 0,
-            reasoning: 0,
-            message_count: 0,
-            cost: 0.0,
-            performance: ModelPerformance::default(),
+            workspace_group_key: workspace_group_key.clone(),
         });
+        let entry = &mut row.usage;
 
         if merge_clients {
             if !entry.client.split(", ").any(|s| s == msg.client) {
@@ -5483,35 +6086,48 @@ fn aggregate_model_usage_entries_with_rollup(
             .record_message(positive_token_total(&msg.tokens), msg.duration_ms);
     }
 
-    let mut entries: Vec<ModelUsage> = model_map
-        .into_values()
-        .map(|mut entry| {
-            let total_tokens = entry
-                .input
-                .max(0)
-                .saturating_add(entry.output.max(0))
-                .saturating_add(entry.cache_read.max(0))
-                .saturating_add(entry.cache_write.max(0))
-                .saturating_add(entry.reasoning.max(0));
-            entry.performance.finalize(total_tokens);
-            let mut providers: Vec<&str> = entry.provider.split(", ").collect();
-            providers.sort_unstable();
-            providers.dedup();
-            entry.provider = providers.join(", ");
-            entry
-        })
-        .collect();
-    entries.sort_by(|a, b| match (a.cost.is_nan(), b.cost.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => b
-            .cost
-            .partial_cmp(&a.cost)
-            .unwrap_or(std::cmp::Ordering::Equal),
-    });
+    fn finish(mut self) -> Vec<ModelUsage> {
+        let label_overrides = if matches!(self.group_by, GroupBy::WorkspaceModel) {
+            std::mem::take(&mut self.workspace_labels).overrides(&mut self.labeler)
+        } else {
+            HashMap::new()
+        };
 
-    entries
+        let mut entries: Vec<ModelUsage> = self
+            .rows
+            .into_values()
+            .map(|row| {
+                let mut entry = row.usage;
+                if let Some(label) = label_overrides.get(&row.workspace_group_key) {
+                    entry.workspace_label = Some(label.clone());
+                }
+                let total_tokens = entry
+                    .input
+                    .max(0)
+                    .saturating_add(entry.output.max(0))
+                    .saturating_add(entry.cache_read.max(0))
+                    .saturating_add(entry.cache_write.max(0))
+                    .saturating_add(entry.reasoning.max(0));
+                entry.performance.finalize(total_tokens);
+                let mut providers: Vec<&str> = entry.provider.split(", ").collect();
+                providers.sort_unstable();
+                providers.dedup();
+                entry.provider = providers.join(", ");
+                entry
+            })
+            .collect();
+        entries.sort_by(|a, b| match (a.cost.is_nan(), b.cost.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b
+                .cost
+                .partial_cmp(&a.cost)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        });
+
+        entries
+    }
 }
 
 /// A message's machine label. An unlabeled message is local: either no
@@ -5552,6 +6168,45 @@ fn model_report_token_totals(entries: &[ModelUsage]) -> (i64, i64, i64, i64) {
     )
 }
 
+/// Streams the model report out of the parse.
+///
+/// Collecting the parse before applying the date filter held every message the
+/// selected clients ever recorded, so a one-day report peaked as high as an
+/// all-time one. The report filter and [`ModelUsageFold`] both work one message
+/// at a time, so each message is dropped as soon as it is counted.
+struct ModelReportSink<'a> {
+    options: &'a ReportOptions,
+    fold: ModelUsageFold,
+    undated_tokens: TokenBreakdown,
+}
+
+impl<'a> ModelReportSink<'a> {
+    fn new(options: &'a ReportOptions) -> Self {
+        Self {
+            options,
+            fold: ModelUsageFold::new(&options.group_by, options.worktree_rollup),
+            undated_tokens: TokenBreakdown::default(),
+        }
+    }
+
+    /// The report rows, and the Claude Desktop usage that has no known date.
+    fn finish(self) -> (Vec<ModelUsage>, TokenBreakdown) {
+        (self.fold.finish(), self.undated_tokens)
+    }
+}
+
+impl MessageSink for ModelReportSink<'_> {
+    fn accept(&mut self, message: UnifiedMessage) {
+        if !message_passes_report_filter(&message, self.options) {
+            return;
+        }
+        if claude_desktop::is_undated_balance(&message) {
+            self.undated_tokens.add_assign_saturating(&message.tokens);
+        }
+        self.fold.add(&message);
+    }
+}
+
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
     Ok(get_model_report_v2(options).await?.report)
 }
@@ -5572,27 +6227,35 @@ pub async fn get_model_report_v2(options: ReportOptions) -> Result<ModelReportV2
     });
 
     let pricing = load_pricing_for_local_parse().await;
-    let (all_messages, claude_desktop_cache) = parse_all_messages_with_coverage(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-        SourceCachePolicy::Persistent,
-    );
-
-    let filtered = filter_messages_for_report(all_messages, &options);
-    let mut undated_tokens = TokenBreakdown::default();
-    for message in &filtered {
-        if claude_desktop::is_undated_balance(message) {
-            undated_tokens.add_assign_saturating(&message.tokens);
+    let mut sink = ModelReportSink::new(&options);
+    let claude_desktop_cache = if recovery::applicable(&home_dir) {
+        // The recovery overlay reconciles its ledger against the whole native
+        // parse at once (which sessions are still on disk, how far each day
+        // already reaches), so only this case collects before folding.
+        let (all_messages, claude_desktop_cache) = parse_all_messages_with_coverage(
+            &home_dir,
+            &clients,
+            pricing.as_deref(),
+            options.use_env_roots,
+            &options.scanner_settings,
+            SourceCachePolicy::Persistent,
+        );
+        for message in all_messages {
+            sink.accept(message);
         }
-    }
-    let entries = aggregate_model_usage_entries_with_rollup(
-        filtered,
-        &options.group_by,
-        options.worktree_rollup,
-    );
+        claude_desktop_cache
+    } else {
+        parse_all_messages_streaming_with_env_strategy(
+            &home_dir,
+            &clients,
+            pricing.as_deref(),
+            options.use_env_roots,
+            &options.scanner_settings,
+            &mut sink,
+        )
+        .coverage
+    };
+    let (entries, undated_tokens) = sink.finish();
 
     let (total_input, total_output, total_cache_read, total_cache_write) =
         model_report_token_totals(&entries);
@@ -5757,7 +6420,7 @@ fn aggregate_hourly_usage_entries(
         };
 
         let entry = hour_map.entry(hour_key).or_default();
-        entry.clients.insert(msg.client.clone());
+        entry.clients.insert(msg.client.to_string());
         entry.models.insert(model_name_for_grouping(
             &msg.client,
             &msg.provider_id,
@@ -6045,6 +6708,9 @@ impl<'a> GraphSink<'a> {
                         .or_insert((0, 0, usage.reason));
                     entry.0 += usage.message_count;
                     entry.1 = entry.1.saturating_add(usage.total_tokens);
+                    if entry.2 != usage.reason {
+                        entry.2 = MULTIPLE_MODEL_PRICING_REASONS;
+                    }
                 }
                 self.incomplete_cost_dates.extend(incomplete_cost_dates);
                 // Validate only the authoritatively priced subset. The zeroed
@@ -6226,6 +6892,7 @@ const ROUTING_LABEL_UNPRICED_REASON: &str =
     "generic routing label has no authoritative model-to-price mapping";
 const MISSING_MODEL_PRICING_REASON: &str = "no authoritative model-to-price mapping";
 const INCOMPLETE_MODEL_PRICING_REASON: &str = "pricing does not cover every populated token bucket";
+const MULTIPLE_MODEL_PRICING_REASONS: &str = "multiple pricing issues";
 const AMBIGUOUS_MODEL_PRICING_REASON: &str =
     "model price lookup is ambiguous across non-equivalent candidates";
 const UNVERIFIED_MODEL_IDENTITY_REASON: &str =
@@ -6323,13 +6990,19 @@ fn prepare_submission_pricing(
                 MISSING_MODEL_PRICING_REASON
             };
             let entry = unpriced_usage
-                .entry((message.provider_id.clone(), message.model_id.clone()))
+                .entry((
+                    message.provider_id.to_string(),
+                    message.model_id.to_string(),
+                ))
                 .or_insert((0, 0, reason));
             entry.0 = entry
                 .0
                 .saturating_add(message.message_count.max(0) as usize);
             entry.1 = entry.1.saturating_add(message.tokens.total());
-            incomplete_cost_dates.insert(message.date.clone());
+            if entry.2 != reason {
+                entry.2 = MULTIPLE_MODEL_PRICING_REASONS;
+            }
+            incomplete_cost_dates.insert(message.date.to_string());
             // An unsafe estimate must not cross the submission boundary. Keep
             // the usage, but represent the unknown part honestly as zero and
             // let `costIsComplete: false` make the server preserve any higher
@@ -6531,7 +7204,7 @@ fn validate_priced_messages(
         }
 
         let id = if message.provider_id.is_empty() {
-            message.model_id.clone()
+            message.model_id.to_string()
         } else {
             format!("{}/{}", message.provider_id, message.model_id)
         };
@@ -6623,9 +7296,9 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
         // A capture under the headless root is a `codex exec` run even when its
         // `session_meta` omits `source: "exec"` and the parser bucketed it as
         // an interactive or subagent thread, so the path wins.
-        message.agent = Some(sessions::codex::CODEX_HEADLESS_AGENT.to_string());
+        message.agent = Some(sessions::codex::CODEX_HEADLESS_AGENT.into());
     } else if message.agent.is_none() {
-        message.agent = Some("headless".to_string());
+        message.agent = Some("headless".into());
     }
 }
 
@@ -6852,8 +7525,8 @@ fn hermes_candidate_day_coverage(messages: &[UnifiedMessage]) -> usize {
 /// model differs, so normalize the first database's count onto exactly one of
 /// the selected messages after choosing every group.
 fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec<UnifiedMessage> {
-    let mut group_order: Vec<(String, String, String)> = Vec::new();
-    let mut group_candidates: HashMap<(String, String, String), Vec<Vec<UnifiedMessage>>> =
+    let mut group_order: Vec<(SharedStr, SharedStr, SharedStr)> = Vec::new();
+    let mut group_candidates: HashMap<(SharedStr, SharedStr, SharedStr), Vec<Vec<UnifiedMessage>>> =
         HashMap::new();
     let mut session_message_counts: HashMap<String, i32> = HashMap::new();
 
@@ -6861,7 +7534,7 @@ fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec
         let mut database_session_counts: HashMap<String, i32> = HashMap::new();
         for message in &messages {
             database_session_counts
-                .entry(message.session_id.clone())
+                .entry(message.session_id.to_string())
                 .and_modify(|count| *count = (*count).max(message.message_count))
                 .or_insert(message.message_count);
         }
@@ -6869,9 +7542,9 @@ fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec
             session_message_counts.entry(session_id).or_insert(count);
         }
 
-        let mut database_groups: HashMap<(String, String, String), Vec<UnifiedMessage>> =
+        let mut database_groups: HashMap<(SharedStr, SharedStr, SharedStr), Vec<UnifiedMessage>> =
             HashMap::new();
-        let mut database_group_order: Vec<(String, String, String)> = Vec::new();
+        let mut database_group_order: Vec<(SharedStr, SharedStr, SharedStr)> = Vec::new();
         for message in messages {
             let group = (
                 message.session_id.clone(),
@@ -6922,7 +7595,7 @@ fn select_best_covered_hermes_groups(databases: Vec<Vec<UnifiedMessage>>) -> Vec
     for message in &mut selected {
         message.message_count = if counted_sessions.insert(message.session_id.clone()) {
             session_message_counts
-                .get(&message.session_id)
+                .get(message.session_id.as_str())
                 .copied()
                 .unwrap_or(0)
         } else {
@@ -7080,7 +7753,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                         let key = msg.dedup_key.clone().unwrap_or_default();
                         if !key.is_empty() {
                             sqlite_locations
-                                .entry(msg.session_id.clone())
+                                .entry(msg.session_id.to_string())
                                 .or_default()
                                 .insert(key.clone());
                         }
@@ -7161,6 +7834,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::MiMoDesktop, micode_desktop_count);
     messages.extend(micode_msgs);
 
+    // Read ahead of the Claude lane, as in the cached lane, so the Claude
+    // lane knows which sessions BB mirrors.
+    let bb_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .bb_dbs
+        .par_iter()
+        .flat_map(|db_path| sessions::bb::parse_bb_sqlite(db_path))
+        .collect();
+    let bb_msgs_raw = sessions::bb::dedup_bb_messages(bb_msgs_raw);
+    let bb_claude_sessions = sessions::bb::claude_sessions_named(&bb_msgs_raw);
+
     let claude_home = PathBuf::from(&home_dir);
     let claude_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Claude)
@@ -7177,7 +7860,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut claude_messages = Vec::new();
     let mut billing_conflicts = Vec::new();
     let mut indices = HashMap::new();
+    let mut claude_turns = ClaudeTurnCoverage::default();
     for message in claude_raw {
+        if !bb_claude_sessions.is_empty()
+            && (include_all
+                || retain_for_requested_clients(
+                    &message.client,
+                    &message.model_id,
+                    &message.provider_id,
+                    &requested,
+                ))
+        {
+            claude_turns.observe(&message, &bb_claude_sessions);
+        }
         if let Some(key) = &message.dedup_key {
             if let Some(index) = indices.get(key).copied() {
                 merge_claude_cross_file_duplicate(
@@ -7199,6 +7894,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         claude_desktop::read(Path::new(&home_dir)).merge_into(&mut claude_messages);
     }
     sessions::claudecode::reconcile_advisor_billing(&mut claude_messages);
+    claude_turns.resolve_legacy_rows(scan_result.get(ClientId::Claude), &claude_home);
     let claude_msgs: Vec<_> = claude_messages.iter().map(unified_to_parsed).collect();
     // Advisor calls and undated Desktop balances add usage, not extra replies.
     counts.set(ClientId::Claude, summed_parsed_message_count(&claude_msgs));
@@ -7270,7 +7966,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         for message in file_messages {
             if message.client == sessions::codex::OPENCLAW_CLIENT_ID {
                 if owned_thread.is_none() {
-                    owned_thread = Some(message.session_id.clone());
+                    owned_thread = Some(message.session_id.to_string());
                 }
                 openclaw_owned_rollouts.push(message);
             } else if should_keep_deduped_message(&mut codex_seen, &message)
@@ -7308,30 +8004,59 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         })
         .collect();
     copilot_unified_msgs = sessions::copilot::merge_copilot_messages(copilot_unified_msgs);
-    let copilot_otel_sessions: HashSet<String> = copilot_unified_msgs
+    let copilot_otel_sessions: HashSet<SharedStr> = copilot_unified_msgs
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
+    let mut copilot_desktop_sessions: HashSet<SharedStr> = HashSet::new();
     if let Some(db_path) = &scan_result.copilot_desktop_db {
-        copilot_unified_msgs.extend(
-            sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
-                .into_iter()
-                .filter(|message| !copilot_otel_sessions.contains(&message.session_id)),
-        );
+        for message in sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
+            .into_iter()
+            .filter(|message| !copilot_otel_sessions.contains(&message.session_id))
+        {
+            copilot_desktop_sessions.insert(message.session_id.clone());
+            copilot_unified_msgs.push(message);
+        }
     }
+    let mut copilot_cli_turn_timestamps: HashMap<SharedStr, Vec<i64>> = HashMap::new();
+    for file_path in &scan_result.copilot_session_state_files {
+        for message in sessions::copilot_session_state::parse_copilot_session_state_file(file_path)
+            .into_iter()
+            .filter(|message| {
+                !copilot_otel_sessions.contains(&message.session_id)
+                    && !copilot_desktop_sessions.contains(&message.session_id)
+            })
+        {
+            copilot_cli_turn_timestamps
+                .entry(message.session_id.clone())
+                .or_default()
+                .push(message.timestamp);
+            copilot_unified_msgs.push(message);
+        }
+    }
+    let copilot_cli_turn_index =
+        sessions::copilot_session_state::SessionStateTurnIndex::new(copilot_cli_turn_timestamps);
     if let Some(db_path) = &scan_result.copilot_session_store_db {
-        copilot_unified_msgs.extend(
-            sessions::copilot_session_store::parse_copilot_session_store_db(db_path)
-                .into_iter()
-                .filter(|message| !copilot_otel_sessions.contains(&message.session_id)),
-        );
+        let session_store_msgs =
+            sessions::copilot_session_store::parse_copilot_session_store_db(db_path);
+        for message in session_store_msgs {
+            if copilot_otel_sessions.contains(&message.session_id)
+                || copilot_desktop_sessions.contains(&message.session_id)
+            {
+                continue;
+            }
+            if copilot_cli_turn_index.overlaps(&message.session_id, message.timestamp) {
+                continue;
+            }
+            copilot_unified_msgs.push(message);
+        }
     }
     {
         let existing_dedup_keys: HashSet<String> = copilot_unified_msgs
             .iter()
             .filter_map(|m| m.dedup_key.clone())
             .collect();
-        let existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
+        let existing_copilot_session_timestamps: HashSet<(SharedStr, i64)> = copilot_unified_msgs
             .iter()
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
@@ -7484,9 +8209,9 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                     .into_iter()
                     .map(|mut message| {
                         if message.client != sessions::codex::OPENCLAW_CLIENT_ID {
-                            message.client = sessions::codex::OPENCLAW_CLIENT_ID.to_string();
+                            message.client = sessions::codex::OPENCLAW_CLIENT_ID.into();
                             if let Some(thread) = &thread_from_name {
-                                message.session_id = thread.clone();
+                                message.session_id = thread.clone().into();
                             }
                         }
                         message
@@ -7525,7 +8250,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             {
                 mirrored_thread_sessions
                     .entry(mirror.thread.to_string())
-                    .or_insert_with(|| message.session_id.clone());
+                    .or_insert_with(|| message.session_id.to_string());
                 if recorded_codex_turns.covers(mirror.thread, mirror.turn) {
                     continue;
                 }
@@ -7535,8 +8260,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
         for mut message in rollout_messages {
-            if let Some(session_id) = mirrored_thread_sessions.get(&message.session_id).cloned() {
-                message.session_id = session_id;
+            if let Some(session_id) = mirrored_thread_sessions
+                .get(message.session_id.as_str())
+                .cloned()
+            {
+                message.session_id = session_id.into();
             }
             if should_keep_deduped_message(&mut seen, &message) {
                 kept.push(message);
@@ -7665,12 +8393,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::omp::parse_omp_file(path))
         .collect();
-    let mut omp_seen: HashSet<String> = HashSet::new();
-    let omp_msgs: Vec<ParsedMessage> = omp_msgs_raw
-        .into_iter()
-        .filter(|message| should_keep_deduped_message(&mut omp_seen, message))
-        .map(|message| unified_to_parsed(&message))
-        .collect();
+    let omp_msgs: Vec<ParsedMessage> =
+        reconcile_omp_responses(&home_dir, options.use_env_roots, omp_msgs_raw, None)
+            .iter()
+            .map(unified_to_parsed)
+            .collect();
     let omp_count = omp_msgs.len() as i32;
     counts.set(ClientId::Omp, omp_count);
     messages.extend(omp_msgs);
@@ -7809,6 +8536,18 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cherrystudio_count = summed_parsed_message_count(&cherrystudio_msgs);
     counts.set(ClientId::CherryStudio, cherrystudio_count);
     messages.extend(cherrystudio_msgs);
+
+    // Same reconciliation as the cached lane: see `bb_row_recorded_by_provider`.
+    let bb_msgs: Vec<ParsedMessage> = bb_msgs_raw
+        .into_iter()
+        .filter(|message| {
+            !bb_row_recorded_by_provider(message, &claude_turns, &recorded_codex_turns)
+        })
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let bb_count = summed_parsed_message_count(&bb_msgs);
+    counts.set(ClientId::Bb, bb_count);
+    messages.extend(bb_msgs);
 
     // DeepSeek Harness zstd JSONL transcripts. A fork's seeded prefix repeats
     // the parent's rows verbatim in a second file, so dedup across the lane.
@@ -7966,6 +8705,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let qwen_count = qwen_msgs.len() as i32;
     counts.set(ClientId::Qwen, qwen_count);
     messages.extend(qwen_msgs);
+
+    let qoder_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Qoder)
+        .par_iter()
+        .flat_map(|path| sessions::qoder::parse_qoder_file(path))
+        .collect();
+    let mut qoder_seen: HashSet<String> = HashSet::new();
+    let qoder_msgs: Vec<ParsedMessage> = qoder_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut qoder_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let qoder_count = summed_parsed_message_count(&qoder_msgs);
+    counts.set(ClientId::Qoder, qoder_count);
+    messages.extend(qoder_msgs);
 
     let roocode_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::RooCode)
@@ -8214,7 +8968,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     } else {
         Vec::new()
     };
-    let cli_session_ids: HashSet<String> = devin_cli_messages
+    let cli_session_ids: HashSet<SharedStr> = devin_cli_messages
         .iter()
         .map(|message| message.session_id.clone())
         .collect();
@@ -8346,14 +9100,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
 
     if include_synthetic {
         for msg in &mut messages {
-            let raw_model = msg.model_id.clone();
-            sessions::synthetic::normalize_synthetic_gateway_fields(
+            sessions::synthetic::normalize_synthetic_gateway_identity(
                 &mut msg.model_id,
                 &mut msg.provider_id,
+                &mut msg.pricing_model_id,
             );
-            if raw_model != msg.model_id && msg.pricing_model_id.is_none() {
-                msg.pricing_model_id = Some(raw_model);
-            }
         }
     }
 
@@ -8395,7 +9146,7 @@ fn rebucket_parsed_days(
         }
         let key = timezone.day_key(message.timestamp);
         if !key.is_empty() {
-            message.date = key;
+            message.date = SharedStr::from(key);
         }
     }
 }
@@ -8498,22 +9249,89 @@ fn should_keep_deduped_message(seen_keys: &mut HashSet<String>, message: &Unifie
         .is_none_or(|key| seen_keys.insert(key.clone()))
 }
 
-type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
+fn reconcile_omp_responses(
+    home: &str,
+    use_env_roots: bool,
+    mut messages: Vec<UnifiedMessage>,
+    pricing: Option<&pricing::PricingService>,
+) -> Vec<UnifiedMessage> {
+    let mut equivalent_candidates = HashSet::new();
+    messages.retain(|message| {
+        let Some(response_key) = message
+            .dedup_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("omp:response:"))
+        else {
+            return true;
+        };
+        equivalent_candidates.insert((
+            response_key.to_string(),
+            message.model_id.clone(),
+            message.provider_id.clone(),
+            message.message_count,
+            message.model_attribution_conflicted,
+            message.tokens.input,
+            message.tokens.output,
+            message.tokens.cache_read,
+            message.tokens.cache_write,
+            message.tokens.cache_write_1h,
+            message.tokens.reasoning,
+        ))
+    });
 
-/// Read every Antigravity surface in legacy-first order, then collapse copies
-/// of the same provider response even when each surface assigned it a
-/// different session ID. Antigravity's response ID is shared by the desktop
-/// cache, CLI database, and IDE extension database; session IDs are not.
+    if sessions::magpie::attribute_omp_responses(home, use_env_roots, &mut messages) > 0 {
+        for message in &mut messages {
+            message.refresh_derived_fields();
+            apply_pricing_if_available(message, pricing);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    messages.retain(|message| should_keep_deduped_message(&mut seen, message));
+    messages
+}
+
+type AntigravitySourceParser = fn(&Path) -> Vec<UnifiedMessage>;
+type AntigravitySourceParserWithV1 = fn(&Path) -> (Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool);
+
+/// Read Antigravity surfaces in legacy-first order, but place cache entries that
+/// relied on fallback timestamps (e.g. file modification time when the usage record
+/// lacked a timestamp) after database sources (antigravity-cli and antigravity-extension).
+/// This ensures authoritative database timestamps win deduplication over cache mtime
+/// fallbacks, while preserving cache rows when no database record exists.
 fn parse_antigravity_family_messages(
     scan_result: &scanner::ScanResult,
     pricing: Option<&pricing::PricingService>,
     machine_labeler: &machine_label::MachineLabeler,
 ) -> Vec<UnifiedMessage> {
-    let sources: [(ClientId, AntigravitySourceParser); 3] = [
-        (
-            ClientId::Antigravity,
-            sessions::antigravity::parse_antigravity_file,
-        ),
+    let parsed_antigravity = scan_result
+        .get(ClientId::Antigravity)
+        .par_iter()
+        .map(|path| {
+            let (mut auth, mut fallback) =
+                sessions::antigravity::parse_antigravity_file_partitioned(path);
+            machine_labeler.label_messages(path, &mut auth);
+            machine_labeler.label_messages(path, &mut fallback);
+            (auth, fallback)
+        })
+        .collect::<Vec<_>>();
+
+    let mut antigravity_authoritative = Vec::new();
+    let mut antigravity_fallback = Vec::new();
+    for (auth, fallback) in parsed_antigravity {
+        antigravity_authoritative.extend(auth);
+        antigravity_fallback.extend(fallback);
+    }
+    if let Some(pricing) = pricing {
+        for message in &mut antigravity_authoritative {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+        for message in &mut antigravity_fallback {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+    }
+
+    let db_sources: [(ClientId, AntigravitySourceParser); 2] = [
         (
             ClientId::AntigravityCli,
             sessions::antigravity_cli::parse_antigravity_cli_file,
@@ -8524,8 +9342,8 @@ fn parse_antigravity_family_messages(
         ),
     ];
 
-    let mut messages = Vec::new();
-    for (client, parse) in sources {
+    let mut db_messages = Vec::new();
+    for (client, parse) in db_sources {
         let mut source_messages: Vec<UnifiedMessage> = scan_result
             .get(client)
             .par_iter()
@@ -8540,10 +9358,171 @@ fn parse_antigravity_family_messages(
                 apply_pricing_if_available(message, Some(pricing));
             }
         }
-        messages.extend(source_messages);
+        db_messages.extend(source_messages);
     }
 
+    let mut messages = Vec::new();
+    messages.extend(antigravity_authoritative);
+    messages.extend(db_messages);
+    messages.extend(antigravity_fallback);
+
     dedupe_antigravity_family_messages(messages)
+}
+
+fn parse_antigravity_family_messages_with_recount_proofs(
+    scan_result: &scanner::ScanResult,
+    pricing: Option<&pricing::PricingService>,
+    machine_labeler: &machine_label::MachineLabeler,
+    flush_context: &FlushContext<'_>,
+    source_reads: &mut BTreeMap<String, SourceReadSummary>,
+) -> (Vec<UnifiedMessage>, BTreeMap<String, ClientRecountProof>) {
+    let antigravity_paths = scan_result.get(ClientId::Antigravity);
+    let parsed_antigravity = antigravity_paths
+        .par_iter()
+        .map(|path| {
+            let (mut current_auth, mut current_fallback, mut v1, ok) =
+                sessions::antigravity::parse_antigravity_file_with_v1_partitioned(path);
+            machine_labeler.label_messages(path, &mut current_auth);
+            machine_labeler.label_messages(path, &mut current_fallback);
+            machine_labeler.label_messages(path, &mut v1);
+            (current_auth, current_fallback, v1, ok)
+        })
+        .collect::<Vec<_>>();
+
+    let unreadable = parsed_antigravity
+        .iter()
+        .filter(|(_, _, _, ok)| !*ok)
+        .count();
+    source_reads.insert(
+        ClientId::Antigravity.as_str().to_string(),
+        SourceReadSummary {
+            discovered: antigravity_paths.len(),
+            unreadable,
+        },
+    );
+    let mut client_read_ok: BTreeMap<String, bool> = BTreeMap::new();
+    client_read_ok.insert(ClientId::Antigravity.as_str().to_string(), unreadable == 0);
+
+    let mut antigravity_authoritative = Vec::new();
+    let mut antigravity_fallback = Vec::new();
+    let mut antigravity_v1 = Vec::new();
+    for (current_auth, current_fallback, v1, _) in parsed_antigravity {
+        antigravity_authoritative.extend(current_auth);
+        antigravity_fallback.extend(current_fallback);
+        antigravity_v1.extend(v1);
+    }
+    if let Some(pricing) = pricing {
+        for message in &mut antigravity_authoritative {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+        for message in &mut antigravity_fallback {
+            apply_pricing_if_available(message, Some(pricing));
+        }
+        for message in &mut antigravity_v1 {
+            apply_pricing_if_available(message, Some(pricing));
+            let _ = pricing.take_cost_estimate_source(message);
+        }
+    }
+
+    let db_sources: [(ClientId, AntigravitySourceParserWithV1); 2] = [
+        (
+            ClientId::AntigravityCli,
+            sessions::antigravity_cli::parse_antigravity_cli_file_with_v1,
+        ),
+        (
+            ClientId::AntigravityExtension,
+            sessions::antigravity_cli::parse_antigravity_extension_file_with_v1,
+        ),
+    ];
+
+    let mut db_messages = Vec::new();
+    let mut db_v1_messages = Vec::new();
+    for (client, parse) in db_sources {
+        let paths = scan_result.get(client);
+        let parsed_triplets: Vec<(Vec<UnifiedMessage>, Vec<UnifiedMessage>, bool)> = paths
+            .par_iter()
+            .map(|path| {
+                let (mut current, mut v1, ok) = parse(path);
+                machine_labeler.label_messages(path, &mut current);
+                machine_labeler.label_messages(path, &mut v1);
+                (current, v1, ok)
+            })
+            .collect();
+        let unreadable = parsed_triplets.iter().filter(|(_, _, ok)| !*ok).count();
+        source_reads.insert(
+            client.as_str().to_string(),
+            SourceReadSummary {
+                discovered: paths.len(),
+                unreadable,
+            },
+        );
+        client_read_ok.insert(client.as_str().to_string(), unreadable == 0);
+
+        let mut source_messages = Vec::new();
+        let mut source_v1_messages = Vec::new();
+        for (current, v1, _) in parsed_triplets {
+            source_messages.extend(current);
+            source_v1_messages.extend(v1);
+        }
+        if let Some(pricing) = pricing {
+            for message in &mut source_messages {
+                apply_pricing_if_available(message, Some(pricing));
+            }
+            for message in &mut source_v1_messages {
+                apply_pricing_if_available(message, Some(pricing));
+                let _ = pricing.take_cost_estimate_source(message);
+            }
+        }
+        db_messages.extend(source_messages);
+        db_v1_messages.extend(source_v1_messages);
+    }
+
+    let mut messages = Vec::new();
+    messages.extend(antigravity_authoritative);
+    messages.extend(db_messages);
+    messages.extend(antigravity_fallback);
+
+    let mut v1_messages = Vec::new();
+    v1_messages.extend(antigravity_v1);
+    v1_messages.extend(db_v1_messages);
+
+    let messages = dedupe_antigravity_family_messages(messages);
+    let v1_messages = dedupe_antigravity_family_messages(v1_messages);
+
+    let mut builders: BTreeMap<String, RecountProofBuilder> = BTreeMap::new();
+    for message in &v1_messages {
+        if let Some((date, model_id)) = flushed_message_identity(message, flush_context) {
+            builders
+                .entry(message.client.as_str().to_string())
+                .or_default()
+                .record_previous(&date, &model_id, message);
+        }
+    }
+    for message in &messages {
+        if let Some((date, model_id)) = flushed_message_identity(message, flush_context) {
+            builders
+                .entry(message.client.as_str().to_string())
+                .or_default()
+                .record_corrected(&date, &model_id, message);
+        }
+    }
+
+    let mut proofs = BTreeMap::new();
+    for (client, builder) in builders {
+        if !client_read_ok.get(&client).copied().unwrap_or(false) {
+            continue;
+        }
+        let proof = builder.finish();
+        let has_diff = proof
+            .values()
+            .flat_map(|models| models.values())
+            .any(|entry| entry.previous != entry.corrected);
+        if has_diff {
+            proofs.insert(client, proof);
+        }
+    }
+
+    (messages, proofs)
 }
 
 /// Deduplicate only response IDs within the Antigravity family. Missing IDs
@@ -8627,6 +9606,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         pricing_model_id: msg.pricing_model_id.clone(),
         estimate_status: msg.estimate_status,
         copilot_context: None,
+        claude_entry_uuid: Default::default(),
         machine_label: None,
     }
 }
@@ -8658,8 +9638,12 @@ mod tests {
     // this branch conflict on every single upstream merge.
     use super::{aggregate_model_usage_entries_with_rollup, WorktreeRollup};
     use super::{flush_retained_lane, matches_flush_filter, FlushContext};
+    use super::{
+        machine_label, parse_antigravity_family_messages,
+        parse_antigravity_family_messages_with_recount_proofs,
+    };
     use serial_test::serial;
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
@@ -8883,6 +9867,387 @@ mod tests {
         assert_eq!(daily[0].totals.tokens, 146);
         assert_eq!(daily[0].token_breakdown.input, 120);
         assert_eq!(daily[0].token_breakdown.output, 26);
+    }
+
+    #[test]
+    fn antigravity_fallback_mtime_rows_yield_to_database_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = dir.path().join("cache.jsonl");
+        let ext_db_file = dir.path().join("extension-conversation.db");
+
+        // Write desktop cache file:
+        // - Row 1: timestamp is null (fallback to mtime), responseId is "resp-shared"
+        // - Row 2: timestamp is null (fallback to mtime), responseId is "resp-cache-only"
+        // - Row 3: timestamp is explicit 1_711_200_000_000, responseId is "resp-cache-auth"
+        let cache_content = r#"{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":100,"output":20,"reasoning":5,"responseId":"resp-shared"}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":50,"output":10,"reasoning":0,"responseId":"resp-cache-only"}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":1711200000000,"input":30,"output":5,"reasoning":0,"responseId":"resp-cache-auth"}
+"#;
+        std::fs::write(&cache_file, cache_content).unwrap();
+
+        fn enc_varint(field: u64, mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = field << 3;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            while value >= 0x80 {
+                out.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+            out
+        }
+
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = (field << 3) | 2;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            let mut len = payload.len();
+            while len >= 0x80 {
+                out.push((len as u8 & 0x7f) | 0x80);
+                len >>= 7;
+            }
+            out.push(len as u8);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        // Build extension SQLite DB with true timestamp for "resp-shared":
+        // Timestamp: 1_711_100_000 seconds
+        let mut ts_blob = Vec::new();
+        ts_blob.extend(enc_varint(1, 1_711_100_000));
+        ts_blob.extend(enc_varint(2, 0));
+
+        let mut gen9 = Vec::new();
+        gen9.extend(enc_len(4, &ts_blob));
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, 1132));
+        usage.extend(enc_varint(2, 100));
+        usage.extend(enc_varint(9, 5));
+        usage.extend(enc_varint(10, 15));
+        usage.extend(enc_len(11, b"resp-shared"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+
+        let outer = enc_len(1, &chat_model);
+
+        let conn = rusqlite::Connection::open(&ext_db_file).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![outer],
+        )
+        .unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result.get_mut(ClientId::Antigravity).push(cache_file);
+        scan_result
+            .get_mut(ClientId::AntigravityExtension)
+            .push(ext_db_file);
+
+        let machine_labeler = machine_label::MachineLabeler::default();
+        let messages = parse_antigravity_family_messages(&scan_result, None, &machine_labeler);
+
+        assert_eq!(messages.len(), 3);
+
+        let shared_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-shared"))
+            .expect("resp-shared must be present");
+        assert_eq!(
+            shared_msg.client, "antigravity-extension",
+            "DB copy must win over cache fallback"
+        );
+        assert_eq!(
+            shared_msg.timestamp, 1_711_100_000_000,
+            "DB true timestamp must be preserved"
+        );
+
+        let cache_only_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-cache-only"))
+            .expect("resp-cache-only must be present");
+        assert_eq!(cache_only_msg.client, "antigravity");
+        assert!(cache_only_msg.timestamp > 0);
+
+        let auth_msg = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-cache-auth"))
+            .expect("resp-cache-auth must be present");
+        assert_eq!(auth_msg.client, "antigravity");
+        assert_eq!(auth_msg.timestamp, 1_711_200_000_000);
+    }
+
+    #[test]
+    fn antigravity_recount_proofs_preserve_extension_attribution_without_discrepancy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = dir.path().join("cache.jsonl");
+        let ext_db_file = dir.path().join("extension-conversation.db");
+
+        let cache_content = r#"{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":100,"output":20,"reasoning":5,"responseId":"resp-shared"}
+"#;
+        std::fs::write(&cache_file, cache_content).unwrap();
+
+        fn enc_varint(field: u64, mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = field << 3;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            while value >= 0x80 {
+                out.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+            out
+        }
+
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = (field << 3) | 2;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            let mut len = payload.len();
+            while len >= 0x80 {
+                out.push((len as u8 & 0x7f) | 0x80);
+                len >>= 7;
+            }
+            out.push(len as u8);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        let mut ts_blob = Vec::new();
+        ts_blob.extend(enc_varint(1, 1_711_100_000));
+        ts_blob.extend(enc_varint(2, 0));
+
+        let mut gen9 = Vec::new();
+        gen9.extend(enc_len(4, &ts_blob));
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, 1132));
+        usage.extend(enc_varint(2, 100));
+        usage.extend(enc_varint(9, 5));
+        usage.extend(enc_varint(10, 15));
+        usage.extend(enc_len(11, b"resp-shared"));
+
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(9, &gen9));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+
+        let outer = enc_len(1, &chat_model);
+
+        let conn = rusqlite::Connection::open(&ext_db_file).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![outer],
+        )
+        .unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result.get_mut(ClientId::Antigravity).push(cache_file);
+        scan_result
+            .get_mut(ClientId::AntigravityExtension)
+            .push(ext_db_file);
+
+        let machine_labeler = machine_label::MachineLabeler::default();
+        let flush_context = FlushContext {
+            pricing: None,
+            include_all: true,
+            requested: HashSet::new(),
+            include_synthetic: true,
+            timezone: Some(crate::bucket_tz::BucketTimezone::Local),
+            local_machine_label: None,
+        };
+        let mut source_reads = BTreeMap::new();
+
+        let (messages, proofs) = parse_antigravity_family_messages_with_recount_proofs(
+            &scan_result,
+            None,
+            &machine_labeler,
+            &flush_context,
+            &mut source_reads,
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].client, "antigravity-extension");
+        assert_eq!(messages[0].timestamp, 1_711_100_000_000);
+        assert!(!proofs.contains_key("antigravity"));
+    }
+
+    #[test]
+    fn antigravity_dedup_and_recount_proofs_with_mixed_fallback_and_authoritative_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_file = dir.path().join("cache.jsonl");
+        let ext_db_file = dir.path().join("extension-conversation.db");
+
+        // Cache contains:
+        // 1. resp-auth: explicit timestamp (1_711_200_000_000)
+        // 2. resp-fallback: null timestamp (falls back to mtime)
+        // 3. resp-fallback-only: null timestamp (falls back to mtime, not in DB)
+        let cache_content = r#"{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":1711200000000,"input":30,"output":10,"reasoning":2,"responseId":"resp-auth","v":2}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":100,"output":20,"reasoning":5,"responseId":"resp-fallback"}
+{"type":"usage","sessionId":"sess-cache","modelId":"claude-sonnet-4.6","timestamp":null,"input":60,"output":15,"reasoning":3,"responseId":"resp-fallback-only"}
+"#;
+        std::fs::write(&cache_file, cache_content).unwrap();
+
+        fn enc_varint(field: u64, mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = field << 3;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            while value >= 0x80 {
+                out.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+            out
+        }
+
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut tag = (field << 3) | 2;
+            while tag >= 0x80 {
+                out.push((tag as u8 & 0x7f) | 0x80);
+                tag >>= 7;
+            }
+            out.push(tag as u8);
+            let mut len = payload.len();
+            while len >= 0x80 {
+                out.push((len as u8 & 0x7f) | 0x80);
+                len >>= 7;
+            }
+            out.push(len as u8);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        fn make_db_row(resp_id: &[u8], ts_seconds: u64) -> Vec<u8> {
+            let mut ts_blob = Vec::new();
+            ts_blob.extend(enc_varint(1, ts_seconds));
+            ts_blob.extend(enc_varint(2, 0));
+
+            let mut gen9 = Vec::new();
+            gen9.extend(enc_len(4, &ts_blob));
+
+            let mut usage = Vec::new();
+            usage.extend(enc_varint(1, 1132));
+            usage.extend(enc_varint(2, 100));
+            usage.extend(enc_varint(5, 500)); // cacheRead
+            usage.extend(enc_varint(9, 5));
+            usage.extend(enc_varint(10, 15));
+            usage.extend(enc_len(11, resp_id));
+
+            let mut chat_model = Vec::new();
+            chat_model.extend(enc_len(4, &usage));
+            chat_model.extend(enc_len(9, &gen9));
+            chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+
+            enc_len(1, &chat_model)
+        }
+
+        let conn = rusqlite::Connection::open(&ext_db_file).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+
+        let row1 = make_db_row(b"resp-auth", 1_711_050_000);
+        let row2 = make_db_row(b"resp-fallback", 1_711_100_000);
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![row1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (1, ?1, 0)",
+            rusqlite::params![row2],
+        )
+        .unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result.get_mut(ClientId::Antigravity).push(cache_file);
+        scan_result
+            .get_mut(ClientId::AntigravityExtension)
+            .push(ext_db_file);
+
+        let machine_labeler = machine_label::MachineLabeler::default();
+        let flush_context = FlushContext {
+            pricing: None,
+            include_all: true,
+            requested: HashSet::new(),
+            include_synthetic: true,
+            timezone: Some(crate::bucket_tz::BucketTimezone::Local),
+            local_machine_label: None,
+        };
+        let mut source_reads = BTreeMap::new();
+
+        let (messages, proofs) = parse_antigravity_family_messages_with_recount_proofs(
+            &scan_result,
+            None,
+            &machine_labeler,
+            &flush_context,
+            &mut source_reads,
+        );
+
+        assert_eq!(messages.len(), 3);
+
+        // 1. Authoritative cache row wins over DB row:
+        let msg_auth = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-auth"))
+            .unwrap();
+        assert_eq!(msg_auth.client, "antigravity");
+        assert_eq!(msg_auth.timestamp, 1_711_200_000_000);
+
+        // 2. DB row wins over fallback cache row:
+        let msg_fallback = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-fallback"))
+            .unwrap();
+        assert_eq!(msg_fallback.client, "antigravity-extension");
+        assert_eq!(msg_fallback.timestamp, 1_711_100_000_000);
+
+        // 3. Fallback-only cache row survives as antigravity:
+        let msg_only = messages
+            .iter()
+            .find(|m| m.dedup_key.as_deref() == Some("resp-fallback-only"))
+            .unwrap();
+        assert_eq!(msg_only.client, "antigravity");
+        assert!(msg_only.timestamp > 0);
+
+        // Verify recount proof for antigravity-extension preserves cacheRead
+        let ext_proof = proofs.get("antigravity-extension");
+        assert!(ext_proof.is_some());
+        for models in ext_proof.unwrap().values() {
+            for entry in models.values() {
+                assert_eq!(
+                    entry.previous.tokens.cache_read, entry.corrected.tokens.cache_read,
+                    "cacheRead must not drop for extension"
+                );
+            }
+        }
     }
 
     #[test]
@@ -9397,6 +10762,436 @@ mod tests {
         }
     }
 
+    /// Migrated VS Code copies count a request once in either parse path, and
+    /// an OTEL row still takes precedence over both session-file copies.
+    #[test]
+    #[serial_test::serial]
+    fn copilot_vscode_copies_dedup_and_yield_to_otel() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let otel = source_home.path().join(".copilot/otel");
+        std::fs::create_dir_all(&otel).unwrap();
+        std::fs::write(
+            otel.join("copilot.jsonl"),
+            r#"{"type":"span","traceId":"11111111111111111111111111111111","spanId":"1111111111111111","name":"chat gpt-4o","startTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-4o","gen_ai.conversation.id":"961e8400-e29b-41d4-a716-446655440008","gen_ai.usage.input_tokens":40}}"#,
+        )
+        .unwrap();
+
+        let workspace_sessions = source_home
+            .path()
+            .join("AppData/Roaming/Code/User/workspaceStorage/2f1c9a/chatSessions");
+        let empty_window_sessions = source_home
+            .path()
+            .join("AppData/Roaming/Code/User/globalStorage/emptyWindowChatSessions");
+        std::fs::create_dir_all(&workspace_sessions).unwrap();
+        std::fs::create_dir_all(&empty_window_sessions).unwrap();
+        let contents = "{\"kind\":0,\"v\":{\"requests\":[{\"timestamp\":1775934260000,\"modelId\":\"copilot/gpt-4o\",\"promptTokens\":999},{\"timestamp\":1775934261000,\"modelId\":\"copilot/gpt-4o\",\"promptTokens\":50}]}}\n";
+        let file_name = "961e8400-e29b-41d4-a716-446655440008.jsonl";
+        std::fs::write(workspace_sessions.join(file_name), contents).unwrap();
+        std::fs::write(empty_window_sessions.join(file_name), contents).unwrap();
+
+        let clients = ["copilot".to_string()];
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        let mut streamed_rows = messages
+            .iter()
+            .map(|message| (message.timestamp, message.tokens.input))
+            .collect::<Vec<_>>();
+        streamed_rows.sort_unstable();
+        assert_eq!(
+            streamed_rows,
+            vec![(1775934260000, 40), (1775934261000, 50)]
+        );
+
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        let mut direct_rows = direct
+            .messages
+            .iter()
+            .map(|message| (message.timestamp, message.input))
+            .collect::<Vec<_>>();
+        direct_rows.sort_unstable();
+        assert_eq!(direct_rows, streamed_rows);
+        assert_eq!(direct.counts.get(ClientId::Copilot), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn copilot_store_turns_only_overlap_file_turns_in_both_scan_paths() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let copilot_dir = source_home.path().join(".copilot");
+        let event_dir = copilot_dir.join("session-state/mixed");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        // Deliberately out of timestamp order: the shared index must sort it.
+        std::fs::write(
+            event_dir.join("events.jsonl"),
+            concat!(
+                "{\"type\":\"session.start\",\"data\":{\"sessionId\":\"mixed\"},\"timestamp\":\"2026-11-01T11:59:00.000Z\"}\n",
+                "{\"type\":\"session.usage_record\",\"id\":\"later\",\"data\":{\"usage\":{\"model\":\"gpt-4o\",\"inputTokens\":50}},\"timestamp\":\"2026-11-01T12:01:00.000Z\"}\n",
+                "{\"type\":\"session.usage_record\",\"id\":\"earlier\",\"data\":{\"usage\":{\"model\":\"gpt-4o\",\"inputTokens\":40}},\"timestamp\":\"2026-11-01T12:00:00.000Z\"}\n",
+            ),
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(copilot_dir.join("session-store.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, created_at TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER PRIMARY KEY, session_id TEXT, turn_index INTEGER,
+                 model TEXT, copilot_usage_model TEXT, input_tokens INTEGER,
+                 output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                 reasoning_tokens INTEGER, total_nano_aiu INTEGER, duration_ms INTEGER,
+                 created_at TEXT
+             );",
+        )
+        .unwrap();
+        for (session, timestamp, input) in [
+            ("db-only", "2026-11-01T12:00:00.000Z", 100),
+            ("db-only", "2026-11-01T12:00:00.000Z", 100),
+            ("db-only", "2026-11-01T12:00:00.010Z", 100),
+            ("db-only", "2026-11-01T12:00:00.020Z", 100),
+            ("db-only", "2026-11-01T12:00:00.021Z", 100),
+            ("mixed", "2026-11-01T12:00:00.000Z", 999),
+            ("mixed", "2026-11-01T12:00:00.019Z", 999),
+            ("mixed", "2026-11-01T12:00:00.020Z", 999),
+            ("mixed", "2026-11-01T12:00:00.021Z", 30),
+            ("mixed", "2026-11-01T12:00:00.030Z", 31),
+            ("mixed", "2026-11-01T12:01:00.000Z", 999),
+        ] {
+            conn.execute(
+                "INSERT INTO assistant_usage_events
+                 (session_id, turn_index, model, input_tokens, created_at)
+                 VALUES (?1, 0, 'gpt-4o', ?2, ?3)",
+                rusqlite::params![session, input, timestamp],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let clients = ["copilot".to_string()];
+        for pass in ["first", "repeat"] {
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(
+                messages.len(),
+                9,
+                "{pass}: every independent store ID survives"
+            );
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 651);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|m| m.session_id == "db-only")
+                    .count(),
+                5,
+                "a file from another session must not suppress these DB turns"
+            );
+            let mut mixed_inputs = messages
+                .iter()
+                .filter(|m| m.session_id == "mixed")
+                .map(|m| m.tokens.input)
+                .collect::<Vec<_>>();
+            mixed_inputs.sort_unstable();
+            assert_eq!(mixed_inputs, vec![30, 31, 40, 50]);
+            let mut streamed_rows = messages
+                .iter()
+                .map(|m| (m.session_id.clone(), m.timestamp, m.tokens.input))
+                .collect::<Vec<_>>();
+            streamed_rows.sort_unstable();
+            let direct = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(clients.to_vec()),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            assert_eq!(direct.counts.get(ClientId::Copilot), 9, "{pass}");
+            let mut direct_rows = direct
+                .messages
+                .iter()
+                .map(|m| (m.session_id.clone(), m.timestamp, m.input))
+                .collect::<Vec<_>>();
+            direct_rows.sort_unstable();
+            assert_eq!(direct_rows, streamed_rows, "{pass}: scan paths agree");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn copilot_shutdown_tracker_keys_survive_both_scan_paths() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let event_dir = source_home
+            .path()
+            .join(".copilot/session-state/auto-session");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        std::fs::write(
+            event_dir.join("events.jsonl"),
+            concat!(
+                "{\"type\":\"session.start\",\"data\":{\"sessionId\":\"auto-session\"},\"id\":\"start\",\"timestamp\":\"2026-11-01T12:00:00.000Z\"}\n",
+                "{\"type\":\"session.shutdown\",\"id\":\"shutdown\",\"timestamp\":\"2026-11-01T12:01:00.000Z\",\"data\":{\"currentModel\":\"gpt-5.2\",\"modelMetrics\":{\"auto\":{\"usage\":{\"inputTokens\":100,\"outputTokens\":10}},\"gpt-5.2\":{\"usage\":{\"inputTokens\":200,\"outputTokens\":20}}}}}\n",
+            ),
+        )
+        .unwrap();
+        let clients = ["copilot".to_string()];
+        for pass in ["first", "repeat"] {
+            let messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            assert_eq!(
+                messages.len(),
+                2,
+                "{pass}: tracker counters are independent"
+            );
+            assert!(messages.iter().all(|m| m.model_id == "gpt-5.2"));
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 300);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 30);
+            let keys = messages
+                .iter()
+                .map(|m| m.dedup_key.as_deref().unwrap())
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                keys,
+                HashSet::from([
+                    "copilot-session-event:auto-session:shutdown:shutdown:auto",
+                    "copilot-session-event:auto-session:shutdown:shutdown:gpt-5.2",
+                ])
+            );
+
+            let direct = parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(clients.to_vec()),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            assert_eq!(direct.counts.get(ClientId::Copilot), 2, "{pass}");
+            assert!(direct.messages.iter().all(|m| m.model_id == "gpt-5.2"));
+            assert_eq!(direct.messages.iter().map(|m| m.input).sum::<i64>(), 300);
+            assert_eq!(direct.messages.iter().map(|m| m.output).sum::<i64>(), 30);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn copilot_session_state_and_store_db_dedup_and_overlap() {
+        use rusqlite::params;
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        let copilot_dir = source_home.path().join(".copilot");
+        std::fs::create_dir_all(&copilot_dir).unwrap();
+
+        // 1. Session A: File only (multi-model Sol + Luna, active file with incomplete trailing line, checkpoints/shutdowns)
+        let sess_a_dir = copilot_dir.join("session-state/sess-a");
+        std::fs::create_dir_all(&sess_a_dir).unwrap();
+        let sess_a_content = r#"{"type":"session.start","data":{"sessionId":"sess-a","context":{"cwd":"/repo-a"}},"id":"start-a","timestamp":"2026-11-01T10:00:00.000Z"}
+{"type":"session.usage_record","data":{"usage":{"model":"gpt-6.1-sol","inputTokens":1000,"outputTokens":100,"cacheReadTokens":500,"cacheWriteTokens":200,"reasoningTokens":50,"cost":1.0,"copilotUsage":{"totalNanoAiu":50000000000}}},"id":"ev-a1","timestamp":"2026-11-01T10:01:00.000Z"}
+{"type":"session.usage_record","data":{"usage":{"model":"gpt-6-luna","inputTokens":500,"outputTokens":50,"cacheReadTokens":200,"cacheWriteTokens":0,"reasoningTokens":10,"cost":1.0,"copilotUsage":{"totalNanoAiu":10000000000}}},"id":"ev-a2","timestamp":"2026-11-01T10:02:00.000Z"}
+{"type":"session.usage_checkpoint","data":{"accountingSnapshot":{"tokenDetails":{"input":{"tokenCount":9999}}}},"id":"chk-1","timestamp":"2026-11-01T10:02:30.000Z"}
+{"type":"session.shutdown","data":{"modelMetrics":{"gpt-6.1-sol":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":500,"cacheWriteTokens":200,"reasoningTokens":50}}}},"id":"shut-1","timestamp":"2026-11-01T10:03:00.000Z"}
+{"type":"session.usage_record","data":{"usage":{"model":"gpt-6-luna","inputTokens":
+"#;
+        std::fs::write(sess_a_dir.join("events.jsonl"), sess_a_content).unwrap();
+
+        // 2. Session B: DB only
+        let db_path = copilot_dir.join("session-store.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE assistant_usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                turn_index INTEGER,
+                model TEXT NOT NULL,
+                copilot_usage_model TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                total_nano_aiu INTEGER,
+                duration_ms INTEGER,
+                created_at TEXT
+            );
+            "#,
+        )
+        .unwrap();
+
+        conn.execute(
+            r#"
+            INSERT INTO assistant_usage_events (
+                session_id, turn_index, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                total_nano_aiu, duration_ms, created_at
+            ) VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                "sess-b",
+                "gpt-6-luna",
+                300,
+                30,
+                100,
+                50,
+                0,
+                5_000_000_000i64,
+                Some(500),
+                "2026-11-01T11:00:00.000Z"
+            ],
+        )
+        .unwrap();
+
+        // 3. Session C: Overlapping (turn 1 in both, turn 2 only in DB, turn 3 only in file)
+        let sess_c_dir = copilot_dir.join("session-state/sess-c");
+        std::fs::create_dir_all(&sess_c_dir).unwrap();
+        let sess_c_content = r#"{"type":"session.start","data":{"sessionId":"sess-c"},"id":"start-c","timestamp":"2026-11-01T12:00:00.000Z"}
+{"type":"session.usage_record","data":{"usage":{"model":"gpt-6.1-sol","inputTokens":400,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0,"copilotUsage":{"totalNanoAiu":20000000000}}},"id":"ev-c1","timestamp":"2026-11-01T12:01:00.000Z"}
+{"type":"session.usage_record","data":{"usage":{"model":"gpt-6.1-sol","inputTokens":600,"outputTokens":60,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0,"copilotUsage":{"totalNanoAiu":30000000000}}},"id":"ev-c3","timestamp":"2026-11-01T12:03:00.000Z"}
+"#;
+        std::fs::write(sess_c_dir.join("events.jsonl"), sess_c_content).unwrap();
+
+        // Turn 1 in DB matches ev-c1 with slight ms jitter (12:01:00.005Z vs 12:01:00.000Z)
+        conn.execute(
+            r#"
+            INSERT INTO assistant_usage_events (
+                session_id, turn_index, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                total_nano_aiu, duration_ms, created_at
+            ) VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                "sess-c",
+                "gpt-6.1-sol",
+                400,
+                40,
+                0,
+                0,
+                0,
+                20_000_000_000i64,
+                Some(400),
+                "2026-11-01T12:01:00.005Z"
+            ],
+        )
+        .unwrap();
+
+        // Turn 2 is ONLY in DB (e.g. rotated out of file)
+        conn.execute(
+            r#"
+            INSERT INTO assistant_usage_events (
+                session_id, turn_index, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                total_nano_aiu, duration_ms, created_at
+            ) VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                "sess-c",
+                "gpt-6.1-sol",
+                500,
+                50,
+                0,
+                0,
+                0,
+                25_000_000_000i64,
+                Some(500),
+                "2026-11-01T12:02:00.000Z"
+            ],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        let clients = ["copilot".to_string()];
+        let messages = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+
+        // sess-a: 2 records (1000-500-200=300 input, 500-200=300 input)
+        // sess-b: 1 record (300-100-50=150 input)
+        // sess-c: exactly 3 records (c1 [overlap counted once], c2 [from DB], c3 [from file])
+        // Total messages: 2 + 1 + 3 = 6
+        assert_eq!(messages.len(), 6);
+
+        let a_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.session_id == "sess-a")
+            .collect();
+        assert_eq!(a_msgs.len(), 2);
+        assert_eq!(a_msgs[0].tokens.input, 300);
+        assert_eq!(a_msgs[0].tokens.output, 100);
+        assert_eq!(a_msgs[0].tokens.reasoning, 50);
+        assert_eq!(a_msgs[1].tokens.input, 300);
+        assert_eq!(a_msgs[1].tokens.output, 50);
+
+        let b_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.session_id == "sess-b")
+            .collect();
+        assert_eq!(b_msgs.len(), 1);
+        assert_eq!(b_msgs[0].tokens.input, 150);
+
+        let c_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.session_id == "sess-c")
+            .collect();
+        assert_eq!(c_msgs.len(), 3);
+
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(clients.to_vec()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(direct.counts.get(ClientId::Copilot), 6);
+        assert_eq!(direct.messages.len(), 6);
+    }
+
     #[test]
     #[serial_test::serial]
     fn copilot_cross_file_anonymous_rows_survive_cached_and_direct_lanes() {
@@ -9784,7 +11579,7 @@ mod tests {
                 },
                 0.0,
             );
-            msg.date = date.to_string();
+            msg.date = date.to_string().into();
             msg
         };
         let tz = crate::BucketTimezone::default();
@@ -9842,7 +11637,7 @@ mod tests {
                 },
                 0.0,
             );
-            message.date = date.to_string();
+            message.date = date.to_string().into();
             message
         };
 
@@ -10512,6 +12307,78 @@ mod tests {
         assert!(take_missing_codex_usage_warnings().is_empty());
         parse_all_messages_with_pricing(home, &[], None);
         assert_eq!(take_missing_codex_usage_warnings().len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn missing_codex_usage_warning_ignores_codex_review_parent_but_tracks_failed_subagent() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let mut tui = crate::tui_signal::TuiActiveGuard::capture();
+        tui.set(true);
+        let sessions = source_home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        // 1. Review parent rollout: has EnteredReviewMode, no turn_context, activity mirrored from subagent.
+        let review_parent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.100Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000001","timestamp":"2026-09-01T10:00:00.000Z","cwd":"/repo","originator":"codex_exec","cli_version":"0.154.0","source":"exec","thread_source":"user","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:00.100Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-7000-8000-000000000001","turn_id":"rollout-1","item":{"type":"EnteredReviewMode","id":"item-1"}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review findings."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:02:00.010Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"No issues found."}]}}"#,
+            "\n"
+        );
+        std::fs::write(sessions.join("review_parent.jsonl"), review_parent).unwrap();
+
+        // 2. Review subagent rollout: metered with CODEX_SUBAGENT_AGENT.
+        let review_subagent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000002","session_id":"00000000-0000-7000-8000-000000000001","source":{"subagent":"review"},"thread_source":"subagent","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"turn_context","payload":{"turn_id":"turn-sub-1","model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:01:59.950Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":100,"reasoning_output_tokens":0,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":100,"reasoning_output_tokens":0,"total_tokens":1100}}}}"#,
+            "\n"
+        );
+        std::fs::write(sessions.join("review_subagent.jsonl"), review_subagent).unwrap();
+
+        let home = source_home.path().to_str().unwrap();
+        // Verify cold and warm cache scans
+        for _ in 0..2 {
+            let messages = parse_all_messages_with_pricing(home, &["codex".to_string()], None);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].agent.as_deref(),
+                Some(crate::sessions::codex::CODEX_SUBAGENT_AGENT)
+            );
+            assert!(
+                take_missing_codex_usage_warnings().is_empty(),
+                "review parent must not trigger missing usage diagnostic warning"
+            );
+        }
+
+        // 3. Failed review subagent rollout without tokens: must trigger diagnostic warning.
+        let failed_subagent = concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00.150Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000003","session_id":"00000000-0000-7000-8000-000000000001","source":{"subagent":"review"},"thread_source":"subagent"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Failed before model call."}]}}"#,
+            "\n"
+        );
+        std::fs::write(sessions.join("failed_subagent.jsonl"), failed_subagent).unwrap();
+
+        for _ in 0..2 {
+            let messages = parse_all_messages_with_pricing(home, &["codex".to_string()], None);
+            assert_eq!(messages.len(), 1);
+            let warnings = take_missing_codex_usage_warnings();
+            assert_eq!(
+                warnings.len(),
+                1,
+                "failed review subagent must trigger missing usage warning"
+            );
+            assert!(warnings[0].contains("1 of 3 inspected rollout files"));
+        }
     }
 
     #[test]
@@ -11405,7 +13272,7 @@ mod tests {
         let labeled = |client: &str, session: &str, machine: Option<&str>| {
             let mut message =
                 make_workspace_message(client, "gpt-5.4", "openai", session, 1.0, None, None);
-            message.machine_label = machine.map(str::to_string);
+            message.machine_label = machine.map(super::SharedStr::from);
             message
         };
         let messages = vec![
@@ -11439,7 +13306,7 @@ mod tests {
     fn test_machine_model_rows_serialize_machine_only_when_set() {
         let mut message =
             make_workspace_message("codex", "gpt-5.4", "openai", "s1", 1.0, None, None);
-        message.machine_label = Some("steven".to_string());
+        message.machine_label = Some("steven".to_string().into());
         let machine_rows =
             aggregate_model_usage_entries(vec![message.clone()], &GroupBy::MachineModel);
         let value = serde_json::to_value(&machine_rows[0]).unwrap();
@@ -11606,6 +13473,88 @@ mod tests {
         assert_eq!(entries[0].output, 10);
         assert_eq!(entries[0].cost, 4.0);
         assert_eq!(entries[0].message_count, 2);
+    }
+
+    #[test]
+    fn first_party_provider_prefix_folds_into_the_bare_model_id() {
+        for (raw, canonical) in [
+            ("anthropic/claude-opus-5-5", "claude-opus-5-5"),
+            ("anthropic/claude-sonnet-5.5", "claude-sonnet-5-5"),
+            ("anthropic/claude-opus-4-8-20260101", "claude-opus-4-8"),
+            ("openai-codex/gpt-6.1-sol", "gpt-6.1-sol"),
+            ("openai/gpt-5.4(high)", "gpt-5.4"),
+            ("x-ai/grok-4.7", "grok-4.7"),
+            ("Google/Gemini-3.8-Flash", "gemini-3.8-flash"),
+        ] {
+            assert_eq!(normalize_syntactic(raw), canonical, "{raw}");
+        }
+    }
+
+    #[test]
+    fn prefixes_that_are_part_of_the_model_name_are_kept() {
+        for raw in [
+            // router label: `cohere` does not make `north-mini-code`
+            "cohere/north-mini-code:free",
+            "cline-free/mimo-v2.6-flash",
+            // another vendor's prefix on a model it does not make
+            "openai/claude-opus-5-5",
+            "azure/gpt-4o",
+            "vertex_ai/gemini-2.5-pro",
+            // reseller or nested path
+            "openrouter/anthropic/claude-opus-5-5",
+            "anthropic/claude/opus-5-5",
+            // nothing after the prefix
+            "anthropic/",
+        ] {
+            assert_eq!(normalize_syntactic(raw), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn prefix_is_kept_when_the_family_word_is_only_a_substring() {
+        // The model after the prefix merely contains a family word inside a
+        // longer word, so it is not that vendor's model.
+        for raw in [
+            "mistral/demistralized",
+            "openai/hypergpt-9",
+            "google/ungeminied-1",
+            "xai/ungrokked",
+            "anthropic/preclaude-3",
+        ] {
+            assert_eq!(normalize_syntactic(raw), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn model_grouping_merges_provider_qualified_gateway_ids_across_clients() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "hermes",
+                    "openai-codex/gpt-6.1-sol",
+                    "omp-smoke",
+                    "session-1",
+                    1.25,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "omp",
+                    "gpt-6.1-sol",
+                    "openai",
+                    "session-2",
+                    2.75,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::Model,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "gpt-6.1-sol");
+        assert_eq!(entries[0].message_count, 2);
+        assert_eq!(entries[0].cost, 4.0);
     }
 
     #[test]
@@ -12222,6 +14171,17 @@ mod tests {
         );
         assert_eq!(round_tripped.cost, 2.5);
         assert_eq!(round_tripped.duration_ms, Some(2500));
+        assert!(parsed.client.shares_allocation_with(&unified.client));
+        assert!(parsed
+            .workspace_key
+            .as_ref()
+            .unwrap()
+            .shares_allocation_with(unified.workspace_key.as_ref().unwrap()));
+        assert!(round_tripped
+            .workspace_label
+            .as_ref()
+            .unwrap()
+            .shares_allocation_with(unified.workspace_label.as_ref().unwrap()));
     }
 
     #[test]
@@ -12456,8 +14416,8 @@ mod tests {
 
         // A physical target can have different gateway identity, but the
         // client filter must retain the selected source Codex row.
-        message.model_id = "served-model-fixture".to_string();
-        message.provider_id = "openai".to_string();
+        message.model_id = "served-model-fixture".to_string().into();
+        message.provider_id = "openai".to_string().into();
         assert!(!matches_flush_filter(&message, &context));
 
         let mut buffer = vec![message];
@@ -12492,6 +14452,411 @@ mod tests {
         assert!(!retain_for_requested_clients(
             "kilocode", "gpt-5", "openai", &kilo_only
         ));
+    }
+
+    fn write_cursor_recount_fixtures(home: &Path) -> (PathBuf, PathBuf) {
+        let cursor_cache_dir = home.join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+        let json_path = cursor_cache_dir.join("usage.json");
+        let csv_path = cursor_cache_dir.join("usage.legacy.csv");
+        let row = |timestamp: i64,
+                   event_id: Option<&str>,
+                   conversation: &str,
+                   model: &str,
+                   input: i64,
+                   cents: f64| {
+            let mut row = serde_json::json!({
+                "timestamp": timestamp.to_string(),
+                "model": model,
+                "chargedCents": cents,
+                "tokenUsage": {
+                    "inputTokens": input,
+                    "outputTokens": 0,
+                    "totalCents": cents,
+                },
+                "conversationId": conversation,
+            });
+            if let Some(event_id) = event_id {
+                row["usageEventId"] = serde_json::json!(event_id);
+            }
+            row
+        };
+        let timestamp = 1_792_841_120_156_i64;
+        let json = serde_json::json!({
+            "usageEventsDisplay": [
+                row(timestamp, Some("event-a"), "conversation-a", "gpt-5", 100, 100.0),
+                // Matches event-a by parsed (session, model, timestamp) and loses.
+                row(timestamp, None, "conversation-a", "gpt-5", 50, 50.0),
+                row(timestamp + 1, Some("event-b"), "conversation-a", "gpt-5", 200, 200.0),
+                // No identified fallback match: generation 2 keeps it independently.
+                row(timestamp + 2, None, "conversation-unmatched", "gpt-5", 30, 30.0),
+                row(
+                    timestamp + 3,
+                    Some("event-c"),
+                    "conversation-c",
+                    "Claude-3.7-Sonnet-20250219",
+                    40,
+                    40.0,
+                ),
+                // Matches event-c and wins because its token total is larger.
+                row(
+                    timestamp + 3,
+                    None,
+                    "conversation-c",
+                    "Claude-3.7-Sonnet-20250219",
+                    60,
+                    60.0,
+                ),
+            ]
+        });
+        std::fs::write(&json_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        std::fs::write(
+            &csv_path,
+            concat!(
+                "Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n",
+                "\"2026-10-24T12:00:00.000Z\",\"On-Demand\",\"legacy-cursor-model\",\"No\",\"7\",\"11\",\"13\",\"17\",\"48\",\"$0.12\"",
+            ),
+        )
+        .unwrap();
+        (json_path, csv_path)
+    }
+
+    fn cursor_proof_cells(
+        messages: &[UnifiedMessage],
+    ) -> std::collections::BTreeMap<(String, String), super::RecountProofCell> {
+        let mut cells = std::collections::BTreeMap::new();
+        for message in messages {
+            cells
+                .entry((
+                    message.date.to_string(),
+                    super::canonical_model_id(&message.model_id),
+                ))
+                .or_insert_with(super::RecountProofCell::default)
+                .add(message);
+        }
+        cells
+    }
+
+    #[test]
+    fn recount_proof_cells_saturate_extreme_cursor_rows() {
+        let mut message = UnifiedMessage::new(
+            "cursor",
+            "gpt-5",
+            "openai",
+            "session",
+            1_792_841_120_156,
+            TokenBreakdown {
+                input: i64::MAX,
+                output: i64::MAX,
+                cache_read: i64::MAX,
+                cache_write: i64::MAX,
+                cache_write_1h: i64::MAX,
+                reasoning: i64::MAX,
+            },
+            f64::MAX,
+        );
+        message.message_count = i32::MAX;
+        let mut cell = super::RecountProofCell::default();
+
+        cell.add(&message);
+        cell.add(&message);
+
+        assert_eq!(cell.tokens.input, i64::MAX);
+        assert_eq!(cell.tokens.output, i64::MAX);
+        assert_eq!(cell.tokens.cache_read, i64::MAX);
+        assert_eq!(cell.tokens.cache_write, i64::MAX);
+        assert_eq!(cell.tokens.cache_write_1h, i64::MAX);
+        assert_eq!(cell.tokens.reasoning, i64::MAX);
+        assert_eq!(cell.messages, i32::MAX);
+        assert_eq!(cell.cost, f64::MAX);
+        assert!(cell.cost.is_finite());
+    }
+
+    #[test]
+    fn cursor_cached_lane_keeps_parser_v4_messages_and_proves_every_v1_row() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let (json_path, csv_path) = write_cursor_recount_fixtures(source_home.path());
+        let mut previous_rows = sessions::cursor::parse_cursor_file(&json_path);
+        previous_rows.extend(sessions::cursor::parse_cursor_file(&csv_path));
+        let mut expected = sessions::cursor::parse_cursor_file_deduped(&json_path);
+        expected.extend(sessions::cursor::parse_cursor_file_deduped(&csv_path));
+
+        assert_eq!(previous_rows.len(), 7, "generation 1 counts every row");
+        assert_eq!(
+            expected.len(),
+            5,
+            "generation 2 keeps one snapshot per event"
+        );
+
+        let mut messages = Vec::new();
+        let outcome = super::parse_all_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
+            &mut messages,
+        );
+
+        assert_eq!(
+            messages, expected,
+            "the dedicated lane must preserve parser-v4 reports"
+        );
+        let proof = outcome.recount_proofs.get("cursor").expect("cursor proof");
+        let previous = cursor_proof_cells(&previous_rows);
+        let corrected = cursor_proof_cells(&expected);
+        for ((date, model), cell) in &previous {
+            assert_eq!(
+                &proof[date][model].previous, cell,
+                "previous {date}/{model}"
+            );
+        }
+        for ((date, model), cell) in &corrected {
+            assert_eq!(
+                &proof[date][model].corrected, cell,
+                "corrected {date}/{model}"
+            );
+        }
+
+        let date = &messages[0].date;
+        let gpt = &proof[date.as_str()]["gpt-5"];
+        assert_eq!(gpt.previous.tokens.input, 380);
+        assert_eq!(gpt.corrected.tokens.input, 330);
+        assert_eq!(gpt.previous.messages, 4);
+        assert_eq!(gpt.corrected.messages, 3);
+        let claude = &proof[date.as_str()]["claude-3-7-sonnet"];
+        assert_eq!(claude.previous.tokens.input, 100);
+        assert_eq!(claude.corrected.tokens.input, 60);
+        assert_eq!(claude.previous.messages, 2);
+        assert_eq!(claude.corrected.messages, 1);
+        let legacy = &proof[date.as_str()]["legacy-cursor-model"];
+        assert_eq!(legacy.previous, legacy.corrected);
+        assert_eq!(legacy.corrected.tokens.input, 11);
+        assert_eq!(legacy.corrected.tokens.cache_write, 7);
+        assert_eq!(legacy.corrected.tokens.cache_read, 13);
+        assert_eq!(legacy.corrected.tokens.output, 17);
+        assert_eq!(outcome.source_reads["cursor"].discovered, 2);
+        assert_eq!(outcome.source_reads["cursor"].unreadable, 0);
+    }
+
+    #[test]
+    fn cursor_recount_collapse_is_per_file_even_when_event_ids_repeat() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cursor_cache_dir = source_home.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+        for (name, first, second) in [("usage.json", 10, 20), ("usage.account.json", 30, 40)] {
+            let json = serde_json::json!({
+                "usageEventsDisplay": [
+                    {
+                        "timestamp": "1792841120156",
+                        "model": "gpt-5",
+                        "usageEventId": "same-id-in-two-account-files",
+                        "chargedCents": first,
+                        "tokenUsage": { "inputTokens": first, "totalCents": first },
+                        "conversationId": "same-conversation",
+                    },
+                    {
+                        "timestamp": "1792841120156",
+                        "model": "gpt-5",
+                        "usageEventId": "same-id-in-two-account-files",
+                        "chargedCents": second,
+                        "tokenUsage": { "inputTokens": second, "totalCents": second },
+                        "conversationId": "same-conversation",
+                    },
+                ]
+            });
+            std::fs::write(
+                cursor_cache_dir.join(name),
+                serde_json::to_vec(&json).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let mut messages = Vec::new();
+        let outcome = super::parse_all_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
+            &mut messages,
+        );
+
+        let mut kept_inputs: Vec<_> = messages
+            .iter()
+            .map(|message| message.tokens.input)
+            .collect();
+        kept_inputs.sort_unstable();
+        assert_eq!(kept_inputs, vec![20, 40]);
+        let date = &messages[0].date;
+        let entry = &outcome.recount_proofs["cursor"][date.as_str()]["gpt-5"];
+        assert_eq!(entry.previous.tokens.input, 100);
+        assert_eq!(entry.corrected.tokens.input, 60);
+        assert_eq!(entry.previous.messages, 4);
+        assert_eq!(entry.corrected.messages, 2);
+    }
+
+    #[test]
+    fn cursor_snapshot_winner_uses_raw_cost_before_local_pricing() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cursor_cache_dir = source_home.path().join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cursor_cache_dir).unwrap();
+        let json = serde_json::json!({
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gpt-5",
+                    "usageEventId": "equal-token-event",
+                    "tokenUsage": { "inputTokens": 100, "outputTokens": 0 },
+                    "conversationId": "conversation",
+                },
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gpt-5",
+                    "usageEventId": "equal-token-event",
+                    "tokenUsage": { "inputTokens": 0, "outputTokens": 100 },
+                    "conversationId": "conversation",
+                },
+            ]
+        });
+        std::fs::write(
+            cursor_cache_dir.join("usage.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-5".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.01),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+
+        let mut messages = Vec::new();
+        super::parse_all_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::InMemory,
+            &mut messages,
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].cost_source, sessions::CostSource::Estimated);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cursor_recount_proof_and_messages_match_on_cold_and_warm_cache_hits() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let (json_path, _) = write_cursor_recount_fixtures(source_home.path());
+        let _parse_counter =
+            sessions::cursor::register_parse_cursor_file_counter(source_home.path());
+
+        let mut cold_messages = Vec::new();
+        let cold = super::parse_all_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+            &mut cold_messages,
+        );
+        assert_eq!(
+            sessions::cursor::parse_cursor_file_call_count(source_home.path()),
+            2,
+            "the cold scan parses both JSON and legacy CSV sources",
+        );
+        let persisted = message_cache::SourceMessageCache::load();
+        let raw_cached = persisted
+            .get(
+                message_cache::CacheIdentity::for_client(ClientId::Cursor),
+                &json_path,
+            )
+            .expect("raw Cursor rows cached");
+        assert_eq!(
+            raw_cached.messages.len(),
+            6,
+            "the cache must retain snapshots the lane drops",
+        );
+
+        let mut warm_messages = Vec::new();
+        let warm = super::parse_all_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["cursor".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            SourceCachePolicy::Persistent,
+            &mut warm_messages,
+        );
+
+        assert_eq!(warm_messages, cold_messages);
+        assert_eq!(warm.recount_proofs, cold.recount_proofs);
+        assert_eq!(warm.source_reads, cold.source_reads);
+        assert_eq!(
+            sessions::cursor::parse_cursor_file_call_count(source_home.path()),
+            2,
+            "a warm cache hit must not call the row parser again",
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cursor_scan_reports_sources_the_parser_silently_returns_as_empty() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        write_cursor_recount_fixtures(source_home.path());
+        let broken_path = source_home
+            .path()
+            .join(".config/tokscale/cursor-cache/usage.broken.json");
+        std::fs::write(&broken_path, r#"{"usageEventsDisplay":"not-an-array"}"#).unwrap();
+        assert!(sessions::cursor::parse_cursor_file(&broken_path).is_empty());
+        assert!(sessions::cursor::parse_cursor_file_checked(&broken_path).is_none());
+        let broken_csv = source_home
+            .path()
+            .join(".config/tokscale/cursor-cache/usage.malformed.csv");
+        std::fs::write(
+            &broken_csv,
+            "Date,Model
+",
+        )
+        .unwrap();
+        assert!(sessions::cursor::parse_cursor_file(&broken_csv).is_empty());
+        assert!(sessions::cursor::parse_cursor_file_checked(&broken_csv).is_none());
+
+        // A readable source is cached on the first scan and served warm on the
+        // second; the broken ones are never cached, so every scan reads them
+        // again and still reports them.
+        for scan in ["cold", "warm"] {
+            let mut messages = Vec::new();
+            let outcome = super::parse_all_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["cursor".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                SourceCachePolicy::Persistent,
+                &mut messages,
+            );
+
+            assert_eq!(outcome.source_reads["cursor"].discovered, 4, "{scan} scan");
+            assert_eq!(outcome.source_reads["cursor"].unreadable, 2, "{scan} scan");
+            assert!(!outcome.source_reads["cursor"].complete(), "{scan} scan");
+        }
     }
 
     #[test]
@@ -14737,8 +17102,10 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        // A Freebuff chat: marked by its `base2-free*` root agent id, with no
-        // authoritative usage — only estimated text.
+        // A Freebuff chat: marked by its free root agent id, with no
+        // authoritative usage — only estimated text. Uses the v3 family the
+        // current Freebuff CLI writes; the parser must not depend on the v2
+        // `base2-free*` spelling.
         let freebuff_chat = manicode
             .join("projects")
             .join("proj")
@@ -14751,7 +17118,7 @@ mod tests {
                 { "variant": "user", "content": "hello world", "timestamp": "2026-08-07T13:00:00.000Z" },
                 { "variant": "ai", "timestamp": "2026-08-07T13:01:00.000Z", "blocks": [ { "content": "Hello!" } ],
                   "metadata": { "runState": { "sessionState": { "mainAgentState": {
-                      "agentType": "base2-free-deepseek-flash" } } } } }
+                      "agentType": "base3-free-catalog" } } } } }
             ]"#,
         )
         .unwrap();
@@ -15170,7 +17537,7 @@ mod tests {
             "the matching year must keep the fx row"
         );
         assert_eq!(
-            fx_rows(Some(expected_date.clone()), None, None).len(),
+            fx_rows(Some(expected_date.to_string()), None, None).len(),
             1,
             "a since cutoff on the row's own day must keep it"
         );
@@ -15264,7 +17631,7 @@ mod tests {
                 },
                 0.0,
             );
-            stale_message.date = "1900-01-01".to_string();
+            stale_message.date = "1900-01-01".to_string().into();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -16216,8 +18583,8 @@ mod tests {
             .iter()
             .map(|message| {
                 (
-                    message.client.clone(),
-                    message.session_id.clone(),
+                    message.client.to_string(),
+                    message.session_id.to_string(),
                     message.tokens.input,
                     message.tokens.cache_read,
                     message.tokens.output,
@@ -16325,7 +18692,7 @@ mod tests {
         let mut uncached: Vec<(String, i64, i64)> = parsed
             .messages
             .iter()
-            .map(|m| (m.session_id.clone(), m.input, m.output))
+            .map(|m| (m.session_id.to_string(), m.input, m.output))
             .collect();
         uncached.sort();
         assert_eq!(
@@ -18376,8 +20743,7 @@ mod tests {
             &rollout,
             transcript
                 .replace("gpt-5.2", "combo/aggregate-fixture")
-                // Keep the equal-token sibling outside the 30s late-usage window.
-                .replace("2026-04-30T11:00:03Z", "2026-04-30T11:01:10Z"),
+                .replace("2026-04-30T11:00:03Z", "2026-04-30T11:00:10Z"),
         )
         .unwrap();
 
@@ -18502,6 +20868,407 @@ mod tests {
                 })
                 .sum();
             assert_eq!(grouped_tokens, original_tokens);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn magpie_attributes_codex_compaction_without_changing_token_totals() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+        let sessions = home.join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("rollout.jsonl"), concat!(
+            r#"{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{"id":"fixture-session","source":"vscode","model_provider":"openai"}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"group/auto"}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:02Z","type":"token_usage_record","payload":{"thread_id":"fixture-session","turn_id":"turn-1","response_id":"resp-compaction","usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":540}}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:03Z","type":"compacted","payload":{"message":"","replacement_history":[]}}"#, "\n",
+            r#"{"timestamp":"2026-10-01T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}"#, "\n"
+        )).unwrap();
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(ledger.join("usage.jsonl"), concat!(
+            r#"{"agent":"codex","response_id":"resp-compaction","provider":"openai","served":"gpt-fixture","req":"group/auto","in":300,"out":40,"cache_read":200,"reasoning":10,"status":200}"#, "\n"
+        )).unwrap();
+        let clients = ["codex".to_string()];
+        let pricing = pricing::PricingService::new(
+            HashMap::from([(
+                "gpt-fixture".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.01),
+                    output_cost_per_token: Some(0.01),
+                    cache_read_input_token_cost: Some(0.01),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        for _ in 0..2 {
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 540);
+            assert_eq!(messages[0].model_id, "gpt-fixture");
+            assert!((messages[0].cost - 5.4).abs() < 1e-9);
+        }
+
+        let row = serde_json::json!({
+            "agent": "codex", "response_id": "resp-compaction", "provider": "openai",
+            "served": "gpt-fixture", "req": "group/auto", "in": 300, "out": 40,
+            "cache_read": 200, "reasoning": 10, "status": 200
+        });
+        for (field, value) in [
+            ("err", serde_json::json!("stream failed")),
+            ("status", serde_json::json!(500)),
+            ("agent", serde_json::json!("claude")),
+            ("served", serde_json::json!("group/auto-example")),
+            ("served", serde_json::json!("group/auto")),
+            ("in", serde_json::json!(301)),
+            ("reasoning", serde_json::json!(9)),
+            ("source", serde_json::json!("reported")),
+            ("computer", serde_json::json!("remote-machine")),
+            ("via", serde_json::json!("remote-machine")),
+            ("handed_on", serde_json::json!(true)),
+        ] {
+            let mut invalid = row.clone();
+            invalid[field] = value;
+            std::fs::write(ledger.join("usage.jsonl"), format!("{invalid}\n")).unwrap();
+            let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+            assert_eq!(messages[0].tokens.total(), 540, "{field}");
+            assert_eq!(messages[0].model_id, "group/auto", "{field}");
+        }
+        std::fs::write(ledger.join("usage.jsonl"), format!("{row}\n{row}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(messages[0].model_id, "group/auto", "duplicate response ID");
+
+        std::fs::write(ledger.join("usage.jsonl"), format!("{row}\n")).unwrap();
+        let opencodex = home.join(".opencodex");
+        std::fs::create_dir_all(&opencodex).unwrap();
+        let mut other = serde_json::json!({
+            "provider":"combo", "requestedModel":"group/auto", "servedModel":"other-model",
+            "inboundProtocol":"responses", "timestamp":1790812802000_i64,
+            "durationMs":0, "status":200,
+            "attempts":[{"ordinal":1,"provider":"other-provider","model":"other-model",
+                "adapter":"fixture","status":200,"durationMs":0,"sendCount":1,
+                "usageStatus":"reported","usage":{"inputTokens":500,"outputTokens":40,
+                "totalTokens":540,"cachedInputTokens":200,"reasoningOutputTokens":10}}]
+        });
+        std::fs::write(opencodex.join("usage.jsonl"), format!("{other}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(
+            messages[0].model_id, "other-model",
+            "existing OpenCodex attribution wins"
+        );
+
+        let first = other.clone();
+        other["servedModel"] = serde_json::json!("another-model");
+        std::fs::write(opencodex.join("usage.jsonl"), format!("{first}\n{other}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(
+            messages[0].model_id, "group/auto",
+            "ambiguous OpenCodex claims stay unresolved"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn magpie_attributes_omp_responses_without_changing_token_totals() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+        let omp_sessions = home.join(".omp/agent/sessions/--test-workspace--");
+        std::fs::create_dir_all(&omp_sessions).unwrap();
+        let session_file = omp_sessions.join("session.jsonl");
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":"stop","usage":{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}"#, "\n"
+        )).unwrap();
+
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(ledger.join("usage.jsonl"), concat!(
+            r#"{"agent":"omp","response_id":"resp-omp-1","provider":"openai","served":"gpt-fixture","req":"group/auto","in":300,"out":40,"cache_read":200,"reasoning":10,"status":200}"#, "\n"
+        )).unwrap();
+
+        let clients = ["omp".to_string()];
+        let pricing = pricing::PricingService::new(
+            HashMap::from([(
+                "gpt-fixture".to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(0.01),
+                    output_cost_per_token: Some(0.01),
+                    cache_read_input_token_cost: Some(0.01),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+
+        // Cold and warm scans must agree on attribution, cost, and usage totals.
+        // Also verifies that Magpie rows carrying reasoning counters for OMP requests
+        // are successfully matched without altering token totals.
+        for _ in 0..2 {
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tokens.total(), 540);
+            assert_eq!(messages[0].model_id, "gpt-fixture");
+            assert_eq!(messages[0].provider_id, "openai");
+            assert_eq!(messages[0].billing_identity.id(), Some("custom-billing"));
+            assert!((messages[0].cost - 5.4).abs() < 1e-9);
+        }
+
+        // Test alternative valid completion reasons: toolUse, length, tool_calls, tool_call, toolcalls
+        for valid_stop in ["toolUse", "length", "tool_calls", "tool_call", "toolcalls"] {
+            std::fs::write(&session_file, format!(concat!(
+                r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
+                r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":"{}","usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
+            ), valid_stop)).unwrap();
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(
+                messages[0].model_id, "gpt-fixture",
+                "valid stopReason {valid_stop}"
+            );
+            assert_eq!(messages[0].tokens.total(), 540);
+        }
+
+        // Test finish_reason / finishReason aliases
+        for (field, val) in [("finishReason", "stop"), ("finish_reason", "tool_calls")] {
+            std::fs::write(&session_file, format!(concat!(
+                r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
+                r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","{}":"{}","usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
+            ), field, val)).unwrap();
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages[0].model_id, "gpt-fixture", "valid alias {field}");
+            assert_eq!(messages[0].tokens.total(), 540);
+        }
+
+        // Test invalid or non-string stopReason (missing completion evidence / failed client stream)
+        for invalid_stop in [
+            r#""error""#,
+            r#""abort""#,
+            "null",
+            "false",
+            "123",
+            r#"{"status":"failed"}"#,
+            "[]",
+        ] {
+            std::fs::write(&session_file, format!(concat!(
+                r#"{{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}}"#, "\n",
+                r#"{{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":{},"usage":{{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}}}}"#, "\n"
+            ), invalid_stop)).unwrap();
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages[0].tokens.total(), 540);
+            assert_eq!(
+                messages[0].model_id, "group/auto",
+                "failed stopReason {invalid_stop}"
+            );
+        }
+
+        // Entirely missing stopReason field
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","usage":{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}"#, "\n"
+        )).unwrap();
+        let messages =
+            parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+        assert_eq!(messages[0].tokens.total(), 540);
+        assert_eq!(messages[0].model_id, "group/auto", "missing stopReason");
+
+        // Restore valid session message
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-1","stopReason":"stop","usage":{"input":300,"output":40,"cacheRead":200,"cacheWrite":0,"totalTokens":540}}}"#, "\n"
+        )).unwrap();
+
+        // Gateway failure / mismatch checks
+        let row = serde_json::json!({
+            "agent": "omp", "response_id": "resp-omp-1", "provider": "openai",
+            "served": "gpt-fixture", "req": "group/auto", "in": 300, "out": 40,
+            "cache_read": 200, "status": 200
+        });
+        for (field, value) in [
+            ("err", serde_json::json!("stream failed")),
+            ("status", serde_json::json!(500)),
+            ("agent", serde_json::json!("codex")),
+            ("served", serde_json::json!("group/auto-example")),
+            ("served", serde_json::json!("group/auto")),
+            ("served", serde_json::json!("auto")),
+            ("req", serde_json::json!("mismatched/model")),
+            ("in", serde_json::json!(301)),
+            ("out", serde_json::json!(41)),
+            ("cache_read", serde_json::json!(201)),
+            ("reasoning", serde_json::json!(45)),
+            ("reasoning", serde_json::json!(-1)),
+            ("source", serde_json::json!("reported")),
+            ("computer", serde_json::json!("remote-machine")),
+            ("via", serde_json::json!("remote-machine")),
+            ("rejected", serde_json::json!(true)),
+            ("handed_on", serde_json::json!(true)),
+        ] {
+            let mut invalid = row.clone();
+            invalid[field] = value;
+            std::fs::write(ledger.join("usage.jsonl"), format!("{invalid}\n")).unwrap();
+            let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+            assert_eq!(messages[0].tokens.total(), 540, "{field}");
+            assert_eq!(messages[0].model_id, "group/auto", "{field}");
+        }
+
+        // Duplicate response ID in Magpie ledger
+        std::fs::write(ledger.join("usage.jsonl"), format!("{row}\n{row}\n")).unwrap();
+        let messages = parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, None);
+        assert_eq!(messages[0].tokens.total(), 540);
+        assert_eq!(
+            messages[0].model_id, "group/auto",
+            "duplicate Magpie response ID"
+        );
+
+        // Retries: Failed client stream + retry attempt with distinct ID.
+        // Test that cold and warm scans agree across retries.
+        std::fs::write(ledger.join("usage.jsonl"), concat!(
+            r#"{"agent":"omp","response_id":"resp-retry-success","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":20,"cache_read":0,"status":200}"#, "\n"
+        )).unwrap();
+        std::fs::write(&session_file, concat!(
+            r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#, "\n",
+            r#"{"type":"message","id":"msg-failed","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-retry-failed","stopReason":"error","usage":{"input":100,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":105}}}"#, "\n",
+            r#"{"type":"message","id":"msg-success","timestamp":"2026-10-01T00:00:05Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-retry-success","stopReason":"stop","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}"#, "\n"
+        )).unwrap();
+        for _ in 0..2 {
+            let messages =
+                parse_all_messages_with_pricing(home.to_str().unwrap(), &clients, Some(&pricing));
+            assert_eq!(messages.len(), 2);
+            let failed_msg = messages.iter().find(|m| m.tokens.total() == 105).unwrap();
+            let success_msg = messages.iter().find(|m| m.tokens.total() == 120).unwrap();
+            assert_eq!(failed_msg.model_id, "group/auto");
+            assert_eq!(success_msg.model_id, "gpt-fixture");
+            let total_tokens: i64 = messages.iter().map(|m| m.tokens.total()).sum();
+            assert_eq!(total_tokens, 225, "usage totals preserved across retry");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_local_clients_attributes_omp_from_magpie() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let sessions = home.join(".omp/agent/sessions/--test-workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("session.jsonl"),
+            concat!(
+                r#"{"type":"session","version":3,"id":"omp-session-1","timestamp":"2026-10-01T00:00:00Z","cwd":"/work"}"#,
+                "\n",
+                r#"{"type":"message","id":"msg-1","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","model":"group/auto","provider":"custom-billing","responseId":"resp-omp-local","stopReason":"stop","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":120}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let ledger = home.join(".config/magpie");
+        std::fs::create_dir_all(&ledger).unwrap();
+        std::fs::write(
+            ledger.join("usage.jsonl"),
+            concat!(
+                r#"{"agent":"omp","response_id":"resp-omp-local","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":20,"status":200}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["omp".to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].model_id, "gpt-fixture");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn magpie_rejects_conflicting_omp_response_copies_in_both_file_orders() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+
+        for (case, first_output, second_output, expected_model) in [
+            ("matching-first", 20, 21, "group/auto"),
+            ("conflicting-first", 21, 20, "group/auto"),
+            ("equivalent-copies", 20, 20, "gpt-fixture"),
+        ] {
+            let source_home = tempfile::TempDir::new().unwrap();
+            let home = source_home.path();
+            let sessions = home.join(".omp/agent/sessions/--test-workspace--");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let response_id = format!("resp-{case}");
+            let record = |session: &str, output: i64| {
+                let session = serde_json::json!({
+                    "type": "session",
+                    "version": 3,
+                    "id": session,
+                    "timestamp": "2026-10-01T00:00:00Z",
+                    "cwd": "/work"
+                });
+                let message = serde_json::json!({
+                    "type": "message",
+                    "id": "msg-1",
+                    "timestamp": "2026-10-01T00:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "model": "group/auto",
+                        "provider": "custom-billing",
+                        "responseId": response_id,
+                        "stopReason": "stop",
+                        "usage": {
+                            "input": 100,
+                            "output": output,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 100 + output
+                        }
+                    }
+                });
+                format!("{session}\n{message}\n")
+            };
+            std::fs::write(
+                sessions.join("session-a.jsonl"),
+                record("session-a", first_output),
+            )
+            .unwrap();
+            std::fs::write(
+                sessions.join("session-b.jsonl"),
+                record("session-b", second_output),
+            )
+            .unwrap();
+
+            let ledger = home.join(".config/magpie");
+            std::fs::create_dir_all(&ledger).unwrap();
+            std::fs::write(
+                ledger.join("usage.jsonl"),
+                format!(
+                    r#"{{"agent":"omp","response_id":"{response_id}","provider":"openai","served":"gpt-fixture","req":"group/auto","in":100,"out":{first_output},"status":200}}
+"#
+                ),
+            )
+            .unwrap();
+
+            for scan in ["cold", "warm"] {
+                let messages = parse_all_messages_with_pricing(
+                    home.to_str().unwrap(),
+                    &["omp".to_string()],
+                    None,
+                );
+                assert_eq!(messages.len(), 1, "{case} {scan}");
+                assert_eq!(messages[0].tokens.input, 100, "{case} {scan}");
+                assert_eq!(messages[0].tokens.output, first_output, "{case} {scan}");
+                assert_eq!(messages[0].model_id, expected_model, "{case} {scan}");
+            }
         }
     }
 
@@ -18880,7 +21647,7 @@ mod tests {
             let fingerprint = message_cache::SourceFingerprint::from_path(&path).unwrap();
             let mut stale_message = expected[0].clone();
             stale_message.timestamp = 0;
-            stale_message.date = "1900-01-01".to_string();
+            stale_message.date = "1900-01-01".to_string().into();
 
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
@@ -19205,7 +21972,7 @@ mod tests {
                 reasoning: 0,
             },
             0.42,
-            Some("planner".to_string()),
+            Some("planner"),
         );
 
         apply_pricing_if_available(&mut msg, None);
@@ -19630,7 +22397,7 @@ mod tests {
             },
             9.0,
         );
-        unpriced.date = "2026-01-01".to_string();
+        unpriced.date = "2026-01-01".to_string().into();
         unpriced.mark_estimated_cost();
 
         let mut complete = UnifiedMessage::new(
@@ -19645,7 +22412,7 @@ mod tests {
             },
             2.0,
         );
-        complete.date = "2026-01-02".to_string();
+        complete.date = "2026-01-02".to_string().into();
         complete.mark_provider_reported_cost();
 
         let graph = build_graph_from_messages(
@@ -20023,6 +22790,74 @@ mod tests {
     }
 
     #[test]
+    fn unpriced_model_reports_mixed_reasons_within_and_across_batches() {
+        let mut custom_models = HashMap::new();
+        custom_models.insert(
+            "known-model".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                output_cost_per_token: Some(2e-6),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(custom_models),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let make_message = |raw_model: &str| {
+            UnifiedMessage::new(
+                "synthetic",
+                "display-model",
+                "gateway",
+                "session",
+                1_736_510_400_000,
+                TokenBreakdown {
+                    input: 1,
+                    cache_read: 1,
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .with_pricing_model(raw_model)
+        };
+        let missing = make_message("unfindable-9843");
+        let incomplete = make_message("known-model");
+        for (message, expected) in [
+            (missing.clone(), MISSING_MODEL_PRICING_REASON),
+            (incomplete.clone(), INCOMPLETE_MODEL_PRICING_REASON),
+        ] {
+            let (_, _, usage, _) = prepare_submission_pricing(vec![message], Some(&pricing));
+            assert_eq!(usage[0].reason, expected);
+        }
+
+        for (first, second) in [(missing.clone(), incomplete.clone()), (incomplete, missing)] {
+            let (_, _, usage, _) =
+                prepare_submission_pricing(vec![first.clone(), second.clone()], Some(&pricing));
+            assert_eq!(usage.len(), 1);
+            assert_eq!(usage[0].message_count, 2);
+            assert_eq!(usage[0].total_tokens, 4);
+            assert_eq!(usage[0].reason, "multiple pricing issues");
+
+            let mut sink = GraphSink::new(
+                None,
+                None,
+                Some(&pricing),
+                GraphPricingRequirement::Submission,
+            );
+            sink.accept(first);
+            sink.drain_batch();
+            sink.accept(second);
+            sink.drain_batch();
+            let entry = sink
+                .unpriced_usage
+                .get(&("gateway".into(), "display-model".into()))
+                .unwrap();
+            assert_eq!(*entry, (2, 4, "multiple pricing issues"));
+        }
+    }
+
+    #[test]
     fn custom_priced_routing_label_reports_incomplete_pricing_not_missing_mapping() {
         // A `custom-pricing.json` entry for a routing label is the user
         // stating what their router actually costs them — the escape hatch
@@ -20160,6 +22995,18 @@ mod tests {
             estimate.evidence.kind,
             pricing::lookup::ResolutionKind::ModelPart
         );
+        let explanation = serde_json::to_value(pricing.explain_message(&message)).unwrap();
+        assert_eq!(explanation["coverage"], false);
+        assert_eq!(
+            explanation["submissionSafetyGap"],
+            "unverified_provider_identity"
+        );
+        let mut reported = message.clone();
+        reported.cost = 0.25;
+        reported.mark_provider_reported_cost();
+        let reported = serde_json::to_value(pricing.explain_message(&reported)).unwrap();
+        assert_eq!(reported["coverage"], true);
+        assert!(reported.get("submissionSafetyGap").is_none());
 
         let graph = build_graph_from_messages(
             vec![message],
@@ -20698,7 +23545,7 @@ mod tests {
             },
             0.0,
         );
-        old.date = "2020-01-01".to_string();
+        old.date = "2020-01-01".to_string().into();
         let filtered = filter_messages_for_report(
             vec![old],
             &ReportOptions {
@@ -20862,7 +23709,7 @@ mod tests {
             tokens.clone(),
             0.0,
         );
-        fast.service_tier = Some("priority".to_string());
+        fast.service_tier = Some("priority".to_string().into());
         apply_pricing_if_available(&mut fast, Some(&pricing));
 
         let mut standard = UnifiedMessage::new(
@@ -20874,7 +23721,7 @@ mod tests {
             tokens.clone(),
             0.0,
         );
-        standard.service_tier = Some("default".to_string());
+        standard.service_tier = Some("default".to_string().into());
         apply_pricing_if_available(&mut standard, Some(&pricing));
 
         let mut non_openai = UnifiedMessage::new(
@@ -20886,7 +23733,7 @@ mod tests {
             tokens,
             0.0,
         );
-        non_openai.service_tier = Some("fast".to_string());
+        non_openai.service_tier = Some("fast".to_string().into());
         apply_pricing_if_available(&mut non_openai, Some(&pricing));
 
         assert!((fast.cost - 0.0468).abs() < 1e-12);
@@ -21011,7 +23858,7 @@ mod tests {
             tokens.clone(),
             0.0,
         );
-        suffix_and_tier.service_tier = Some("fast".to_string());
+        suffix_and_tier.service_tier = Some("fast".to_string().into());
         apply_pricing_if_available(&mut suffix_and_tier, Some(&pricing));
 
         let mut standard = UnifiedMessage::new(
@@ -22490,7 +25337,7 @@ mod tests {
             .expect("devin-cli recount proof");
         let date = messages[0].date.clone();
         assert!(messages.iter().all(|message| message.date == date));
-        let entry = &proof[&date]["gpt-5"];
+        let entry = &proof[date.as_str()]["gpt-5"];
         assert_eq!(entry.corrected.tokens.input, 67 + 10 + 20);
         assert_eq!(entry.corrected.tokens.output, 103 + 5 + 5);
         assert_eq!(entry.corrected.messages, 3);
@@ -22503,6 +25350,573 @@ mod tests {
         assert_eq!(reads.discovered, 2);
         assert_eq!(reads.unreadable, 1);
         assert!(!reads.complete());
+    }
+
+    mod devin_cache_tests {
+        use super::*;
+        use std::path::{Path, PathBuf};
+
+        fn database(home: &Path) -> (PathBuf, rusqlite::Connection) {
+            let path = home.join(".local/share/devin/cli/sessions.db");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT, working_directory TEXT, title TEXT);
+                 CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT, created_at INTEGER);
+                 INSERT INTO sessions VALUES ('sess', 'gpt-5', '/tmp/project', 'Task');",
+            ).unwrap();
+            (path, conn)
+        }
+
+        fn append(conn: &rusqlite::Connection, request: &str, input: i64, output: i64) {
+            conn.execute(
+                "INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('sess', ?1, 1700000000)",
+                [serde_json::json!({"role":"assistant", "metadata": {
+                    "request_id":request, "metrics":{"input_tokens":input,"output_tokens":output}
+                }}).to_string()],
+            ).unwrap();
+        }
+
+        fn scan(
+            home: &Path,
+            policy: SourceCachePolicy,
+        ) -> (Vec<UnifiedMessage>, crate::StreamingParseOutcome) {
+            let mut messages = Vec::new();
+            let outcome = crate::parse_all_messages_streaming(
+                home.to_str().unwrap(),
+                &["devin-cli".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                policy,
+                &mut messages,
+            );
+            (messages, outcome)
+        }
+
+        fn cached(path: &Path) -> Option<message_cache::CachedSourceEntry> {
+            message_cache::SourceMessageCache::load().get(
+                message_cache::CacheIdentity::for_client(ClientId::DevinCli),
+                path,
+            )
+        }
+
+        fn persist_legacy_entry(
+            cache_home: &Path,
+            entry: message_cache::CachedSourceEntry,
+            version: u32,
+        ) {
+            let mut serialized = serde_json::to_value(entry).unwrap();
+            serialized["parser_version"] = serde_json::json!(version);
+            let old_entry: message_cache::CachedSourceEntry =
+                serde_json::from_value(serialized).unwrap();
+            // Freeze the envelope as well as its entry. Writing an old entry
+            // inside a current-version envelope would only test corruption.
+            use bincode::Options;
+            let parser_dir =
+                cache_home.join(".config/tokscale/cache/source-message-cache-v2/devin-cli");
+            let shards: Vec<_> = std::fs::read_dir(parser_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "bin"))
+                .collect();
+            assert_eq!(shards.len(), 1);
+            // Bincode encodes this struct positionally: format, namespace,
+            // parser version, payload. Keep the existing format and bytes.
+            let (format, namespace, _, _): (u32, String, u32, Vec<u8>) = bincode::options()
+                .deserialize(&std::fs::read(&shards[0]).unwrap())
+                .unwrap();
+            assert_eq!(format, 11);
+            let payload = bincode::options().serialize(&vec![old_entry]).unwrap();
+            let envelope = bincode::options()
+                .serialize(&(format, namespace, version, payload))
+                .unwrap();
+            std::fs::write(&shards[0], envelope).unwrap();
+        }
+
+        fn assert_warm_matches_cold(home: &Path, path: &Path, raw_rows: usize) {
+            let (warm, warm_outcome) = scan(home, SourceCachePolicy::Persistent);
+            let (cold, cold_outcome) = scan(home, SourceCachePolicy::InMemory);
+            assert_eq!(warm_outcome.source_reads, cold_outcome.source_reads);
+            assert!(warm_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(
+                serde_json::to_value(&warm).unwrap(),
+                serde_json::to_value(&cold).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&warm_outcome.recount_proofs).unwrap(),
+                serde_json::to_value(&cold_outcome.recount_proofs).unwrap()
+            );
+            let entry = cached(path).expect("stable scan writes an entry");
+            assert_eq!(entry.messages.len(), raw_rows);
+            assert_eq!(
+                serde_json::to_value(&entry.messages).unwrap(),
+                serde_json::to_value(crate::sessions::devin::parse_devin_cli_sqlite(path)).unwrap()
+            );
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_preserves_cached_and_appended_request_multiplicities() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            assert_warm_matches_cold(home.path(), &path, 2);
+            // Cached duplicates survive, and a third distinct row must survive
+            // even though request, time, and every token bucket are identical.
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-2", 10, 5);
+            assert_warm_matches_cold(home.path(), &path, 4);
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(messages.len(), 2);
+            let proof = &outcome.recount_proofs["devin-cli"][messages[0].date.as_str()]["gpt-5"];
+            assert_eq!(proof.previous.messages, 4);
+            assert_eq!(proof.previous.tokens.input, 67 * 3 + 10);
+            assert_eq!(proof.corrected.tokens.input, 67 + 10);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_preserves_equal_totals_with_different_token_buckets() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            assert_warm_matches_cold(home.path(), &path, 1);
+            append(&conn, "req-1", 103, 67);
+            assert_warm_matches_cold(home.path(), &path, 2);
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            let proof = &outcome.recount_proofs["devin-cli"][messages[0].date.as_str()]["gpt-5"];
+            assert_eq!(proof.previous.tokens.input, 170);
+            assert_eq!(proof.previous.tokens.output, 170);
+            assert_eq!(proof.corrected.tokens.input, 67);
+            assert_eq!(proof.corrected.tokens.output, 103);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_unchanged_hit_and_live_edits() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 1);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(
+                probe.reads(),
+                1,
+                "unchanged cache hit must not decode SQLite rows"
+            );
+
+            let edits = [
+                "UPDATE message_nodes SET chat_message = '{\"role\":\"assistant\",\"metadata\":{\"request_id\":\"req-1\",\"metrics\":{\"input_tokens\":103,\"output_tokens\":67}}}' WHERE row_id = 2",
+                "UPDATE message_nodes SET created_at = 1700086400 WHERE row_id = 2",
+                "UPDATE sessions SET model = 'gpt-4o'",
+                "UPDATE sessions SET working_directory = '/tmp/other'",
+                "UPDATE sessions SET title = 'Edited task'",
+            ];
+            for sql in edits {
+                conn.execute_batch(sql).unwrap();
+                let before = probe.reads();
+                scan(home.path(), SourceCachePolicy::Persistent);
+                assert_eq!(
+                    probe.reads(),
+                    before + 1,
+                    "edit requires a full read: {sql}"
+                );
+                assert_warm_matches_cold(home.path(), &path, 2);
+            }
+            conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 2")
+                .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            // Same count, sum, max id and sessions as the cached source, but
+            // replacement row contents: row stats never proved pure append.
+            conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 1")
+                .unwrap();
+            append(&conn, "replacement", 20, 30);
+            assert_warm_matches_cold(home.path(), &path, 1);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_retries_watermark_races_without_replaying_rows() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            // Append after the pre-read fingerprint, before SELECT. The old
+            // watermark design cached this extra row under an earlier mark.
+            append(&conn, "req-2", 10, 5);
+            probe.before_read_sql("INSERT INTO message_nodes (session_id, chat_message, created_at) SELECT session_id, chat_message, created_at FROM message_nodes WHERE row_id = 1");
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(!outcome.source_reads["devin-cli"].complete());
+            assert!(
+                cached(&path).is_none(),
+                "racing read must not publish a stale fingerprint"
+            );
+            assert_warm_matches_cold(home.path(), &path, 3);
+            // Append after SELECT, before fingerprint revalidation. Do not
+            // tag the old read with the newer database fingerprint either.
+            append(&conn, "req-3", 20, 5);
+            probe.after_read_sql("INSERT INTO message_nodes (session_id, chat_message, created_at) SELECT session_id, chat_message, created_at FROM message_nodes WHERE row_id = 1");
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(!outcome.source_reads["devin-cli"].complete());
+            assert!(cached(&path).is_none());
+            assert_warm_matches_cold(home.path(), &path, 5);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_does_not_cache_failed_or_partial_reads() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            // The usage SELECT does not need title. A missing title must not
+            // be mistaken for a successful zero-valued sessions hash.
+            conn.execute_batch(
+                "ALTER TABLE sessions DROP COLUMN title; UPDATE sessions SET model = 'gpt-4o'",
+            )
+            .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            // SQLite accepts a blob in this TEXT column, but row decoding
+            // fails. Keep readable rows for local output, not for the cache.
+            conn.execute_batch("INSERT INTO message_nodes VALUES (2, 'sess', X'FF', 1700000000)")
+                .unwrap();
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(outcome.source_reads["devin-cli"].unreadable, 1);
+            assert!(!outcome.source_reads["devin-cli"].complete());
+            assert!(cached(&path).is_none());
+            assert!(!crate::sessions::devin::devin_cli_source_is_readable(&path));
+            let (_, repeated) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(!repeated.source_reads["devin-cli"].complete());
+            conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 2")
+                .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            conn.execute_batch("ALTER TABLE sessions RENAME TO unavailable_sessions")
+                .unwrap();
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(messages.is_empty());
+            assert_eq!(outcome.source_reads["devin-cli"].unreadable, 1);
+            assert!(cached(&path).is_none());
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn devin_submission_graph_withholds_completeness_for_partial_rows() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            let pricing = pricing::PricingService::new(
+                HashMap::from([(
+                    "gpt-5".to_string(),
+                    pricing::ModelPricing {
+                        input_cost_per_token: Some(0.001),
+                        output_cost_per_token: Some(0.002),
+                        ..Default::default()
+                    },
+                )]),
+                HashMap::new(),
+            );
+            let options = || ReportOptions {
+                home_dir: Some(home.path().to_str().unwrap().to_string()),
+                clients: Some(vec!["devin-cli".to_string()]),
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                let graph = crate::generate_graph_with_loaded_pricing(
+                    options(),
+                    Some(&pricing),
+                    crate::GraphPricingRequirement::Submission,
+                    None,
+                )
+                .await
+                .unwrap();
+                assert!(graph.source_reads["devin-cli"].complete());
+                assert_eq!(graph.contributions.len(), 1);
+            }
+            assert_eq!(
+                probe.reads(),
+                1,
+                "unchanged submission cache hit must not rescan rows"
+            );
+            conn.execute_batch("INSERT INTO message_nodes VALUES (3, 'sess', X'FF', 1700000000)")
+                .unwrap();
+            for _ in 0..2 {
+                let graph = crate::generate_graph_with_loaded_pricing(
+                    options(),
+                    Some(&pricing),
+                    crate::GraphPricingRequirement::Submission,
+                    None,
+                )
+                .await
+                .unwrap();
+                let summary = graph.source_reads["devin-cli"];
+                assert_eq!(summary.discovered, 1);
+                assert_eq!(summary.unreadable, 1);
+                // The CLI uses this exact predicate before assigning both
+                // full-history and complete-day authority to submission.
+                assert!(!summary.complete());
+                assert_eq!(
+                    graph.contributions.len(),
+                    1,
+                    "readable usage still reaches the graph"
+                );
+                assert!(!graph.recount_proofs["devin-cli"].is_empty());
+                assert!(cached(&path).is_none());
+            }
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_handles_row_ids_whose_sum_overflows() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 103, 67);
+            conn.execute(
+                "UPDATE message_nodes SET row_id = ?1 WHERE row_id = 2",
+                [i64::MAX],
+            )
+            .unwrap();
+            assert_warm_matches_cold(home.path(), &path, 2);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            assert_warm_matches_cold(home.path(), &path, 2);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_rejects_literal_v5_entry_with_unchanged_fingerprint() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            let mut stale = cached(&path).unwrap();
+            stale.messages.truncate(1);
+
+            // Positive control: these are loadable persisted bytes with the
+            // exact live fingerprint, not an accidentally unreadable fixture.
+            let mut cache = message_cache::SourceMessageCache::load();
+            cache.insert(stale.clone());
+            cache.save_if_dirty();
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 1);
+            assert_eq!(
+                outcome.recount_proofs["devin-cli"].values().next().unwrap()["gpt-5"]
+                    .previous
+                    .messages,
+                1
+            );
+
+            // Freeze the old producer version literally. The old row-stats
+            // resume could persist this lossy raw vector; changing only its
+            // parser version must force a fresh read even with matching bytes.
+            persist_legacy_entry(cache_home.path(), stale, 5);
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 2, "v5 entries must not be served unchanged");
+            assert_eq!(
+                outcome.recount_proofs["devin-cli"].values().next().unwrap()["gpt-5"]
+                    .previous
+                    .messages,
+                2
+            );
+            assert_warm_matches_cold(home.path(), &path, 2);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_json_decode_failures_revoke_authority_but_valid_skips_do_not() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            for valid in [
+                r#"{"role":"user","metadata":["non-assistant schema"]}"#,
+                r#"{"role":"tool","metadata":"tool metadata"}"#,
+                r#"{"role":"assistant"}"#,
+                r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":0}}}"#,
+            ] {
+                conn.execute("INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('sess', ?1, 1700000000)", [valid]).unwrap();
+            }
+            assert_warm_matches_cold(home.path(), &path, 1);
+            for invalid in [
+                "{not json",
+                r#"{"role":"assistant","metadata":"wrong schema"}"#,
+                r#"{"role":"assistant","metadata":{"metrics":{"input_tokens":"bad"}}}"#,
+            ] {
+                conn.execute(
+                    "INSERT INTO message_nodes VALUES (100, 'sess', ?1, 1700000000)",
+                    [invalid],
+                )
+                .unwrap();
+                for policy in [
+                    SourceCachePolicy::Persistent,
+                    SourceCachePolicy::Persistent,
+                    SourceCachePolicy::InMemory,
+                ] {
+                    let (messages, outcome) = scan(home.path(), policy);
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(outcome.source_reads["devin-cli"].unreadable, 1);
+                    assert!(!outcome.source_reads["devin-cli"].complete());
+                    assert!(cached(&path).is_none());
+                }
+                assert!(!crate::sessions::devin::devin_cli_source_is_readable(&path));
+                conn.execute_batch("DELETE FROM message_nodes WHERE row_id = 100")
+                    .unwrap();
+                assert_warm_matches_cold(home.path(), &path, 1);
+            }
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_empty_legacy_and_disappearing_sources() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            conn.execute_batch("DROP TABLE message_nodes").unwrap();
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(messages.is_empty());
+            assert_eq!(outcome.source_reads["devin-cli"].discovered, 1);
+            assert!(outcome.source_reads["devin-cli"].complete());
+            assert!(crate::sessions::devin::devin_cli_source_is_readable(&path));
+            conn.execute_batch("CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY)")
+                .unwrap();
+            let (_, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(!outcome.source_reads["devin-cli"].complete());
+            assert!(!crate::sessions::devin::devin_cli_source_is_readable(&path));
+            drop(conn);
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            probe.remove_before_read();
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(messages.is_empty());
+            assert_eq!(outcome.source_reads["devin-cli"].discovered, 1);
+            assert!(!outcome.source_reads["devin-cli"].complete());
+            assert!(cached(&path).is_none());
+            assert!(!crate::sessions::devin::devin_cli_source_is_readable(&path));
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_schema_probe_matches_sqlite_identifier_rules() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            append(&conn, "req-1", 67, 103);
+            conn.execute_batch("ALTER TABLE message_nodes RENAME TO renamed_nodes; ALTER TABLE renamed_nodes RENAME TO Message_Nodes").unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+            conn.execute_batch("ALTER TABLE Message_Nodes RENAME TO backing_nodes; CREATE VIEW message_nodes AS SELECT * FROM backing_nodes").unwrap();
+            assert_warm_matches_cold(home.path(), &path, 1);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_one_failed_database_revokes_client_completeness() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let imported = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (good_path, good) = database(home.path());
+            let (bad_path, bad) = database(imported.path());
+            append(&good, "good", 67, 103);
+            append(&bad, "bad-prefix", 10, 5);
+            bad.execute_batch("INSERT INTO message_nodes VALUES (2, 'sess', X'FF', 1700000000)")
+                .unwrap();
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&good_path);
+            let settings = scanner::ScannerSettings {
+                extra_scan_paths: std::collections::BTreeMap::from([(
+                    "devin-cli".to_string(),
+                    vec![bad_path.parent().unwrap().to_path_buf()],
+                )]),
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                let mut messages = Vec::new();
+                let outcome = crate::parse_all_messages_streaming(
+                    home.path().to_str().unwrap(),
+                    &["devin-cli".to_string()],
+                    None,
+                    false,
+                    &settings,
+                    SourceCachePolicy::Persistent,
+                    &mut messages,
+                );
+                assert_eq!(messages.len(), 2);
+                assert_eq!(outcome.source_reads["devin-cli"].discovered, 2);
+                assert_eq!(outcome.source_reads["devin-cli"].unreadable, 1);
+                assert!(!outcome.source_reads["devin-cli"].complete());
+                assert!(cached(&good_path).is_some());
+                assert!(cached(&bad_path).is_none());
+            }
+            assert_eq!(probe.reads(), 1);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cache_rejects_literal_v6_prefix_that_skipped_invalid_json() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+            let (path, conn) = database(home.path());
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&path);
+            append(&conn, "req-1", 67, 103);
+            scan(home.path(), SourceCachePolicy::Persistent);
+            let mut stale = cached(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO message_nodes VALUES (2, 'sess', '{not json', 1700000000)",
+            )
+            .unwrap();
+            stale.fingerprint =
+                match message_cache::SourceFingerprint::check_sqlite_path(&path, None).unwrap() {
+                    message_cache::FingerprintStatus::Changed(fingerprint) => fingerprint,
+                    _ => unreachable!(),
+                };
+            // Positive control: the exact live fingerprint serves the cached
+            // prefix without decoding. v6 used to admit precisely this entry.
+            let mut cache = message_cache::SourceMessageCache::load();
+            cache.insert(stale.clone());
+            cache.save_if_dirty();
+            let (_, control) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(control.source_reads["devin-cli"].complete());
+            assert_eq!(probe.reads(), 1);
+            persist_legacy_entry(cache_home.path(), stale, 6);
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(
+                probe.reads(),
+                2,
+                "literal v6 must reparse under the stronger decode contract"
+            );
+            assert_eq!(messages.len(), 1);
+            assert!(!outcome.source_reads["devin-cli"].complete());
+            assert!(cached(&path).is_none());
+        }
     }
 
     #[test]
@@ -22974,7 +26388,7 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
         std::fs::write(
             sessions_dir.join("ag-submit.jsonl"),
-            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag"}
+            r#"{"type":"usage","sessionId":"ag-submit","modelId":"model_placeholder_m84","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1,"responseId":"resp-ag","v":2}
 "#,
         )
         .unwrap();
@@ -23014,6 +26428,21 @@ mod tests {
             graph.contributions[0].clients[0].model_id,
             "gemini-3-flash-preview"
         );
+        let date = &graph.contributions[0].date;
+        let proof = &graph.recount_proofs["antigravity"][date]["gemini-3-flash-preview"];
+        assert_eq!(proof.previous.tokens.input, 12);
+        assert_eq!(proof.previous.tokens.output, 5);
+        assert_eq!(proof.previous.tokens.cache_read, 2);
+        assert_eq!(proof.previous.tokens.cache_write, 0);
+        assert_eq!(proof.previous.tokens.reasoning, 1);
+        assert_eq!(proof.previous.messages, 1);
+
+        assert_eq!(proof.corrected.tokens.input, 12);
+        assert_eq!(proof.corrected.tokens.output, 4);
+        assert_eq!(proof.corrected.tokens.cache_read, 2);
+        assert_eq!(proof.corrected.tokens.cache_write, 0);
+        assert_eq!(proof.corrected.tokens.reasoning, 1);
+        assert_eq!(proof.corrected.messages, 1);
     }
 
     #[test]
@@ -23720,7 +27149,11 @@ mod tests {
         assert_eq!(parsed.counts.get(ClientId::Amp), 2);
         assert_eq!(parsed.messages.len(), 2);
 
-        let dates: HashSet<String> = parsed.messages.iter().map(|msg| msg.date.clone()).collect();
+        let dates: HashSet<String> = parsed
+            .messages
+            .iter()
+            .map(|msg| msg.date.to_string())
+            .collect();
         let local_date = |timestamp_ms: i64| {
             chrono::Local
                 .timestamp_millis_opt(timestamp_ms)
@@ -24617,7 +28050,7 @@ mod tests {
             let mut per_model: std::collections::HashMap<String, i64> =
                 std::collections::HashMap::new();
             for message in &messages {
-                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+                *per_model.entry(message.model_id.to_string()).or_default() += message.tokens.input;
             }
             assert_eq!(per_model.get("model-a").copied(), Some(150));
             assert_eq!(per_model.get("model-b").copied(), Some(100));
@@ -24749,7 +28182,7 @@ mod tests {
                 TokenBreakdown::default(),
                 0.0,
             );
-            message.date = date.to_string();
+            message.date = date.to_string().into();
             message
         };
 
@@ -24828,7 +28261,7 @@ mod tests {
                 0,
                 TokenBreakdown::default(),
                 0.0,
-                agent.map(str::to_string),
+                agent,
             )
         };
 
@@ -25462,6 +28895,228 @@ mod tests {
         }
     }
 
+    /// Installs [`crate::AFTER_SQLITE_SCAN_HOOK`] for one test and clears it again
+    /// even if the test panics, so no later scan inherits the write.
+    struct AfterSqliteScanHook;
+
+    impl AfterSqliteScanHook {
+        fn set(path: &std::path::Path, hook: fn(&std::path::Path)) -> Self {
+            *crate::AFTER_SQLITE_SCAN_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((path.to_path_buf(), hook));
+            Self
+        }
+    }
+
+    impl Drop for AfterSqliteScanHook {
+        fn drop(&mut self) {
+            *crate::AFTER_SQLITE_SCAN_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    static AFTER_SQLITE_SCAN_HOOK_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn count_after_sqlite_scan_hook_call(_: &std::path::Path) {
+        AFTER_SQLITE_SCAN_HOOK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn after_sqlite_scan_hook_runs_only_for_its_database() {
+        AFTER_SQLITE_SCAN_HOOK_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let temp = tempfile::TempDir::new().unwrap();
+        let expected = temp.path().join("expected.db");
+        let other = temp.path().join("other.db");
+        let hook = AfterSqliteScanHook::set(&expected, count_after_sqlite_scan_hook_call);
+
+        crate::run_after_sqlite_scan_hook(&other);
+        assert_eq!(
+            AFTER_SQLITE_SCAN_HOOK_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        crate::run_after_sqlite_scan_hook(&expected);
+        assert_eq!(
+            AFTER_SQLITE_SCAN_HOOK_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        drop(hook);
+    }
+
+    /// Downgrades the cached entry for `path` to one written before billing
+    /// identity existed, which is what an upgrade from an older build leaves.
+    fn mark_cache_entry_legacy(client: ClientId, path: &std::path::Path) {
+        let identity = message_cache::CacheIdentity::for_client(client);
+        let mut cache = message_cache::SourceMessageCache::load();
+        let mut entry = cache
+            .take(identity, path)
+            .expect("the first scan caches the database");
+        entry.billing_identity_generation = 0;
+        cache.insert(entry);
+        cache.save_if_dirty();
+    }
+
+    /// Stands in for OpenCode committing a message while a scan is reading.
+    fn commit_opencode_row_during_scan(path: &std::path::Path) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES ('msg-during-scan', 'session-1', 9900, 9900, ?1)",
+                [timed_opencode_payload("msg-during-scan", 40)],
+            )
+            .unwrap();
+    }
+
+    /// An OpenCode database in active use can be written during every scan. A
+    /// legacy cache entry must not be replayed over a complete scan for that
+    /// reason alone: the entry never gets replaced, and every report and
+    /// submission freezes at the usage it held.
+    #[test]
+    #[serial_test::serial]
+    fn opencode_complete_scan_that_raced_a_write_replaces_a_legacy_cache_entry() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let db_dir = source_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode.db");
+        let conn = create_timed_opencode_db(&db_path);
+        insert_timed_opencode_row(&conn, "msg-old", 1_000, 50);
+        let scan = || {
+            parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["opencode".to_string()],
+                None,
+            )
+        };
+        assert_eq!(total_output_tokens(&scan()), 50);
+        mark_cache_entry_legacy(ClientId::OpenCode, &db_path);
+
+        // Usage recorded after the legacy entry was written, then a scan that
+        // OpenCode writes into while it runs.
+        insert_timed_opencode_row(&conn, "msg-new", 2_000, 60);
+        let hook = AfterSqliteScanHook::set(&db_path, commit_opencode_row_during_scan);
+        let raced = scan();
+        drop(hook);
+        assert_eq!(
+            total_output_tokens(&raced),
+            110,
+            "the complete scan, not the legacy entry, must be reported"
+        );
+        let identity = message_cache::CacheIdentity::for_client(ClientId::OpenCode);
+        assert!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .is_none(),
+            "the legacy entry the database moved past must be retired"
+        );
+
+        // Once the database is quiet, a scan sees every row and caches it
+        // under the current generation.
+        assert_eq!(total_output_tokens(&scan()), 150);
+        assert_eq!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .expect("a stable scan caches the database")
+                .billing_identity_generation,
+            1
+        );
+    }
+
+    fn micode_row_payload(output: i64) -> String {
+        format!(
+            r#"{{
+                "role": "assistant",
+                "modelID": "mimo-v2.5-pro",
+                "providerID": "mimo",
+                "cost": 0.05,
+                "tokens": {{ "input": 100, "output": {output}, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                "time": {{ "created": 1700000000000.0 }}
+            }}"#
+        )
+    }
+
+    /// Stands in for MiMo Code committing a message while a scan is reading.
+    fn commit_micode_row_during_scan(path: &std::path::Path) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO message (id, session_id, data)
+                 VALUES ('msg-during-scan', 'ses_1', ?1)",
+                [micode_row_payload(40)],
+            )
+            .unwrap();
+    }
+
+    /// MiMo Code's lane has the same legacy fallback as OpenCode's, so a
+    /// database written during the scan must not freeze its usage either.
+    #[test]
+    #[serial_test::serial]
+    fn micode_complete_scan_that_raced_a_write_replaces_a_legacy_cache_entry() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let micode_dir = source_home.path().join(".local/share/mimocode");
+        std::fs::create_dir_all(&micode_dir).unwrap();
+        let db_path = micode_dir.join("mimocode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let insert = |id: &str, output: i64| {
+            conn.execute(
+                "INSERT INTO message (id, session_id, data) VALUES (?1, 'ses_1', ?2)",
+                rusqlite::params![id, micode_row_payload(output)],
+            )
+            .unwrap();
+        };
+        insert("msg-old", 50);
+        let scan = || {
+            parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["micode".to_string()],
+                None,
+            )
+        };
+        assert_eq!(total_output_tokens(&scan()), 50);
+        mark_cache_entry_legacy(ClientId::MiMoCode, &db_path);
+
+        insert("msg-new", 60);
+        let hook = AfterSqliteScanHook::set(&db_path, commit_micode_row_during_scan);
+        let raced = scan();
+        drop(hook);
+        assert_eq!(
+            total_output_tokens(&raced),
+            110,
+            "the complete scan, not the legacy entry, must be reported"
+        );
+        let identity = message_cache::CacheIdentity::for_client(ClientId::MiMoCode);
+        assert!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .is_none(),
+            "the legacy entry the database moved past must be retired"
+        );
+
+        assert_eq!(total_output_tokens(&scan()), 150);
+        assert_eq!(
+            message_cache::SourceMessageCache::load()
+                .get(identity, &db_path)
+                .expect("a stable scan caches the database")
+                .billing_identity_generation,
+            1
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]
@@ -25712,6 +29367,1649 @@ mod tests {
                     existing.billing_identity,
                     sessions::BillingIdentity::Unknown
                 );
+            }
+        }
+    }
+
+    /// BB runs Claude and Codex under the user's normal homes, so each
+    /// response it drives is in BB's database and in the provider's own log.
+    /// These pin that every report counts such a response once, under the
+    /// provider, on every lane and on cold and warm source caches.
+    mod bb_provider_mirror {
+        use super::*;
+        use std::collections::BTreeMap;
+
+        const MIRRORED_SESSION: &str = "11111111-2222-4333-8444-555555555555";
+        const STANDALONE_SESSION: &str = "11111111-2222-4333-8444-777777777777";
+        /// A session BB recorded whose transcript is gone.
+        const DELETED_SESSION: &str = "11111111-2222-4333-8444-666666666666";
+        const MIRRORED_UUID: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+        const CODEX_THREAD: &str = "01a02208-6c1e-7411-af9d-5af46a1fd384";
+        const CODEX_TURN: &str = "01a02208-6d00-7e60-9054-4e1c6068de0f";
+        /// A Codex turn BB recorded that the rollout does not hold.
+        const CODEX_MISSING_TURN: &str = "01a02208-b4f8-73e3-ae6c-7231a43e3974";
+
+        fn claude_transcript(home: &Path, session: &str, uuid: &str, id: &str, usage: &str) {
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            let user = serde_json::json!({
+                "type": "user", "uuid": format!("{uuid}-user"), "sessionId": session,
+                "timestamp": "2026-09-21T10:00:00.000Z",
+                "message": {"role": "user", "content": "hi"}
+            });
+            let assistant = format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"{session}","timestamp":"2026-09-21T10:00:05.000Z","requestId":"req_{id}","message":{{"id":"msg_{id}","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{usage}}}}}"#
+            );
+            std::fs::write(
+                dir.join(format!("{session}.jsonl")),
+                format!("{user}\n{assistant}\n"),
+            )
+            .unwrap();
+        }
+
+        fn codex_rollout(home: &Path) {
+            let dir = home.join(".codex/sessions/2026/09/21");
+            std::fs::create_dir_all(&dir).unwrap();
+            let lines = [
+                format!(r#"{{"timestamp":"2026-09-21T10:00:00Z","type":"session_meta","payload":{{"id":"{CODEX_THREAD}","originator":"bb","cli_version":"0.150.0","source":"vscode","model_provider":"openai","cwd":"/work/bbrepro"}}}}"#),
+                format!(r#"{{"timestamp":"2026-09-21T10:00:00Z","type":"event_msg","payload":{{"type":"task_started","turn_id":"{CODEX_TURN}","started_at":1790000000}}}}"#),
+                format!(r#"{{"timestamp":"2026-09-21T10:00:00Z","type":"turn_context","payload":{{"turn_id":"{CODEX_TURN}","model":"gpt-5.2-codex"}}}}"#),
+                r#"{"timestamp":"2026-09-21T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5600,"cached_input_tokens":5000,"output_tokens":500},"last_token_usage":{"input_tokens":5600,"cached_input_tokens":5000,"output_tokens":500}}}}"#.to_string(),
+            ];
+            std::fs::write(
+                dir.join(format!("rollout-2026-09-21T10-00-00-{CODEX_THREAD}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+        }
+
+        /// A BB database in the current schema (`events.provider_thread_id`).
+        fn bb_db(home: &Path) -> rusqlite::Connection {
+            let dir = home.join(".bb");
+            std::fs::create_dir_all(&dir).unwrap();
+            let conn = rusqlite::Connection::open(dir.join("bb.db")).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY NOT NULL, project_id TEXT, provider_id TEXT NOT NULL,
+                    model_override TEXT, title TEXT, parent_thread_id TEXT, created_at INTEGER NOT NULL
+                );
+                CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL);
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT,
+                    provider_thread_id TEXT, sequence INTEGER NOT NULL, type TEXT NOT NULL,
+                    data TEXT NOT NULL, created_at INTEGER NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+            conn
+        }
+
+        fn bb_thread(
+            conn: &rusqlite::Connection,
+            id: &str,
+            provider: &str,
+            model: &str,
+            parent: Option<&str>,
+        ) {
+            conn.execute(
+                "INSERT INTO threads VALUES (?1, NULL, ?2, ?3, NULL, ?4, 1790000000000)",
+                (id, provider, model, parent),
+            )
+            .unwrap();
+        }
+
+        /// One BB turn: its usage row and, when `checkpoint` is set, the
+        /// `turn/completed` row naming the provider's id for the turn.
+        /// `column` is false for a fork's copied rows, whose column BB clears.
+        fn bb_turn(
+            conn: &rusqlite::Connection,
+            thread: &str,
+            turn: &str,
+            session: &str,
+            column: bool,
+            checkpoint: Option<&str>,
+            usage: &str,
+        ) {
+            bb_turn_at(
+                conn,
+                thread,
+                turn,
+                session,
+                column,
+                checkpoint,
+                usage,
+                1790762405010,
+            );
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn bb_turn_at(
+            conn: &rusqlite::Connection,
+            thread: &str,
+            turn: &str,
+            session: &str,
+            column: bool,
+            checkpoint: Option<&str>,
+            usage: &str,
+            created_at: i64,
+        ) {
+            let column = column.then_some(session);
+            let next: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 1, 'thread/tokenUsage/updated', ?5, ?6)",
+                (
+                    format!("evt_{next}"),
+                    thread,
+                    turn,
+                    column,
+                    format!(r#"{{"providerThreadId":"{session}","tokenUsage":{{"total":{usage},"last":{usage}}}}}"#),
+                    created_at,
+                ),
+            )
+            .unwrap();
+            if let Some(checkpoint) = checkpoint {
+                conn.execute(
+                    "INSERT INTO events VALUES (?1, ?2, ?3, ?4, 2, 'turn/completed', ?5, ?6)",
+                    (
+                        format!("evt_{next}_done"),
+                        thread,
+                        turn,
+                        column,
+                        format!(r#"{{"providerThreadId":"{session}","status":"completed","providerCheckpointId":"{checkpoint}"}}"#),
+                        created_at + 1,
+                    ),
+                )
+                .unwrap();
+            }
+        }
+
+        /// The reported reproduction plus the usage that exists in one store
+        /// only: the mirrored response (6,100 tokens) is in the Claude
+        /// transcript and in BB; a standalone Claude session (500) is only in
+        /// Claude; a BB turn whose transcript is gone (700) and a BB turn on
+        /// another provider (300) are only in BB.
+        fn claude_fixture(home: &Path) {
+            claude_transcript(
+                home,
+                MIRRORED_SESSION,
+                MIRRORED_UUID,
+                "mirrored",
+                r#"{"input_tokens":100,"output_tokens":500,"cache_read_input_tokens":5000,"cache_creation_input_tokens":500}"#,
+            );
+            claude_transcript(
+                home,
+                STANDALONE_SESSION,
+                "bbbbbbbb-0000-4000-8000-000000000002",
+                "standalone",
+                r#"{"input_tokens":400,"output_tokens":100}"#,
+            );
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_mirror",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            // A fork of it: BB copied the mirrored turn with the column cleared.
+            bb_thread(
+                &conn,
+                "thr_fork",
+                "claude-code",
+                "claude-sonnet-4-5",
+                Some("thr_mirror"),
+            );
+            bb_thread(
+                &conn,
+                "thr_deleted",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_thread(&conn, "thr_pi", "pi", "claude-sonnet-4-5", None);
+            let mirrored = r#"{"totalTokens":6100,"inputTokens":100,"cachedInputTokens":5500,"cacheReadInputTokens":5000,"cacheWriteInputTokens":500,"outputTokens":500,"reasoningOutputTokens":0}"#;
+            bb_turn(
+                &conn,
+                "thr_mirror",
+                "turn_m",
+                MIRRORED_SESSION,
+                true,
+                Some(MIRRORED_UUID),
+                mirrored,
+            );
+            bb_turn(
+                &conn,
+                "thr_fork",
+                "turn_m",
+                MIRRORED_SESSION,
+                false,
+                Some(MIRRORED_UUID),
+                mirrored,
+            );
+            bb_turn(
+                &conn,
+                "thr_deleted",
+                "turn_d",
+                DELETED_SESSION,
+                true,
+                Some("cccccccc-0000-4000-8000-000000000003"),
+                r#"{"totalTokens":700,"inputTokens":600,"outputTokens":100}"#,
+            );
+            bb_turn(
+                &conn,
+                "thr_pi",
+                "turn_p",
+                "pi-session",
+                true,
+                None,
+                r#"{"totalTokens":300,"inputTokens":200,"outputTokens":100}"#,
+            );
+        }
+
+        fn codex_fixture(home: &Path) {
+            codex_rollout(home);
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_codex", "codex", "gpt-5.2-codex", None);
+            bb_turn(
+                &conn,
+                "thr_codex",
+                "turn_c1",
+                CODEX_THREAD,
+                true,
+                Some(CODEX_TURN),
+                r#"{"totalTokens":6100,"inputTokens":5600,"cachedInputTokens":5000,"cacheReadInputTokens":5000,"cacheWriteInputTokens":0,"outputTokens":500,"reasoningOutputTokens":0}"#,
+            );
+            bb_turn(
+                &conn,
+                "thr_codex",
+                "turn_c2",
+                CODEX_THREAD,
+                true,
+                Some(CODEX_MISSING_TURN),
+                r#"{"totalTokens":900,"inputTokens":800,"cachedInputTokens":0,"cacheReadInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":100,"reasoningOutputTokens":0}"#,
+            );
+        }
+
+        /// Tokens and message count per client.
+        type Totals = BTreeMap<String, (i64, i32)>;
+
+        fn unified_totals(messages: &[UnifiedMessage]) -> Totals {
+            let mut totals = Totals::new();
+            for message in messages {
+                let entry = totals.entry(message.client.to_string()).or_default();
+                entry.0 += message.tokens.total();
+                entry.1 += message.message_count;
+            }
+            totals
+        }
+
+        fn totals(rows: &[(&str, i64, i32)]) -> Totals {
+            rows.iter()
+                .map(|(client, tokens, messages)| (client.to_string(), (*tokens, *messages)))
+                .collect()
+        }
+
+        fn clients(names: &[&str]) -> Vec<String> {
+            names.iter().map(|name| name.to_string()).collect()
+        }
+
+        fn submit_default_clients() -> Vec<String> {
+            let mut clients: Vec<String> = ClientId::iter()
+                .filter(|client| client.submit_default())
+                .map(|client| client.as_str().to_string())
+                .collect();
+            clients.push("synthetic".to_string());
+            clients
+        }
+
+        fn collected(home: &Path, clients: &[String]) -> Totals {
+            unified_totals(&parse_all_messages_with_pricing_with_env_strategy(
+                home.to_str().unwrap(),
+                clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            ))
+        }
+
+        fn direct(home: &Path, clients: Option<Vec<String>>) -> (Totals, Vec<(ClientId, i32)>) {
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(home.to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients,
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+            })
+            .unwrap();
+            let mut totals = Totals::new();
+            for message in &parsed.messages {
+                let entry = totals.entry(message.client.to_string()).or_default();
+                entry.0 += message.input
+                    + message.output
+                    + message.cache_read
+                    + message.cache_write
+                    + message.reasoning;
+                entry.1 += message.message_count;
+            }
+            let counts = [ClientId::Claude, ClientId::Codex, ClientId::Bb]
+                .into_iter()
+                .map(|client| (client, parsed.counts.get(client)))
+                .collect();
+            (totals, counts)
+        }
+
+        /// The graph lane streams through `GraphSink`; `Submission` is the
+        /// pricing contract of the payload `tokscale submit` sends.
+        fn graph(
+            home: &Path,
+            clients: Vec<String>,
+            requirement: GraphPricingRequirement,
+        ) -> Totals {
+            let pricing = pricing::PricingService::new(
+                HashMap::from(["claude-sonnet-4-5", "gpt-5.2-codex"].map(|model| {
+                    (
+                        model.to_string(),
+                        pricing::ModelPricing {
+                            input_cost_per_token: Some(0.000001),
+                            output_cost_per_token: Some(0.000002),
+                            cache_read_input_token_cost: Some(0.0000001),
+                            cache_creation_input_token_cost: Some(0.000001),
+                            ..Default::default()
+                        },
+                    )
+                })),
+                HashMap::new(),
+            );
+            let graph = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(generate_graph_with_loaded_pricing(
+                    ReportOptions {
+                        home_dir: Some(home.to_str().unwrap().to_string()),
+                        clients: Some(clients),
+                        ..Default::default()
+                    },
+                    Some(&pricing),
+                    requirement,
+                    None,
+                ))
+                .unwrap();
+            let mut totals = Totals::new();
+            for day in &graph.contributions {
+                for row in &day.clients {
+                    let entry = totals.entry(row.client.clone()).or_default();
+                    entry.0 += row.tokens.input
+                        + row.tokens.output
+                        + row.tokens.cache_read
+                        + row.tokens.cache_write
+                        + row.tokens.reasoning;
+                    entry.1 += row.messages;
+                }
+            }
+            totals
+        }
+
+        /// A transcript of several responses, one assistant entry each:
+        /// `(entry uuid, response id, input, output)`.
+        fn claude_transcript_rows(home: &Path, session: &str, rows: &[(&str, &str, i64, i64)]) {
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut lines = String::new();
+            for (index, (uuid, id, input, output)) in rows.iter().enumerate() {
+                lines.push_str(&format!(
+                    r#"{{"type":"user","uuid":"{uuid}-user","sessionId":"{session}","timestamp":"2026-09-21T10:0{index}:00.000Z","message":{{"role":"user","content":"hi"}}}}"#
+                ));
+                lines.push('\n');
+                lines.push_str(&format!(
+                    r#"{{"type":"assistant","uuid":"{uuid}","sessionId":"{session}","timestamp":"2026-09-21T10:0{index}:05.000Z","requestId":"req_{id}","message":{{"id":"msg_{id}","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
+                ));
+                lines.push('\n');
+            }
+            std::fs::write(dir.join(format!("{session}.jsonl")), lines).unwrap();
+        }
+
+        fn plain_usage(input: i64, output: i64) -> String {
+            format!(
+                r#"{{"totalTokens":{},"inputTokens":{input},"outputTokens":{output}}}"#,
+                input + output
+            )
+        }
+
+        /// Every lane, on a cold and then a warm source cache.
+        fn assert_every_lane(
+            home: &Path,
+            everything: &Totals,
+            claude_only: &Totals,
+            bb_only: &Totals,
+        ) {
+            for phase in ["cold", "warm"] {
+                assert_eq!(&collected(home, &[]), everything, "{phase} default");
+                assert_eq!(
+                    &collected(home, &clients(&["claude", "bb"])),
+                    everything,
+                    "{phase} claude+bb"
+                );
+                assert_eq!(
+                    &graph(
+                        home,
+                        submit_default_clients(),
+                        GraphPricingRequirement::Submission
+                    ),
+                    everything,
+                    "{phase} submission graph"
+                );
+                assert_eq!(
+                    &graph(
+                        home,
+                        clients(&["claude", "bb"]),
+                        GraphPricingRequirement::Lenient
+                    ),
+                    everything,
+                    "{phase} graph"
+                );
+                assert_eq!(
+                    &collected(home, &clients(&["claude"])),
+                    claude_only,
+                    "{phase} claude"
+                );
+                assert_eq!(&collected(home, &clients(&["bb"])), bb_only, "{phase} bb");
+            }
+            assert_eq!(&direct(home, None).0, everything, "direct default");
+            assert_eq!(
+                &direct(home, Some(clients(&["claude"]))).0,
+                claude_only,
+                "direct claude"
+            );
+            assert_eq!(
+                &direct(home, Some(clients(&["bb"]))).0,
+                bb_only,
+                "direct bb"
+            );
+        }
+
+        const SHARED_SESSION: &str = "22222222-2222-4333-8444-555555555555";
+
+        /// A Claude session whose rewritten transcript keeps only an
+        /// unrelated 2,000-token response, while BB recorded two other turns
+        /// of that session (1,000 and 700) the transcript no longer holds,
+        /// plus a 333-token turn on another provider. Nothing is mirrored, so
+        /// every row counts: 4,033 tokens in 4 messages.
+        #[test]
+        #[serial]
+        fn bb_turns_the_transcript_lacks_stay_counted_in_a_shared_session() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            claude_transcript_rows(
+                home,
+                SHARED_SESSION,
+                &[("dddddddd-0000-4000-8000-000000000001", "kept", 1_500, 500)],
+            );
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_shared",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_thread(&conn, "thr_pi", "pi", "claude-sonnet-4-5", None);
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some("dddddddd-0000-4000-8000-0000000000a1"),
+                &plain_usage(800, 200),
+            );
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_2",
+                SHARED_SESSION,
+                true,
+                Some("dddddddd-0000-4000-8000-0000000000a2"),
+                &plain_usage(600, 100),
+            );
+            bb_turn(
+                &conn,
+                "thr_pi",
+                "turn_p",
+                "pi-session",
+                true,
+                None,
+                &plain_usage(233, 100),
+            );
+
+            assert_every_lane(
+                home,
+                &totals(&[("bb", 2_033, 3), ("claude", 2_000, 1)]),
+                &totals(&[("claude", 2_000, 1)]),
+                &totals(&[("bb", 2_033, 3)]),
+            );
+        }
+
+        /// The same session where the transcript also holds the 1,000-token
+        /// turn BB recorded: only that duplicate goes, so the 700-token
+        /// BB-only turn of the same session stays. 4,033 tokens in 4 messages.
+        #[test]
+        #[serial]
+        fn bb_drops_only_the_turn_the_transcript_holds_in_a_shared_session() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let mirrored = "eeeeeeee-0000-4000-8000-000000000001";
+            claude_transcript_rows(
+                home,
+                SHARED_SESSION,
+                &[
+                    (mirrored, "mirrored", 800, 200),
+                    ("eeeeeeee-0000-4000-8000-000000000002", "native", 1_500, 500),
+                ],
+            );
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_shared",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_thread(&conn, "thr_pi", "pi", "claude-sonnet-4-5", None);
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some(mirrored),
+                &plain_usage(800, 200),
+            );
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_3",
+                SHARED_SESSION,
+                true,
+                Some("eeeeeeee-0000-4000-8000-0000000000a3"),
+                &plain_usage(600, 100),
+            );
+            bb_turn(
+                &conn,
+                "thr_pi",
+                "turn_p",
+                "pi-session",
+                true,
+                None,
+                &plain_usage(233, 100),
+            );
+
+            assert_every_lane(
+                home,
+                &totals(&[("bb", 1_033, 2), ("claude", 3_000, 2)]),
+                &totals(&[("claude", 3_000, 2)]),
+                &totals(&[("bb", 2_033, 3)]),
+            );
+        }
+
+        /// The checkpoint is the turn's last assistant entry. A `<synthetic>`
+        /// notice that ends the turn adds no row, but it is still the entry BB
+        /// names, so the response before it must match it.
+        #[test]
+        #[serial]
+        fn bb_turn_ending_on_a_synthetic_entry_still_matches_its_response() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            let synthetic = "ffffffff-0000-4000-8000-000000000002";
+            std::fs::write(
+                dir.join(format!("{SHARED_SESSION}.jsonl")),
+                format!(
+                    concat!(
+                        r#"{{"type":"user","uuid":"u1","sessionId":"{s}","timestamp":"2026-09-21T10:00:00.000Z","message":{{"role":"user","content":"hi"}}}}"#, "\n",
+                        r#"{{"type":"assistant","uuid":"ffffffff-0000-4000-8000-000000000001","sessionId":"{s}","timestamp":"2026-09-21T10:00:05.000Z","requestId":"req_a","message":{{"id":"msg_a","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":800,"output_tokens":200}}}}}}"#, "\n",
+                        r#"{{"type":"assistant","uuid":"{synthetic}","sessionId":"{s}","timestamp":"2026-09-21T10:00:06.000Z","message":{{"id":"msg_syn","role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"No response requested."}}],"usage":{{"input_tokens":0,"output_tokens":0}}}}}}"#, "\n",
+                    ),
+                    s = SHARED_SESSION,
+                    synthetic = synthetic,
+                ),
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(
+                &conn,
+                "thr_shared",
+                "claude-code",
+                "claude-sonnet-4-5",
+                None,
+            );
+            bb_turn(
+                &conn,
+                "thr_shared",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some(synthetic),
+                &plain_usage(800, 200),
+            );
+
+            assert_eq!(collected(home, &[]), totals(&[("claude", 1_000, 1)]));
+            assert_eq!(direct(home, None).0, totals(&[("claude", 1_000, 1)]));
+        }
+
+        /// The graph (submission pricing) for one date range, per day and
+        /// client, with days bucketed in UTC.
+        fn graph_days(
+            home: &Path,
+            clients: Vec<String>,
+            since: &str,
+            until: &str,
+        ) -> BTreeMap<(String, String), (i64, i32)> {
+            let pricing = pricing::PricingService::new(
+                HashMap::from(["claude-sonnet-4-5", "gpt-5.2-codex"].map(|model| {
+                    (
+                        model.to_string(),
+                        pricing::ModelPricing {
+                            input_cost_per_token: Some(0.000001),
+                            output_cost_per_token: Some(0.000002),
+                            cache_read_input_token_cost: Some(0.0000001),
+                            ..Default::default()
+                        },
+                    )
+                })),
+                HashMap::new(),
+            );
+            let graph = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(generate_graph_with_loaded_pricing(
+                    ReportOptions {
+                        home_dir: Some(home.to_str().unwrap().to_string()),
+                        clients: Some(clients),
+                        since: Some(since.to_string()),
+                        until: Some(until.to_string()),
+                        scanner_settings: scanner::ScannerSettings {
+                            bucket_timezone: Some("UTC".to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Some(&pricing),
+                    GraphPricingRequirement::Submission,
+                    None,
+                ))
+                .unwrap();
+            let mut days = BTreeMap::new();
+            for day in &graph.contributions {
+                for row in &day.clients {
+                    let entry: &mut (i64, i32) = days
+                        .entry((day.date.clone(), row.client.clone()))
+                        .or_default();
+                    entry.0 += row.tokens.input
+                        + row.tokens.output
+                        + row.tokens.cache_read
+                        + row.tokens.cache_write
+                        + row.tokens.reasoning;
+                    entry.1 += row.messages;
+                }
+            }
+            days
+        }
+
+        /// The direct lane for one date range, per day and client (UTC days).
+        fn direct_days(
+            home: &Path,
+            since: &str,
+            until: &str,
+        ) -> BTreeMap<(String, String), (i64, i32)> {
+            let parsed = parse_local_clients(LocalParseOptions {
+                home_dir: Some(home.to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: None,
+                since: Some(since.to_string()),
+                until: Some(until.to_string()),
+                year: None,
+                scanner_settings: scanner::ScannerSettings {
+                    bucket_timezone: Some("UTC".to_string()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+            let mut days = BTreeMap::new();
+            for message in &parsed.messages {
+                let entry: &mut (i64, i32) = days
+                    .entry((message.date.to_string(), message.client.to_string()))
+                    .or_default();
+                entry.0 += message.input
+                    + message.output
+                    + message.cache_read
+                    + message.cache_write
+                    + message.reasoning;
+                entry.1 += message.message_count;
+            }
+            days
+        }
+
+        fn merged(
+            mut left: BTreeMap<(String, String), (i64, i32)>,
+            right: BTreeMap<(String, String), (i64, i32)>,
+        ) -> BTreeMap<(String, String), (i64, i32)> {
+            for (key, (tokens, messages)) in right {
+                let entry = left.entry(key).or_default();
+                entry.0 += tokens;
+                entry.1 += messages;
+            }
+            left
+        }
+
+        /// 2026-09-21T23:59:59Z: the provider's record of the response.
+        const LATE_ON_D_MINUS_1: &str = "2026-09-21T23:59:59";
+        /// 2026-09-22T00:00:01Z: BB's row for the same response.
+        const BB_ROW_ON_D: i64 = 1_790_035_201_000;
+
+        /// Which response a report counts must not depend on its date range.
+        /// The mirrored turn's native record is on D-1 and BB's row on D, so it
+        /// belongs to D-1 under the provider in every report: a D-1 report
+        /// plus a D report equals the D-1..D report, and nothing is counted
+        /// twice when daily reports are summed or submitted one day at a time.
+        fn assert_day_reports_add_up(home: &Path, provider: &str, tokens: i64) {
+            let expected = BTreeMap::from([(
+                ("2026-09-21".to_string(), provider.to_string()),
+                (tokens, 1),
+            )]);
+            for phase in ["cold", "warm"] {
+                let clients = submit_default_clients();
+                let both = graph_days(home, clients.clone(), "2026-09-21", "2026-09-22");
+                let split = merged(
+                    graph_days(home, clients.clone(), "2026-09-21", "2026-09-21"),
+                    graph_days(home, clients, "2026-09-22", "2026-09-22"),
+                );
+                assert_eq!(both, expected, "{phase} D-1..D graph");
+                assert_eq!(split, both, "{phase} D-1 + D graph");
+                let both = direct_days(home, "2026-09-21", "2026-09-22");
+                let split = merged(
+                    direct_days(home, "2026-09-21", "2026-09-21"),
+                    direct_days(home, "2026-09-22", "2026-09-22"),
+                );
+                assert_eq!(both, expected, "{phase} D-1..D direct");
+                assert_eq!(split, both, "{phase} D-1 + D direct");
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn bb_claude_mirror_across_a_day_boundary_counts_once_on_the_native_day() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let uuid = "abababab-0000-4000-8000-000000000001";
+            let dir = home.join(".claude/projects/-work-bbrepro");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{SHARED_SESSION}.jsonl")),
+                format!(
+                    concat!(
+                        r#"{{"type":"user","uuid":"u1","sessionId":"{s}","timestamp":"{t}.000Z","message":{{"role":"user","content":"hi"}}}}"#,
+                        "\n",
+                        r#"{{"type":"assistant","uuid":"{u}","sessionId":"{s}","timestamp":"{t}.500Z","requestId":"req_late","message":{{"id":"msg_late","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"ok"}}],"usage":{{"input_tokens":800,"output_tokens":200}}}}}}"#,
+                        "\n",
+                    ),
+                    s = SHARED_SESSION,
+                    t = LATE_ON_D_MINUS_1,
+                    u = uuid,
+                ),
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_late", "claude-code", "claude-sonnet-4-5", None);
+            bb_turn_at(
+                &conn,
+                "thr_late",
+                "turn_late",
+                SHARED_SESSION,
+                true,
+                Some(uuid),
+                &plain_usage(800, 200),
+                BB_ROW_ON_D,
+            );
+            assert_day_reports_add_up(home, "claude", 1_000);
+        }
+
+        #[test]
+        #[serial]
+        fn bb_codex_mirror_across_a_day_boundary_counts_once_on_the_native_day() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let dir = home.join(".codex/sessions/2026/09/21");
+            std::fs::create_dir_all(&dir).unwrap();
+            let lines = [
+                format!(
+                    r#"{{"timestamp":"{LATE_ON_D_MINUS_1}Z","type":"session_meta","payload":{{"id":"{CODEX_THREAD}","originator":"bb","cli_version":"0.150.0","source":"vscode","model_provider":"openai","cwd":"/work/bbrepro"}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"{LATE_ON_D_MINUS_1}Z","type":"turn_context","payload":{{"turn_id":"{CODEX_TURN}","model":"gpt-5.2-codex"}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"{LATE_ON_D_MINUS_1}.500Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":800,"cached_input_tokens":0,"output_tokens":200}},"last_token_usage":{{"input_tokens":800,"cached_input_tokens":0,"output_tokens":200}}}}}}}}"#
+                ),
+            ];
+            std::fs::write(
+                dir.join(format!("rollout-2026-09-21T23-59-59-{CODEX_THREAD}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_late", "codex", "gpt-5.2-codex", None);
+            bb_turn_at(
+                &conn,
+                "thr_late",
+                "turn_late",
+                CODEX_THREAD,
+                true,
+                Some(CODEX_TURN),
+                &plain_usage(800, 200),
+                BB_ROW_ON_D,
+            );
+            assert_day_reports_add_up(home, "codex", 1_000);
+        }
+
+        /// A session whose main transcript is gone on a cold cache while a
+        /// subagent transcript of it remains: the subagent rows carry the
+        /// session id, but they are not the main turns BB recorded, so those
+        /// BB rows stay counted.
+        #[test]
+        #[serial]
+        fn bb_main_turns_stay_counted_when_only_a_subagent_transcript_remains() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            let subagents = home
+                .join(".claude/projects/-work-bbrepro")
+                .join(SHARED_SESSION)
+                .join("subagents");
+            std::fs::create_dir_all(&subagents).unwrap();
+            std::fs::write(
+                subagents.join("agent-a1.jsonl"),
+                format!(
+                    concat!(
+                        r#"{{"type":"user","uuid":"s0","isSidechain":true,"agentId":"a1","sessionId":"{s}","timestamp":"2026-09-21T10:00:01.000Z","message":{{"role":"user","content":"task"}}}}"#,
+                        "\n",
+                        r#"{{"type":"assistant","uuid":"cdcdcdcd-0000-4000-8000-000000000009","isSidechain":true,"agentId":"a1","sessionId":"{s}","timestamp":"2026-09-21T10:00:02.000Z","requestId":"req_sub","message":{{"id":"msg_sub","role":"assistant","model":"claude-sonnet-4-5","content":[{{"type":"text","text":"done"}}],"usage":{{"input_tokens":300,"output_tokens":100}}}}}}"#,
+                        "\n",
+                    ),
+                    s = SHARED_SESSION,
+                ),
+            )
+            .unwrap();
+            let conn = bb_db(home);
+            bb_thread(&conn, "thr_main", "claude-code", "claude-sonnet-4-5", None);
+            bb_turn(
+                &conn,
+                "thr_main",
+                "turn_1",
+                SHARED_SESSION,
+                true,
+                Some("cdcdcdcd-0000-4000-8000-000000000001"),
+                &plain_usage(800, 200),
+            );
+            bb_turn(
+                &conn,
+                "thr_main",
+                "turn_2",
+                SHARED_SESSION,
+                true,
+                Some("cdcdcdcd-0000-4000-8000-000000000002"),
+                &plain_usage(600, 100),
+            );
+
+            assert_every_lane(
+                home,
+                &totals(&[("bb", 1_700, 2), ("claude", 400, 1)]),
+                &totals(&[("claude", 400, 1)]),
+                &totals(&[("bb", 1_700, 2)]),
+            );
+        }
+
+        /// BB marks a turn's start on the first row it reads for the turn id,
+        /// across threads. When that row is a fork copy without provider
+        /// identity and the original replaces it, the turn still has its one
+        /// start, so hourly and TUI turn counts do not change.
+        #[test]
+        #[serial]
+        fn bb_fork_copy_replacement_keeps_the_turn_start() {
+            for (copy, original) in [("thr_a", "thr_b"), ("thr_b", "thr_a")] {
+                let cache_home = tempfile::TempDir::new().unwrap();
+                let source_home = tempfile::TempDir::new().unwrap();
+                let _cache_env = redirect_cache_home(cache_home.path());
+                let home = source_home.path();
+                let conn = bb_db(home);
+                bb_thread(&conn, original, "claude-code", "claude-sonnet-4-5", None);
+                bb_thread(
+                    &conn,
+                    copy,
+                    "claude-code",
+                    "claude-sonnet-4-5",
+                    Some(original),
+                );
+                bb_turn(
+                    &conn,
+                    original,
+                    "turn_1",
+                    SHARED_SESSION,
+                    true,
+                    None,
+                    &plain_usage(800, 200),
+                );
+                conn.execute(
+                    "INSERT INTO events VALUES ('copy', ?1, 'turn_1', NULL, 1, 'thread/tokenUsage/updated', ?2, 1790762405010)",
+                    (
+                        copy,
+                        format!(r#"{{"tokenUsage":{{"total":{u},"last":{u}}}}}"#, u = plain_usage(800, 200)),
+                    ),
+                )
+                .unwrap();
+                for phase in ["cold", "warm"] {
+                    let messages = parse_all_messages_with_pricing_with_env_strategy(
+                        home.to_str().unwrap(),
+                        &clients(&["bb"]),
+                        None,
+                        false,
+                        &scanner::ScannerSettings::default(),
+                    );
+                    assert_eq!(messages.len(), 1, "{copy} first, {phase}");
+                    assert_eq!(
+                        messages
+                            .iter()
+                            .filter(|message| message.is_turn_start)
+                            .count(),
+                        1,
+                        "{copy} first, {phase}: TUI turn count"
+                    );
+                    let hourly = aggregate_hourly_usage_entries(
+                        messages,
+                        crate::bucket_tz::BucketTimezone::from_scanner_settings(
+                            &scanner::ScannerSettings::default(),
+                        ),
+                    );
+                    assert_eq!(
+                        hourly.iter().map(|hour| hour.turn_count).sum::<i32>(),
+                        1,
+                        "{copy} first, {phase}: hourly turn count"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn bb_claude_mirror_counts_once_on_every_lane_and_cache_state() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            claude_fixture(home);
+
+            let everything = totals(&[("bb", 1_000, 2), ("claude", 6_600, 2)]);
+            for phase in ["cold", "warm"] {
+                // Default scan (no client filter) and the submission set.
+                assert_eq!(collected(home, &[]), everything, "{phase} default");
+                assert_eq!(
+                    graph(
+                        home,
+                        submit_default_clients(),
+                        GraphPricingRequirement::Submission
+                    ),
+                    everything,
+                    "{phase} submission graph"
+                );
+                assert_eq!(
+                    graph(
+                        home,
+                        clients(&["claude", "bb"]),
+                        GraphPricingRequirement::Lenient
+                    ),
+                    everything,
+                    "{phase} graph"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["claude", "bb"])),
+                    everything,
+                    "{phase}"
+                );
+                // A filter that leaves out the provider keeps BB's own rows.
+                assert_eq!(
+                    collected(home, &clients(&["claude"])),
+                    totals(&[("claude", 6_600, 2)]),
+                    "{phase} claude only"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["bb"])),
+                    totals(&[("bb", 7_100, 3)]),
+                    "{phase} bb only"
+                );
+            }
+
+            // The uncached ParsedMessage lane agrees, counts included.
+            let (default_totals, default_counts) = direct(home, None);
+            assert_eq!(default_totals, everything);
+            assert_eq!(
+                default_counts,
+                vec![
+                    (ClientId::Claude, 2),
+                    (ClientId::Codex, 0),
+                    (ClientId::Bb, 2)
+                ]
+            );
+            let (bb_only, bb_counts) = direct(home, Some(clients(&["bb"])));
+            assert_eq!(bb_only, totals(&[("bb", 7_100, 3)]));
+            assert_eq!(bb_counts[2], (ClientId::Bb, 3));
+            let (claude_only, _) = direct(home, Some(clients(&["claude"])));
+            assert_eq!(claude_only, totals(&[("claude", 6_600, 2)]));
+        }
+
+        #[test]
+        #[serial]
+        fn bb_codex_mirror_counts_once_per_turn_the_rollout_holds() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let _cache_env = redirect_cache_home(cache_home.path());
+            let home = source_home.path();
+            codex_fixture(home);
+
+            let everything = totals(&[("bb", 900, 1), ("codex", 6_100, 1)]);
+            for phase in ["cold", "warm"] {
+                assert_eq!(collected(home, &[]), everything, "{phase} default");
+                assert_eq!(
+                    graph(
+                        home,
+                        submit_default_clients(),
+                        GraphPricingRequirement::Submission
+                    ),
+                    everything,
+                    "{phase} submission graph"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["codex"])),
+                    totals(&[("codex", 6_100, 1)]),
+                    "{phase} codex only"
+                );
+                assert_eq!(
+                    collected(home, &clients(&["bb"])),
+                    totals(&[("bb", 7_000, 2)]),
+                    "{phase} bb only"
+                );
+            }
+            let (default_totals, default_counts) = direct(home, None);
+            assert_eq!(default_totals, everything);
+            assert_eq!(
+                default_counts,
+                vec![
+                    (ClientId::Claude, 0),
+                    (ClientId::Codex, 1),
+                    (ClientId::Bb, 1)
+                ]
+            );
+        }
+    }
+
+    /// The model report folds rows straight out of the parse instead of
+    /// collecting every message first. These pin it to the collecting path it
+    /// replaced: same rows, totals and undated tokens for every grouping and
+    /// date range, including the recovery-ledger case that still collects.
+    mod model_report_streaming {
+        use super::super::{
+            claude_desktop, get_model_report_v2, load_pricing_for_local_parse,
+            model_report_token_totals, parse_all_messages_with_coverage, recovery, ModelReportSink,
+            ModelReportV2, ModelUsage,
+        };
+        use super::*;
+
+        /// One Claude Code assistant response at `timestamp` (UTC).
+        fn claude_line(timestamp: &str, id: &str, model: &str, input: i64, output: i64) -> String {
+            format!(
+                concat!(
+                    r#"{{"type":"assistant","timestamp":"{timestamp}","requestId":"req_{id}","#,
+                    r#""message":{{"id":"msg_{id}","model":"{model}","#,
+                    r#""usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#,
+                    "\n"
+                ),
+                timestamp = timestamp,
+                id = id,
+                model = model,
+                input = input,
+                output = output,
+            )
+        }
+
+        /// One Codex rollout with a single response at `timestamp` (UTC).
+        fn codex_rollout(session: &str, timestamp: &str, input: i64, output: i64) -> String {
+            let total = input + output;
+            format!(
+                concat!(
+                    r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{session}","source":"interactive","model_provider":"openai","cwd":"/repo"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{ts}","type":"turn_context","payload":{{"model":"gpt-5.5"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input},"output_tokens":{output},"total_tokens":{total}}},"last_token_usage":{{"input_tokens":{input},"output_tokens":{output},"total_tokens":{total}}}}}}}}}"#,
+                    "\n"
+                ),
+                ts = timestamp,
+                session = session,
+                input = input,
+                output = output,
+                total = total,
+            )
+        }
+
+        /// Claude and Codex usage on both sides of the Asia/Seoul midnight at
+        /// 2026-05-01T15:00:00Z, with one copy of each client's usage in two
+        /// sources. Each copy must count once.
+        fn write_fixture(home: &Path) {
+            let projects = client_scan_root(home, ClientId::Claude);
+            let project_a = projects.join("-tmp-stream-a");
+            let project_b = projects.join("-tmp-stream-b");
+            std::fs::create_dir_all(&project_a).unwrap();
+            std::fs::create_dir_all(&project_b).unwrap();
+            std::fs::write(
+                project_a.join("a.jsonl"),
+                [
+                    claude_line(
+                        "2026-05-01T14:59:59.000Z",
+                        "late",
+                        "claude-sonnet-4-5",
+                        100,
+                        10,
+                    ),
+                    claude_line(
+                        "2026-05-01T15:00:00.000Z",
+                        "dup",
+                        "claude-sonnet-4-5",
+                        200,
+                        20,
+                    ),
+                    claude_line(
+                        "2026-05-02T03:00:00.000Z",
+                        "noon",
+                        "claude-opus-4-1",
+                        300,
+                        30,
+                    ),
+                ]
+                .concat(),
+            )
+            .unwrap();
+            std::fs::write(
+                project_b.join("b.jsonl"),
+                [
+                    claude_line(
+                        "2026-05-01T15:00:00.000Z",
+                        "dup",
+                        "claude-sonnet-4-5",
+                        200,
+                        20,
+                    ),
+                    claude_line(
+                        "2026-05-03T01:00:00.000Z",
+                        "next",
+                        "claude-sonnet-4-5",
+                        400,
+                        40,
+                    ),
+                ]
+                .concat(),
+            )
+            .unwrap();
+
+            let sessions = home.join(".codex/sessions");
+            let archived = home.join(".codex/archived_sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::create_dir_all(&archived).unwrap();
+            std::fs::write(
+                sessions.join("late.jsonl"),
+                codex_rollout(
+                    "11111111-1111-7111-8111-111111111111",
+                    "2026-05-01T14:59:59Z",
+                    50,
+                    5,
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                sessions.join("early.jsonl"),
+                codex_rollout(
+                    "22222222-2222-7222-8222-222222222222",
+                    "2026-05-01T15:00:01Z",
+                    60,
+                    6,
+                ),
+            )
+            .unwrap();
+            let shared = codex_rollout(
+                "33333333-3333-7333-8333-333333333333",
+                "2026-05-02T02:00:00Z",
+                70,
+                7,
+            );
+            std::fs::write(sessions.join("shared.jsonl"), &shared).unwrap();
+            std::fs::write(archived.join("shared-archived.jsonl"), &shared).unwrap();
+        }
+
+        fn options(
+            home: &Path,
+            zone: &str,
+            group_by: GroupBy,
+            rollup: WorktreeRollup,
+            range: (Option<&str>, Option<&str>, Option<&str>),
+        ) -> ReportOptions {
+            let (since, until, year) = range;
+            ReportOptions {
+                home_dir: Some(home.to_string_lossy().into_owned()),
+                use_env_roots: false,
+                clients: Some(vec!["claude".to_string(), "codex".to_string()]),
+                since: since.map(str::to_string),
+                until: until.map(str::to_string),
+                year: year.map(str::to_string),
+                group_by,
+                worktree_rollup: rollup,
+                scanner_settings: scanner::ScannerSettings {
+                    bucket_timezone: Some(zone.into()),
+                    ..Default::default()
+                },
+            }
+        }
+
+        /// What the report computed before it streamed: the whole parse with
+        /// the recovery overlay applied, then the date filter, the undated
+        /// tally and the aggregation, each over the collected messages.
+        async fn collected_report(options: &ReportOptions) -> ModelReportV2 {
+            let home = options.home_dir.clone().unwrap();
+            let clients = options.clients.clone().unwrap();
+            let pricing = load_pricing_for_local_parse().await;
+            let (messages, claude_desktop_cache) = parse_all_messages_with_coverage(
+                &home,
+                &clients,
+                pricing.as_deref(),
+                options.use_env_roots,
+                &options.scanner_settings,
+                SourceCachePolicy::Persistent,
+            );
+            let filtered = filter_messages_for_report(messages, options);
+            let mut undated_tokens = TokenBreakdown::default();
+            for message in &filtered {
+                if claude_desktop::is_undated_balance(message) {
+                    undated_tokens.add_assign_saturating(&message.tokens);
+                }
+            }
+            let entries = aggregate_model_usage_entries_with_rollup(
+                filtered,
+                &options.group_by,
+                options.worktree_rollup,
+            );
+            let (total_input, total_output, total_cache_read, total_cache_write) =
+                model_report_token_totals(&entries);
+            ModelReportV2 {
+                undated_tokens,
+                claude_desktop_cache,
+                report: crate::ModelReport {
+                    total_messages: entries.iter().map(|e| e.message_count).sum(),
+                    total_cost: entries.iter().map(|e| e.cost).sum::<f64>() + 0.0,
+                    entries,
+                    total_input,
+                    total_output,
+                    total_cache_read,
+                    total_cache_write,
+                    processing_time_ms: 0,
+                },
+            }
+        }
+
+        /// Rows in a fixed order. Rows that tie on cost come out in hash-map
+        /// order, which differs between two folds of the same messages.
+        fn canonical_rows(entries: &[ModelUsage]) -> Vec<String> {
+            let mut rows: Vec<String> = entries
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap())
+                .collect();
+            rows.sort();
+            rows
+        }
+
+        fn assert_same_report(streamed: &ModelReportV2, collected: &ModelReportV2, label: &str) {
+            assert_eq!(
+                canonical_rows(&streamed.report.entries),
+                canonical_rows(&collected.report.entries),
+                "{label}"
+            );
+            let totals = |report: &ModelReportV2| {
+                (
+                    report.report.total_input,
+                    report.report.total_output,
+                    report.report.total_cache_read,
+                    report.report.total_cache_write,
+                    report.report.total_messages,
+                    report.report.total_cost.to_bits(),
+                )
+            };
+            assert_eq!(totals(streamed), totals(collected), "{label}");
+            assert_eq!(streamed.undated_tokens, collected.undated_tokens, "{label}");
+            assert_eq!(
+                serde_json::to_value(&streamed.claude_desktop_cache).unwrap(),
+                serde_json::to_value(&collected.claude_desktop_cache).unwrap(),
+                "{label}"
+            );
+        }
+
+        const GROUPINGS: [GroupBy; 7] = [
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
+            GroupBy::MachineModel,
+        ];
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        fn day_totals(report: &ModelReportV2) -> (i64, i64, i32) {
+            (
+                report.report.total_input,
+                report.report.total_output,
+                report.report.total_messages,
+            )
+        }
+
+        #[test]
+        #[serial]
+        fn streamed_model_report_matches_collected_report_for_every_grouping_and_range() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let mut cache_env = redirect_cache_home(cache_home.path());
+            cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            let mut recovery_env =
+                crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_RECOVERY_DISABLE"]);
+            recovery_env.remove("TOKSCALE_RECOVERY_DISABLE");
+            write_fixture(source_home.path());
+            assert!(!recovery::applicable(&source_home.path().to_string_lossy()));
+            let runtime = runtime();
+
+            let ranges = [
+                (None, None, None),
+                (Some("2026-05-01"), Some("2026-05-01"), None),
+                (Some("2026-05-02"), Some("2026-05-02"), None),
+                (Some("2026-05-02"), None, None),
+                (None, Some("2026-05-01"), None),
+                (Some("2026-05-01"), Some("2026-05-03"), None),
+                (None, None, Some("2026")),
+                (Some("2027-01-01"), Some("2027-01-31"), None),
+            ];
+            for zone in ["Asia/Seoul", "UTC"] {
+                for group_by in GROUPINGS {
+                    // Only `workspace,model` consults the worktree rollup.
+                    let rollups = if group_by == GroupBy::WorkspaceModel {
+                        vec![WorktreeRollup::Separate, WorktreeRollup::MergeIntoRepo]
+                    } else {
+                        vec![WorktreeRollup::Separate]
+                    };
+                    for rollup in rollups {
+                        for range in ranges {
+                            let options =
+                                options(source_home.path(), zone, group_by.clone(), rollup, range);
+                            let streamed = runtime
+                                .block_on(get_model_report_v2(options.clone()))
+                                .unwrap();
+                            let collected = runtime.block_on(collected_report(&options));
+                            let label = format!("{zone} {group_by} {rollup:?} {range:?}");
+                            assert_same_report(&streamed, &collected, &label);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn streamed_model_report_buckets_days_in_the_pinned_zone_and_counts_copies_once() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let mut cache_env = redirect_cache_home(cache_home.path());
+            cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            write_fixture(source_home.path());
+            let runtime = runtime();
+            let report = |zone: &str, day: &str| {
+                let options = options(
+                    source_home.path(),
+                    zone,
+                    GroupBy::ClientModel,
+                    WorktreeRollup::Separate,
+                    (Some(day), Some(day), None),
+                );
+                runtime.block_on(get_model_report_v2(options)).unwrap()
+            };
+
+            // Seoul: the last second before its midnight stays on 05-01.
+            assert_eq!(
+                day_totals(&report("Asia/Seoul", "2026-05-01")),
+                (150, 15, 2)
+            );
+            // Seoul 05-02 opens at exactly 15:00:00Z. The Claude response copied
+            // into two transcripts and the Codex rollout kept in both
+            // sessions/ and archived_sessions/ count once each.
+            let seoul_second_day = report("Asia/Seoul", "2026-05-02");
+            assert_eq!(day_totals(&seoul_second_day), (630, 63, 4));
+            let codex_row = seoul_second_day
+                .report
+                .entries
+                .iter()
+                .find(|entry| entry.client == "codex")
+                .unwrap();
+            assert_eq!((codex_row.input, codex_row.message_count), (130, 2));
+            // The same instants on the UTC calendar all fall on 05-01.
+            assert_eq!(day_totals(&report("UTC", "2026-05-01")), (410, 41, 4));
+            assert_eq!(day_totals(&report("UTC", "2026-05-02")), (370, 37, 2));
+            assert_eq!(
+                day_totals(&report("Asia/Seoul", "2026-05-03")),
+                (400, 40, 1)
+            );
+
+            let empty = report("Asia/Seoul", "2027-01-01");
+            assert!(empty.report.entries.is_empty());
+            assert_eq!(day_totals(&empty), (0, 0, 0));
+            assert_eq!(empty.report.total_cost.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(empty.undated_tokens, TokenBreakdown::default());
+        }
+
+        #[test]
+        #[serial]
+        fn model_report_with_a_recovery_ledger_still_applies_the_overlay() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let source_home = tempfile::TempDir::new().unwrap();
+            let mut cache_env = redirect_cache_home(cache_home.path());
+            cache_env.set("TOKSCALE_PRICING_CACHE_ONLY", "1");
+            let mut recovery_env =
+                crate::paths::test_env::EnvGuard::capture(&["TOKSCALE_RECOVERY_DISABLE"]);
+            recovery_env.remove("TOKSCALE_RECOVERY_DISABLE");
+            write_fixture(source_home.path());
+            let home = source_home.path().to_string_lossy().into_owned();
+            let write_ledger = |ledger_home: &str| {
+                let ledger = serde_json::json!({
+                    "version": 1,
+                    "home": ledger_home,
+                    "messages": [{
+                        "client": "codex",
+                        "model_id": "gpt-5.5",
+                        "provider_id": "openai",
+                        "session_id": "wiped-session",
+                        "workspace_key": null,
+                        "workspace_label": null,
+                        // 2026-05-02T03:00:00Z, noon in Seoul.
+                        "timestamp": 1_777_690_800_000_i64,
+                        "date": "2026-05-02",
+                        "tokens": {
+                            "input": 150,
+                            "output": 0,
+                            "cache_read": 0,
+                            "cache_write": 0,
+                            "reasoning": 0
+                        },
+                        "cost": 0.0,
+                        "agent": null,
+                        "dedup_key": "wiped-session-row"
+                    }]
+                });
+                let path = recovery::path();
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, serde_json::to_string(&ledger).unwrap()).unwrap();
+            };
+            let runtime = runtime();
+            let codex_input = |report: &ModelReportV2| {
+                report
+                    .report
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.client == "codex")
+                    .map(|entry| entry.input)
+                    .sum::<i64>()
+            };
+
+            for (ledger_home, applies) in [(home.as_str(), true), ("/not/this/home", false)] {
+                write_ledger(ledger_home);
+                assert_eq!(recovery::applicable(&home), applies);
+                for group_by in [GroupBy::ClientModel, GroupBy::Model] {
+                    for range in [
+                        (Some("2026-05-02"), Some("2026-05-02"), None),
+                        (None, None, None),
+                    ] {
+                        let options = options(
+                            source_home.path(),
+                            "Asia/Seoul",
+                            group_by.clone(),
+                            WorktreeRollup::Separate,
+                            range,
+                        );
+                        let streamed = runtime
+                            .block_on(get_model_report_v2(options.clone()))
+                            .unwrap();
+                        let collected = runtime.block_on(collected_report(&options));
+                        let label = format!("{ledger_home} {group_by} {range:?}");
+                        assert_same_report(&streamed, &collected, &label);
+                        let native_codex = if range.0.is_some() { 130 } else { 180 };
+                        let recovered = if applies { 150 } else { 0 };
+                        assert_eq!(codex_input(&streamed), native_codex + recovered, "{label}");
+                    }
+                }
+            }
+        }
+
+        fn message(
+            client: &str,
+            model: &str,
+            session: &str,
+            date: &str,
+            input: i64,
+            cost: f64,
+        ) -> UnifiedMessage {
+            let mut message = UnifiedMessage::new(
+                client,
+                model,
+                "anthropic",
+                session,
+                1_777_690_800_000,
+                TokenBreakdown {
+                    input,
+                    output: 1,
+                    ..Default::default()
+                },
+                cost,
+            );
+            message.date = date.into();
+            message
+        }
+
+        #[test]
+        fn model_report_sink_matches_collected_fold_for_undated_and_dated_messages() {
+            let mut undated = message("claude", "claude-opus-4-1", "desktop", "", 1_000, 0.5);
+            undated.timestamp = 0;
+            undated.date = claude_desktop::UNKNOWN_DATE.into();
+            assert!(claude_desktop::is_undated_balance(&undated));
+            // Costs whose f64 sum depends on the order they are added in.
+            let messages = vec![
+                message("claude", "claude-opus-4-1", "s1", "2026-05-01", 10, 0.1),
+                undated,
+                message("claude", "claude-opus-4-1", "s1", "2026-05-02", 20, 0.2),
+                message("codex", "claude-opus-4-1", "s2", "2026-05-02", 30, 0.3),
+                message("claude", "claude-opus-4-1", "s2", "2026-05-02", 40, 1e-17),
+                message("claude", "claude-sonnet-4-5", "s3", "2026-05-03", 50, 3.3),
+                message("claude", "claude-opus-4-1", "s1", "2026-05-03", 60, 0.7),
+            ];
+            let ranges = [
+                (None, None, None),
+                (Some("2026-05-02"), Some("2026-05-02"), None),
+                (Some("2026-05-02"), None, None),
+                (None, Some("2026-05-02"), None),
+                (None, None, Some("2026")),
+                (Some("2027-01-01"), Some("2027-01-01"), None),
+            ];
+            for group_by in GROUPINGS {
+                for (since, until, year) in ranges {
+                    let options = ReportOptions {
+                        since: since.map(str::to_string),
+                        until: until.map(str::to_string),
+                        year: year.map(str::to_string),
+                        group_by: group_by.clone(),
+                        ..Default::default()
+                    };
+                    let mut sink = ModelReportSink::new(&options);
+                    for message in messages.clone() {
+                        sink.accept(message);
+                    }
+                    let (entries, undated_tokens) = sink.finish();
+
+                    let filtered = filter_messages_for_report(messages.clone(), &options);
+                    let mut expected_undated = TokenBreakdown::default();
+                    for message in &filtered {
+                        if claude_desktop::is_undated_balance(message) {
+                            expected_undated.add_assign_saturating(&message.tokens);
+                        }
+                    }
+                    let expected = aggregate_model_usage_entries_with_rollup(
+                        filtered,
+                        &group_by,
+                        WorktreeRollup::Separate,
+                    );
+                    let label = format!("{group_by} {since:?} {until:?} {year:?}");
+                    assert_eq!(
+                        canonical_rows(&entries),
+                        canonical_rows(&expected),
+                        "{label}"
+                    );
+                    assert_eq!(undated_tokens, expected_undated, "{label}");
+                    let dated = since.is_some() || until.is_some() || year.is_some();
+                    assert_eq!(
+                        undated_tokens.input,
+                        if dated { 0 } else { 1_000 },
+                        "{label}"
+                    );
+                }
             }
         }
     }

@@ -1,6 +1,6 @@
 //! Cursor IDE session parser
 //!
-//! Parses usage files cached locally at ~/.config/tokscale/cursor-cache/.
+//! Parses usage files cached locally at ~/.config/tokscale/cursor-cache/ (or `$TOKSCALE_CONFIG_DIR/cursor-cache/` when set).
 //! The active account's cache is `usage.json` (or legacy `usage.csv`);
 //! additional accounts use `usage.account-<sha256>.json` with exact-owner metadata.
 //! Unmarked legacy JSON/CSV caches remain readable until the CLI preserves them
@@ -18,10 +18,9 @@
 use super::{timestamp_to_date_with_timezone, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
-#[cfg(test)]
-use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
@@ -140,6 +139,10 @@ fn infer_provider(model: &str) -> &'static str {
 
 /// One row of `usageEventsDisplay`. Only the fields tokscale consumes are
 /// modeled; unknown fields are ignored so upstream additions don't break parsing.
+///
+/// The field order is a contract: serde also accepts a row in positional form
+/// (a JSON array whose entries fill the fields in this order), so a field
+/// added here has to keep its position stable.
 #[derive(Debug, Deserialize)]
 struct CursorUsageEvent {
     #[serde(rename = "conversationId", default)]
@@ -258,6 +261,11 @@ pub struct CursorUsageEventIdentity {
     pub model: String,
     pub timestamp: i64,
     pub tokens: TokenBreakdown,
+    /// The event's own id, when the row carries one.
+    ///
+    /// A stable identity for the event itself, so the successive snapshots
+    /// Cursor reports for one event are recognized as that one event.
+    pub usage_event_id: Option<String>,
 }
 
 /// Project a row using the report parser's full deserializer and normalization.
@@ -273,6 +281,7 @@ pub fn parse_cursor_usage_event_identity(
         model: event.normalized_model()?.to_string(),
         conversation_id: event.normalized_conversation_id().map(str::to_string),
         tokens: event.token_usage.unwrap_or_default().token_breakdown(),
+        usage_event_id: cursor_usage_event_id(value),
     })
 }
 
@@ -375,12 +384,42 @@ fn parse_cost(cost_str: &str) -> f64 {
     parse_finite_cost(cost_str).unwrap_or(0.0)
 }
 
-/// Parse a Cursor usage cache file, dispatching on its extension.
+/// Parse every accepted row in a Cursor usage cache file.
 ///
 /// `.json` files come from the dashboard usage-events endpoint and are keyed by
-/// the real `conversationId`. `.csv` files are the legacy export format and keep
-/// the synthetic per-day session id for backward compatibility.
+/// the real `conversationId`. Repeated snapshots of one JSON event are returned
+/// separately with the same Cursor-scoped `dedup_key`; the cached scan lane owns
+/// the generation-2 collapse so it can prove both parser generations from the
+/// same rows. `.csv` files are the legacy export format and keep the synthetic
+/// per-day session id for backward compatibility.
 pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
+    try_parse_cursor_file(path).unwrap_or_default()
+}
+
+/// Parse a Cursor cache with the generation-2 event-snapshot collapse applied.
+///
+/// Direct consumers outside the cached scan lane use this to retain the report
+/// behavior that `parse_cursor_file` provided before recount proofs needed every
+/// generation-1 row. The collapse remains per file, matching Cursor parser v4.
+pub fn parse_cursor_file_deduped(path: &Path) -> Vec<UnifiedMessage> {
+    dedupe_cursor_event_snapshots(parse_cursor_file(path))
+}
+
+/// Parse every accepted row like [`parse_cursor_file`], or return `None` when
+/// the source cannot be read as a Cursor cache at all (an unreadable file,
+/// invalid JSON, no `usageEventsDisplay` array, or a CSV without the Cursor
+/// header). An empty `Vec` is a readable cache that holds no usage.
+///
+/// The scan lane uses this on a cache miss to tell a source it could not read
+/// from one that is simply empty. A warm cache hit serves the rows of an
+/// unchanged file and needs no read check.
+pub(crate) fn parse_cursor_file_checked(path: &Path) -> Option<Vec<UnifiedMessage>> {
+    try_parse_cursor_file(path)
+}
+
+/// Every full parse of a Cursor cache goes through here, so the test counter
+/// sees each one, whichever entry point asked for it.
+fn try_parse_cursor_file(path: &Path) -> Option<Vec<UnifiedMessage>> {
     #[cfg(test)]
     record_parse_cursor_file_call(path);
 
@@ -390,10 +429,25 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
 
     if is_json {
-        parse_cursor_events_json(path)
+        try_parse_cursor_events_json(path)
     } else {
-        parse_cursor_csv_file(path)
+        try_parse_cursor_csv_file(path)
     }
+}
+
+/// The event's own identity, when the row carries one.
+///
+/// Read from the raw row rather than from [`CursorUsageEvent`], whose field
+/// order is a contract: a row in positional form (a JSON array) fills that
+/// struct's fields in order, so adding the id there would shift every field
+/// after it. The id is read from the named field of the raw object instead,
+/// which leaves the struct's layout untouched.
+fn cursor_usage_event_id(row: &serde_json::Value) -> Option<String> {
+    row.get("usageEventId")?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse a Cursor usage events JSON file (dashboard `get-filtered-usage-events`).
@@ -405,27 +459,31 @@ pub fn parse_cursor_file(path: &Path) -> Vec<UnifiedMessage> {
 /// parsed individually so one malformed entry is skipped rather than discarding
 /// the whole cache. Events with no usable `conversationId` fall back to a
 /// UTC-stable synthetic per-day id so their cost is never dropped from totals.
+///
+/// Rows sharing a `usageEventId` are snapshots of one event, not independent
+/// events. They are all returned with one Cursor-scoped `dedup_key`; the cached
+/// scan lane keeps the lexicographic maximum `(token total, cost)` and records
+/// the rest in its recount proof. An id-less legacy row with the same parsed
+/// session, model, and timestamp as an identified row receives that same key.
 pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
+    try_parse_cursor_events_json(path).unwrap_or_default()
+}
 
-    let root: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(root) => root,
-        Err(_) => return vec![],
-    };
-
-    let rows = root
-        .get("usageEventsDisplay")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn try_parse_cursor_events_json(path: &Path) -> Option<Vec<UnifiedMessage>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let rows = root.get("usageEventsDisplay")?.as_array()?.clone();
 
     let account_id = account_id_from_cursor_cache_path(path);
     let mut messages = Vec::with_capacity(rows.len());
+    // The snapshot identity of each parsed row, kept alongside its message so
+    // the duplicated snapshots of one event can be collapsed afterwards.
+    let mut snapshot_ids: Vec<Option<String>> = Vec::with_capacity(rows.len());
 
     for row in rows {
+        // The event id is read before the row is consumed by the deserializer.
+        let usage_event_id = cursor_usage_event_id(&row);
+
         // Deserialize each row on its own so one malformed entry (an unexpected
         // type in a single field) skips just that row instead of discarding the
         // entire cache.
@@ -482,10 +540,124 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
         if cost.is_some() {
             message.mark_provider_reported_cost();
         }
+        snapshot_ids.push(usage_event_id);
         messages.push(message);
     }
 
+    assign_cursor_event_dedup_keys(&mut messages, &snapshot_ids);
+    Some(messages)
+}
+
+const CURSOR_EVENT_DEDUP_PREFIX: &str = "cursor-event:";
+
+/// Whether a message key marks snapshots that generation 2 collapses.
+pub(crate) fn is_cursor_event_dedup_key(key: Option<&str>) -> bool {
+    key.is_some_and(|key| key.starts_with(CURSOR_EVENT_DEDUP_PREFIX))
+}
+
+/// Mark repeated snapshots of one Cursor event with one per-file key.
+///
+/// Cursor's usage-events payload is a log of *snapshots*, not of independent
+/// events: the same event is reported again with its running token totals. An
+/// id-less legacy row with the same parsed session id, model, and timestamp as
+/// an identified row joins that event. If several identified ids share the
+/// fallback identity, the smallest id wins for only the id-less rows; distinct
+/// identified events remain distinct. Unmatched id-less rows stay unkeyed.
+fn assign_cursor_event_dedup_keys(
+    messages: &mut [UnifiedMessage],
+    snapshot_ids: &[Option<String>],
+) {
+    let mut identified_by_fallback: HashMap<(super::SharedStr, super::SharedStr, i64), String> =
+        HashMap::new();
+    for (message, snapshot_id) in messages.iter().zip(snapshot_ids) {
+        let Some(snapshot_id) = snapshot_id.as_ref() else {
+            continue;
+        };
+        identified_by_fallback
+            .entry((
+                message.session_id.clone(),
+                message.model_id.clone(),
+                message.timestamp,
+            ))
+            .and_modify(|current| {
+                if snapshot_id < current {
+                    current.clone_from(snapshot_id);
+                }
+            })
+            .or_insert_with(|| snapshot_id.clone());
+    }
+
+    for (message, snapshot_id) in messages.iter_mut().zip(snapshot_ids) {
+        let fallback_key = (
+            message.session_id.clone(),
+            message.model_id.clone(),
+            message.timestamp,
+        );
+        let event_id = snapshot_id
+            .as_ref()
+            .or_else(|| identified_by_fallback.get(&fallback_key));
+        if let Some(event_id) = event_id {
+            message.dedup_key = Some(format!("{CURSOR_EVENT_DEDUP_PREFIX}{event_id}"));
+        }
+    }
+}
+
+/// Identify the one generation-2 survivor in each per-file Cursor event group.
+///
+/// The winner is the lexicographic maximum `(token total, cost)`, with the
+/// earliest row winning exact ties. Returned indices retain source order, so
+/// filtering by this mask reproduces the parser-v4 report order exactly.
+pub(crate) fn cursor_event_snapshot_keep_mask(messages: &[UnifiedMessage]) -> Vec<bool> {
+    let mut keep = vec![true; messages.len()];
+    let mut surviving: HashMap<String, usize> = HashMap::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        let Some(key) = message
+            .dedup_key
+            .as_ref()
+            .filter(|key| is_cursor_event_dedup_key(Some(key)))
+        else {
+            continue;
+        };
+        match surviving.get(key).copied() {
+            Some(current) => {
+                // Parser v4 ranked the raw rows before local pricing. Preserve
+                // that contract on both cold and warm lanes: an estimated cost
+                // must not win an equal-token tie that raw unknown cost did not.
+                let rank = |message: &UnifiedMessage| {
+                    (
+                        message.tokens.total(),
+                        if message.has_authoritative_cost() {
+                            message.cost
+                        } else {
+                            0.0
+                        },
+                    )
+                };
+                let is_larger = rank(message) > rank(&messages[current]);
+                if is_larger {
+                    keep[current] = false;
+                    surviving.insert(key.clone(), index);
+                } else {
+                    keep[index] = false;
+                }
+            }
+            None => {
+                surviving.insert(key.clone(), index);
+            }
+        }
+    }
+
+    keep
+}
+
+fn dedupe_cursor_event_snapshots(messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+    let keep = cursor_event_snapshot_keep_mask(&messages);
     messages
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(message, keep)| keep.then_some(message))
+        .collect()
 }
 
 /// Parse a Cursor usage CSV file
@@ -493,24 +665,18 @@ pub fn parse_cursor_events_json(path: &Path) -> Vec<UnifiedMessage> {
 /// Handles both formats:
 /// - New: Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
 /// - Old: Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost,Cost to you
-fn parse_cursor_csv_file(path: &Path) -> Vec<UnifiedMessage> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
+fn try_parse_cursor_csv_file(path: &Path) -> Option<Vec<UnifiedMessage>> {
+    let content = std::fs::read_to_string(path).ok()?;
 
     let mut messages = Vec::with_capacity(128);
     let mut lines = content.lines();
 
-    // Parse header line to determine column indices
-    let header = match lines.next() {
-        Some(h) => h,
-        None => return vec![],
-    };
+    // Parse header line to determine column indices.
+    let header = lines.next()?;
 
-    // Verify this is a valid Cursor CSV
+    // A scanner match with no Cursor header is not readable Cursor history.
     if !header.contains("Date") || !header.contains("Model") {
-        return vec![];
+        return None;
     }
 
     // Detect format by checking for "Kind" column and column count
@@ -536,6 +702,9 @@ fn parse_cursor_csv_file(path: &Path) -> Vec<UnifiedMessage> {
         // v1 format: Date,Model,Input (w/ Cache Write),...
         (1, 2, 3, 4, 5, 7)
     };
+    if column_count <= cost_idx {
+        return None;
+    }
 
     let account_id = account_id_from_cursor_cache_path(path);
 
@@ -616,7 +785,7 @@ fn parse_cursor_csv_file(path: &Path) -> Vec<UnifiedMessage> {
         messages.push(message);
     }
 
-    messages
+    Some(messages)
 }
 
 /// Simple CSV line parser that handles quoted fields
@@ -699,6 +868,277 @@ mod tests {
         let _sibling_counter = register_parse_cursor_file_counter(sibling.path());
         record_parse_cursor_file_call(&sibling.path().join("usage.csv"));
         assert_eq!(parse_cursor_file_call_count(sibling.path()), 1);
+    }
+
+    fn cursor_snapshot_row(
+        timestamp: i64,
+        usage_event_id: Option<&str>,
+        input_tokens: i64,
+        charged_cents: f64,
+    ) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "timestamp": timestamp.to_string(),
+            "model": "gpt-5",
+            "chargedCents": charged_cents,
+            "tokenUsage": {
+                "inputTokens": input_tokens,
+                "outputTokens": 0,
+                "totalCents": charged_cents,
+            },
+            "conversationId": "same-conversation",
+        });
+        if let Some(usage_event_id) = usage_event_id {
+            row["usageEventId"] = serde_json::json!(usage_event_id);
+        }
+        row
+    }
+
+    fn parse_cursor_snapshot_rows(rows: Vec<serde_json::Value>) -> Vec<UnifiedMessage> {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        let json = serde_json::json!({"usageEventsDisplay": rows});
+        std::fs::write(&file_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        parse_cursor_file_deduped(&file_path)
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_only_the_largest_snapshot_per_event() {
+        // Cursor's usage-events payload reports one event repeatedly, with its
+        // running token totals. The rows share a `usageEventId` and a
+        // timestamp, so summing them would count the event many times over.
+        let json = r#"{
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gemini-3.8-flash-high",
+                    "usageEventId": "452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                    "chargedCents": 226.30601501464844,
+                    "tokenUsage": {
+                        "cacheReadTokens": 10512194,
+                        "inputTokens": 1906404,
+                        "outputTokens": 11958,
+                        "totalCents": 226.30601501464844
+                    },
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                },
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gemini-3.8-flash-high",
+                    "usageEventId": "452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                    "chargedCents": 214.28521728515625,
+                    "tokenUsage": {
+                        "cacheReadTokens": 9000000,
+                        "inputTokens": 1900000,
+                        "outputTokens": 96958,
+                        "totalCents": 214.28521728515625
+                    },
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                },
+                {
+                    "timestamp": "1792841120156",
+                    "model": "gemini-3.8-flash-high",
+                    "usageEventId": "452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                    "chargedCents": 33.39442443847656,
+                    "tokenUsage": {
+                        "cacheReadTokens": 400000,
+                        "inputTokens": 40000,
+                        "outputTokens": 4103,
+                        "totalCents": 33.39442443847656
+                    },
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                }
+            ]
+        }"#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file_deduped(&file_path);
+        assert_eq!(messages.len(), 1, "one event must yield one message");
+        assert_eq!(messages[0].tokens.cache_read, 10512194);
+        assert_eq!(messages[0].tokens.input, 1906404);
+        assert_eq!(messages[0].tokens.output, 11958);
+        assert!((messages[0].cost - 2.2630601501464844).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_matches_idless_snapshot_to_identified_event() {
+        let idless = cursor_snapshot_row(1_792_841_120_156, None, 10, 1.0);
+        let identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+
+        let messages = parse_cursor_snapshot_rows(vec![idless, identified]);
+
+        assert_eq!(messages.len(), 1, "one event must yield one message");
+        assert_eq!(messages[0].tokens.input, 20);
+        assert!((messages[0].cost - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_matches_idless_snapshot_after_identified_event() {
+        let identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+        let idless = cursor_snapshot_row(1_792_841_120_156, None, 10, 1.0);
+
+        let messages = parse_cursor_snapshot_rows(vec![identified, idless]);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "row order must not change the event count"
+        );
+        assert_eq!(messages[0].tokens.input, 20);
+        assert!((messages[0].cost - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_larger_idless_snapshot_for_synthetic_session() {
+        let mut idless = cursor_snapshot_row(1_792_841_120_156, None, 30, 3.0);
+        let mut identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+        idless.as_object_mut().unwrap().remove("conversationId");
+        identified.as_object_mut().unwrap().remove("conversationId");
+
+        let messages = parse_cursor_snapshot_rows(vec![idless, identified]);
+
+        assert_eq!(messages.len(), 1, "one event must yield one message");
+        assert_eq!(messages[0].tokens.input, 30);
+        assert!(messages[0].session_id.starts_with("cursor-active-"));
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_matches_idless_snapshot_to_smallest_identified_id() {
+        let larger_id = cursor_snapshot_row(1_792_841_120_156, Some("z-event"), 20, 2.0);
+        let smaller_id = cursor_snapshot_row(1_792_841_120_156, Some("a-event"), 10, 1.0);
+        let idless = cursor_snapshot_row(1_792_841_120_156, None, 30, 3.0);
+
+        let messages = parse_cursor_snapshot_rows(vec![larger_id, smaller_id, idless]);
+        let mut inputs: Vec<_> = messages
+            .iter()
+            .map(|message| message.tokens.input)
+            .collect();
+        inputs.sort_unstable();
+
+        assert_eq!(inputs, vec![20, 30]);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_idless_snapshot_at_a_distinct_timestamp() {
+        let identified = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+        let matching_idless = cursor_snapshot_row(1_792_841_120_156, None, 10, 1.0);
+        let distinct_idless = cursor_snapshot_row(1_792_841_120_157, None, 7, 0.7);
+
+        let messages =
+            parse_cursor_snapshot_rows(vec![identified, matching_idless, distinct_idless]);
+
+        assert_eq!(messages.len(), 2, "the unmatched id-less event must remain");
+        assert!(messages.iter().any(|message| {
+            message.timestamp == 1_792_841_120_157 && message.tokens.input == 7
+        }));
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_later_lower_snapshot_does_not_replace_larger() {
+        let larger = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            100,
+            10.0,
+        );
+        let later_but_lower = cursor_snapshot_row(
+            1_792_841_120_156,
+            Some("452fb2c1-c17e-4a0f-9b99-95a98967cfed"),
+            20,
+            2.0,
+        );
+
+        let messages = parse_cursor_snapshot_rows(vec![larger, later_but_lower]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert!((messages[0].cost - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_rows_without_an_event_id() {
+        // Id-less rows without any identified session/model/timestamp match
+        // carry no event identity, so they are all kept as independent events.
+        let json = r#"{
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792405129245",
+                    "model": "grok-bot-automation",
+                    "chargedCents": 0,
+                    "conversationId": "sand-subagent-9405fe37"
+                },
+                {
+                    "timestamp": "1792405129246",
+                    "model": "grok-bot-automation",
+                    "chargedCents": 0,
+                    "conversationId": "sand-subagent-9405fe38"
+                }
+            ]
+        }"#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_cursor_events_json_keeps_distinct_events_with_the_same_model() {
+        // Two different events of the same model must not be merged just
+        // because they share a conversation.
+        let json = r#"{
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1792838733769",
+                    "model": "gemini-4-argon-medium",
+                    "usageEventId": "d85f7dbb-31fc-4c6c-b904-652930ba1d40",
+                    "chargedCents": 319.1834411621094,
+                    "tokenUsage": {"inputTokens": 100, "outputTokens": 10, "totalCents": 319.1834411621094},
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                },
+                {
+                    "timestamp": "1792838254696",
+                    "model": "gemini-4-argon-medium",
+                    "usageEventId": "b039781d-caa8-43ec-b993-ef2002481e3c",
+                    "chargedCents": 70.84400939941406,
+                    "tokenUsage": {"inputTokens": 50, "outputTokens": 5, "totalCents": 70.84400939941406},
+                    "conversationId": "09645c1b-1e4b-4c73-8218-f7dd143eaaab"
+                }
+            ]
+        }"#;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("usage.json");
+        std::fs::write(&file_path, json).unwrap();
+
+        let messages = parse_cursor_file(&file_path);
+        assert_eq!(messages.len(), 2);
+        let total: i64 = messages.iter().map(|m| m.tokens.total()).sum();
+        assert_eq!(total, 165);
     }
 
     #[test]

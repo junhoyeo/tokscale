@@ -7,6 +7,7 @@ pub mod antigravity;
 pub mod antigravity_cli;
 pub mod aside;
 pub mod augment;
+pub mod bb;
 pub mod cherrystudio;
 pub mod claudecode;
 pub mod cline;
@@ -16,6 +17,7 @@ pub mod codex;
 pub mod commandcode;
 pub mod copilot;
 pub mod copilot_desktop;
+pub mod copilot_session_state;
 pub mod copilot_session_store;
 pub mod copilot_vscode;
 pub mod crush;
@@ -39,6 +41,7 @@ pub mod kimchi;
 pub mod kimi;
 pub mod kiro;
 pub mod lmstudio;
+pub(crate) mod magpie;
 pub mod mcode;
 pub mod micode;
 pub mod muse;
@@ -46,12 +49,14 @@ pub mod mux;
 pub mod omp;
 pub mod openclaw;
 pub mod opencode;
+pub(crate) mod opencode_claude_agent;
 pub mod opencode_schema;
 pub mod opencodereview;
 pub(crate) mod opencodex;
 pub mod pi;
 pub mod prime_agent;
 pub mod proma;
+pub mod qoder;
 pub mod qwen;
 pub mod reasonix;
 pub mod roocode;
@@ -67,10 +72,14 @@ pub mod workbuddy;
 pub mod zcode;
 pub mod zed;
 
+mod shared_str;
+
 use std::io::Read;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR_STR};
 
 use crate::TokenBreakdown;
+
+pub use shared_str::SharedStr;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +96,7 @@ pub enum BillingIdentity {
     #[default]
     Unknown,
     Known {
-        id: String,
+        id: SharedStr,
         origin: BillingIdentityOrigin,
     },
 }
@@ -107,11 +116,14 @@ pub fn normalize_billing_provider(raw: &str) -> Option<String> {
 impl BillingIdentity {
     pub fn from_explicit(raw: Option<&str>, origin: BillingIdentityOrigin) -> Self {
         raw.and_then(normalize_billing_provider)
-            .map_or(Self::Unknown, |id| Self::Known { id, origin })
+            .map_or(Self::Unknown, |id| Self::Known {
+                id: SharedStr::from(id),
+                origin,
+            })
     }
     pub fn id(&self) -> Option<&str> {
         match self {
-            Self::Known { id, .. } => Some(id),
+            Self::Known { id, .. } => Some(id.as_str()),
             Self::Unknown => None,
         }
     }
@@ -129,14 +141,14 @@ pub enum EstimateStatus {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
-    pub client: String,
-    pub model_id: String,
-    pub provider_id: String,
-    pub session_id: String,
-    pub workspace_key: Option<String>,
-    pub workspace_label: Option<String>,
+    pub client: SharedStr,
+    pub model_id: SharedStr,
+    pub provider_id: SharedStr,
+    pub session_id: SharedStr,
+    pub workspace_key: Option<SharedStr>,
+    pub workspace_label: Option<SharedStr>,
     pub timestamp: i64,
-    pub date: String,
+    pub date: SharedStr,
     pub tokens: TokenBreakdown,
     pub cost: f64,
     #[serde(default)]
@@ -144,26 +156,26 @@ pub struct UnifiedMessage {
     /// OpenAI processing tier actually used for this request, when the source
     /// records it. Fast/priority requests have a different per-token tariff.
     #[serde(default)]
-    pub service_tier: Option<String>,
+    pub service_tier: Option<SharedStr>,
     #[serde(default)]
     pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
     pub message_count: i32,
-    pub agent: Option<String>,
+    pub agent: Option<SharedStr>,
     pub dedup_key: Option<String>,
     /// Human-readable session title/name when the source client stores one
     /// (e.g. OpenCode's `session.title` column). `None` for clients that
     /// don't record a title; the Sessions tab falls back to showing just
     /// the session ID in that case.
     #[serde(default)]
-    pub session_title: Option<String>,
+    pub session_title: Option<SharedStr>,
     /// Session ID of the parent session when this message belongs to a
     /// subagent session linked to one (e.g. OMP nests subagent transcripts
     /// under a directory named after the parent session). `None` for
     /// top-level sessions and clients without subagent linkage. The
     /// Sessions tab can roll these messages into the parent's row.
     #[serde(default)]
-    pub parent_session_id: Option<String>,
+    pub parent_session_id: Option<SharedStr>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
@@ -176,7 +188,7 @@ pub struct UnifiedMessage {
     pub billing_identity: BillingIdentity,
     /// Original model before display/grouping normalization, when different.
     #[serde(default)]
-    pub pricing_model_id: Option<String>,
+    pub pricing_model_id: Option<SharedStr>,
     #[serde(default)]
     pub estimate_status: EstimateStatus,
     /// Copilot-only attribution provenance. Stored in its namespace-specific
@@ -189,7 +201,77 @@ pub struct UnifiedMessage {
     /// label. Assigned per source file after parsing or a cache load, so it is
     /// never part of the source-cache layout.
     #[serde(skip)]
-    pub machine_label: Option<String>,
+    pub machine_label: Option<SharedStr>,
+    /// Claude-only: the transcript entry this row ends on. Stored in the
+    /// Claude cache envelope beside the entry (like `copilot_context`), so it
+    /// does not change any client's message layout or the Claude checkpoint
+    /// digest. See [`ClaudeEntryUuid`].
+    #[serde(skip)]
+    pub claude_entry_uuid: ClaudeEntryUuid,
+}
+
+/// The `uuid` of the last Claude Code transcript entry a Claude row covers.
+///
+/// A Claude row is one API response (`message.id` + `requestId`), written as
+/// one transcript entry per content block. The row keeps the `uuid` of the
+/// last top-level assistant entry seen for it before the next response or
+/// user prompt, which is the entry an Agent SDK host records as the turn's
+/// checkpoint (BB's `providerCheckpointId`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClaudeEntryUuid {
+    /// Not recorded: a row from a cache written before this field existed,
+    /// or a row from another client.
+    #[default]
+    Unknown,
+    /// Parsed, and no transcript entry `uuid` belongs to the row (tool-result
+    /// estimates, advisor rows, headless output, entries without a `uuid`).
+    Absent,
+    /// The entry's `uuid`: its 16 bytes when it is a canonical UUID, else the
+    /// first 16 bytes of its SHA-256.
+    Known([u8; 16]),
+}
+
+impl ClaudeEntryUuid {
+    /// The identity of a transcript entry `uuid` as stored on a row. BB's
+    /// checkpoint ids go through the same function, so equal strings always
+    /// compare equal.
+    pub fn from_entry_uuid(raw: &str) -> Self {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Self::Absent;
+        }
+        let hex: Vec<u8> = raw.bytes().filter(|byte| *byte != b'-').collect();
+        let canonical = raw.len() == 36
+            && hex.len() == 32
+            && [8, 13, 18, 23]
+                .iter()
+                .all(|&index| raw.as_bytes()[index] == b'-');
+        if canonical {
+            let mut bytes = [0u8; 16];
+            let parsed = hex.chunks(2).zip(bytes.iter_mut()).all(|(pair, out)| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    .map(|value| *out = value)
+                    .is_some()
+            });
+            if parsed {
+                return Self::Known(bytes);
+            }
+        }
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(raw.as_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        Self::Known(bytes)
+    }
+
+    pub fn known(self) -> Option<[u8; 16]> {
+        match self {
+            Self::Known(bytes) => Some(bytes),
+            Self::Unknown | Self::Absent => None,
+        }
+    }
 }
 
 const fn default_message_count() -> i32 {
@@ -367,19 +449,19 @@ fn titlecase_agent(name: &str) -> String {
 
 impl UnifiedMessage {
     pub fn new(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
     ) -> Self {
         Self::new_full(
-            client,
-            model_id,
-            provider_id,
-            session_id,
+            client.as_ref(),
+            model_id.as_ref(),
+            provider_id.as_ref(),
+            session_id.as_ref(),
             timestamp,
             tokens,
             cost,
@@ -390,20 +472,20 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_agent(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
-        agent: Option<String>,
+        agent: Option<&str>,
     ) -> Self {
         Self::new_full(
-            client,
-            model_id,
-            provider_id,
-            session_id,
+            client.as_ref(),
+            model_id.as_ref(),
+            provider_id.as_ref(),
+            session_id.as_ref(),
             timestamp,
             tokens,
             cost,
@@ -414,20 +496,20 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_dedup(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: impl AsRef<str>,
+        model_id: impl AsRef<str>,
+        provider_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
         dedup_key: Option<String>,
     ) -> Self {
         Self::new_full(
-            client,
-            model_id,
-            provider_id,
-            session_id,
+            client.as_ref(),
+            model_id.as_ref(),
+            provider_id.as_ref(),
+            session_id.as_ref(),
             timestamp,
             tokens,
             cost,
@@ -438,33 +520,33 @@ impl UnifiedMessage {
 
     #[allow(clippy::too_many_arguments)]
     fn new_full(
-        client: impl Into<String>,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-        session_id: impl Into<String>,
+        client: &str,
+        model_id: &str,
+        provider_id: &str,
+        session_id: &str,
         timestamp: i64,
         tokens: TokenBreakdown,
         cost: f64,
-        agent: Option<String>,
+        agent: Option<&str>,
         dedup_key: Option<String>,
     ) -> Self {
         let date = timestamp_to_date(timestamp);
         Self {
-            client: client.into(),
-            model_id: model_id.into(),
-            provider_id: provider_id.into(),
-            session_id: session_id.into(),
+            client: SharedStr::from(client),
+            model_id: SharedStr::from(model_id),
+            provider_id: SharedStr::from(provider_id),
+            session_id: SharedStr::from(session_id),
             workspace_key: None,
             workspace_label: None,
             timestamp,
-            date,
+            date: SharedStr::from(date),
             tokens,
             cost,
             cost_source: CostSource::Unknown,
             service_tier: None,
             duration_ms: None,
             message_count: default_message_count(),
-            agent,
+            agent: agent.map(SharedStr::from),
             dedup_key,
             session_title: None,
             parent_session_id: None,
@@ -472,6 +554,7 @@ impl UnifiedMessage {
             model_attribution_conflicted: false,
             copilot_context: None,
             machine_label: None,
+            claude_entry_uuid: ClaudeEntryUuid::Unknown,
             billing_identity: BillingIdentity::Unknown,
             pricing_model_id: None,
             estimate_status: EstimateStatus::Unpriced,
@@ -489,9 +572,19 @@ impl UnifiedMessage {
     }
 
     pub fn preserve_pricing_model(&mut self, raw: &str) {
-        if raw != self.model_id && self.pricing_model_id.is_none() {
-            self.pricing_model_id = Some(raw.into());
+        if raw != self.model_id.as_str() && self.pricing_model_id.is_none() {
+            self.pricing_model_id = Some(SharedStr::from(raw));
         }
+    }
+
+    /// Rewrite a Synthetic gateway row to its pricing identity. See
+    /// [`synthetic::normalize_synthetic_gateway_identity`].
+    pub fn normalize_synthetic_gateway(&mut self) -> bool {
+        synthetic::normalize_synthetic_gateway_identity(
+            &mut self.model_id,
+            &mut self.provider_id,
+            &mut self.pricing_model_id,
+        )
     }
 
     pub fn pricing_context(&self) -> crate::pricing::PricingContext<'_> {
@@ -508,17 +601,17 @@ impl UnifiedMessage {
         }
     }
 
-    pub fn set_workspace(
-        &mut self,
-        workspace_key: Option<String>,
-        workspace_label: Option<String>,
-    ) {
-        self.workspace_key = workspace_key;
-        self.workspace_label = workspace_label;
+    pub fn set_workspace<K, L>(&mut self, workspace_key: Option<K>, workspace_label: Option<L>)
+    where
+        K: Into<SharedStr>,
+        L: Into<SharedStr>,
+    {
+        self.workspace_key = workspace_key.map(Into::into);
+        self.workspace_label = workspace_label.map(Into::into);
     }
 
     pub(crate) fn refresh_derived_fields(&mut self) {
-        self.date = timestamp_to_date(self.timestamp);
+        self.date = SharedStr::from(timestamp_to_date(self.timestamp));
     }
 
     /// Re-derive the day bucket under an explicitly chosen timezone.
@@ -534,8 +627,9 @@ impl UnifiedMessage {
         // not an instant before 1970. Re-keying it would move garbage between
         // two equally wrong days, and it is also what bounds the window the
         // auto-pin agreement check has to cover: leaving these alone is what
-        // makes `AGREEMENT_WINDOW_START_MS` a real lower bound rather than a
-        // convenient one.
+        // keeps the epoch start of `AGREEMENT_WINDOW_START_MS` a real lower
+        // bound rather than a convenient one. Windows starts later, at a
+        // chosen floor — see `WINDOWS_AGREEMENT_WINDOW_START_MS`.
         if self.timestamp <= 0 {
             return;
         }
@@ -546,7 +640,7 @@ impl UnifiedMessage {
         // with `""` would collapse the message into a bucket that is not a day
         // at all, and that bucket would then be submitted.
         if !key.is_empty() {
-            self.date = key;
+            self.date = SharedStr::from(key);
         }
     }
 
@@ -1210,6 +1304,155 @@ where
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn repeated_message_strings_share_one_allocation() {
+        let first = UnifiedMessage::new(
+            "opencode",
+            "claude-opus-4.5",
+            "anthropic",
+            "ses_same",
+            1_700_000_000_000,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        let mut second = UnifiedMessage::new(
+            "opencode",
+            "claude-opus-4.5",
+            "anthropic",
+            "ses_same",
+            1_700_000_000_000,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        second.set_workspace(
+            Some("/src/tokscale".to_string()),
+            Some("tokscale".to_string()),
+        );
+        let mut third = second.clone();
+        third.set_workspace(
+            Some("/src/tokscale".to_string()),
+            Some("tokscale".to_string()),
+        );
+
+        assert!(first.client.shares_allocation_with(&second.client));
+        assert!(first.model_id.shares_allocation_with(&second.model_id));
+        assert!(first
+            .provider_id
+            .shares_allocation_with(&second.provider_id));
+        assert!(first.session_id.shares_allocation_with(&second.session_id));
+        assert!(first.date.shares_allocation_with(&second.date));
+        assert!(second
+            .workspace_key
+            .as_ref()
+            .unwrap()
+            .shares_allocation_with(third.workspace_key.as_ref().unwrap()));
+        assert!(second.model_id.shares_allocation_with(&third.model_id));
+        assert_eq!(second, third);
+        assert_ne!(first.workspace_key, second.workspace_key);
+    }
+
+    #[test]
+    fn shared_message_strings_keep_the_string_cache_layout() {
+        let mut message = UnifiedMessage::new_with_dedup(
+            "opencode",
+            "claude-opus-4.5",
+            "anthropic",
+            "ses_layout",
+            1_700_000_000_000,
+            TokenBreakdown {
+                input: 10,
+                output: 4,
+                cache_read: 2,
+                cache_write: 1,
+                cache_write_1h: 0,
+                reasoning: 3,
+            },
+            1.25,
+            Some("dedup-unique".to_string()),
+        );
+        message.set_workspace(
+            Some("/src/tokscale".to_string()),
+            Some("tokscale".to_string()),
+        );
+        message.service_tier = Some(SharedStr::from("priority"));
+        message.agent = Some(SharedStr::from("build"));
+        message.session_title = Some(SharedStr::from("layout check"));
+        message.parent_session_id = Some(SharedStr::from("parent"));
+        message.pricing_model_id = Some(SharedStr::from("claude-opus-4.5-raw"));
+        message.billing_identity = BillingIdentity::from_explicit(
+            Some("Anthropic"),
+            BillingIdentityOrigin::ExplicitRecord,
+        );
+        message.mark_provider_reported_cost();
+        message.is_turn_start = true;
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Wire {
+            client: String,
+            model_id: String,
+            provider_id: String,
+            session_id: String,
+            workspace_key: Option<String>,
+            workspace_label: Option<String>,
+            timestamp: i64,
+            date: String,
+            tokens: TokenBreakdown,
+            cost: f64,
+            cost_source: CostSource,
+            service_tier: Option<String>,
+            duration_ms: Option<i64>,
+            message_count: i32,
+            agent: Option<String>,
+            dedup_key: Option<String>,
+            session_title: Option<String>,
+            parent_session_id: Option<String>,
+            is_turn_start: bool,
+            model_attribution_conflicted: bool,
+            billing_identity: WireBilling,
+            pricing_model_id: Option<String>,
+            estimate_status: EstimateStatus,
+        }
+
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        enum WireBilling {
+            Unknown,
+            Known {
+                id: String,
+                origin: BillingIdentityOrigin,
+            },
+        }
+
+        let bytes = bincode::serialize(&message).unwrap();
+        let wire: Wire = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(wire.client, "opencode");
+        assert_eq!(wire.model_id, "claude-opus-4.5");
+        assert_eq!(wire.session_id, "ses_layout");
+        assert_eq!(wire.workspace_key.as_deref(), Some("/src/tokscale"));
+        assert_eq!(wire.workspace_label.as_deref(), Some("tokscale"));
+        assert_eq!(wire.dedup_key.as_deref(), Some("dedup-unique"));
+        assert_eq!(wire.service_tier.as_deref(), Some("priority"));
+        assert_eq!(wire.agent.as_deref(), Some("build"));
+        assert_eq!(wire.session_title.as_deref(), Some("layout check"));
+        assert_eq!(wire.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(
+            wire.pricing_model_id.as_deref(),
+            Some("claude-opus-4.5-raw")
+        );
+        assert_eq!(wire.tokens.input, 10);
+        assert!(matches!(
+            wire.billing_identity,
+            WireBilling::Known { ref id, origin }
+                if id == "anthropic" && origin == BillingIdentityOrigin::ExplicitRecord
+        ));
+
+        let round_trip = bincode::serialize(&wire).unwrap();
+        assert_eq!(bytes, round_trip);
+        let decoded: UnifiedMessage = bincode::deserialize(&bytes).unwrap();
+        assert!(decoded.model_id.shares_allocation_with(&message.model_id));
+        assert_eq!(decoded.dedup_key.as_deref(), Some("dedup-unique"));
+        assert_eq!(decoded, message);
+    }
 
     #[test]
     fn workspace_repo_root_strips_worktree_suffixes() {

@@ -250,7 +250,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let quota = fetch_quota(&client, &api_key).await?;
         let sub = fetch_sub(&client, &api_key).await.ok();
 
@@ -312,6 +312,7 @@ pub fn fetch() -> Result<UsageOutput> {
         }
 
         Ok(UsageOutput {
+            freshness: None,
             provider: "Z.ai".into(),
             account: None,
             credential_source: None,

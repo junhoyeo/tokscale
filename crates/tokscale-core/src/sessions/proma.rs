@@ -176,7 +176,7 @@ fn parse_sdk_file(path: &Path) -> Vec<UnifiedMessage> {
             let label = key.as_deref().and_then(workspace_label_from_key);
             message.set_workspace(key, label);
         }
-        message.service_tier = text(body, "service_tier");
+        message.service_tier = text(body, "service_tier").map(crate::sessions::SharedStr::from);
         message.dedup_key = serde_json::to_string(&Identity::Sdk {
             uuid: text(&record, "uuid"),
             response: text(body, "id"),
@@ -250,10 +250,10 @@ pub(crate) fn reconcile_sources(
         for message in messages {
             match identity(message) {
                 Some(Identity::Pi { entry, .. }) => {
-                    pi_sessions.insert(message.session_id.clone());
-                    path_sessions.insert(path.clone(), message.session_id.clone());
+                    pi_sessions.insert(message.session_id.to_string());
+                    path_sessions.insert(path.clone(), message.session_id.to_string());
                     if let Some(entry) = entry {
-                        pi_entries.insert((message.session_id.clone(), entry));
+                        pi_entries.insert((message.session_id.to_string(), entry));
                     }
                 }
                 Some(Identity::Sdk {
@@ -284,7 +284,7 @@ pub(crate) fn reconcile_sources(
                 .or(m
                     .sdk_session_id
                     .as_ref()
-                    .filter(|s| pi_sessions.contains(*s)))
+                    .filter(|s| pi_sessions.contains(s.as_str())))
         });
         for mut message in messages {
             let key = match identity(&message) {
@@ -297,7 +297,7 @@ pub(crate) fn reconcile_sources(
                             .as_ref()
                             .and_then(|uuid| meta.and_then(|m| m.pi_entry_bindings.get(uuid)));
                         let native =
-                            linked_session.or_else(|| pi_sessions.get(&message.session_id));
+                            linked_session.or_else(|| pi_sessions.get(message.session_id.as_str()));
                         if let Some(session) = native {
                             // A known binding missing from the native file may
                             // be a crash-truncated tail: keep its display copy.

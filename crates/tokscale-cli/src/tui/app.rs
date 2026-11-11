@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokscale_core::ClientId;
 
-use crate::commands::usage::{UsageFetchReport, UsageOutput};
+use crate::commands::usage::{UsageAccount, UsageFetchReport, UsageOutput};
 use crate::ClientFilter;
 
 use ratatui::style::Color;
@@ -225,6 +225,7 @@ pub enum ClickAction {
     CodexUseAccount { account_id: String },
     CodexRemoveAccount { account_id: String },
     CodexResetAccount { account_id: String },
+    AntigravityLinkHook,
 }
 
 fn codex_reset_outcome_label(
@@ -401,6 +402,8 @@ pub struct App {
     confirmed_codex_use_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_remove_account_id: Rc<RefCell<Option<String>>>,
     confirmed_codex_reset_account_id: Rc<RefCell<Option<String>>>,
+    confirmed_antigravity_hook: Rc<RefCell<Option<String>>>,
+    antigravity_hook_registered: bool,
     pub hide_usage_emails: bool,
     pub codex_login_lines: Vec<String>,
     pub(crate) codex_login_outcome: Option<CodexLoginOutcome>,
@@ -507,6 +510,7 @@ impl App {
         let confirmed_codex_use_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_remove_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_reset_account_id = Rc::new(RefCell::new(None));
+        let confirmed_antigravity_hook = Rc::new(RefCell::new(None));
         let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
         let current_tab = if Self::tab_visible(&settings, requested_tab) {
             requested_tab
@@ -583,6 +587,9 @@ impl App {
             confirmed_codex_use_account_id,
             confirmed_codex_remove_account_id,
             confirmed_codex_reset_account_id,
+            confirmed_antigravity_hook,
+            antigravity_hook_registered:
+                crate::commands::usage::antigravity::is_antigravity_hook_registered(),
             hide_usage_emails: true,
             codex_login_lines: Vec::new(),
             codex_login_outcome: None,
@@ -903,6 +910,7 @@ impl App {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_key(key.code);
             self.consume_confirmed_codex_account_action();
+            self.consume_confirmed_antigravity_hook_action();
             self.apply_pending_language_change();
             return false;
         }
@@ -1332,6 +1340,9 @@ impl App {
             ClickAction::CodexResetAccount { account_id } => {
                 self.confirm_codex_rate_limit_reset(&account_id);
             }
+            ClickAction::AntigravityLinkHook => {
+                self.confirm_antigravity_hook_registration();
+            }
         }
     }
 
@@ -1391,12 +1402,11 @@ impl App {
     }
 
     fn confirm_codex_account_switch(&mut self, account_id: &str) {
-        if self.subscription_usage.iter().any(|usage| {
-            usage
-                .account
-                .as_ref()
-                .is_some_and(|account| account.id == account_id && account.is_active)
-        }) {
+        let Some(account) = self.saved_codex_account(account_id) else {
+            self.set_status("Codex account not found");
+            return;
+        };
+        if account.is_active {
             self.set_status("Codex account already active");
             return;
         }
@@ -1412,12 +1422,11 @@ impl App {
     }
 
     fn confirm_codex_account_removal(&mut self, account_id: &str) {
-        if self.subscription_usage.iter().any(|usage| {
-            usage
-                .account
-                .as_ref()
-                .is_some_and(|account| account.id == account_id && account.is_active)
-        }) {
+        let Some(account) = self.saved_codex_account(account_id) else {
+            self.set_status("Codex account not found");
+            return;
+        };
+        if account.is_active {
             self.set_status("Switch Codex accounts before removing the current account");
             return;
         }
@@ -1449,6 +1458,58 @@ impl App {
         if let Some(account_id) = account_id {
             self.reset_codex_rate_limits(&account_id);
         }
+    }
+
+    pub fn is_antigravity_hook_registered(&self) -> bool {
+        self.antigravity_hook_registered
+    }
+
+    pub fn refresh_antigravity_hook_registered(&mut self) {
+        self.antigravity_hook_registered =
+            crate::commands::usage::antigravity::is_antigravity_hook_registered();
+    }
+
+    pub fn confirm_antigravity_hook_registration(&mut self) {
+        if self.is_antigravity_hook_registered() {
+            self.set_status("Antigravity CLI sync hook is already installed");
+            return;
+        }
+        let target_path = crate::commands::usage::antigravity::global_hooks_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.gemini/config/hooks.json".to_string());
+        let dialog = ConfirmDialog::antigravity_hook(
+            target_path,
+            self.confirmed_antigravity_hook.clone(),
+            self.settings.tui_language,
+        );
+        self.dialog_stack.show(Box::new(dialog));
+        self.set_status("Confirm Antigravity hook registration");
+    }
+
+    fn consume_confirmed_antigravity_hook_action(&mut self) {
+        let confirmed = self.confirmed_antigravity_hook.borrow_mut().take();
+        if confirmed.is_some() {
+            match crate::commands::usage::antigravity::register_antigravity_hook() {
+                Ok(path) => {
+                    self.antigravity_hook_registered = true;
+                    self.set_status(&format!("Registered hook in {}", path.display()));
+                    self.refresh_usage();
+                }
+                Err(e) => {
+                    self.set_status(&format!("Failed to register hook: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Only Codex cards carry saved Codex identities; other providers reuse
+    /// the account slot for things the Codex store does not own.
+    fn saved_codex_account(&self, account_id: &str) -> Option<&UsageAccount> {
+        self.subscription_usage
+            .iter()
+            .filter(|usage| usage.provider == "Codex")
+            .filter_map(|usage| usage.account.as_ref())
+            .find(|account| account.id == account_id)
     }
 
     fn codex_account_label(&self, account_id: &str) -> String {
@@ -1689,6 +1750,7 @@ impl App {
         if self.dialog_stack.is_active() {
             self.dialog_stack.handle_mouse(event);
             self.consume_confirmed_codex_account_action();
+            self.consume_confirmed_antigravity_hook_action();
             return;
         }
 
@@ -1796,6 +1858,9 @@ impl App {
         self.persist_current_sort();
 
         self.current_tab = target;
+        if target == Tab::Usage {
+            self.refresh_antigravity_hook_registered();
+        }
         if target != Tab::Daily {
             self.selected_daily_detail_date = None;
         }
@@ -3456,6 +3521,7 @@ mod tests {
 
     fn usage_output(provider: &str, account: Option<UsageAccount>) -> UsageOutput {
         UsageOutput {
+            freshness: None,
             provider: provider.to_string(),
             account,
             credential_source: None,
@@ -5190,6 +5256,34 @@ mod tests {
     }
 
     #[test]
+    fn test_usage_initial_tab_schedules_background_load() {
+        let app = App::new_with_cached_data(
+            TuiConfig {
+                initial_tab: Some(Tab::Usage),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(app.current_tab, Tab::Usage);
+        assert!(app.usage_fetch_attempted);
+        assert!(app.is_fetching_usage());
+    }
+
+    #[test]
+    fn test_pending_usage_load_keeps_quit_responsive_without_another_fetch() {
+        let mut app = make_app();
+        app.current_tab = Tab::Usage;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.usage_rx = Some(receiver);
+        app.usage_fetcher = || panic!("a pending Usage load must not create another fetch");
+        app.refresh_usage();
+        assert!(app.is_fetching_usage());
+        assert!(app.handle_key_event(key(KeyCode::Char('q'))));
+        assert!(app.should_quit);
+    }
+
+    #[test]
     fn test_handle_key_refresh_usage_tab_reports_fetch_failure_diagnostic() {
         let mut app = make_app();
         app.usage_fetcher = failing_usage_fetcher;
@@ -5492,10 +5586,18 @@ mod tests {
     #[test]
     fn test_handle_mouse_click_codex_remove_opens_confirmation_dialog() {
         let mut app = make_app();
+        app.subscription_usage = vec![usage_output(
+            "Codex",
+            Some(UsageAccount {
+                id: "acct_personal".to_string(),
+                label: Some("personal".to_string()),
+                is_active: false,
+            }),
+        )];
         app.add_click_area(
             Rect::new(0, 0, 10, 2),
             ClickAction::CodexRemoveAccount {
-                account_id: "acct_work".to_string(),
+                account_id: "acct_personal".to_string(),
             },
         );
 
@@ -5538,6 +5640,80 @@ mod tests {
             app.status_message.as_deref(),
             Some("Switch Codex accounts before removing the current account")
         );
+    }
+
+    /// Antigravity model groups and MiniMax Token Plan sites reuse the account
+    /// slot. A Use/Remove click carrying one of their ids, whether or not it is
+    /// marked active, must be refused before any Codex dialog opens; the same
+    /// id on a Codex card is accepted (positive control).
+    #[test]
+    fn test_codex_account_actions_refuse_ids_from_non_codex_cards() {
+        let click = |app: &mut App, action: ClickAction| {
+            app.click_areas.clear();
+            app.add_click_area(Rect::new(0, 0, 10, 2), action);
+            app.handle_mouse_event(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            });
+        };
+
+        for provider in ["Antigravity", "MiniMax Token Plan"] {
+            for is_active in [false, true] {
+                for remove in [false, true] {
+                    let mut app = make_app();
+                    app.subscription_usage = vec![usage_output(
+                        provider,
+                        Some(UsageAccount {
+                            id: "external_account".to_string(),
+                            label: None,
+                            is_active,
+                        }),
+                    )];
+                    let account_id = "external_account".to_string();
+                    let action = if remove {
+                        ClickAction::CodexRemoveAccount { account_id }
+                    } else {
+                        ClickAction::CodexUseAccount { account_id }
+                    };
+
+                    click(&mut app, action);
+
+                    assert!(
+                        !app.dialog_stack.is_active(),
+                        "{provider} active={is_active} remove={remove}"
+                    );
+                    assert_eq!(
+                        app.status_message.as_deref(),
+                        Some("Codex account not found"),
+                        "{provider} active={is_active} remove={remove}"
+                    );
+                }
+            }
+        }
+
+        for remove in [false, true] {
+            let mut app = make_app();
+            app.subscription_usage = vec![usage_output(
+                "Codex",
+                Some(UsageAccount {
+                    id: "external_account".to_string(),
+                    label: None,
+                    is_active: false,
+                }),
+            )];
+            let account_id = "external_account".to_string();
+            let action = if remove {
+                ClickAction::CodexRemoveAccount { account_id }
+            } else {
+                ClickAction::CodexUseAccount { account_id }
+            };
+
+            click(&mut app, action);
+
+            assert!(app.dialog_stack.is_active(), "remove={remove}");
+        }
     }
 
     #[test]

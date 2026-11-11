@@ -4,12 +4,15 @@ import {
   applyRecountProofToCell,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
+  recountCostUnsafeModels,
+  recountProofProvesCost,
   scanScopeCoversFullHistory,
   SUPPORTED_VERSIONED_PARSERS,
   type ClientRecountProof,
   type ParserClientHighWaterState,
   type ParserHighWaterPlan,
   type RecountProofCell,
+  type RecountProofEntry,
 } from "../../src/lib/db/parserHighWater";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -112,6 +115,15 @@ function expectCreditedNothing(plan: ParserHighWaterPlan) {
   expect(plan.mode).not.toBe("freeze");
 }
 
+
+/** `applyRecountProofToCell` contexts used below. */
+const AT_TRANSITION = {
+  transition: true,
+  costIsComplete: true,
+  storedCostIsFloor: false,
+  costUnsafeModels: new Set<string>() as ReadonlySet<string>,
+} as const;
+const AT_TRANSITION_FLOOR = { ...AT_TRANSITION, storedCostIsFloor: true } as const;
 describe("non-destructive parser generation high-water", () => {
   it("treats prototype-named model IDs as ordinary untrusted keys", () => {
     const first = baseline(
@@ -1530,6 +1542,23 @@ describe("droid parser high-water", () => {
     expect(plan.mode).toBe("freeze");
     expect(plan.increments).toEqual({});
   });
+
+  it("does not credit complete days, because a growing session moves tokens between days", () => {
+    const state = droidPlan(wholeSessionOnOneDay, sessionSplitAcrossDays).nextState!;
+
+    const plan = planParserHighWaterSubmission({
+      client: "droid",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.droid,
+      fullHistory: false,
+      completeDays: true,
+      existingLegacyDays: {},
+      incomingDays: droidSnapshot(droidContribution("2026-08-10", 500_000)),
+      state,
+    });
+
+    expect(plan.mode).toBe("freeze");
+    expect(plan.increments).toEqual({});
+  });
 });
 
 describe("devin-cli recount proof", () => {
@@ -1585,6 +1614,25 @@ describe("devin-cli recount proof", () => {
         { [entry.modelId ?? "swe-2-high"]: { previous: entry.previous, corrected: entry.corrected } },
       ])
     );
+  }
+
+  /** What a snapshot submits for one proof day when its cost was safe: the corrected side. */
+  function submittedFor(proofDay: Record<string, RecountProofEntry>): ClientBreakdownData {
+    return foldParserClientSnapshot(
+      [
+        {
+          date: "2026-10-08",
+          clients: Object.entries(proofDay).map(([modelId, entry]) => ({
+            client: "devin-cli",
+            modelId,
+            tokens: { ...entry.corrected.tokens },
+            cost: entry.corrected.cost,
+            messages: entry.corrected.messages,
+          })),
+        },
+      ],
+      "devin-cli"
+    )["2026-10-08"];
   }
 
   function devinPlan(
@@ -1678,8 +1726,9 @@ describe("devin-cli recount proof", () => {
   it("keeps stored usage the proof does not describe", () => {
     // Two local databases fed the stored day (A = 400 with 50 duplicate
     // rows, B = 600). This scan read only A: B contributes to neither side of
-    // the proof, so only A's 50 duplicates come off and B's 600 stay. Replacing
-    // the cell with the 350 the scan reports would delete B outright.
+    // the proof, which explains only 400 of the stored 1,000. Replacing the
+    // cell with the 350 the scan reports would delete B outright, and taking
+    // A's 50 off would be repeated by every later submit of the same proof.
     const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
     const scan = devinSnapshot(devinContribution("2026-10-08", 350));
     const plan = devinPlan(stored, scan, {
@@ -1690,34 +1739,254 @@ describe("devin-cli recount proof", () => {
 
     expect(plan.mode).toBe("baseline-legacy");
     expect(plan.recountDays).toEqual(["2026-10-08"]);
-    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(950);
-    expect(plan.nextState?.aggregate.tokens).toBe(950);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
+    expect(plan.nextState?.aggregate.tokens).toBe(1_000);
   });
 
-  it("heals the rest once the missing source is read again", () => {
-    // Continuing from the A-only scan above (ledger 950): B becomes readable
-    // and carries 60 duplicates of its own. The proof now covers both, and
-    // the subtraction stops at the corrected count, so A's duplicates are not
-    // taken off a second time.
+  it("does not wear unexplained usage down when the same proof is replayed", () => {
+    // Stored 1,000, but the proof's rows account for only 500 of it (100
+    // after dedup). Subtracting the 400 on every submit would give 600, 200,
+    // then 100, removing usage the proof never described.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const scan = devinSnapshot(devinContribution("2026-10-08", 100));
+    const partialProof = proof({
+      "2026-10-08": { previous: proofCell(500), corrected: proofCell(100) },
+    });
+    let state = devinPlan(stored, scan, { recountProof: partialProof }).nextState!;
+    expect(state.days["2026-10-08"]?.tokens).toBe(1_000);
+
+    for (let replay = 0; replay < 3; replay += 1) {
+      const plan = devinPlan({}, scan, { state, recountProof: partialProof });
+      expect(plan.mode).toBe("incremental");
+      expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
+      state = plan.nextState!;
+    }
+  });
+
+  it("corrects a day the transition could not correct when the missing source is read again", () => {
+    // Continuing from the A-only scan above (ledger kept at 1,000): B becomes
+    // readable and carries 110 duplicates of its own. The proof now explains
+    // the whole stored cell — its previous side equals it exactly — and the
+    // cell was never credited in this generation's units (the observed
+    // snapshot holds only A's 350), so the residue is still lowered to the
+    // corrected count.
     const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
     const first = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 350)), {
       recountProof: proof({
         "2026-10-08": { previous: proofCell(400), corrected: proofCell(350) },
       }),
     });
-    expect(first.nextState?.days["2026-10-08"]?.tokens).toBe(950);
+    expect(first.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
 
+    const bothSources = proof({
+      "2026-10-08": { previous: proofCell(1_000), corrected: proofCell(890) },
+    });
     const second = devinPlan({}, devinSnapshot(devinContribution("2026-10-08", 890)), {
       state: first.nextState,
+      recountProof: bothSources,
+    });
+    expect(second.mode).toBe("incremental");
+    expect(second.recountDays).toEqual(["2026-10-08"]);
+    expect(second.recountTransition).toBeUndefined();
+    expect(second.nextState?.days["2026-10-08"]?.tokens).toBe(890);
+    expect(second.nextState?.aggregate.tokens).toBe(890);
+
+    // A transition that reads both sources corrects the day the same way.
+    const transition = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 890)), {
+      recountProof: bothSources,
+    });
+    expect(transition.recountTransition).toBe(true);
+    expect(transition.nextState?.days["2026-10-08"]?.tokens).toBe(890);
+  });
+
+  it("clears the high-water deficit once residue is corrected, crediting new usage", () => {
+    // Stored 1,000 under generation 1 (400 = A with 50 dupes, 600 = B). The
+    // transition-era scan read only A, so the cell stayed. Now the snapshot
+    // reads both sources and reports 100 tokens of genuinely new usage on a
+    // later day. Without the correction the credited 1,000 would exceed the
+    // incoming 990 and freeze the new day's growth behind the deficit.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const first = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 350)), {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(400), corrected: proofCell(350) },
+      }),
+    });
+
+    const second = devinPlan(
+      {},
+      devinSnapshot(
+        devinContribution("2026-10-08", 890),
+        devinContribution("2026-10-09", 100)
+      ),
+      {
+        state: first.nextState,
+        recountProof: proof({
+          "2026-10-08": { previous: proofCell(1_000), corrected: proofCell(890) },
+        }),
+      }
+    );
+
+    expect(second.highWaterDeficit).toBeUndefined();
+    expect(second.nextState?.days["2026-10-08"]?.tokens).toBe(890);
+    expect(second.increments["2026-10-09"]?.tokens).toBe(100);
+    expect(second.nextState?.days["2026-10-09"]?.tokens).toBe(100);
+    expect(second.nextState?.aggregate.tokens).toBe(990);
+  });
+
+  it("infers residue on a v2 state written before the set was tracked", () => {
+    // The credited day (1,000) was never corrected — the last snapshot held
+    // only A's 350 — so the divergence marks the cell as residue and the
+    // proof that now covers both sources heals it post-transition.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const first = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 350)), {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(400), corrected: proofCell(350) },
+      }),
+    });
+    const legacyState = { ...first.nextState! } as ParserClientHighWaterState;
+    delete legacyState.residueDays;
+
+    const second = devinPlan({}, devinSnapshot(devinContribution("2026-10-08", 890)), {
+      state: legacyState,
       recountProof: proof({
         "2026-10-08": { previous: proofCell(1_000), corrected: proofCell(890) },
       }),
     });
 
-    expect(second.mode).toBe("incremental");
-    expect(second.recountDays).toEqual(["2026-10-08"]);
     expect(second.nextState?.days["2026-10-08"]?.tokens).toBe(890);
-    expect(second.nextState?.aggregate.tokens).toBe(890);
+    expect(second.nextState?.residueDays).toEqual({});
+  });
+
+  it("keeps a cell equal to its last snapshot from inference marks", () => {
+    // A baseline-new state credited 200 from A and B under this generation.
+    // Without a residue set, inference must not mark it: A's later proof can
+    // count the same 200 under generation 1 after B disappears, and lowering
+    // the day would erase B's usage.
+    const state = {
+      ...devinPlan(
+        {},
+        devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0, 2))
+      ).nextState!,
+    } as ParserClientHighWaterState;
+    delete state.residueDays;
+
+    const afterDelete = devinPlan(
+      {},
+      devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0, 1)),
+      {
+        state,
+        recountProof: proof({
+          "2026-10-08": { previous: proofCell(200, 0, 2), corrected: proofCell(100, 0, 1) },
+        }),
+      }
+    );
+
+    expect(afterDelete.nextState?.days["2026-10-08"]?.tokens).toBe(200);
+  });
+
+  it("treats every credited cell of a pre-v2 state as residue", () => {
+    // A state written before allocation schema v2 predates recounts: its
+    // stored rows are all previous-generation counts, so a matching proof
+    // corrects them without a transition or a residue set.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const legacyState = {
+      version: SUPPORTED_VERSIONED_PARSERS["devin-cli"],
+      baselineEstablished: true,
+      aggregate: {
+        input: 1_000,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        tokens: 1_000,
+        messages: 1,
+        inputIncludingCacheRead: 1_000,
+      },
+      days: stored,
+    } as ParserClientHighWaterState;
+
+    const plan = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 890)), {
+      state: legacyState,
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(1_000), corrected: proofCell(890) },
+      }),
+    });
+
+    expect(plan.mode).toBe("incremental");
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(890);
+    expect(plan.nextState?.residueDays).toEqual({});
+    expect(plan.nextState?.aggregate.tokens).toBe(890);
+  });
+
+  it("keeps a corrected day when one of its sources later disappears", () => {
+    // Databases A and B fed the stored day: generation 1 counted 200 from
+    // each and generation 2 counts 100 from each. The first full snapshot
+    // reads both and corrects the day to 200.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 400, "swe-2-high", 0, 4));
+    const first = devinPlan(
+      stored,
+      devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0, 2)),
+      {
+        recountProof: proof({
+          "2026-10-08": { previous: proofCell(400, 0, 4), corrected: proofCell(200, 0, 2) },
+        }),
+      }
+    );
+    expect(first.nextState?.days["2026-10-08"]?.tokens).toBe(200);
+
+    // B is then deleted. A's proof still counts A's duplicates under
+    // generation 1, and its previous side (200 tokens, 2 messages) equals
+    // the corrected day exactly. The day is in generation-2 units, though,
+    // and B's 100 must stay.
+    const afterDelete = devinPlan(
+      {},
+      devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0, 1)),
+      {
+        state: first.nextState,
+        recountProof: proof({
+          "2026-10-08": { previous: proofCell(200, 0, 2), corrected: proofCell(100, 0, 1) },
+        }),
+      }
+    );
+    expect(afterDelete.recountTransition).toBeUndefined();
+    expect(afterDelete.nextState?.days["2026-10-08"]?.tokens).toBe(200);
+    expect(afterDelete.nextState?.days["2026-10-08"]?.messages).toBe(2);
+  });
+
+  it("never lowers a day first credited by this generation when a source disappears", () => {
+    // The day was never stored under generation 1: this generation credited
+    // 200 from A and B. A's later proof explains only A.
+    const state = devinPlan(
+      {},
+      devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0, 2))
+    ).nextState!;
+    const afterDelete = devinPlan(
+      {},
+      devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0, 1)),
+      {
+        state,
+        recountProof: proof({
+          "2026-10-08": { previous: proofCell(500, 0, 2), corrected: proofCell(100, 0, 1) },
+        }),
+      }
+    );
+    expect(afterDelete.nextState?.days["2026-10-08"]?.tokens).toBe(200);
+  });
+
+  it("keeps a legacy day whose remaining source has since outgrown it", () => {
+    // The stored 400 came from A (200) and B (200) under generation 1. B is
+    // gone by the first generation-2 scan and A has grown to 500. A's proof
+    // counts more than the stored day, yet none of B's share is in it, so
+    // the day is kept rather than lowered to A's corrected 150. (A day that
+    // only grew from one source looks the same and stays inflated too.)
+    const stored = devinSnapshot(devinContribution("2026-10-08", 400));
+    const plan = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 150)), {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(500), corrected: proofCell(150) },
+      }),
+    });
+    expect(plan.recountDays).toEqual(["2026-10-08"]);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(400);
   });
 
   it("never lowers a cell below the corrected count and lets growth raise it", () => {
@@ -1774,7 +2043,7 @@ describe("devin-cli recount proof", () => {
       }
     );
     expect(lower.mode).toBe("incremental");
-    expect(lower.highWaterDeficit).toBeGreaterThan(0);
+    expect(lower.highWaterDeficit).toBeUndefined();
     expect(lower.increments["2026-10-08"]).toBeUndefined();
     expect(lower.nextState?.days["2026-10-08"]?.tokens).toBe(455_000_000);
 
@@ -1790,6 +2059,35 @@ describe("devin-cli recount proof", () => {
     );
     expect(grown.mode).toBe("incremental");
     expect(grown.nextState?.aggregate.tokens).toBe(700_000_000);
+  });
+
+  it("keeps crediting new usage after local Devin history shrinks", () => {
+    // Devin CLI deletes `message_nodes` rows (a deleted session, a rewound
+    // branch), so later scans no longer carry that usage. The stored days
+    // stay, and new usage must still count.
+    const stored = devinSnapshot(
+      devinContribution("2026-10-01", 5_000),
+      devinContribution("2026-10-08", 400)
+    );
+    const transition = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 400)));
+    expect(transition.mode).toBe("baseline-legacy");
+    expect(transition.nextState?.days["2026-10-01"]?.tokens).toBe(5_000);
+
+    const grown = devinPlan(
+      {},
+      devinSnapshot(
+        devinContribution("2026-10-08", 450, "swe-2-high", 0, 2),
+        devinContribution("2026-10-09", 300)
+      ),
+      { state: transition.nextState }
+    );
+    expect(grown.mode).toBe("incremental");
+    expect(grown.highWaterDeficit).toBeUndefined();
+    expect(grown.increments["2026-10-08"]?.tokens).toBe(50);
+    expect(grown.increments["2026-10-08"]?.messages).toBe(1);
+    expect(grown.increments["2026-10-09"]?.tokens).toBe(300);
+    expect(grown.nextState?.days["2026-10-01"]?.tokens).toBe(5_000);
+    expect(grown.nextState?.aggregate.tokens).toBe(5_750);
   });
 
   it("rejects a proof that does not describe the submitted snapshot", () => {
@@ -1877,8 +2175,9 @@ describe("devin-cli recount proof", () => {
     const proofDay = proof({
       "2026-10-08": { previous: proofCell(3_000, 30), corrected: proofCell(1_200, 8) },
     })["2026-10-08"];
+    const submitted = submittedFor(proofDay);
 
-    const exact = applyRecountProofToCell(stored, proofDay);
+    const exact = applyRecountProofToCell(stored, proofDay, submitted, AT_TRANSITION_FLOOR);
     expect(exact.cell.tokens).toBe(1_200);
     expect(exact.cell.cost).toBeCloseTo(8, 4);
     expect(exact.cell.models["swe-2-high"].cost).toBeCloseTo(8, 4);
@@ -1891,11 +2190,244 @@ describe("devin-cli recount proof", () => {
     // A stored cost already partly corrected stops at the corrected cost
     // rather than taking the full proven difference off again.
     const partlyCorrected = { ...stored, cost: 15, models: { "swe-2-high": { ...stored.models["swe-2-high"], cost: 15 } } };
-    expect(applyRecountProofToCell(partlyCorrected, proofDay).cell.cost).toBeCloseTo(8, 4);
+    expect(applyRecountProofToCell(partlyCorrected, proofDay, submitted, AT_TRANSITION).cell.cost).toBeCloseTo(8, 4);
 
-    // A stored cost below the corrected cost is not touched.
+    // A complete stored cost below the corrected cost is not touched; a floor
+    // there is raised to the corrected cost, which prices exactly its rows.
     const belowCorrected = { ...stored, cost: 5, models: { "swe-2-high": { ...stored.models["swe-2-high"], cost: 5 } } };
-    expect(applyRecountProofToCell(belowCorrected, proofDay).cell.cost).toBeCloseTo(5, 4);
+    expect(applyRecountProofToCell(belowCorrected, proofDay, submitted, AT_TRANSITION).cell.cost).toBeCloseTo(5, 4);
+    expect(applyRecountProofToCell(belowCorrected, proofDay, submitted, AT_TRANSITION_FLOOR).cell.cost).toBeCloseTo(8, 4);
+
+    // An incomplete snapshot keeps every stored cost as a floor.
+    const incomplete = applyRecountProofToCell(stored, proofDay, submitted, {
+      ...AT_TRANSITION_FLOOR,
+      costIsComplete: false,
+      costUnsafeModels: new Set(["swe-2-high"]),
+    });
+    expect(incomplete.cell.tokens).toBe(1_200);
+    expect(incomplete.cell.cost).toBeCloseTo(30, 4);
+  });
+
+  it("treats a stored cost within one stored unit above the previous cost as explained", () => {
+    // Stored costs are quantized to 1/10,000 while proof costs are raw sums of
+    // the same prices, so they can differ by noise below one stored unit.
+    const base = devinSnapshot(devinContribution("2026-10-08", 3_000, "swe-2-high", 30))["2026-10-08"];
+    const withCost = (cost: number): ClientBreakdownData => ({
+      ...base,
+      cost,
+      models: { "swe-2-high": { ...base.models["swe-2-high"], cost } },
+    });
+    const proofDay = proof({
+      "2026-10-08": { previous: proofCell(3_000, 30), corrected: proofCell(1_200, 8) },
+    })["2026-10-08"];
+
+    expect(applyRecountProofToCell(withCost(30.00005), proofDay, submittedFor(proofDay), AT_TRANSITION).cell.cost).toBeCloseTo(8, 4);
+    // Beyond that slack the stored cost holds spend the proof does not explain.
+    expect(applyRecountProofToCell(withCost(30.0003), proofDay, submittedFor(proofDay), AT_TRANSITION).cell.cost).toBeCloseTo(30.0003, 4);
+  });
+
+  it("proves a cost only when every model holds exactly the corrected counts and cost", () => {
+    const proofDay = proof({
+      "2026-10-08": { previous: proofCell(200, 0.2, 2), corrected: proofCell(100, 0.1, 1) },
+    })["2026-10-08"];
+    const cell = (tokens: number, cost: number) =>
+      devinSnapshot(devinContribution("2026-10-08", tokens, "swe-2-high", cost, 1))["2026-10-08"];
+
+    expect(recountProofProvesCost(cell(100, 0.1), proofDay, submittedFor(proofDay))).toBe(true);
+    // Within one stored cost unit of the raw proof cost.
+    expect(recountProofProvesCost(cell(100, 0.10005), proofDay, submittedFor(proofDay))).toBe(true);
+    // Another source's cell can hold the same counts at a different cost.
+    expect(recountProofProvesCost(cell(100, 0.15), proofDay, submittedFor(proofDay))).toBe(false);
+    expect(recountProofProvesCost(cell(200, 0.2), proofDay, submittedFor(proofDay))).toBe(false);
+    // A model the proof does not name keeps the cell unproven.
+    const twoModels = devinSnapshot(
+      devinContribution("2026-10-08", 100, "swe-2-high", 0.1, 1),
+      devinContribution("2026-10-08", 50, "swe-1-5", 0.05, 1)
+    )["2026-10-08"];
+    expect(recountProofProvesCost(twoModels, proofDay, submittedFor(proofDay))).toBe(false);
+  });
+
+  it("reports what the transition's correction changed and whether it proves the cost", () => {
+    const proofDay = proof({
+      "2026-10-08": { previous: proofCell(200, 0.2, 2), corrected: proofCell(100, 0.1, 1) },
+    })["2026-10-08"];
+
+    const exact = applyRecountProofToCell(
+      devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0.2, 2))["2026-10-08"],
+      proofDay,
+      submittedFor(proofDay),
+      AT_TRANSITION
+    );
+    expect(exact.changed).toBe(true);
+    expect(exact.costProven).toBe(true);
+    expect(exact.cell.tokens).toBe(100);
+
+    // The counts are corrected, but a stored cost the previous cost does not
+    // account for is kept, so the proof does not stand behind it.
+    const unexplainedCost = applyRecountProofToCell(
+      devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0.5, 2))["2026-10-08"],
+      proofDay,
+      submittedFor(proofDay),
+      AT_TRANSITION
+    );
+    expect(unexplainedCost.changed).toBe(true);
+    expect(unexplainedCost.costProven).toBe(false);
+    expect(unexplainedCost.cell.tokens).toBe(100);
+    expect(unexplainedCost.cell.cost).toBeCloseTo(0.5, 4);
+
+    // A model the proof does not name is untouched and keeps the cell
+    // unproven.
+    const partly = applyRecountProofToCell(
+      devinSnapshot(
+        devinContribution("2026-10-08", 200, "swe-2-high", 0.2, 2),
+        devinContribution("2026-10-08", 50, "swe-1-5", 0.05, 1)
+      )["2026-10-08"],
+      proofDay,
+      submittedFor(proofDay),
+      AT_TRANSITION
+    );
+    expect(partly.changed).toBe(true);
+    expect(partly.costProven).toBe(false);
+    expect(partly.cell.models["swe-2-high"].tokens).toBe(100);
+    expect(partly.cell.models["swe-1-5"].tokens).toBe(50);
+
+    // Counts that are already the corrected ones are not a recount: the cell
+    // and its cost are returned unchanged.
+    const sameCounts = applyRecountProofToCell(
+      devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0.15, 1))["2026-10-08"],
+      proofDay,
+      submittedFor(proofDay),
+      AT_TRANSITION
+    );
+    expect(sameCounts.changed).toBe(false);
+    expect(sameCounts.cell.cost).toBeCloseTo(0.15, 4);
+  });
+
+  it("keeps a model's stored cost when the proof's cost is not what the snapshot submitted", () => {
+    // Submission zeroed an estimate it could not price safely after the proof
+    // was built, so the proof's $0.10 rests on that estimate. The counts are
+    // corrected; the stored $0.15 is kept.
+    const proofDay = proof({
+      "2026-10-08": { previous: proofCell(200, 0.2, 2), corrected: proofCell(100, 0.1, 1) },
+    })["2026-10-08"];
+    const zeroed = devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0, 1))["2026-10-08"];
+    const stored = devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0.15, 2))["2026-10-08"];
+
+    const correction = applyRecountProofToCell(stored, proofDay, zeroed, AT_TRANSITION);
+    // The same on the incomplete day the submission actually marked.
+    expect(
+      applyRecountProofToCell(stored, proofDay, zeroed, {
+        ...AT_TRANSITION,
+        costIsComplete: false,
+        costUnsafeModels: new Set(["swe-2-high"]),
+      }).cell.cost
+    ).toBeCloseTo(0.15, 4);
+    expect(correction.changed).toBe(true);
+    expect(correction.costProven).toBe(false);
+    expect(correction.cell.tokens).toBe(100);
+    expect(correction.cell.messages).toBe(1);
+    expect(correction.cell.cost).toBeCloseTo(0.15, 4);
+    expect(correction.removed).toEqual({ tokens: 100, cost: 0, messages: 1 });
+
+    // Nor does such a proof show a cost to be complete.
+    const atCorrected = devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0.1, 1))["2026-10-08"];
+    expect(recountProofProvesCost(atCorrected, proofDay, zeroed)).toBe(false);
+    expect(recountProofProvesCost(atCorrected, proofDay, submittedFor(proofDay))).toBe(true);
+  });
+
+  it("changes the cost of a model the snapshot did not submit only when every day naming it is priced", () => {
+    // Every stored row on the 8th is a duplicate of a survivor dated another
+    // day, so the snapshot submits nothing for the 8th and the corrected side
+    // is empty. The old CLI priced the rows at $0.15.
+    const proofDay = proof({
+      "2026-10-08": { previous: proofCell(100, 0.2, 1), corrected: proofCell(0, 0, 0) },
+    })["2026-10-08"];
+    const stored = devinSnapshot(devinContribution("2026-10-08", 100, "swe-2-high", 0.15, 1))["2026-10-08"];
+
+    // A day the proof names the model on could not be priced, so the
+    // survivors' price is unknown: the counts go, the cost stays.
+    const partial = applyRecountProofToCell(stored, proofDay, undefined, {
+      ...AT_TRANSITION,
+      costUnsafeModels: new Set(["swe-2-high"]),
+    });
+    expect(partial.cell.tokens).toBe(0);
+    expect(partial.cell.cost).toBeCloseTo(0.15, 4);
+    expect(partial.costProven).toBe(false);
+
+    // With every such day priced, the duplicates' cost goes with them.
+    const complete = applyRecountProofToCell(stored, proofDay, undefined, AT_TRANSITION);
+    expect(complete.cell.tokens).toBe(0);
+    expect(complete.cell.cost).toBe(0);
+  });
+
+  it("marks the models a proof names on an unpriced day, or all of them once a day was rejected", () => {
+    const proofOf = {
+      "2026-10-08": {
+        "swe-2-high": { previous: proofCell(200, 0.2), corrected: proofCell(100, 0.1) },
+      },
+      "2026-10-09": {
+        "swe-1-5": { previous: proofCell(50, 0.05), corrected: proofCell(50, 0.05) },
+        "swe-2-high": { previous: proofCell(80, 0.08), corrected: proofCell(80, 0.08) },
+      },
+    };
+    const accepted = ["2026-10-08", "2026-10-09"];
+
+    expect(recountCostUnsafeModels(proofOf, { accepted, rejected: [] }, new Set())).toEqual(new Set());
+    expect(
+      recountCostUnsafeModels(proofOf, { accepted, rejected: [] }, new Set(["2026-10-08"]))
+    ).toEqual(new Set(["swe-2-high"]));
+    expect(
+      recountCostUnsafeModels(proofOf, { accepted, rejected: [] }, new Set(["2026-10-09"]))
+    ).toEqual(new Set(["swe-1-5", "swe-2-high"]));
+    expect(
+      recountCostUnsafeModels(proofOf, { accepted: ["2026-10-08"], rejected: ["2026-10-09"] }, new Set())
+    ).toEqual(new Set(["swe-1-5", "swe-2-high"]));
+  });
+
+  it("holds back a model without survivors while any proof day is unpriced", () => {
+    // swe-1-5's rows on the 8th are all duplicates; its survivor could be the
+    // 9th's swe-2-high (a copy that lost its generation model), and the 9th is
+    // unpriced. swe-1-5 never appears on the 9th, yet it waits too.
+    const proofOf = {
+      "2026-10-08": {
+        "swe-1-5": { previous: proofCell(100, 0.15), corrected: proofCell(0, 0, 0) },
+      },
+      "2026-10-09": {
+        "swe-2-high": { previous: proofCell(100, 0.15), corrected: proofCell(100, 0.15) },
+      },
+    };
+    const recount = { accepted: ["2026-10-08", "2026-10-09"], rejected: [] };
+
+    expect(recountCostUnsafeModels(proofOf, recount, new Set(["2026-10-09"]))).toEqual(
+      new Set(["swe-1-5", "swe-2-high"])
+    );
+    // With every day priced, nothing waits.
+    expect(recountCostUnsafeModels(proofOf, recount, new Set())).toEqual(new Set());
+  });
+
+  it("reports the unsafe models in the plan and keeps their stored cost", () => {
+    // The 8th's survivors are priced, but swe-2-high also appears on the
+    // unpriced 9th, so its cost moves on neither day.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 200, "swe-2-high", 0.2, 1));
+    const plan = planParserHighWaterSubmission({
+      client: "devin-cli",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS["devin-cli"],
+      fullHistory: true,
+      existingLegacyDays: stored,
+      incomingDays: devinSnapshot(
+        devinContribution("2026-10-08", 100, "swe-2-high", 0.1, 1),
+        devinContribution("2026-10-09", 50, "swe-2-high", 0, 1)
+      ),
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(200, 0.2), corrected: proofCell(100, 0.1) },
+        "2026-10-09": { previous: proofCell(50, 0.05), corrected: proofCell(50, 0.05) },
+      }),
+      costIncompleteDates: new Set(["2026-10-09"]),
+    });
+
+    expect(plan.recountCostUnsafeModels).toEqual(["swe-2-high"]);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(100);
+    expect(plan.nextState?.days["2026-10-08"]?.cost).toBeCloseTo(0.2, 4);
   });
 
   it("keeps generation-1 submissions compatible before the transition", () => {
@@ -2014,10 +2546,12 @@ describe("devin-cli recount proof", () => {
     expect(plan.nextState?.days["2026-10-08"]?.cost).toBe(20);
   });
 
-  it("accepts a proof whose corrected cost exceeds a submission that zeroed unpriced rows", () => {
+  it("accepts a proof whose corrected cost exceeds a submission that zeroed unpriced rows, keeping the stored cost", () => {
     const stored = devinSnapshot(devinContribution("2026-10-08", 1_000, "swe-2-high", 20));
     // Submission zeroes cost it cannot price after the proof was built, so
-    // the snapshot may carry LESS cost than the proof's corrected side.
+    // the snapshot may carry LESS cost than the proof's corrected side. The
+    // proof still corrects the counts, but its $9 rests on that unsafe cost,
+    // so the stored $20 stays, as the route keeps it for the stored cell.
     const scan = devinSnapshot(devinContribution("2026-10-08", 455, "swe-2-high", 0));
     const plan = devinPlan(stored, scan, {
       recountProof: proof({
@@ -2027,7 +2561,7 @@ describe("devin-cli recount proof", () => {
 
     expect(plan.recountDays).toEqual(["2026-10-08"]);
     expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(455);
-    expect(plan.nextState?.days["2026-10-08"]?.cost).toBe(9);
+    expect(plan.nextState?.days["2026-10-08"]?.cost).toBe(20);
   });
 
   it("applies an all-duplicate proof day the snapshot does not date", () => {
@@ -2057,6 +2591,466 @@ describe("devin-cli recount proof", () => {
       }),
     });
     expect(mismatched.rejectedRecountDays).toEqual(["2026-10-06"]);
+  });
+});
+
+describe("cursor recount proof rollout", () => {
+  const client = "cursor";
+  const modelId = "gemini-4-argon-medium";
+
+  function cursorContribution(
+    date: string,
+    tokens: number,
+    cost: number,
+    messages: number
+  ) {
+    return {
+      date,
+      clients: [
+        {
+          client,
+          modelId,
+          tokens: {
+            input: tokens,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          cost,
+          messages,
+        },
+      ],
+    };
+  }
+
+  function cursorSnapshot(
+    ...rows: ReturnType<typeof cursorContribution>[]
+  ): Record<string, ClientBreakdownData> {
+    return foldParserClientSnapshot(rows, client);
+  }
+
+  function cursorProofCell(
+    tokens: number,
+    cost: number,
+    messages: number
+  ): RecountProofCell {
+    return {
+      tokens: {
+        input: tokens,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+      },
+      cost,
+      messages,
+    };
+  }
+
+  function cursorProof(
+    previous: RecountProofCell,
+    corrected: RecountProofCell
+  ): ClientRecountProof {
+    return {
+      "2026-10-08": {
+        [modelId]: { previous, corrected },
+      },
+    };
+  }
+
+  function cursorPlan(args: {
+    existing: Record<string, ClientBreakdownData>;
+    incoming: Record<string, ClientBreakdownData>;
+    fullHistory?: boolean;
+    completeDays?: boolean;
+    incomingVersion?: number;
+    state?: ParserClientHighWaterState;
+    persistedVersion?: number;
+    recountProof?: ClientRecountProof;
+  }) {
+    return planParserHighWaterSubmission({
+      client,
+      incomingVersion:
+        args.incomingVersion ?? SUPPORTED_VERSIONED_PARSERS.cursor,
+      fullHistory: args.fullHistory ?? true,
+      completeDays: args.completeDays,
+      existingLegacyDays: args.existing,
+      incomingDays: args.incoming,
+      state: args.state,
+      persistedVersion: args.persistedVersion,
+      recountProof: args.recountProof,
+    });
+  }
+
+  const inflated = cursorSnapshot(
+    cursorContribution("2026-10-08", 1_000, 10, 4)
+  );
+  const corrected = cursorSnapshot(
+    cursorContribution("2026-10-08", 400, 4, 1)
+  );
+  const proof = cursorProof(
+    cursorProofCell(1_000, 10, 4),
+    cursorProofCell(400, 4, 1)
+  );
+
+  it("moves a Cursor model's cost on its own day's pricing", () => {
+    // The same model also appears on the unpriced 9th. Cursor's duplicates
+    // share their survivor's day, so the priced 8th still heals its cost;
+    // Devin CLI, whose duplicates can cross midnight, would keep it.
+    const plan = planParserHighWaterSubmission({
+      client,
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.cursor,
+      fullHistory: true,
+      existingLegacyDays: cursorSnapshot(cursorContribution("2026-10-08", 200, 2, 2)),
+      incomingDays: cursorSnapshot(
+        cursorContribution("2026-10-08", 100, 1, 1),
+        cursorContribution("2026-10-09", 50, 0, 1)
+      ),
+      recountProof: {
+        "2026-10-08": {
+          [modelId]: { previous: cursorProofCell(200, 2, 2), corrected: cursorProofCell(100, 1, 1) },
+        },
+        "2026-10-09": {
+          [modelId]: { previous: cursorProofCell(50, 0.5, 1), corrected: cursorProofCell(50, 0.5, 1) },
+        },
+      },
+      costIncompleteDates: new Set(["2026-10-09"]),
+    });
+
+    expect(plan.recountCostUnsafeModels).toBeUndefined();
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(100);
+    expect(plan.nextState?.days["2026-10-08"]?.cost).toBeCloseTo(1, 4);
+  });
+
+  it("registers generation 2 while accepting generation 1 until transition", () => {
+    expect(SUPPORTED_VERSIONED_PARSERS.cursor).toBe(2);
+
+    const before = cursorPlan({
+      existing: inflated,
+      incoming: inflated,
+      incomingVersion: 1,
+    });
+    expect(before.mode).toBe("status-quo");
+    expect(before.nextState).toBeUndefined();
+
+    const pending = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      fullHistory: false,
+      recountProof: proof,
+    }).nextState!;
+    const after = cursorPlan({
+      existing: corrected,
+      incoming: inflated,
+      incomingVersion: 1,
+      state: pending,
+      persistedVersion: 2,
+    });
+    expect(after.mode).toBe("freeze");
+    expect(after.nextState).toBeUndefined();
+  });
+
+  it("lowers an inflated cell from a full-history proof but never below corrected", () => {
+    const exact = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      recountProof: proof,
+    });
+    expect(exact.mode).toBe("baseline-legacy");
+    expect(exact.recountDays).toEqual(["2026-10-08"]);
+    expect(exact.nextState?.days["2026-10-08"]?.tokens).toBe(400);
+    expect(exact.nextState?.days["2026-10-08"]?.cost).toBe(4);
+    expect(exact.nextState?.days["2026-10-08"]?.messages).toBe(1);
+
+    const alreadyBelow = cursorPlan({
+      existing: cursorSnapshot(
+        cursorContribution("2026-10-08", 350, 3.5, 1)
+      ),
+      incoming: corrected,
+      recountProof: proof,
+    });
+    expect(alreadyBelow.nextState?.days["2026-10-08"]?.tokens).toBe(400);
+    expect(alreadyBelow.nextState?.days["2026-10-08"]?.cost).toBe(4);
+    expect(alreadyBelow.nextState?.days["2026-10-08"]?.messages).toBe(1);
+  });
+
+  it("rejects a proof whose corrected side does not match the submitted cell", () => {
+    const mismatched = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      recountProof: cursorProof(
+        cursorProofCell(1_000, 10, 4),
+        cursorProofCell(399, 4, 1)
+      ),
+    });
+
+    expect(mismatched.recountDays).toBeUndefined();
+    expect(mismatched.rejectedRecountDays).toEqual(["2026-10-08"]);
+    expect(mismatched.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
+  });
+
+  it("keeps a partial scan pending without applying its proof", () => {
+    const partial = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      fullHistory: false,
+      recountProof: proof,
+    });
+
+    expect(partial.mode).toBe("freeze");
+    expect(partial.recountDays).toBeUndefined();
+    expect(partial.nextState?.baselineEstablished).toBe(false);
+
+    const followed = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      state: partial.nextState,
+      recountProof: proof,
+    });
+    expect(followed.recountDays).toEqual(["2026-10-08"]);
+    expect(followed.nextState?.days["2026-10-08"]?.tokens).toBe(400);
+  });
+
+  it("keeps crediting new usage after local Cursor history shrinks", () => {
+    // `tokscale cursor logout` archives that account's cache and the scanner
+    // skips archives, so later scans no longer carry its days. The stored
+    // days stay, and new usage from the account still in use must count.
+    const stored = cursorSnapshot(
+      cursorContribution("2026-10-01", 5_000, 50, 10),
+      cursorContribution("2026-10-08", 400, 4, 1)
+    );
+    const transition = cursorPlan({ existing: stored, incoming: corrected });
+    expect(transition.mode).toBe("baseline-legacy");
+    expect(transition.nextState?.days["2026-10-01"]?.tokens).toBe(5_000);
+
+    const grown = cursorPlan({
+      existing: {},
+      incoming: cursorSnapshot(
+        cursorContribution("2026-10-08", 450, 4.5, 2),
+        cursorContribution("2026-10-09", 300, 3, 1)
+      ),
+      state: transition.nextState,
+    });
+    expect(grown.mode).toBe("incremental");
+    expect(grown.highWaterDeficit).toBeUndefined();
+    expect(grown.increments["2026-10-08"]?.tokens).toBe(50);
+    expect(grown.increments["2026-10-08"]?.messages).toBe(1);
+    expect(grown.increments["2026-10-09"]?.tokens).toBe(300);
+    expect(grown.nextState?.days["2026-10-01"]?.tokens).toBe(5_000);
+    expect(grown.nextState?.aggregate.tokens).toBe(5_750);
+  });
+
+  it("credits a day only up to its snapshot total when its model ids change", () => {
+    const stored = cursorSnapshot(cursorContribution("2026-10-08", 400, 4, 1));
+    const state = cursorPlan({ existing: stored, incoming: stored }).nextState!;
+    // The same day under another model id: per-model capacity alone would
+    // credit it a second time.
+    const renamed = foldParserClientSnapshot(
+      [
+        {
+          date: "2026-10-08",
+          clients: [
+            {
+              client,
+              modelId: "gemini-4-argon",
+              tokens: { input: 450, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+              cost: 4.5,
+              messages: 2,
+            },
+          ],
+        },
+      ],
+      client
+    );
+
+    const plan = cursorPlan({ existing: {}, incoming: renamed, state });
+    expect(plan.increments["2026-10-08"]?.tokens).toBe(50);
+    expect(plan.increments["2026-10-08"]?.messages).toBe(1);
+    expect(plan.nextState?.aggregate.tokens).toBe(450);
+  });
+
+  it("budgets a day from the normalized totals the route writes", () => {
+    // A legacy cell whose nested models (200) exceed its scalar total (100).
+    // The route adds increments to the normalized models, so a budget taken
+    // from the scalar would let the day end above the snapshot's 150.
+    const nested = cursorSnapshot(cursorContribution("2026-10-08", 200, 2, 2))["2026-10-08"];
+    const overRepresented: ClientBreakdownData = {
+      ...nested,
+      tokens: 100,
+      input: 100,
+      messages: 1,
+    };
+    const archived = cursorSnapshot(cursorContribution("2026-10-01", 1_000, 10, 4));
+    const renamed = foldParserClientSnapshot(
+      [
+        {
+          date: "2026-10-08",
+          clients: [
+            {
+              client,
+              modelId: "gemini-4-argon",
+              tokens: { input: 150, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+              cost: 1.5,
+              messages: 2,
+            },
+          ],
+        },
+      ],
+      client
+    );
+
+    const plan = cursorPlan({
+      existing: { ...archived, "2026-10-08": overRepresented },
+      incoming: renamed,
+    });
+    expect(plan.mode).toBe("baseline-legacy");
+    expect(plan.increments["2026-10-08"]).toBeUndefined();
+  });
+
+  it("zeroes a moved snapshot's earlier day only at the transition", () => {
+    // One event whose later snapshot carries the next day's timestamp. Real
+    // Cursor snapshots keep their event's timestamp (#1544); if one did not,
+    // generation 1 would count both days while the cache holds both rows, and
+    // the proof would show the earlier day's row as a duplicate.
+    const moved: ClientRecountProof = {
+      "2026-10-08": {
+        [modelId]: { previous: cursorProofCell(100, 1, 1), corrected: cursorProofCell(0, 0, 0) },
+      },
+      "2026-10-09": {
+        [modelId]: { previous: cursorProofCell(110, 1.1, 1), corrected: cursorProofCell(110, 1.1, 1) },
+      },
+    };
+    const day9 = cursorSnapshot(cursorContribution("2026-10-09", 110, 1.1, 1));
+
+    // At the transition both stored days hold generation-1 counts, so the
+    // proof zeroes the earlier one.
+    const transition = cursorPlan({
+      existing: {
+        ...cursorSnapshot(cursorContribution("2026-10-08", 100, 1, 1)),
+        ...day9,
+      },
+      incoming: day9,
+      recountProof: moved,
+    });
+    expect(transition.recountDays).toEqual(["2026-10-08", "2026-10-09"]);
+    expect(transition.nextState?.days["2026-10-08"]?.tokens ?? 0).toBe(0);
+    expect(transition.nextState?.days["2026-10-09"]?.tokens).toBe(110);
+
+    // After a transition that ran without a proof, the stored day is still
+    // previous-generation residue, so a proof that arrives later can still
+    // zero it — the stored 100 is exactly what generation 1 counted, and
+    // keeping it would double-count the event the snapshot re-dated.
+    const day8 = cursorSnapshot(cursorContribution("2026-10-08", 100, 1, 1));
+    const state = cursorPlan({ existing: day8, incoming: day8 }).nextState!;
+    const later = cursorPlan({ existing: {}, incoming: day9, state, recountProof: moved });
+    expect(later.recountTransition).toBeUndefined();
+    expect(later.nextState?.days["2026-10-08"]?.tokens ?? 0).toBe(0);
+    expect(later.nextState?.days["2026-10-09"]?.tokens).toBe(110);
+    expect(later.nextState?.aggregate.tokens).toBe(110);
+  });
+
+  it("keeps an empty full-history snapshot pending", () => {
+    const empty = cursorPlan({ existing: inflated, incoming: {} });
+
+    expect(empty.mode).toBe("freeze");
+    expect(empty.nextState?.baselineEstablished).toBe(false);
+
+    const followed = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      state: empty.nextState,
+      recountProof: proof,
+    });
+    expect(followed.recountDays).toEqual(["2026-10-08"]);
+    expect(followed.nextState?.days["2026-10-08"]?.tokens).toBe(400);
+  });
+
+  it("credits a date-bounded scan's complete days after the baseline and keeps older days", () => {
+    const history = cursorSnapshot(
+      cursorContribution("2026-10-01", 5_000, 50, 10),
+      cursorContribution("2026-10-08", 400, 4, 1)
+    );
+    const baseline = cursorPlan({ existing: {}, incoming: history });
+    expect(baseline.mode).toBe("baseline-new");
+
+    const week = cursorPlan({
+      existing: history,
+      incoming: cursorSnapshot(
+        cursorContribution("2026-10-08", 450, 4.5, 2),
+        cursorContribution("2026-10-09", 300, 3, 1)
+      ),
+      fullHistory: false,
+      completeDays: true,
+      state: baseline.nextState,
+    });
+
+    expect(week.mode).toBe("incremental");
+    expect(week.increments["2026-10-08"]?.tokens).toBe(50);
+    expect(week.increments["2026-10-08"]?.messages).toBe(1);
+    expect(week.increments["2026-10-09"]?.tokens).toBe(300);
+    expect(week.nextState?.days["2026-10-01"]?.tokens).toBe(5_000);
+    expect(week.nextState?.observedDays?.["2026-10-01"]?.tokens).toBe(5_000);
+    expect(week.nextState?.aggregate.tokens).toBe(5_750);
+
+    const full = cursorPlan({
+      existing: {},
+      incoming: cursorSnapshot(
+        cursorContribution("2026-10-01", 5_000, 50, 10),
+        cursorContribution("2026-10-08", 450, 4.5, 2),
+        cursorContribution("2026-10-09", 300, 3, 1)
+      ),
+      state: week.nextState,
+    });
+    expect(full.increments).toEqual({});
+    expect(full.nextState?.aggregate.tokens).toBe(5_750);
+  });
+
+  it("keeps a date-bounded scan frozen until a full snapshot establishes the baseline", () => {
+    const first = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      fullHistory: false,
+      completeDays: true,
+    });
+    expect(first.mode).toBe("freeze");
+    expect(first.nextState?.baselineEstablished).toBe(false);
+
+    const again = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      fullHistory: false,
+      completeDays: true,
+      state: first.nextState,
+    });
+    expect(again.mode).toBe("freeze");
+    expect(again.nextState).toBeUndefined();
+  });
+
+  it("leaves residue for a full snapshot to correct instead of a date-bounded scan", () => {
+    const transition = cursorPlan({ existing: inflated, incoming: corrected });
+    expect(transition.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
+
+    const week = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      fullHistory: false,
+      completeDays: true,
+      state: transition.nextState,
+      recountProof: proof,
+    });
+    expect(week.mode).toBe("incremental");
+    expect(week.recountDays).toBeUndefined();
+    expect(week.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
+
+    const full = cursorPlan({
+      existing: inflated,
+      incoming: corrected,
+      state: week.nextState,
+      recountProof: proof,
+    });
+    expect(full.recountDays).toEqual(["2026-10-08"]);
+    expect(full.nextState?.days["2026-10-08"]?.tokens).toBe(400);
   });
 });
 
@@ -2260,5 +3254,171 @@ describe("unverified retention floor", () => {
     });
     expect(plan.mode).toBe("freeze");
     expect(plan.increments).toEqual({});
+  });
+});
+
+describe("Cursor legacy tokenless cost allocation", () => {
+  const date = "2025-04-15";
+  function snapshot(
+    rows: Array<{
+      date?: string;
+      modelId?: string;
+      tokens?: number;
+      messages: number;
+      cost: number;
+    }>,
+    client = "cursor",
+  ) {
+    return foldParserClientSnapshot(
+      rows.map((row) => ({
+        date: row.date ?? date,
+        clients: [{
+          client,
+          modelId: row.modelId ?? "premium-tool-call",
+          tokens: {
+            input: row.tokens ?? 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+          messages: row.messages,
+          cost: row.cost,
+        }],
+      })),
+      client,
+    );
+  }
+  function plan(
+    stored: Record<string, ClientBreakdownData>,
+    incoming: Record<string, ClientBreakdownData>,
+    state?: ParserClientHighWaterState,
+    client = "cursor",
+  ) {
+    return planParserHighWaterSubmission({
+      client,
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS[client],
+      fullHistory: true,
+      existingLegacyDays: stored,
+      incomingDays: incoming,
+      state,
+    });
+  }
+
+  it("credits a newly discovered tokenless day's cost once", () => {
+    const stored = snapshot([{
+      date: "2026-10-25",
+      modelId: "gpt-4o",
+      tokens: 100,
+      messages: 1,
+      cost: 1,
+    }]);
+    const incoming = { ...stored, ...snapshot([{ messages: 1, cost: 0.02 }]) };
+    const baseline = plan({}, stored);
+    const next = plan(stored, incoming, baseline.nextState);
+    expect(next.mode).toBe("incremental");
+    expect(next.increments[date]?.tokens).toBe(0);
+    expect(next.increments[date]?.messages).toBe(1);
+    expect(next.increments[date]?.cost).toBeCloseTo(0.02, 4);
+    expect(next.nextState?.days[date]?.cost).toBeCloseTo(0.02, 4);
+    const replay = plan(next.nextState!.days, incoming, next.nextState);
+    expect(replay.mode).toBe("incremental");
+    expect(replay.increments).toEqual({});
+    expect(replay.nextState?.days[date]?.cost).toBeCloseTo(0.02, 4);
+  });
+
+  it("credits new tokenless cost during a preserving legacy transition", () => {
+    const stored = snapshot([{ date: "2025-04-14", messages: 1, cost: 0.02 }]);
+    const incoming = { ...stored, ...snapshot([{ messages: 1, cost: 0.03 }]) };
+    const next = plan(stored, incoming);
+    expect(next.mode).toBe("baseline-legacy");
+    expect(next.increments[date]?.cost).toBeCloseTo(0.03, 4);
+    expect(next.nextState?.days["2025-04-14"]?.cost).toBeCloseTo(0.02, 4);
+    const replay = plan(next.nextState!.days, incoming, next.nextState);
+    expect(replay.mode).toBe("incremental");
+    expect(replay.increments).toEqual({});
+    expect(replay.nextState?.days[date]?.cost).toBeCloseTo(0.03, 4);
+  });
+
+  it("bounds tokenless spend by the fraction of messages the day can credit", () => {
+    const stored = snapshot([
+      { messages: 1, cost: 1 },
+      { modelId: "gpt-4o", tokens: 100, messages: 1, cost: 1 },
+    ]);
+    const baseline = plan({}, stored);
+    const incoming = snapshot([{ messages: 3, cost: 3 }]);
+    const next = plan(stored, incoming, baseline.nextState);
+    // Two new premium calls are reported, but only one net new message can be
+    // proved for the day after the other model disappears: credit half of $2.
+    expect(next.increments[date]?.messages).toBe(1);
+    expect(next.increments[date]?.cost).toBeCloseTo(1, 4);
+    expect(next.nextState?.days[date]?.cost).toBeCloseTo(3, 4);
+    const replay = plan(next.nextState!.days, incoming, next.nextState);
+    expect(replay.mode).toBe("incremental");
+    expect(replay.increments).toEqual({});
+  });
+
+  it.each([
+    { client: "cursor", modelId: "auto" },
+    { client: "devin-cli", modelId: "premium-tool-call" },
+  ])(
+    "does not authorize tokenless cost for $client/$modelId",
+    ({ client, modelId }) => {
+      const stored = snapshot([{ modelId, messages: 1, cost: 1 }], client);
+      const baseline = plan({}, stored, undefined, client);
+      const next = plan(
+        stored,
+        snapshot([{ modelId, messages: 2, cost: 2 }], client),
+        baseline.nextState,
+        client,
+      );
+      expect(next.increments[date]?.messages).toBe(1);
+      expect(next.increments[date]?.cost).toBe(0);
+    },
+  );
+
+  it("does not authorize cost for repricing or rejected message growth", () => {
+    const stored = snapshot([{ messages: 2, cost: 1 }]);
+    const baseline = plan({}, stored);
+    for (const messages of [1, 2]) {
+      const next = plan(
+        stored,
+        snapshot([{ messages, cost: 2 }]),
+        baseline.nextState,
+      );
+      expect(next.mode).toBe("incremental");
+      expect(next.increments).toEqual({});
+      expect(next.nextState?.days[date]?.cost).toBe(1);
+    }
+  });
+
+  it("does not apply the tokenless exception to a previously token-bearing cell", () => {
+    const stored = snapshot([{ tokens: 100, messages: 1, cost: 1 }]);
+    const baseline = plan({}, stored);
+    const next = plan(
+      stored,
+      snapshot([{ messages: 2, cost: 2 }]),
+      baseline.nextState,
+    );
+    expect(next.increments[date]?.messages).toBe(1);
+    expect(next.increments[date]?.cost).toBe(0);
+  });
+
+  it("still prices token-bearing growth by accepted tokens rather than messages", () => {
+    const stored = snapshot([
+      { modelId: "gpt-4o", tokens: 100, messages: 1, cost: 1 },
+      { modelId: "other", tokens: 100, messages: 1, cost: 1 },
+    ]);
+    const baseline = plan({}, stored);
+    const next = plan(
+      stored,
+      snapshot([{ modelId: "gpt-4o", tokens: 250, messages: 2, cost: 4 }]),
+      baseline.nextState,
+    );
+    // One third of the model's 150-token capacity fits the day's 50-token
+    // budget; no message fits. The $3 marginal cost must still credit $1.
+    expect(next.increments[date]?.tokens).toBe(50);
+    expect(next.increments[date]?.messages).toBe(0);
+    expect(next.increments[date]?.cost).toBeCloseTo(1, 4);
   });
 });

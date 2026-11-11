@@ -159,7 +159,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let mut outputs = Vec::new();
 
         for site in targets {
@@ -196,6 +196,7 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
                 continue;
             }
             outputs.push(UsageOutput {
+                freshness: None,
                 provider: "MiniMax Token Plan".into(),
                 account: Some(UsageAccount {
                     id: site.label.to_string(),

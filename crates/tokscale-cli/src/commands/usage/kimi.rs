@@ -202,7 +202,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
 
         // Proactive refresh if token is about to expire
         if needs_refresh(expires_at) {
@@ -293,6 +293,7 @@ pub fn fetch() -> Result<UsageOutput> {
         }
 
         Ok(UsageOutput {
+            freshness: None,
             provider: "Kimi".into(),
             account: None,
             credential_source: None,

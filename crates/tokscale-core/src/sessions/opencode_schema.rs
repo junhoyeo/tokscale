@@ -17,7 +17,7 @@
 //! opposite of the point.
 
 use super::utils::{
-    open_readonly_sqlite_opt, sqlite_for_each_row_on, sqlite_for_each_row_on_with_params,
+    open_readonly_sqlite_snapshot, sqlite_for_each_row_on, sqlite_for_each_row_on_with_params,
     SqliteScan,
 };
 use super::{
@@ -670,7 +670,7 @@ fn merge_duplicate_workspace(
         (None, Some(key)) => message.set_workspace(Some(key), candidate_label),
         (Some(existing), Some(candidate)) if existing != candidate => {
             state.has_workspace_conflict = true;
-            message.set_workspace(None, None);
+            message.set_workspace(None::<&str>, None::<&str>);
         }
         _ => {}
     }
@@ -679,6 +679,79 @@ fn merge_duplicate_workspace(
 // =============================================================================
 // Field resolution
 // =============================================================================
+
+struct AcceptedSchemaUsage {
+    model_id: String,
+    cache_read: i64,
+    cache_write: i64,
+    input: i64,
+    output: i64,
+    reasoning: i64,
+    created_ms: f64,
+    completed_ms: Option<f64>,
+}
+
+/// The accept/reject gates shared by message ingest and the Claude-agent
+/// claim scan. A payload that returns `None` is absent from reports.
+fn accepted_schema_usage(
+    msg: &OpenCodeSchemaMessage,
+    cfg: &OpenCodeSchemaConfig,
+) -> Option<AcceptedSchemaUsage> {
+    // v1 rows carry an explicit role; v2 rows omit it and are pre-filtered
+    // by the SQL `type` column, so only a dual-schema client may treat a
+    // missing role as assistant.
+    let is_assistant = if cfg.dual_schema {
+        msg.is_assistant()
+    } else {
+        msg.role.as_deref() == Some("assistant")
+    };
+    if !is_assistant {
+        return None;
+    }
+
+    let tokens = msg.tokens.as_ref()?;
+    let (cache_read, cache_write) = resolve_cache(tokens.cache.as_ref(), cfg.strict_cache)?;
+    let model_id = if cfg.dual_schema {
+        msg.resolve_model_id()
+    } else {
+        msg.model_id.clone()
+    }?;
+    // A payload with no `$.time` is dropped unless the client supplies a
+    // fallback, matching the mandatory `time` field its own type declared.
+    let (created_ms, completed_ms) = match msg.time {
+        Some(ref time) => (
+            normalize_epoch(time.created, cfg),
+            time.completed
+                .map(|completed| normalize_epoch(completed, cfg)),
+        ),
+        None => (cfg.fallback_timestamp? as f64, None),
+    };
+
+    Some(AcceptedSchemaUsage {
+        model_id,
+        cache_read,
+        cache_write,
+        input: tokens.input.max(0),
+        output: tokens.output.max(0),
+        reasoning: tokens.reasoning.unwrap_or(0).max(0),
+        created_ms,
+        completed_ms,
+    })
+}
+
+/// Whether `data` would become a counted OpenCode message.
+///
+/// The caller still has to apply the SQL `type = 'assistant'` filter. v2
+/// payloads omit `role`, and a missing role is assistant only because that
+/// column already selected them.
+pub(crate) fn opencode_payload_is_countable_usage(data: &str) -> bool {
+    let mut bytes = data.as_bytes().to_vec();
+    let msg: OpenCodeSchemaMessage = match simd_json::from_slice(&mut bytes) {
+        Ok(msg) => msg,
+        Err(_) => return false,
+    };
+    accepted_schema_usage(&msg, &OpenCodeSchemaConfig::opencode()).is_some()
+}
 
 /// Clamp `$.tokens.cache` to `(read, write)`, or reject the message when the
 /// client requires a well-formed cache object and the payload lacks one.
@@ -756,23 +829,23 @@ pub(crate) fn reported_cost(cost: Option<f64>) -> Option<f64> {
 /// channel-suffixed sibling database, or an overlap between schema generations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OpenCodeSchemaFingerprint {
-    billing_provider: Option<String>,
+    billing_provider: Option<crate::sessions::SharedStr>,
     created_bits: u64,
     completed_bits: Option<u64>,
-    model_id: String,
-    provider_id: String,
+    model_id: crate::sessions::SharedStr,
+    provider_id: crate::sessions::SharedStr,
     input: i64,
     output: i64,
     reasoning: i64,
     cache_read: i64,
     cache_write: i64,
     cost_bits: u64,
-    agent: Option<String>,
+    agent: Option<crate::sessions::SharedStr>,
     /// Surface/client tag for stores that host more than one product surface
     /// (e.g. MiMo Code CLI vs Xiaomi MiMo AI desktop sharing one SQLite file).
     /// `None` keeps legacy fingerprint equality so clients that do not split
     /// surfaces still collapse fork copies.
-    surface: Option<String>,
+    surface: Option<crate::sessions::SharedStr>,
 }
 
 #[derive(Debug, Clone)]
@@ -860,27 +933,16 @@ impl SchemaAccumulator {
             Err(_) => return None,
         };
 
-        // v1 rows carry an explicit role; v2 rows omit it and are pre-filtered
-        // by the SQL `type` column, so only a dual-schema client may treat a
-        // missing role as assistant.
-        let is_assistant = if cfg.dual_schema {
-            msg.is_assistant()
-        } else {
-            msg.role.as_deref() == Some("assistant")
-        };
-        if !is_assistant {
-            return None;
-        }
-
-        let tokens = msg.tokens.as_ref()?;
-        let (cache_read, cache_write) = resolve_cache(tokens.cache.as_ref(), cfg.strict_cache)?;
-
-        let resolved_model_id = if cfg.dual_schema {
-            msg.resolve_model_id()
-        } else {
-            msg.model_id.clone()
-        };
-        let model_id = resolved_model_id?;
+        let AcceptedSchemaUsage {
+            model_id,
+            cache_read,
+            cache_write,
+            input,
+            output,
+            reasoning,
+            created_ms,
+            completed_ms,
+        } = accepted_schema_usage(&msg, cfg)?;
 
         let billing_provider = if cfg.dual_schema {
             msg.resolve_provider_id()
@@ -888,17 +950,6 @@ impl SchemaAccumulator {
             msg.provider_id.clone()
         };
         let provider_id = resolve_provider(&msg, &model_id, cfg);
-
-        // A payload with no `$.time` is dropped unless the client supplies a
-        // fallback, matching the mandatory `time` field its own type declared.
-        let (created_ms, completed_ms) = match msg.time {
-            Some(ref time) => (
-                normalize_epoch(time.created, cfg),
-                time.completed
-                    .map(|completed| normalize_epoch(completed, cfg)),
-            ),
-            None => (cfg.fallback_timestamp? as f64, None),
-        };
 
         let agent_or_mode = if cfg.prefer_mode_over_agent {
             msg.mode.clone().or_else(|| msg.agent.clone())
@@ -913,9 +964,6 @@ impl SchemaAccumulator {
             }
         });
 
-        let input = tokens.input.max(0);
-        let output = tokens.output.max(0);
-        let reasoning = tokens.reasoning.unwrap_or(0).max(0);
         let reported = reported_cost(msg.cost);
         let cost = reported.unwrap_or(0.0);
 
@@ -968,7 +1016,7 @@ impl SchemaAccumulator {
                 reasoning,
             },
             cost,
-            agent.clone(),
+            agent.as_deref(),
         )
         .with_billing(
             billing_provider.as_deref(),
@@ -1006,7 +1054,7 @@ impl SchemaAccumulator {
         if let Some(ref title) = row_session_title {
             let trimmed = title.trim();
             if !trimmed.is_empty() {
-                unified.session_title = Some(trimmed.to_string());
+                unified.session_title = Some(trimmed.into());
             }
         }
 
@@ -1026,19 +1074,20 @@ impl SchemaAccumulator {
         let fingerprint = OpenCodeSchemaFingerprint {
             created_bits: created_ms.to_bits(),
             completed_bits: completed_ms.map(f64::to_bits),
-            model_id,
-            provider_id,
+            model_id: crate::sessions::SharedStr::from(model_id),
+            provider_id: crate::sessions::SharedStr::from(provider_id),
             billing_provider: billing_provider
                 .as_deref()
-                .and_then(super::normalize_billing_provider),
+                .and_then(super::normalize_billing_provider)
+                .map(crate::sessions::SharedStr::from),
             input,
             output,
             reasoning,
             cache_read,
             cache_write,
             cost_bits: cost.to_bits(),
-            agent,
-            surface,
+            agent: agent.map(crate::sessions::SharedStr::from),
+            surface: surface.map(crate::sessions::SharedStr::from),
         };
 
         // Cloning the small index list avoids holding a borrow of
@@ -1253,7 +1302,8 @@ fn refresh_changed_session_metadata(
 
     if !changed.is_empty() {
         for message in cached.iter_mut() {
-            let Some((workspace_root, session_title)) = changed.get(&message.session_id) else {
+            let Some((workspace_root, session_title)) = changed.get(message.session_id.as_str())
+            else {
                 continue;
             };
             set_workspace_from_root(message, workspace_root.as_deref());
@@ -1261,7 +1311,7 @@ fn refresh_changed_session_metadata(
                 .as_deref()
                 .map(str::trim)
                 .filter(|title| !title.is_empty())
-                .map(str::to_string);
+                .map(crate::sessions::SharedStr::from);
         }
     }
 
@@ -1425,6 +1475,34 @@ const MAX_MERGED_DEDUP_KEYS: usize = 250_000;
 pub(crate) static INCREMENTAL_RESCANS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Runs once between OpenCode query groups for a matching database path.
+#[cfg(test)]
+type PathScopedQueryGroupHook = Option<(std::path::PathBuf, fn(&Path))>;
+
+#[cfg(test)]
+static BETWEEN_OPENCODE_QUERY_GROUPS_HOOK: std::sync::Mutex<PathScopedQueryGroupHook> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_between_opencode_query_groups_hook(path: &Path) {
+    let hook = {
+        let mut slot = BETWEEN_OPENCODE_QUERY_GROUPS_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|(expected_path, _)| expected_path == path)
+        {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
 /// A scan's messages plus the state a later scan needs to resume from it.
 pub(crate) struct OpenCodeSchemaScan {
     pub complete: bool,
@@ -1494,7 +1572,7 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
     cfg: OpenCodeSchemaConfig,
     session_clients: Option<&std::collections::HashMap<String, String>>,
 ) -> OpenCodeSchemaScan {
-    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
+    let Some(conn) = open_readonly_sqlite_snapshot(db_path) else {
         return OpenCodeSchemaScan::empty();
     };
 
@@ -1583,6 +1661,11 @@ pub(crate) fn scan_opencode_schema_sqlite_with_session_clients(
             }
             _ => None,
         });
+
+        #[cfg(test)]
+        if group_index + 1 < cfg.query_groups.len() {
+            run_between_opencode_query_groups_hook(db_path);
+        }
     }
 
     // Resolve each physical row to the final message slot after all
@@ -1682,7 +1765,7 @@ pub(crate) fn rescan_opencode_schema_sqlite_with_session_clients(
         return None;
     }
 
-    let conn = open_readonly_sqlite_opt(db_path)?;
+    let conn = open_readonly_sqlite_snapshot(db_path)?;
     let db_namespace = if cfg.namespace_rowid_dedup_key {
         db_path.to_string_lossy().into_owned()
     } else {
@@ -2030,4 +2113,118 @@ fn merge_incremental_messages(
     }
 
     Some(merged)
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    struct BetweenQueryGroupsHook;
+
+    impl BetweenQueryGroupsHook {
+        fn set(path: &Path, hook: fn(&Path)) -> Self {
+            *BETWEEN_OPENCODE_QUERY_GROUPS_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((path.to_path_buf(), hook));
+            Self
+        }
+    }
+
+    impl Drop for BetweenQueryGroupsHook {
+        fn drop(&mut self) {
+            *BETWEEN_OPENCODE_QUERY_GROUPS_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    fn payload(output: i64) -> String {
+        format!(
+            r#"{{
+                "id": "logical-turn",
+                "role": "assistant",
+                "modelID": "claude-sonnet-4",
+                "providerID": "anthropic",
+                "tokens": {{ "input": 10, "output": {output}, "reasoning": 0, "cache": {{ "read": 0, "write": 0 }} }},
+                "time": {{ "created": 1700000000000.0 }}
+            }}"#
+        )
+    }
+
+    fn migrate_turn_to_v1(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        let transaction = conn.unchecked_transaction().unwrap();
+        transaction
+            .execute("DELETE FROM session_message WHERE id = 'logical-turn'", [])
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES ('logical-turn', 'session-1', 2000, 2000, ?1)",
+                [payload(150)],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn full_scan_reads_dual_schema_groups_from_one_snapshot() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 type TEXT NOT NULL,
+                 time_created INTEGER NOT NULL,
+                 time_updated INTEGER NOT NULL,
+                 data TEXT NOT NULL
+             );
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 time_created INTEGER NOT NULL,
+                 time_updated INTEGER NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message
+                 (id, session_id, type, time_created, time_updated, data)
+             VALUES ('logical-turn', 'session-1', 'assistant', 1000, 1000, ?1)",
+            params![payload(100)],
+        )
+        .unwrap();
+
+        let hook = BetweenQueryGroupsHook::set(&db_path, migrate_turn_to_v1);
+        let scan = scan_opencode_schema_sqlite(&db_path, OpenCodeSchemaConfig::opencode());
+        drop(hook);
+
+        assert!(scan.complete);
+        assert_eq!(
+            scan.messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            100,
+            "the v2 and v1 query groups must share the pre-write snapshot"
+        );
+        let post_write = scan_opencode_schema_sqlite(&db_path, OpenCodeSchemaConfig::opencode());
+        assert_eq!(
+            post_write
+                .messages
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            150,
+            "the test writer must commit the replacement turn"
+        );
+    }
 }

@@ -88,6 +88,8 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   muse: "Muse Code",
   vibe: "Mistral Vibe",
   proma: "Proma",
+  bb: "BB",
+  qoder: "Qoder",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -160,6 +162,8 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   muse: "https://github.com/meta-models.png",
   vibe: "https://github.com/mistralai.png",
   proma: "https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png",
+  bb: "https://github.com/get-bb.png",
+  qoder: "https://github.com/alibaba.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -224,6 +228,8 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   muse: "#0064E0",
   vibe: "#FA520F",
   proma: "#6366F1",
+  bb: "#4F46E5",
+  qoder: "#FF4D00",
 };
 
 // Derived values

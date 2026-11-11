@@ -713,3 +713,163 @@ describe("antigravityPriorCoverage flash tier canonicalization", () => {
     expect(prior.total.tokens).toBe(200_000);
   });
 });
+
+describe("planAntigravityTransition generation boundary", () => {
+  const FAMILY = ["antigravity", "antigravity-cli", "antigravity-extension"] as const;
+  const PREVIOUS = GEN - 1;
+  const pins = (generation: number) =>
+    Object.fromEntries(FAMILY.map((client) => [client, generation]));
+  const DATE = "2026-08-10";
+  const MODEL = "gemini-3.5-flash-high";
+  // One response as the previous generation counted it (model enum added to
+  // input, output and reasoning swapped) and as the registered one counts it.
+  const previousCount = {
+    tokens: { input: 1632, output: 40, cacheRead: 16000, cacheWrite: 0, reasoning: 300 },
+    cost: 1.5,
+    messages: 1,
+  };
+  const correctedCount = {
+    tokens: { input: 500, output: 300, cacheRead: 16000, cacheWrite: 0, reasoning: 40 },
+    cost: 1.2,
+    messages: 1,
+  };
+  type Count = typeof previousCount;
+  const snapshot = (count: Count) => [
+    {
+      date: DATE,
+      clients: [{ client: "antigravity-cli", modelId: MODEL, ...count }],
+      totals: { costIsComplete: true },
+    },
+  ];
+  const stored = (count: Count) => {
+    const cell = {
+      ...count.tokens,
+      tokens: Object.values(count.tokens).reduce((sum, n) => sum + n, 0),
+      messages: count.messages,
+      cost: count.cost,
+    };
+    return [
+      {
+        date: DATE,
+        sourceBreakdown: { "antigravity-cli": { ...cell, models: { [MODEL]: cell } } },
+      },
+    ];
+  };
+  const proof = {
+    "antigravity-cli": {
+      [DATE]: { [MODEL]: { previous: previousCount, corrected: correctedCount } },
+    },
+  };
+
+  it("keeps accepting the previous generation from a device that has not moved on", () => {
+    // Every CLI released before the registered generation declares the
+    // previous one, and the receiver deploys before the next CLI ships.
+    for (const persistedVersions of [undefined, pins(PREVIOUS)]) {
+      const plan = planAntigravityTransition({
+        ...baseArgs(),
+        incomingVersions: pins(PREVIOUS),
+        persistedVersions,
+        contributions: snapshot(previousCount),
+        existingDays: stored(previousCount),
+      });
+      expect(plan.mode).toBe("replace");
+      expect(plan.parserVersions).toEqual(pins(PREVIOUS));
+    }
+  });
+
+  it("moves the device to the registered generation when its proof corrects the stored cells", () => {
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      persistedVersions: pins(PREVIOUS),
+      recountProofs: proof,
+      contributions: snapshot(correctedCount),
+      existingDays: stored(previousCount),
+    });
+    expect(plan.mode).toBe("replace");
+    expect(plan.parserVersions).toEqual(pins(GEN));
+    expect(plan.recountCostReduction).toBeCloseTo(0.3, 8);
+  });
+
+  it("leaves the device on the previous generation when a registered snapshot freezes", () => {
+    // Without a proof the corrected snapshot does not cover the stored cells.
+    // They stay in the previous generation's units, so the marker must too:
+    // a later proof can still correct them.
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      contributions: snapshot(correctedCount),
+      existingDays: stored(previousCount),
+    });
+    expect(plan.mode).toBe("freeze");
+    expect(plan.parserVersions).toEqual(pins(PREVIOUS));
+  });
+
+  it("still corrects a device whose only marker is one member an earlier receiver pinned", () => {
+    // Before generation 2 was registered, a submit declaring it for one
+    // member froze as a future generation and pinned only that member. No
+    // cell changed, so the stored layout is still the previous generation's
+    // and the proof must still apply.
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      persistedVersions: { "antigravity-extension": GEN },
+      recountProofs: proof,
+      contributions: snapshot(correctedCount),
+      existingDays: stored(previousCount),
+    });
+    expect(plan.mode).toBe("replace");
+    expect(plan.parserVersions).toEqual(pins(GEN));
+    expect(plan.recountCostReduction).toBeCloseTo(0.3, 8);
+  });
+
+  it("ignores a recount proof once the device is on the registered generation", () => {
+    // The stored cell equals the proof's previous side and the proof passes
+    // every structural check. After the transition the stored cells are in
+    // the registered generation's units, so equal counts prove nothing.
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      persistedVersions: pins(GEN),
+      recountProofs: proof,
+      contributions: snapshot(correctedCount),
+      existingDays: stored(previousCount),
+    });
+    expect(plan.mode).toBe("freeze");
+    expect(plan.recountCostReduction).toBeUndefined();
+    expect(plan.parserVersions).toEqual(pins(GEN));
+  });
+
+  it("ignores a recount proof sent with the previous generation", () => {
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      incomingVersions: pins(PREVIOUS),
+      recountProofs: proof,
+      contributions: snapshot(correctedCount),
+      existingDays: stored(previousCount),
+    });
+    expect(plan.mode).toBe("freeze");
+    expect(plan.parserVersions).toEqual(pins(PREVIOUS));
+  });
+
+  it("freezes the previous generation once the device is on the registered one", () => {
+    // An older CLI on the same device counts the same history higher. Letting
+    // it replace the layout would undo the correction.
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      incomingVersions: pins(PREVIOUS),
+      persistedVersions: pins(GEN),
+      contributions: snapshot(previousCount),
+      existingDays: stored(correctedCount),
+    });
+    expect(plan.mode).toBe("freeze");
+    expect(plan.parserVersions).toEqual(pins(GEN));
+    expect(plan.warning).toContain("Update the Tokscale CLI");
+  });
+
+  it("freezes a family that declares two generations at once", () => {
+    const plan = planAntigravityTransition({
+      ...baseArgs(),
+      incomingVersions: { ...pins(GEN), antigravity: PREVIOUS },
+      contributions: snapshot(correctedCount),
+    });
+    expect(plan.mode).toBe("freeze");
+    expect(plan.parserVersions).toEqual(pins(PREVIOUS));
+  });
+});

@@ -36,8 +36,8 @@ This applies to all GitHub-content authoring through the CLI — PR bodies, issu
 
 - Before any commit, inspect the effective Git identity (`git config user.name` / `user.email`) and remotes. If the identity does not match the contributor or expected automation account for the current branch, stop and ask for confirmation.
 - Never commit as worker/agent identities such as `worker1`, `worker2`, `worker3`, or `*@example.invalid`.
-- When merging pull requests through `gh`, use merge commits (`gh pr merge --merge ...`) unless the user explicitly requests another merge strategy.
-- Before merging, verify the merge commit title is the intended conventional PR title and does not contain worker/agent/internal review jargon.
+- Merge pull requests through `gh` with a squash merge (`gh pr merge --squash ...`). The repository allows no other merge method, so `--merge` and `--rebase` are rejected; check with `gh api repos/junhoyeo/tokscale --jq '.allow_merge_commit, .allow_squash_merge, .allow_rebase_merge'`.
+- Before merging, verify the PR title is the intended conventional title and does not contain worker/agent/internal review jargon: it becomes the commit subject on `main`.
 
 ## Commit Message Convention
 

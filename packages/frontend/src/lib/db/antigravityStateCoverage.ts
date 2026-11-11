@@ -1,8 +1,11 @@
-import type { ClientBreakdownData } from "./helpers";
+import type { ClientBreakdownData, ModelBreakdownData } from "./helpers";
 import {
   modelsForHighWater,
   PARSER_HIGH_WATER_STATE_VERSION,
+  type ClientRecountProof,
   type DeviceParserStates,
+  type RecountProofCell,
+  type RecountProofEntry,
 } from "./parserHighWater";
 import { ownValue } from "../safeRecord";
 
@@ -11,6 +14,13 @@ export const ANTIGRAVITY_FAMILY = [
   "antigravity-cli",
   "antigravity-extension",
 ] as const;
+
+export type AntigravityClient = (typeof ANTIGRAVITY_FAMILY)[number];
+export type AntigravityRecountProofs = Partial<
+  Record<AntigravityClient, ClientRecountProof>
+>;
+
+const PROOF_COST_TOLERANCE = 1e-6;
 
 const COVERAGE_FIELDS = [
   "tokens",
@@ -59,6 +69,259 @@ function maximum(left: Coverage, right: Coverage): Coverage {
 
 function sameCoverage(left: Coverage, right: Coverage): boolean {
   return COVERAGE_FIELDS.every((field) => left[field] === right[field]);
+}
+
+function validProofUsage(usage: RecountProofCell | undefined): usage is RecountProofCell {
+  if (!usage || !usage.tokens) return false;
+  const { input, output, cacheRead, cacheWrite, reasoning } = usage.tokens;
+  return (
+    [input, output, cacheRead, cacheWrite, reasoning, usage.messages].every(
+      (n) => Number.isSafeInteger(n) && n >= 0,
+    ) &&
+    Number.isFinite(usage.cost) &&
+    usage.cost >= 0
+  );
+}
+
+function usageToCoverage(usage: RecountProofCell): Coverage {
+  const { input, output, cacheRead, cacheWrite, reasoning } = usage.tokens;
+  return {
+    tokens: input + output + cacheRead + cacheWrite + reasoning,
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    reasoning,
+    messages: usage.messages,
+  };
+}
+
+function modelToCoverage(model: ModelBreakdownData): Coverage {
+  const reasoning = model.reasoning ?? 0;
+  return {
+    tokens:
+      model.tokens ??
+      model.input + model.output + model.cacheRead + model.cacheWrite + reasoning,
+    input: model.input,
+    output: model.output,
+    cacheRead: model.cacheRead,
+    cacheWrite: model.cacheWrite,
+    reasoning,
+    messages: model.messages,
+  };
+}
+
+function validAntigravityDayInvariants(
+  client: AntigravityClient,
+  prev: Coverage,
+  corr: Coverage,
+): boolean {
+  if (client === "antigravity-cli" || client === "antigravity-extension") {
+    // v1 -> v2 for SQLite gen_metadata:
+    // - #1 (model enum) was added to #2 (input_tokens) in v1, so v1 input >= v2 input
+    //   and 0-token failed turns carrying only #1 were counted as messages in v1.
+    // - #9 (thinking) and #10 (response output) were swapped in v1, and #3
+    //   (total output) is used as a fallback when #9 == 0 && #10 == 0.
+    // - #4 (cache_write_tokens) was 0 in v1.
+    // - #5 (cache_read_tokens) is unchanged.
+    return (
+      prev.input >= corr.input &&
+      prev.output + prev.reasoning <= corr.output + corr.reasoning &&
+      prev.cacheRead === corr.cacheRead &&
+      prev.cacheWrite === 0 &&
+      prev.messages >= corr.messages
+    );
+  }
+  // v1 -> v2 for desktop RPC JSONL cache:
+  // - v1 output was outputTokens (responseOutputTokens + thinkingOutputTokens).
+  // - v1 cacheWrite was hardcoded to 0.
+  // - v1 dropped usage rows whose raw timestamp was null/0 instead of falling
+  //   back to session_meta / file mtime.
+  return (
+    prev.input <= corr.input &&
+    prev.cacheRead <= corr.cacheRead &&
+    prev.cacheWrite === 0 &&
+    prev.reasoning <= corr.reasoning &&
+    prev.output <= corr.output + corr.reasoning &&
+    prev.messages <= corr.messages
+  );
+}
+
+/**
+ * Validate a client's recount proof against the incoming folded snapshot and
+ * the Antigravity v1 -> v2 structural invariants.
+ */
+export function validateAntigravityRecountProof(
+  client: AntigravityClient,
+  proof: ClientRecountProof | undefined,
+  layoutDays: Record<string, ClientBreakdownData>,
+): ClientRecountProof | undefined {
+  if (!proof) return undefined;
+  const dates = new Set([...Object.keys(proof), ...Object.keys(layoutDays)]);
+  for (const date of dates) {
+    const proofModels = ownValue(proof, date) ?? {};
+    const submittedModels = modelsForHighWater(ownValue(layoutDays, date));
+    const modelIds = new Set([
+      ...Object.keys(proofModels),
+      ...Object.keys(submittedModels),
+    ]);
+    const dayPrev = emptyCoverage();
+    const dayCorr = emptyCoverage();
+
+    for (const modelId of modelIds) {
+      const entry = ownValue(proofModels, modelId);
+      const model = ownValue(submittedModels, modelId);
+      if (
+        !entry ||
+        !validProofUsage(entry.previous) ||
+        !validProofUsage(entry.corrected)
+      ) {
+        return undefined;
+      }
+      addCoverage(dayPrev, usageToCoverage(entry.previous));
+      addCoverage(dayCorr, usageToCoverage(entry.corrected));
+      const corr = usageToCoverage(entry.corrected);
+      if (!model) {
+        if (
+          !sameCoverage(corr, emptyCoverage()) ||
+          entry.corrected.cost !== 0
+        ) {
+          return undefined;
+        }
+        continue;
+      }
+      if (
+        !sameCoverage(modelToCoverage(model), corr) ||
+        !Number.isFinite(model.cost) ||
+        model.cost < 0 ||
+        model.cost - entry.corrected.cost > PROOF_COST_TOLERANCE
+      ) {
+        return undefined;
+      }
+    }
+
+    if (!validAntigravityDayInvariants(client, dayPrev, dayCorr)) {
+      return undefined;
+    }
+  }
+  return proof;
+}
+
+function findMatchingProofEntry(
+  proofModels: Record<string, RecountProofEntry>,
+  modelId: string,
+  modelCoverage: Coverage,
+): RecountProofEntry | undefined {
+  const exact = ownValue(proofModels, modelId);
+  if (exact && sameCoverage(modelCoverage, usageToCoverage(exact.previous))) {
+    return exact;
+  }
+  if (modelId === "__legacy_cell__") {
+    const entries = Object.values(proofModels).filter((entry) =>
+      sameCoverage(modelCoverage, usageToCoverage(entry.previous)),
+    );
+    return entries.length === 1 ? entries[0] : undefined;
+  }
+  const canonical = canonicalLedgerModelId(modelId);
+  const candidates = Object.entries(proofModels).filter(
+    ([id, entry]) =>
+      canonicalLedgerModelId(id) === canonical &&
+      sameCoverage(modelCoverage, usageToCoverage(entry.previous)),
+  );
+  return candidates.length === 1 ? candidates[0][1] : undefined;
+}
+
+function adjustCellWithRecountProof(
+  cell: ClientBreakdownData | undefined,
+  date: string | undefined,
+  proof: ClientRecountProof | undefined,
+): {
+  cell: ClientBreakdownData | undefined;
+  removedDelta: Coverage;
+  removedCost: number;
+} {
+  if (!cell || !date || !proof) {
+    return { cell, removedDelta: emptyCoverage(), removedCost: 0 };
+  }
+  const proofModels = ownValue(proof, date);
+  if (!proofModels) {
+    return { cell, removedDelta: emptyCoverage(), removedCost: 0 };
+  }
+  const models = modelsForHighWater(cell);
+  let changed = false;
+  const adjustedModels: Record<string, ModelBreakdownData> = {};
+  const nextTotal = emptyCoverage();
+  const removedDelta = emptyCoverage();
+  let removedCost = 0;
+
+  for (const [modelId, model] of Object.entries(models)) {
+    const modelCov = modelToCoverage(model);
+    const entry = findMatchingProofEntry(proofModels, modelId, modelCov);
+    if (entry) {
+      const prevCov = usageToCoverage(entry.previous);
+      const corrCov = usageToCoverage(entry.corrected);
+      if (
+        !sameCoverage(prevCov, corrCov) ||
+        Math.abs(entry.previous.cost - entry.corrected.cost) >
+          PROOF_COST_TOLERANCE
+      ) {
+        changed = true;
+      }
+      for (const field of COVERAGE_FIELDS) {
+        removedDelta[field] += prevCov[field] - corrCov[field];
+      }
+      removedCost += Math.max(0, entry.previous.cost - entry.corrected.cost);
+      if (sameCoverage(corrCov, emptyCoverage()) && entry.corrected.cost === 0) {
+        continue;
+      }
+      adjustedModels[modelId] = {
+        ...model,
+        ...corrCov,
+        cost: entry.corrected.cost,
+      };
+      addCoverage(nextTotal, corrCov);
+    } else {
+      adjustedModels[modelId] = model;
+      addCoverage(nextTotal, modelCov);
+    }
+  }
+
+  if (!changed) {
+    return { cell, removedDelta: emptyCoverage(), removedCost: 0 };
+  }
+  if (
+    Object.keys(adjustedModels).length === 0 &&
+    sameCoverage(nextTotal, emptyCoverage())
+  ) {
+    return { cell: undefined, removedDelta, removedCost };
+  }
+  return {
+    cell: {
+      ...cell,
+      ...nextTotal,
+      models: adjustedModels,
+    },
+    removedDelta,
+    removedCost,
+  };
+}
+
+function sumProofTotals(proof: ClientRecountProof): {
+  previous: Coverage;
+  corrected: Coverage;
+  removedCost: number;
+} {
+  const previous = emptyCoverage();
+  const corrected = emptyCoverage();
+  let removedCost = 0;
+  for (const models of Object.values(proof)) {
+    for (const entry of Object.values(models)) {
+      addCoverage(previous, usageToCoverage(entry.previous));
+      addCoverage(corrected, usageToCoverage(entry.corrected));
+      removedCost += Math.max(0, entry.previous.cost - entry.corrected.cost);
+    }
+  }
+  return { previous, corrected, removedCost };
 }
 
 type LegacyLedger = {
@@ -233,12 +496,92 @@ function legacyLedgerCoverage(
 export function antigravityPriorCoverage(
   existingDays: PriorDay[],
   parserStates?: DeviceParserStates,
-): { total: Coverage; unverifiable: boolean } {
+  recountProofs?: AntigravityRecountProofs,
+): { total: Coverage; unverifiable: boolean; recountCostReduction: number } {
   const existingBreakdowns = existingDays.map((day) =>
     (day.sourceBreakdown ?? {}) as Record<string, ClientBreakdownData>,
   );
+
+  let recountCostReduction = 0;
+  const adjustedBreakdowns: Array<Record<string, ClientBreakdownData>> =
+    existingBreakdowns.map(() => ({}));
+
+  for (const client of ANTIGRAVITY_FAMILY) {
+    const proof = ownValue(recountProofs, client);
+    const rawClientCells = existingBreakdowns.map((breakdown) =>
+      ownValue(breakdown, client),
+    );
+    const rawClientCoverage = coverage(rawClientCells);
+    const proofTotals = proof ? sumProofTotals(proof) : undefined;
+
+    if (
+      proofTotals &&
+      !sameCoverage(rawClientCoverage, emptyCoverage()) &&
+      sameCoverage(rawClientCoverage, proofTotals.previous)
+    ) {
+      // Whole-client stored coverage matches the proof's v1 previous total
+      // across all 7 fields (even if turns were simultaneously re-dated or
+      // re-attributed across models). Represent the client's adjusted stored
+      // coverage directly as `proofTotals.corrected`.
+      const rawClientStoredCost = rawClientCells.reduce(
+        (sum, c) => sum + (c?.cost ?? 0),
+        0,
+      );
+      const allowedCostReduction = Math.min(
+        proofTotals.removedCost,
+        rawClientStoredCost,
+      );
+      recountCostReduction += allowedCostReduction;
+      const firstIdx = rawClientCells.findIndex((c) => c !== undefined);
+      if (firstIdx !== -1) {
+        const correctedModels: Record<string, ModelBreakdownData> = {};
+        if (proof) {
+          for (const dayModels of Object.values(proof)) {
+            for (const [modelId, entry] of Object.entries(dayModels)) {
+              const existing = correctedModels[modelId] ?? {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                reasoning: 0,
+                cost: 0,
+              };
+              existing.input += entry.corrected.tokens.input;
+              existing.output += entry.corrected.tokens.output;
+              existing.cacheRead += entry.corrected.tokens.cacheRead;
+              existing.cacheWrite += entry.corrected.tokens.cacheWrite;
+              existing.reasoning += entry.corrected.tokens.reasoning;
+              existing.cost += entry.corrected.cost;
+              correctedModels[modelId] = existing;
+            }
+          }
+        }
+        adjustedBreakdowns[firstIdx][client] = {
+          ...rawClientCells[firstIdx]!,
+          ...proofTotals.corrected,
+          models:
+            Object.keys(correctedModels).length > 0
+              ? correctedModels
+              : rawClientCells[firstIdx]!.models,
+        };
+      }
+      continue;
+    }
+
+    existingDays.forEach((day, index) => {
+      const rawCell = rawClientCells[index];
+      if (!rawCell) return;
+      const adjusted = adjustCellWithRecountProof(rawCell, day.date, proof);
+      const allowedCellReduction = Math.min(adjusted.removedCost, rawCell.cost);
+      recountCostReduction += allowedCellReduction;
+      if (adjusted.cell) {
+        adjustedBreakdowns[index][client] = adjusted.cell;
+      }
+    });
+  }
+
   const stored = coverage(
-    existingBreakdowns.flatMap((breakdown) =>
+    adjustedBreakdowns.flatMap((breakdown) =>
       ANTIGRAVITY_FAMILY.map((client) => ownValue(breakdown, client)),
     ),
   );
@@ -248,6 +591,8 @@ export function antigravityPriorCoverage(
   for (const client of ANTIGRAVITY_FAMILY) {
     const state = ownValue(parserStates, client);
     if (!state) continue;
+    const proof = ownValue(recountProofs, client);
+    const proofTotals = proof ? sumProofTotals(proof) : undefined;
     if (
       state.stateVersion != null &&
       state.stateVersion !== PARSER_HIGH_WATER_STATE_VERSION
@@ -273,12 +618,12 @@ export function antigravityPriorCoverage(
       // advanced its aggregate even when no cell could accept that growth.
       // Rebuild its ledger from the rows that were actually credited in
       // `existingDays`, matching `planParserHighWaterSubmission`.
-      const creditedCells = existingBreakdowns
+      const creditedCells = adjustedBreakdowns
         .map((breakdown) => ownValue(breakdown, client))
         .filter((cell): cell is ClientBreakdownData => cell !== undefined);
       const creditedDays: Record<string, ClientBreakdownData> = {};
       existingDays.forEach((day, index) => {
-        const cell = ownValue(existingBreakdowns[index], client);
+        const cell = ownValue(adjustedBreakdowns[index], client);
         if (cell) creditedDays[day.date ?? String(index)] = cell;
       });
       ledgers.push({
@@ -287,12 +632,78 @@ export function antigravityPriorCoverage(
       });
       continue;
     }
-    ledgers.push({ days: state.days, aggregate: state.aggregate });
+
+    const rawLedger: LegacyLedger = {
+      days: state.days,
+      aggregate: state.aggregate,
+    };
+    if (
+      proof &&
+      proofTotals &&
+      sameCoverage(ledgerLifetime(rawLedger), proofTotals.previous)
+    ) {
+      const correctedDays: Record<string, ClientBreakdownData> = {};
+      for (const [date, models] of Object.entries(proof)) {
+        const modelMap: Record<string, ModelBreakdownData> = {};
+        const dayTotal = emptyCoverage();
+        let dayCost = 0;
+        for (const [modelId, entry] of Object.entries(models)) {
+          const corrCov = usageToCoverage(entry.corrected);
+          if (sameCoverage(corrCov, emptyCoverage()) && entry.corrected.cost === 0) {
+            continue;
+          }
+          modelMap[modelId] = {
+            ...corrCov,
+            cost: entry.corrected.cost,
+          };
+          addCoverage(dayTotal, corrCov);
+          dayCost += entry.corrected.cost;
+        }
+        if (Object.keys(modelMap).length > 0) {
+          correctedDays[date] = {
+            ...dayTotal,
+            cost: dayCost,
+            models: modelMap,
+          };
+        }
+      }
+      ledgers.push({
+        days: correctedDays,
+        aggregate: proofTotals.corrected,
+      });
+      continue;
+    }
+
+    if (proof) {
+      const adjustedDays: Record<string, ClientBreakdownData> = {};
+      const totalRemoved = emptyCoverage();
+      for (const [date, cell] of Object.entries(state.days)) {
+        const adjusted = adjustCellWithRecountProof(cell, date, proof);
+        for (const field of COVERAGE_FIELDS) {
+          totalRemoved[field] += adjusted.removedDelta[field];
+        }
+        if (adjusted.cell) {
+          adjustedDays[date] = adjusted.cell;
+        }
+      }
+      const adjustedAggregate = emptyCoverage();
+      for (const field of COVERAGE_FIELDS) {
+        adjustedAggregate[field] = Math.max(
+          0,
+          state.aggregate[field] - totalRemoved[field],
+        );
+      }
+      ledgers.push({ days: adjustedDays, aggregate: adjustedAggregate });
+      continue;
+    }
+
+    ledgers.push(rawLedger);
   }
 
   const legacy = legacyLedgerCoverage(ledgers);
   return {
     total: maximum(stored, legacy.total),
     unverifiable: unverifiable || legacy.unverifiable,
+    recountCostReduction,
   };
 }

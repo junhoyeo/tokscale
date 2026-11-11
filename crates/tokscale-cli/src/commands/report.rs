@@ -12,7 +12,7 @@ use tokscale_core::content_extractor::SessionContent;
 use tokscale_core::content_extractor::{extract_session_content, metadata_only_content};
 use tokscale_core::pricing::PricingService;
 use tokscale_core::wiki::{WikiDb, WikiEntry};
-use tokscale_core::{parse_local_clients, CostSource, LocalParseOptions, ParsedMessage};
+use tokscale_core::{parse_local_clients, CostSource, LocalParseOptions, ParsedMessage, SharedStr};
 
 pub struct ReportOptions {
     pub json: bool,
@@ -145,7 +145,7 @@ fn record_new_sessions(
         .get_existing_session_ids()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let mut session_map: HashMap<String, SessionAgg> = HashMap::new();
+    let mut session_map: HashMap<SharedStr, SessionAgg> = HashMap::new();
 
     for msg in messages {
         let agg = session_map
@@ -187,15 +187,15 @@ fn record_new_sessions(
 
     let mut new_count = 0;
     for (session_id, agg) in &session_map {
-        let is_new = !existing.contains(session_id);
-        let models_used: Vec<String> = agg.models.keys().cloned().collect();
+        let is_new = !existing.contains(session_id.as_str());
+        let models_used: Vec<String> = agg.models.keys().map(ToString::to_string).collect();
         let duration_minutes = (agg.last_active - agg.created_at) / 60;
 
         let entry = WikiEntry {
-            session_id: session_id.clone(),
-            client: agg.client.clone(),
-            workspace: agg.workspace.clone(),
-            workspace_label: agg.workspace_label.clone(),
+            session_id: session_id.to_string(),
+            client: agg.client.to_string(),
+            workspace: agg.workspace.as_ref().map(ToString::to_string),
+            workspace_label: agg.workspace_label.as_ref().map(ToString::to_string),
             created_at: agg.created_at,
             last_active: agg.last_active,
             title: None,
@@ -926,8 +926,8 @@ fn run_cli_summarizer(
 
 /// Default MiniMax text model used by the `minimax` summarizer backend. Callers
 /// may override it with the `MINIMAX_MODEL` environment variable (for example to
-/// select the smaller `MiniMax-M2.7` model).
-const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3";
+/// select `MiniMax-M3`). Explicit custom and legacy model IDs remain supported.
+const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3.1-Flash";
 
 /// Global (international) OpenAI-compatible base URL for MiniMax inference.
 const MINIMAX_GLOBAL_BASE_URL: &str = "https://api.minimax.io/v1";
@@ -943,6 +943,28 @@ fn minimax_base_url(region: Option<&str>) -> &'static str {
         Some("cn") | Some("cn_zh") | Some("china") | Some("zh") => MINIMAX_CN_BASE_URL,
         _ => MINIMAX_GLOBAL_BASE_URL,
     }
+}
+
+/// Build the request shared by the report backend and its transport tests.
+fn minimax_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    region: Option<&str>,
+    model: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!("{}/chat/completions", minimax_base_url(region)))
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": model.unwrap_or(MINIMAX_DEFAULT_MODEL),
+            "stream": false,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt },
+            ],
+        }))
 }
 
 /// Extract the assistant message text from an OpenAI-compatible chat-completion
@@ -971,9 +993,7 @@ fn minimax_chat(system_prompt: &str, user_prompt: &str) -> Result<String> {
         .or_else(|_| std::env::var("MINIMAX_API_TOKEN"))
         .map_err(|_| anyhow::anyhow!("No MINIMAX_API_KEY or MINIMAX_API_TOKEN set."))?;
     let region = std::env::var("MINIMAX_API_REGION").ok();
-    let base_url = minimax_base_url(region.as_deref());
-    let model =
-        std::env::var("MINIMAX_MODEL").unwrap_or_else(|_| MINIMAX_DEFAULT_MODEL.to_string());
+    let model = std::env::var("MINIMAX_MODEL").ok();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -982,21 +1002,16 @@ fn minimax_chat(system_prompt: &str, user_prompt: &str) -> Result<String> {
         let client = tokscale_core::http::client_builder()
             .timeout(BACKEND_TIMEOUT)
             .build()?;
-        let body = serde_json::json!({
-            "model": model,
-            "stream": false,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt },
-            ],
-        });
-        let resp = client
-            .post(format!("{base_url}/chat/completions"))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let resp = minimax_request(
+            &client,
+            &api_key,
+            region.as_deref(),
+            model.as_deref(),
+            system_prompt,
+            user_prompt,
+        )
+        .send()
+        .await?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -1658,9 +1673,10 @@ fn compute_msg_cost(msg: &ParsedMessage, pricing: Option<&PricingService>) -> f6
 }
 
 fn format_tokens(tokens: i64) -> String {
-    if tokens >= 1_000_000_000 {
+    // Switch units where the rounded value would reach 1000 ("1000K", "1000.0M").
+    if tokens >= 999_950_000 {
         format!("{:.1}B", tokens as f64 / 1_000_000_000.0)
-    } else if tokens >= 1_000_000 {
+    } else if tokens >= 999_500 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
         format!("{:.0}K", tokens as f64 / 1_000.0)
@@ -1670,16 +1686,16 @@ fn format_tokens(tokens: i64) -> String {
 }
 
 struct SessionAgg {
-    client: String,
-    workspace: Option<String>,
-    workspace_label: Option<String>,
+    client: SharedStr,
+    workspace: Option<SharedStr>,
+    workspace_label: Option<SharedStr>,
     created_at: i64,
     last_active: i64,
     total_input: i64,
     total_output: i64,
     total_cache_read: i64,
     total_cost: f64,
-    models: HashMap<String, i32>,
+    models: HashMap<SharedStr, i32>,
     message_count: i32,
 }
 
@@ -1688,6 +1704,15 @@ mod tests {
     use super::*;
     use tokscale_core::pricing::{ModelPricing, PricingService};
     use tokscale_core::TokenBreakdown;
+
+    #[test]
+    fn format_tokens_promotes_to_the_next_unit_at_the_rounding_boundary() {
+        assert_eq!(format_tokens(999_499), "999K");
+        assert_eq!(format_tokens(999_500), "1.0M");
+        assert_eq!(format_tokens(999_949_999), "999.9M");
+        assert_eq!(format_tokens(999_950_000), "1.0B");
+        assert_eq!(format_tokens(1_500), "2K");
+    }
 
     fn test_pricing_service() -> PricingService {
         let mut litellm = HashMap::new();
@@ -1729,14 +1754,14 @@ mod tests {
             estimate_status: tokscale_core::sessions::EstimateStatus::Unpriced,
             billing_identity: tokscale_core::sessions::BillingIdentity::Unknown,
             pricing_model_id: None,
-            client: "claude".to_string(),
-            model_id: model_id.to_string(),
-            provider_id: "anthropic".to_string(),
-            session_id: "s1".to_string(),
+            client: "claude".into(),
+            model_id: model_id.into(),
+            provider_id: "anthropic".into(),
+            session_id: "s1".into(),
             workspace_key: None,
             workspace_label: None,
             timestamp: 0,
-            date: "2026-01-01".to_string(),
+            date: "2026-01-01".into(),
             input: 1_000,
             output: 500,
             cache_read: 2_000,
@@ -1784,8 +1809,8 @@ mod tests {
     fn compute_msg_cost_skips_xai_request_tier_for_grok_multi_call_aggregate() {
         let pricing = test_pricing_service();
         let mut aggregate = parsed_message("grok-4.5");
-        aggregate.client = "grok".to_string();
-        aggregate.provider_id = "xai".to_string();
+        aggregate.client = "grok".into();
+        aggregate.provider_id = "xai".into();
         aggregate.input = 58_682;
         aggregate.output = 3_877;
         aggregate.cache_read = 314_112;
@@ -1834,14 +1859,14 @@ mod tests {
     fn compute_msg_cost_applies_openai_fast_and_priority_tiers() {
         let pricing = test_pricing_service();
         let mut standard = parsed_message("gpt-5.6-terra");
-        standard.provider_id = "openai".to_string();
+        standard.provider_id = "openai".into();
         let standard_cost = compute_msg_cost(&standard, Some(&pricing));
         assert!(standard_cost > 0.0);
 
         for tier in ["priority", "FaSt"] {
             let mut fast = parsed_message("gpt-5.6-terra");
-            fast.provider_id = "openai".to_string();
-            fast.service_tier = Some(tier.to_string());
+            fast.provider_id = "openai".into();
+            fast.service_tier = Some(tier.into());
             assert_eq!(compute_msg_cost(&fast, Some(&pricing)), standard_cost * 2.0);
         }
     }
@@ -1972,7 +1997,7 @@ mod tests {
 
         msg.cost = 0.42;
         msg.cost_source = CostSource::ProviderReported;
-        msg.service_tier = Some("priority".to_string());
+        msg.service_tier = Some("priority".into());
         assert_eq!(compute_msg_cost(&msg, Some(&pricing)), 0.42);
         // An authoritative figure does not need a pricing dataset at all.
         assert_eq!(compute_msg_cost(&msg, None), 0.42);
@@ -2053,8 +2078,8 @@ mod tests {
         db.upsert_entry(&stored).unwrap();
 
         let mut message = parsed_message("grok-4.5");
-        message.client = "grok".to_string();
-        message.provider_id = "xai".to_string();
+        message.client = "grok".into();
+        message.provider_id = "xai".into();
         message.input = 100;
         message.output = 20;
         message.cache_read = 30;
@@ -2541,6 +2566,104 @@ mod tests {
         let entry = entry_for(inner_id, "gemini");
         let content = extract_content_for_session(&entry, &index);
         assert_eq!(content.first_user_message.as_deref(), Some("Hello Gemini"));
+    }
+
+    #[test]
+    fn minimax_requests_default_to_flash_and_preserve_explicit_models() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (region, host) in [(None, "api.minimax.io"), (Some("cn"), "api.minimaxi.com")] {
+            for model in [
+                None,
+                Some("MiniMax-M3.1-Flash"),
+                Some("MiniMax-M3"),
+                Some("MiniMax-M2.7"),
+                Some("custom-model"),
+            ] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = std::thread::spawn(move || {
+                    let (stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    assert_eq!(line, "POST /v1/chat/completions HTTP/1.1\r\n");
+                    let mut length = None;
+                    loop {
+                        line.clear();
+                        reader.read_line(&mut line).unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                        assert!(!line.is_empty(), "request headers ended prematurely");
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = Some(value.trim().parse::<usize>().unwrap());
+                        }
+                    }
+                    let mut body = vec![0; length.unwrap()];
+                    reader.read_exact(&mut body).unwrap();
+                    let response = r#"{"choices":[{"message":{"content":"[]"}}]}"#;
+                    write!(
+                        reader.get_mut(),
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response.len(),
+                        response
+                    )
+                    .unwrap();
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+                });
+                runtime.block_on(async {
+                    let client = tokscale_core::http::client_builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(5))
+                        .build()
+                        .unwrap();
+                    let mut request = minimax_request(
+                        &client,
+                        "test-only",
+                        region,
+                        model,
+                        "Summarize sessions",
+                        "[{\"title\":\"A session\"}]",
+                    )
+                    .build()
+                    .unwrap();
+                    assert_eq!(
+                        request.url().as_str(),
+                        format!("https://{host}/v1/chat/completions")
+                    );
+                    assert_eq!(request.headers()["authorization"], "Bearer test-only");
+                    assert_eq!(request.headers()["content-type"], "application/json");
+                    // Only reroute the destination; send the production request body over HTTP.
+                    *request.url_mut() = format!("http://{address}/v1/chat/completions")
+                        .parse()
+                        .unwrap();
+                    let response = client.execute(request).await.unwrap().text().await.unwrap();
+                    assert_eq!(parse_openai_content(&response).as_deref(), Some("[]"));
+                });
+                assert_eq!(
+                    server.join().unwrap(),
+                    serde_json::json!({
+                        "model": model.unwrap_or("MiniMax-M3.1-Flash"),
+                        "stream": false,
+                        "messages": [
+                            { "role": "system", "content": "Summarize sessions" },
+                            { "role": "user", "content": "[{\"title\":\"A session\"}]" },
+                        ],
+                    })
+                );
+            }
+        }
     }
 
     #[test]

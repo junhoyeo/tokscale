@@ -35,6 +35,14 @@ jobs:
   build:
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
+    env:
+      # A pull request only has to show that every target still compiles and
+      # links. The release profile's fat LTO with one codegen unit is most of
+      # a build's time and does not change that answer, so pull request builds
+      # turn it off. Android keeps the release profile: it is the one target
+      # whose binary this workflow also runs, so every pull request still
+      # builds and starts one binary exactly as a release does.
+      FAST_PROFILE: ${{ github.event_name == 'pull_request' && matrix.settings.target != 'aarch64-linux-android' }}
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +147,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cli-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ hashFiles('Cargo.lock') }}
+          # The two profiles produce different artifacts, so they must not
+          # restore each other's `target/`.
+          key: cli-${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}-${{ env.FAST_PROFILE == 'true' && 'fast-' || '' }}${{ hashFiles('Cargo.lock') }}
 
       - uses: mlugg/setup-zig@v2
         if: ${{ contains(matrix.settings.target, 'linux') && !contains(matrix.settings.target, 'android') }}
@@ -161,6 +171,15 @@ jobs:
           target: aarch64-linux-android
           runner: qemu-user
 
+      - name: Turn off LTO for pull request builds
+        if: ${{ env.FAST_PROFILE == 'true' }}
+        shell: bash
+        run: |
+          {
+            echo "CARGO_PROFILE_RELEASE_LTO=off"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+          } >> "$GITHUB_ENV"
+
       - name: Build CLI binary
         run: ${{ matrix.settings.build }}
         shell: bash
@@ -175,8 +194,9 @@ jobs:
         shell: bash
         run: ${{ matrix.settings.strip }}
 
-      # Keep release and PR artifacts identical. The Apple Silicon build may
-      # include a dynamically loaded Foundation Models sidecar.
+      # Stage release and pull request artifacts the same way. The Apple
+      # Silicon build may include a dynamically loaded Foundation Models
+      # sidecar.
       - name: Stage CLI binary artifact
         shell: bash
         run: |

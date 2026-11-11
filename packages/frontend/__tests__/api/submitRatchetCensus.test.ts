@@ -177,6 +177,7 @@ function makeAwaitableBuilder(result: unknown) {
     where: vi.fn(() => builder),
     for: vi.fn(() => builder),
     limit: vi.fn(() => builder),
+    orderBy: vi.fn(() => builder),
     then: (resolve: (value: unknown) => unknown) => Promise.resolve(resolve(result)),
   };
   return builder;
@@ -291,7 +292,13 @@ function buildMockTx(): TxTrace {
       };
       return builder;
     }),
-    select: vi.fn(() => makeAwaitableBuilder(selectResults.shift() ?? [])),
+    select: vi.fn((columns: Record<string, unknown>) =>
+      makeAwaitableBuilder(
+        "leaderboardHidden" in columns
+          ? [{ leaderboardHidden: false }]
+          : selectResults.shift() ?? []
+      ),
+    ),
     insert: vi.fn(() => {
       insertCall += 1;
       if (insertCall === 1) {

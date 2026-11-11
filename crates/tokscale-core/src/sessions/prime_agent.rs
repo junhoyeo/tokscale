@@ -17,6 +17,7 @@ use super::utils::{for_each_json_line_with_bytes, parse_json_line, parse_timesta
 use super::UnifiedMessage;
 use crate::TokenBreakdown;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -256,6 +257,10 @@ impl PiFormatObserver for PrimeAccountingBuilder<'_> {
             return;
         }
 
+        // Standalone usage is not an assistant completion or a child-attribution target.
+        if entry.entry_type != "message" {
+            return;
+        }
         let Some(parsed) = emitted else {
             return;
         };
@@ -984,6 +989,13 @@ pub(crate) fn reconcile_prime_agent_messages(
             }
         }
     }
+    // Everything above only decides which attributions are represented, and it
+    // grows with the attribution history. Release it before the messages are
+    // regrouped below so the two never peak together.
+    drop(eligible);
+    drop(attribution_keys);
+    drop(unique_attributions);
+    drop(available_children);
 
     let mut adjustment_groups: HashMap<String, Vec<(PathBuf, &PrimeUsageAdjustment)>> =
         HashMap::new();
@@ -1016,10 +1028,16 @@ pub(crate) fn reconcile_prime_agent_messages(
                     .to_string()
             },
         );
-        if !grouped.contains_key(&identity) {
-            group_order.push(identity.clone());
+        match grouped.entry(identity) {
+            Entry::Occupied(mut group) => group.get_mut().push(message),
+            // Nearly every identity holds a single message. Growing its group
+            // with `push` would reserve room for four, holding the whole Prime
+            // history four times over; `vec![message]` reserves exactly one.
+            Entry::Vacant(slot) => {
+                group_order.push(slot.key().clone());
+                slot.insert(vec![message]);
+            }
         }
-        grouped.entry(identity).or_default().push(message);
     }
 
     let mut deduped = Vec::with_capacity(group_order.len());
@@ -1151,6 +1169,45 @@ mod tests {
             "prime-agent:response:response-2"
         );
         assert_eq!(accounting.adjustments[0].attributions[0].id, "usage-2");
+    }
+
+    #[test]
+    fn standalone_usage_with_colliding_ids_keeps_assistant_accounting_aligned() {
+        let file = session_file(
+            r#"{"type":"session","id":"root"}
+{"type":"usage","id":"background","timestamp":"2026-10-16T12:00:00Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":5}}
+{"type":"message","id":"assistant","timestamp":"2026-10-16T12:00:01Z","message":{"role":"assistant","model":"gpt-5","responseId":"assistant-response","usage":{"input":20}}}
+{"type":"usage","id":"assistant","timestamp":"2026-10-16T12:00:02Z","kind":"cache_warm","model":"gpt-5","usage":{"input":5}}
+{"type":"child_usage_attributed","id":"child-attribution","targetId":"assistant","childUsage":{"input":3},"aggregateUsage":{"input":20}}
+{"type":"child_usage_attributed","id":"not-a-completion","targetId":"background","childUsage":{"input":1},"aggregateUsage":{"input":5}}"#,
+        );
+        let (messages, fresh) = parse_prime_agent_file_with_accounting(file.path());
+        let cached = analyze_prime_agent_accounting(file.path(), &messages);
+        assert_eq!(messages.len(), 3);
+        for accounting in [fresh, cached] {
+            assert_eq!(accounting.adjustments.len(), 1);
+            assert_eq!(
+                accounting.adjustments[0].dedup_key,
+                "prime-agent:response:assistant-response"
+            );
+            assert_eq!(accounting.adjustments[0].persisted_usage.input, 20);
+        }
+    }
+
+    #[test]
+    fn standalone_usage_does_not_enter_the_child_completion_pool() {
+        let file = session_file(
+            r#"{"type":"session","id":"child","rlmDepth":1,"parentSession":"/tmp/parent.jsonl"}
+{"type":"usage","id":"background","timestamp":"2026-10-16T12:00:00Z","kind":"cache_warm","model":"gpt-5","usage":{"input":5}}
+{"type":"message","id":"assistant","timestamp":"2026-10-16T12:00:01Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":20}}}"#,
+        );
+        let (messages, fresh) = parse_prime_agent_file_with_accounting(file.path());
+        let cached = analyze_prime_agent_accounting(file.path(), &messages);
+        assert_eq!(messages.len(), 2);
+        for accounting in [fresh, cached] {
+            assert_eq!(accounting.child_message_usages.len(), 1);
+            assert_eq!(accounting.child_message_usages[0].usage.input, 20);
+        }
     }
 
     #[test]
@@ -2278,7 +2335,7 @@ mod tests {
 
             let mut per_model: HashMap<String, i64> = HashMap::new();
             for message in &messages {
-                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+                *per_model.entry(message.model_id.to_string()).or_default() += message.tokens.input;
             }
             per_model
         }
@@ -2460,7 +2517,7 @@ mod tests {
 
             let mut per_model: HashMap<String, i64> = HashMap::new();
             for message in &messages {
-                *per_model.entry(message.model_id.clone()).or_default() += message.tokens.input;
+                *per_model.entry(message.model_id.to_string()).or_default() += message.tokens.input;
             }
             per_model
         }

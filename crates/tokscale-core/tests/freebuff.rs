@@ -162,28 +162,87 @@ fn test_codebuff_chat_without_usage_is_not_attributed_to_freebuff() {
 
 #[test]
 fn test_freebuff_chat_is_identified_by_free_root_agent_id() {
-    // Freebuff always runs a `base2-free*` root agent (its model picker maps
-    // every free model onto one). That id is persisted per assistant message
-    // under metadata.runState, so it is a positive per-chat marker.
-    let dir = TempDir::new().unwrap();
-    let base = dir.path().join("manicode");
-    let path = write_chat(
-        &base,
-        "proj",
-        "2026-08-07T10-00-00.000Z",
-        r#"[
-            { "variant": "user", "content": "hello world", "timestamp": "2026-08-07T10:00:00.000Z" },
-            { "variant": "ai", "content": "", "blocks": [ { "type": "text", "content": "Hello!" } ],
-              "timestamp": "2026-08-07T10:00:05.000Z",
-              "metadata": { "runState": { "sessionState": { "mainAgentState": {
-                  "agentType": "base2-free-deepseek-flash" } } } } }
-        ]"#,
-        "deepseek/deepseek-v4-flash",
-    );
+    // Freebuff always runs a root agent carrying a `free` path segment (its
+    // model picker maps every free model onto one). That id is persisted per
+    // assistant message under metadata.runState, so it is a positive per-chat
+    // marker. Cover every family the CLI has shipped: v2 (`base2-free*`), v3
+    // (`base3-free*`, including `base3-free-catalog`) and the v3 fast lane
+    // (`base3-fast-free-*`).
+    for (index, agent_type) in [
+        "base2-free",
+        "base2-free-deepseek-flash",
+        "base3-free",
+        "base3-free-catalog",
+        "base3-free-gpt-6-1-terra",
+        "base3-fast-free-deepseek-flash",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("manicode");
+        let path = write_chat(
+            &base,
+            "proj",
+            &format!("2026-08-07T1{index}-00-00.000Z"),
+            &format!(
+                r#"[
+                    {{ "variant": "user", "content": "hello world", "timestamp": "2026-08-07T10:00:00.000Z" }},
+                    {{ "variant": "ai", "content": "", "blocks": [ {{ "type": "text", "content": "Hello!" }} ],
+                      "timestamp": "2026-08-07T10:00:05.000Z",
+                      "metadata": {{ "runState": {{ "sessionState": {{ "mainAgentState": {{
+                          "agentType": "{agent_type}" }} }} }} }} }}
+                ]"#
+            ),
+            "deepseek/deepseek-v4-flash",
+        );
 
-    let msgs = parse_freebuff_file(&path);
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0].client, "freebuff");
+        let msgs = parse_freebuff_file(&path);
+        assert_eq!(msgs.len(), 1, "root agent {agent_type} must be Freebuff");
+        assert_eq!(msgs[0].client, "freebuff");
+    }
+}
+
+#[test]
+fn test_paid_root_agents_are_not_claimed_by_freebuff() {
+    // The v3 paid roots are one rename away from the free ones, so pin them:
+    // `base3` and the `base3-fast-worker-*` lane belong to Codebuff, and a
+    // marker that matched on a `base3` prefix instead of the `free` segment
+    // would silently claim paid chats as Freebuff.
+    for (index, agent_type) in [
+        "base2",
+        "base2-lite",
+        "base2-max",
+        "base2-plan",
+        "base3",
+        "base3-fast-worker-deepseek-flash",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("manicode");
+        let path = write_chat(
+            &base,
+            "proj",
+            &format!("2026-08-07T2{index}-00-00.000Z"),
+            &format!(
+                r#"[
+                    {{ "variant": "user", "content": "hello world", "timestamp": "2026-08-07T10:00:00.000Z" }},
+                    {{ "variant": "ai", "content": "", "blocks": [ {{ "type": "text", "content": "Hello!" }} ],
+                      "timestamp": "2026-08-07T10:00:05.000Z",
+                      "metadata": {{ "runState": {{ "sessionState": {{ "mainAgentState": {{
+                          "agentType": "{agent_type}" }} }} }} }} }}
+                ]"#
+            ),
+            "deepseek/deepseek-v4-flash",
+        );
+
+        assert!(
+            parse_freebuff_file(&path).is_empty(),
+            "root agent {agent_type} is a paid Codebuff agent and must not be estimated as Freebuff"
+        );
+    }
 }
 
 #[test]

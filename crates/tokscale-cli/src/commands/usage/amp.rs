@@ -276,6 +276,7 @@ fn usage_output_from_text(display_text: &str) -> Result<UsageOutput> {
         anyhow::bail!("Amp returned no parseable usage (display text format may have changed)");
     }
     Ok(UsageOutput {
+        freshness: None,
         provider: "Amp".into(),
         account: None,
         credential_source: None,
@@ -305,7 +306,7 @@ fn fetch_via_api(api_key: &str) -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     let display_text = rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let resp = client
             .post("https://ampcode.com/api/internal")
             .header("Authorization", format!("Bearer {api_key}"))

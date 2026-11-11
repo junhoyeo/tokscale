@@ -121,6 +121,8 @@
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json`（Windows 通用路径；可用 `VIBE_HOME` 覆盖根目录） |
 | <img width="48px" src="https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png" alt="Proma" /> | [Proma](https://github.com/proma-ai/Proma) | `~/.proma/agent-sessions/`, `~/.proma/sdk-config/{sessions,projects}/`; `~/.proma-dev/` |
+| <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
+| <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl`（可用 `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` 覆盖根目录） |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
 
@@ -193,7 +195,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside 和 Mistral Vibe、Proma 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe、Proma、BB 和 Qoder 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -331,6 +333,7 @@ tokscale models --json > report.json   # 保存到文件
 | **工作区 + 模型** | `--group-by workspace,model` | | 先按工作区键、再按模型对本地使用量分组；添加 [`--merge-worktrees`](#按工作区统计费用) 可将 git worktree 折叠进其父仓库 |
 | **会话 + 模型** | `--group-by session,model` | | 每个 `session_id` 和模型一行 — 将成本归因到特定的 agent-CLI 会话 |
 | **客户端 + 会话 + 模型** | `--group-by client,session,model` | | 每个客户端、会话和模型一行 — 适用于按 `session_id` 关联的多代理运行器 |
+| **机器 + 模型** | `--group-by machine,model` | | 每个机器标签和模型一行 — 参见[按机器统计用量](#按机器统计用量) |
 
 **`--group-by model`**（最精简）
 
@@ -398,6 +401,37 @@ tokscale models --json --group-by workspace,model --merge-worktrees
 
 在 TUI 中按 `g` → **工作区 + 模型**，再按 `w` 切换 worktree 折叠（页脚会显示 `[w:worktrees]` 或 `[w:repos]`）。
 
+#### 按机器统计用量
+
+如果你把其他机器的会话文件夹复制到本地目录，并通过 `scanner.extraScanPaths` 添加，请用 `scanner.machineLabels` 为每个文件夹指定机器标签。带标签文件夹下的所有会话文件都计入该机器；其余全部计入 `scanner.localMachineLabel`（默认 `"local"`）:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/Users/me/mirrors/steven/.codex/sessions"],
+      "claude": ["/Users/me/mirrors/steven/.claude/projects"]
+    },
+    "machineLabels": {
+      "/Users/me/mirrors/steven": "steven"
+    },
+    "localMachineLabel": "laptop"
+  }
+}
+```
+
+文件夹匹配其下的所有文件，按完整的路径组成部分比较（在 Windows 上不区分大小写）；文件夹嵌套时，最长的文件夹优先。然后按机器分组:
+
+```bash
+# 每个 (机器, 模型) 一行，带 Machine 列
+tokscale models --light --group-by machine,model
+
+# 仅在此模式下 JSON 条目才包含 `machine` 字段
+tokscale models --json --group-by machine,model
+```
+
+在 TUI 中按 `g` → **机器 + 模型**。
+
 工作区行的标签为 `repo` 或 `repo ⑃ worktree`。各客户端记录工作区的方式并不一致 — Claude Code 存储的是把非字母数字替换成短横线的目录 slug（`-Users-me-devpro-app`），而 Codex 与 OpenCode 存储真实路径 — 因此 tokscale 会对照文件系统把 slug 还原成真实路径。有四点值得注意:
 
 - **不加 `--merge-worktrees` 时，每个 git worktree 各占一行。** 为每个任务单独开 worktree 的 agent CLI 会让一个仓库分散到很多行；`--merge-worktrees` 会把它们重新合并（同时也会合并不同客户端以不同键格式记录的同一个仓库）。
@@ -429,7 +463,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`prime-agent`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`antigravity-extension`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`micode-desktop`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`、`cherrystudio`、`lmstudio`、`unsloth`、`hindsight`、`muse`、`aside` 和 `vibe`。
+可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`prime-agent`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`antigravity-extension`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`micode-desktop`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`、`cherrystudio`、`lmstudio`、`unsloth`、`hindsight`、`muse`、`aside`、`vibe`、`proma`、`bb` 和 `qoder`。
 
 > **破坏性变更（v4.0.0）**：单客户端布尔选项（`--opencode`、`--claude`、`--codex` 等）已被移除，现在会直接报错。请改用规范的 `--client`/`-c` 选项——例如 `tokscale --client opencode,claude`。
 
@@ -818,7 +852,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | 需要已安装并已认证的 Codex CLI。 |
 | `gemini` | `gemini -p` | 需要已安装并已认证的 Gemini CLI。 |
 | `kiro` | `kiro --non-interactive` | 需要已安装并已认证的 Kiro CLI。 |
-| `minimax` | （HTTP API） | 使用 OpenAI 兼容的 chat-completions API，无需 CLI。设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN`。默认在全局端点（`https://api.minimax.io/v1`）使用 `MiniMax-M3`；设置 `MINIMAX_API_REGION=cn` 可改用 `https://api.minimaxi.com/v1`，并可通过 `MINIMAX_MODEL` 选择其他模型（例如 `MiniMax-M2.7`）。 |
+| `minimax` | （HTTP API） | 使用 OpenAI 兼容的 chat-completions API，无需 CLI。设置 `MINIMAX_API_KEY` 或 `MINIMAX_API_TOKEN`。默认在全局端点（`https://api.minimax.io/v1`）使用 `MiniMax-M3.1-Flash`；设置 `MINIMAX_API_REGION=cn` 可改用 `https://api.minimaxi.com/v1`，并可通过 `MINIMAX_MODEL` 选择其他模型（例如 `MiniMax-M3`）。 |
 
 **工作原理：**
 
@@ -972,6 +1006,8 @@ Tokscale 将设置存储在配置目录下的 `settings.json` 中。默认位置
 | `minutelyTabEnabled` | boolean | `false` | 在 TUI 中显示按分钟的 Minutely 标签，并在数据加载期间执行分钟级聚合。对大多数用户而言，分钟级粒度是较为小众的诊断视图，而在大数据集上分钟分桶有非平凡的代价，因此默认关闭。 |
 | `cursor.syncTimeoutSeconds` | number | 未设置 | `tokscale cursor sync` 下载每个账户使用量时的总时间预算（秒，1-86400）。未设置时从 120 秒开始，并根据 Cursor 报告的使用量事件数延长，最多 1800 秒。`tokscale cursor sync --timeout <SECONDS>` 会按次运行覆盖该设置。参见 [Cursor IDE 命令](#cursor-ide-命令)。 |
 | `scanner.extraScanPaths` | object | `{}` | 针对 Tokscale 默认 home 根位置之外的会话，为各客户端额外指定的扫描根目录 |
+| `scanner.machineLabels` | object | `{}` | 每个文件夹的机器标签，格式为 `{ "<folder>": "<label>" }`。在 `--group-by machine,model` 中，文件夹下的会话文件计入其标签；匹配的文件夹中最长者优先。参见[按机器统计用量](#按机器统计用量)。 |
+| `scanner.localMachineLabel` | string | `"local"` | 不属于任何 `scanner.machineLabels` 文件夹的会话文件所用的机器标签 |
 | `scanner.bucketTimezone` | string | 自动检测 | 此设备将使用量按天分桶时所用时区的 IANA 名称（例如 `"Asia/Seoul"`）。首次运行时会自动记录。请优先使用 `tokscale config set timezone <zone>`，而非手动编辑。 |
 
 #### 每日边界与 `scanner.bucketTimezone`
@@ -1130,7 +1166,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside 和 Mistral Vibe、Proma）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe、Proma、BB、Qoder）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -1554,6 +1590,8 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 按账户读取原生浏览器用量；仅扫描 `messages.jsonl`，排除 artifacts、memory 和 passwords。 |
 | Mistral Vibe | `$VIBE_HOME/logs/session/`（默认：`~/.vibe/logs/session/`） | `%VIBE_HOME%\logs\session\`（默认：`%USERPROFILE%\.vibe\logs\session\`） | 全平台通用 `~/.vibe` 根目录；仅读取各会话目录的 `meta.json` 累计 `stats`，不读取 `messages.jsonl` 对话内容 |
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | 优先使用 Pi SDK 用量，避免重复计算界面副本；同时支持旧版 Claude SDK 记录及独立界面日志。详见[统计规则与限制](docs/proma.md)。 |
+| BB | `$BB_DATA_DIR`（默认：`~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（默认：`%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | 解析 `bb.db` SQLite 数据库（`threads` 和 `events` 表）。准确提取编排代理 Harness 中的 Prompt 缓存和推理 Token 分解。BB 在常规主目录下运行 Claude Code 和 Codex，因此两边都记录的响应只在 `claude` 或 `codex` 下统计一次；仅指定 `--client bb` 时仍显示 BB 记录的全部内容。 |
+| Qoder | `$QODER_CONFIG_DIR/projects/`（默认：`~/.qoder/projects/`）、`$QODERCN_CONFIG_DIR/projects/`（默认：`~/.qoder-cn/projects/`） | `%QODER_CONFIG_DIR%\projects\`（默认：`%USERPROFILE%\.qoder\projects\`）、`%QODERCN_CONFIG_DIR%\projects\`（默认：`%USERPROFILE%\.qoder-cn\projects\`） | 解析 Qoder 和 Qoder CN 的 JSONL 会话及子代理日志；合并多分块助手片段，并在托管模型 Token 数被归零时从对话文本进行估算 |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 
@@ -1858,11 +1896,18 @@ Hermes 将会话级使用量存储在 SQLite `sessions` 表中。Tokscale 导入
 
 位置：`~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`。[Oh My Pi](https://github.com/can1357/oh-my-pi) 将相同的会话格式写入 `~/.omp/agent/sessions/`，并作为独立的 `omp` 客户端进行跟踪。
 
-包含会话头和消息条目的 JSONL 格式：
+包含会话、消息和使用量条目的 JSONL 格式：
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+{"type":"usage","id":"usage_001","parentId":"msg_001","timestamp":"2026-01-01T00:00:02.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":0,"totalTokens":100}}
 ```
+
+Tokscale 读取具有 `provider`、`model` 和 `usage` 字段的原生独立 `usage` 条目。它接受任意 `kind` 值。Pi 将该记录定义为 [UsageEntry](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md#usageentry)。
+
+不含 usage 的记录不会增加 Token 计数。独立 usage 有上报成本时，Tokscale 保留该成本。否则，Tokscale 使用现有价格数据。
+
+此行为适用于 Pi、Oh My Pi、Senpi、Kimchi Coding 和 Prime Agent 的 Pi 格式解析器。Prime Agent 的独立 usage 不参与助手完成匹配。复制的记录保留其去重标识。Kimchi 保持现有的会话范围标识。升级后，解析器缓存会失效，因此 Tokscale 会再次读取会话。
 
 ### Senpi (OmO Native)
 

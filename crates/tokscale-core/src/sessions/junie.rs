@@ -137,7 +137,7 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
                 start_timestamp,
                 tokens,
                 cost,
-                agent.clone(),
+                agent.as_deref(),
             )
             .with_pricing_model(model_raw)
             .with_billing(

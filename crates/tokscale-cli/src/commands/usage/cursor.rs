@@ -131,6 +131,7 @@ pub fn fetch() -> Result<UsageOutput> {
                 .map(str::to_string)
         });
         Ok(UsageOutput {
+            freshness: None,
             provider: PROVIDER.to_string(),
             account: None,
             credential_source: Some("desktop".into()),
@@ -173,6 +174,7 @@ pub fn fetch_grok_bot() -> Result<Vec<UsageOutput>> {
             return Ok(Vec::new());
         }
         Ok(vec![UsageOutput {
+            freshness: None,
             provider: GROK_BOT_PROVIDER.to_string(),
             account: None,
             credential_source: Some("desktop".into()),

@@ -119,8 +119,42 @@ fn old_cursor_credentials_path(home_dir: &Path) -> PathBuf {
     home_dir.join(".tokscale/cursor-credentials.json")
 }
 
+/// Resolved through the scanner's own `ClientId::Cursor` root so the writer and
+/// the reader cannot disagree. `TOKSCALE_CONFIG_DIR` relocates the cache only
+/// for the user's own home; any other home (a test's scratch home) stays
+/// hermetic.
 fn cursor_cache_dir(home_dir: &Path) -> PathBuf {
-    home_dir.join(".config/tokscale/cursor-cache")
+    let use_env_roots = crate::paths::home_dir().as_deref() == Some(home_dir);
+    scanned_cursor_cache_dir(home_dir, use_env_roots)
+}
+
+/// The directory a report scans for `home_dir`. Reports enable env roots only
+/// without an explicit `--home`, so `--home "$HOME"` reads the home default
+/// even when `TOKSCALE_CONFIG_DIR` is set.
+fn scanned_cursor_cache_dir(home_dir: &Path, use_env_roots: bool) -> PathBuf {
+    PathBuf::from(
+        tokscale_core::ClientId::Cursor
+            .data()
+            .resolve_path_with_env_strategy(&home_dir.to_string_lossy(), use_env_roots),
+    )
+}
+
+/// The cache glob setup warnings point at: the directory the report scans,
+/// abbreviated to `~/...` only when it is the user's own default location.
+pub fn usage_cache_glob(home_dir: &Path, use_env_roots: bool) -> String {
+    let cache_dir = scanned_cursor_cache_dir(home_dir, use_env_roots);
+    if use_env_roots && cache_dir == home_dir.join(".config/tokscale/cursor-cache") {
+        "~/.config/tokscale/cursor-cache/usage*.json".to_string()
+    } else {
+        cache_dir.join("usage*.json").to_string_lossy().into_owned()
+    }
+}
+
+/// Whether the cache lives outside the home's default root, in which case the
+/// legacy `~/.tokscale/cursor-cache` belongs to the host profile rather than
+/// this one and must be neither migrated in nor purged.
+fn cursor_cache_is_isolated(home_dir: &Path) -> bool {
+    cursor_cache_dir(home_dir) != home_dir.join(".config/tokscale/cursor-cache")
 }
 
 fn cursor_desktop_auto_import_disabled_path(home_dir: &Path) -> PathBuf {
@@ -263,6 +297,10 @@ pub struct SyncCursorResult {
 }
 
 fn migrate_cache_dir_from_old_path_in_home(home_dir: &Path) {
+    // The migration deletes the legacy dir; never pull it into an isolated root.
+    if cursor_cache_is_isolated(home_dir) {
+        return;
+    }
     let old_dir = old_cursor_cache_dir(home_dir);
     let new_dir = cursor_cache_dir(home_dir);
     if !new_dir.exists()
@@ -373,30 +411,43 @@ fn usage_events_watermark_ms(events: &[serde_json::Value], max_timestamp: i64) -
 
 /// Identity of a usage event for incremental merge.
 ///
-/// Accepted rows use the report parser's projection of every immutable known
-/// field: trimmed model/session ids (one missing-id fallback), integer timestamp
-/// and defaulted/coerced/clamped token counts. Mutable billing and unknown fields
-/// are omitted so a re-fetched correction replaces its cached row; the multiset
-/// merge separately preserves repeated events with the same projection. Rejected
-/// rows retain their raw identity; only object key ordering is canonicalized.
+/// A row that carries a `usageEventId` is identified by that id alone: Cursor
+/// reports one event repeatedly with its running token totals, so the token
+/// projection differs between those snapshots and would make the merge keep
+/// them side by side instead of letting the newest one replace the older.
+///
+/// Rows without such an id use the report parser's projection of every
+/// immutable known field: trimmed model/session ids (one missing-id fallback),
+/// integer timestamp and defaulted/coerced/clamped token counts. Mutable
+/// billing and unknown fields are omitted so a re-fetched correction replaces
+/// its cached row; the multiset merge separately preserves repeated events with
+/// the same projection. Rejected rows retain their raw identity; only object
+/// key ordering is canonicalized.
 fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
     let mut identity = if let Some(parsed) =
         tokscale_core::sessions::cursor::parse_cursor_usage_event_identity(event)
     {
-        // Restrict accepted rows to the report parser's immutable projection.
-        // Cursor exposes no stable event id, so multiplicity is tracked by the
-        // merge rather than by unknown fields that billing corrections may change.
-        serde_json::json!({
-            "conversationId": parsed.conversation_id,
-            "model": parsed.model,
-            "timestamp": parsed.timestamp,
-            "tokenUsage": {
-                "inputTokens": parsed.tokens.input,
-                "outputTokens": parsed.tokens.output,
-                "cacheReadTokens": parsed.tokens.cache_read,
-                "cacheWriteTokens": parsed.tokens.cache_write,
-            },
-        })
+        if let Some(usage_event_id) = parsed.usage_event_id {
+            // The event's own id identifies it across its snapshots.
+            serde_json::json!({
+                "usageEventId": usage_event_id,
+            })
+        } else {
+            // Restrict accepted rows to the report parser's immutable projection.
+            // Without an event id, multiplicity is tracked by the merge rather
+            // than by unknown fields that billing corrections may change.
+            serde_json::json!({
+                "conversationId": parsed.conversation_id,
+                "model": parsed.model,
+                "timestamp": parsed.timestamp,
+                "tokenUsage": {
+                    "inputTokens": parsed.tokens.input,
+                    "outputTokens": parsed.tokens.output,
+                    "cacheReadTokens": parsed.tokens.cache_read,
+                    "cacheWriteTokens": parsed.tokens.cache_write,
+                },
+            })
+        }
     } else {
         // Rejected rows cannot be projected safely. Keep their complete raw
         // identity so unrelated malformed data is never discarded.
@@ -409,9 +460,9 @@ fn cursor_usage_event_identity(event: &serde_json::Value) -> String {
 /// Reconcile `incoming` (just fetched, newest first) with `existing` (the cache).
 /// Incoming is authoritative for every identity present in the completed overlap,
 /// so all cached occurrences of those identities are replaced. Every incoming
-/// occurrence is retained because Cursor has no stable event id and distinct
-/// billable events may have identical parser fields. Cached identities the new
-/// pages never reached stay in the result.
+/// occurrence is retained because distinct billable events may have identical
+/// parser fields. Cached identities the new pages never reached stay in the
+/// result.
 fn merge_cursor_usage_events(
     existing: Vec<serde_json::Value>,
     incoming: Vec<serde_json::Value>,
@@ -1412,8 +1463,10 @@ fn remove_all_accounts_in_home(home: &Path, purge_cache: bool) -> Result<()> {
     if purge_cache {
         // `--all --purge-cache` is an explicit deletion request. Remove both
         // application-owned cache locations, including legacy files and earlier
-        // archives whose ownership can no longer be proved.
-        for dir in [cache_dir.clone(), old_cursor_cache_dir(home)] {
+        // archives whose ownership can no longer be proved. An isolated root
+        // owns only its own cache, so the host's legacy dir is left alone.
+        let legacy_dir = (!cursor_cache_is_isolated(home)).then(|| old_cursor_cache_dir(home));
+        for dir in std::iter::once(cache_dir.clone()).chain(legacy_dir) {
             if dir.exists() {
                 fs::remove_dir_all(dir)?;
             }
@@ -1602,9 +1655,11 @@ fn is_cursor_usage_cache_filename(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
-pub fn has_cursor_usage_cache_in_home(home_dir: &Path) -> bool {
+/// Whether a report for `home_dir` will find a cache; see
+/// [`scanned_cursor_cache_dir`] for `use_env_roots`.
+pub fn has_cursor_usage_cache_in_home(home_dir: &Path, use_env_roots: bool) -> bool {
     migrate_cache_dir_from_old_path_in_home(home_dir);
-    let cache_dir = cursor_cache_dir(home_dir);
+    let cache_dir = scanned_cursor_cache_dir(home_dir, use_env_roots);
     if !cache_dir.exists() {
         return false;
     }
@@ -1623,7 +1678,7 @@ pub fn has_cursor_usage_cache() -> bool {
         Ok(home_dir) => home_dir,
         Err(_) => return false,
     };
-    has_cursor_usage_cache_in_home(&home_dir)
+    has_cursor_usage_cache_in_home(&home_dir, true)
 }
 
 fn expected_cursor_usage_cache_paths_in(home_dir: &Path) -> Vec<PathBuf> {
@@ -2660,6 +2715,91 @@ pub async fn sync_cursor_cache_with_explicit_timeout(
     .await
 }
 
+/// The persisted budget to consult for a submit Cursor sync, if any.
+/// Only a submit without an explicit `--timeout` reads the setting.
+fn setting_budget_for_submit(
+    explicit_timeout: Option<Duration>,
+    load_setting: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    let flag_given = explicit_timeout.is_some_and(|timeout| !timeout.is_zero());
+    if !flag_given {
+        load_setting()
+    } else {
+        None
+    }
+}
+
+/// Timeout override for the submit Cursor usage download: if the user passed
+/// `--timeout` (or `--cursor-timeout`) or configured `cursor.syncTimeoutSeconds`
+/// in `settings.json`, use that budget with `is_custom = true`.
+/// Otherwise, returns `(None, false)` which uses the default 15s budget.
+fn sync_timeout_override_for_submit(
+    explicit_timeout: Option<Duration>,
+    configured_secs: Option<u64>,
+) -> (Option<Duration>, bool) {
+    if let Some(timeout) = explicit_timeout.filter(|timeout| !timeout.is_zero()) {
+        return (Some(timeout.min(max_sync_timeout())), true);
+    }
+
+    if let Some(secs) = configured_secs.filter(|secs| is_valid_sync_timeout_secs(*secs)) {
+        return (Some(Duration::from_secs(secs)), true);
+    }
+
+    (None, false)
+}
+
+pub async fn sync_cursor_cache_for_submit(explicit_timeout: Option<Duration>) -> SyncCursorResult {
+    let home = match home_dir() {
+        Ok(home) => home,
+        Err(error) => {
+            return SyncCursorResult {
+                synced: false,
+                rows: 0,
+                error: Some(format!("Failed to get home dir: {error}")),
+            };
+        }
+    };
+    sync_cursor_cache_for_submit_in_home(&home, explicit_timeout, configured_sync_timeout_secs)
+        .await
+}
+
+async fn sync_cursor_cache_for_submit_with_fetcher_in_home<F, Fut>(
+    home: &Path,
+    fetch_usage_json: F,
+) -> SyncCursorResult
+where
+    F: Fn(CursorUsageFetch) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    if !cursor_desktop_auto_import_is_disabled_in_home(home) {
+        let _ = ensure_credentials_from_local_cursor();
+    }
+
+    sync_cursor_cache_with_fetcher_in_home(home, fetch_usage_json).await
+}
+
+async fn sync_cursor_cache_for_submit_in_home<F>(
+    home: &Path,
+    explicit_timeout: Option<Duration>,
+    load_setting: F,
+) -> SyncCursorResult
+where
+    F: FnOnce() -> Option<u64>,
+{
+    let configured_secs = setting_budget_for_submit(explicit_timeout, load_setting);
+    let (timeout, is_custom) = sync_timeout_override_for_submit(explicit_timeout, configured_secs);
+    sync_cursor_cache_for_submit_with_fetcher_in_home(home, move |fetch| async move {
+        fetch_cursor_usage_events_json(
+            &fetch.session_token,
+            timeout,
+            is_custom,
+            fetch.existing_cache.as_deref(),
+        )
+        .await
+    })
+    .await
+}
+
 /// Moves `file_path` into a newly created private directory under archive/.
 /// Keep its original filename and bytes, and never overwrite an earlier backup.
 ///
@@ -3006,6 +3146,14 @@ mod tests {
             }
             Self { name, original }
         }
+
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var_os(name);
+            unsafe {
+                std::env::remove_var(name);
+            }
+            Self { name, original }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -3019,6 +3167,176 @@ mod tests {
                 },
             }
         }
+    }
+
+    /// Points `HOME` at a scratch dir and sets or clears the config override
+    /// and XDG, returning the guards in drop order.
+    fn cursor_cache_env(
+        home: &Path,
+        config_override: Option<&Path>,
+        xdg: Option<&Path>,
+    ) -> [EnvVarGuard; 3] {
+        let set_or_remove = |name, value: Option<&Path>| match value {
+            Some(value) => EnvVarGuard::set(name, value.to_str().unwrap()),
+            None => EnvVarGuard::remove(name),
+        };
+        [
+            set_or_remove("XDG_CONFIG_HOME", xdg),
+            set_or_remove("TOKSCALE_CONFIG_DIR", config_override),
+            EnvVarGuard::set("HOME", home.to_str().unwrap()),
+        ]
+    }
+
+    #[test]
+    #[serial]
+    fn test_cursor_cache_dir_matches_scanner_across_override_and_xdg() {
+        let home = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        let xdg = TempDir::new().unwrap();
+        let scratch_home = TempDir::new().unwrap();
+        let home_default = home.path().join(".config/tokscale/cursor-cache");
+        for config_override in [None, Some(config.path())] {
+            for xdg_value in [None, Some(xdg.path())] {
+                let _env = cursor_cache_env(home.path(), config_override, xdg_value);
+                let own_home = home_dir().unwrap();
+                assert_eq!(own_home, home.path());
+                let label = format!("override={config_override:?} xdg={xdg_value:?}");
+
+                let expected = match config_override {
+                    Some(config) => config.join("cursor-cache"),
+                    None => home_default.clone(),
+                };
+                assert_eq!(cursor_cache_dir(&own_home), expected, "{label}");
+                let scanned = PathBuf::from(
+                    tokscale_core::ClientId::Cursor
+                        .data()
+                        .resolve_path(own_home.to_str().unwrap()),
+                );
+                assert_eq!(cursor_cache_dir(&own_home), scanned, "{label}");
+
+                // Negative control: a home other than the user's own never
+                // follows the override, matching the scanner's explicit-home
+                // behavior.
+                assert_eq!(
+                    cursor_cache_dir(scratch_home.path()),
+                    scratch_home.path().join(".config/tokscale/cursor-cache"),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_report_setup_checks_the_directory_the_scan_reads() {
+        let home = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        for config_override in [None, Some(config.path())] {
+            let _env = cursor_cache_env(home.path(), config_override, None);
+            let own_home = home_dir().unwrap();
+            let home_default = own_home.join(".config/tokscale/cursor-cache");
+            for use_env_roots in [true, false] {
+                let label = format!("override={config_override:?} env_roots={use_env_roots}");
+                let scanned = PathBuf::from(
+                    tokscale_core::ClientId::Cursor
+                        .data()
+                        .resolve_path_with_env_strategy(own_home.to_str().unwrap(), use_env_roots),
+                );
+                let glob = usage_cache_glob(&own_home, use_env_roots);
+                if use_env_roots && config_override.is_none() {
+                    assert_eq!(
+                        glob, "~/.config/tokscale/cursor-cache/usage*.json",
+                        "{label}"
+                    );
+                } else {
+                    assert_eq!(
+                        glob,
+                        scanned.join("usage*.json").to_string_lossy(),
+                        "{label}"
+                    );
+                }
+
+                // A cache only in the other location must not satisfy the
+                // check: `--home "$HOME"` scans the home default even when
+                // the override is set, and vice versa.
+                let other = if scanned == home_default {
+                    config.path().join("cursor-cache")
+                } else {
+                    home_default.clone()
+                };
+                for dir in [&scanned, &other] {
+                    let _ = fs::remove_dir_all(dir);
+                }
+                fs::create_dir_all(&other).unwrap();
+                fs::write(other.join("usage.json"), "{}").unwrap();
+                assert!(
+                    !has_cursor_usage_cache_in_home(&own_home, use_env_roots),
+                    "{label}"
+                );
+                fs::create_dir_all(&scanned).unwrap();
+                fs::write(scanned.join("usage.json"), "{}").unwrap();
+                assert!(
+                    has_cursor_usage_cache_in_home(&own_home, use_env_roots),
+                    "{label}"
+                );
+                for dir in [&scanned, &other] {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_legacy_cache_migrates_only_into_the_default_root() {
+        for override_set in [false, true] {
+            let home = TempDir::new().unwrap();
+            let config = TempDir::new().unwrap();
+            let _env = cursor_cache_env(home.path(), override_set.then(|| config.path()), None);
+            let legacy_dir = old_cursor_cache_dir(home.path());
+            fs::create_dir_all(&legacy_dir).unwrap();
+            fs::write(legacy_dir.join("usage.json"), b"host legacy history").unwrap();
+
+            migrate_cache_dir_from_old_path_in_home(&home_dir().unwrap());
+
+            let migrated = cursor_cache_dir(&home_dir().unwrap()).join("usage.json");
+            if override_set {
+                assert!(!migrated.exists(), "an isolated root must not adopt it");
+                assert_eq!(
+                    fs::read(legacy_dir.join("usage.json")).unwrap(),
+                    b"host legacy history"
+                );
+            } else {
+                assert_eq!(fs::read(migrated).unwrap(), b"host legacy history");
+                assert!(!legacy_dir.exists());
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_purge_all_removes_legacy_cache_only_without_override() -> Result<()> {
+        for override_set in [false, true] {
+            let home = TempDir::new()?;
+            let config = TempDir::new()?;
+            let _env = cursor_cache_env(home.path(), override_set.then(|| config.path()), None);
+            let cache_dir = cursor_cache_dir(&home_dir()?);
+            fs::create_dir_all(&cache_dir)?;
+            fs::write(cache_dir.join("usage.json"), b"own history")?;
+            let legacy_dir = old_cursor_cache_dir(home.path());
+            fs::create_dir_all(&legacy_dir)?;
+            fs::write(legacy_dir.join("usage.json"), b"host legacy history")?;
+
+            remove_all_accounts_in_home(&home_dir()?, true)?;
+
+            assert!(!cache_dir.exists(), "purge must clear the active cache");
+            assert_eq!(
+                legacy_dir.exists(),
+                override_set,
+                "override set: {override_set}"
+            );
+        }
+        Ok(())
     }
 
     /// #1250: cursor.com serves a bot-protection challenge instead of the API
@@ -3392,6 +3710,111 @@ mod tests {
             sync_timeout_override(true, None, None),
             (Some(CURSOR_EXPLICIT_SYNC_TIMEOUT), false)
         );
+    }
+
+    #[test]
+    fn test_sync_timeout_override_for_submit_prefers_flag_then_setting_then_none() {
+        // The flag wins over the persisted setting.
+        assert_eq!(
+            sync_timeout_override_for_submit(Some(Duration::from_secs(300)), Some(600)),
+            (Some(Duration::from_secs(300)), true)
+        );
+        // Without a flag, `cursor.syncTimeoutSeconds` is the custom budget.
+        assert_eq!(
+            sync_timeout_override_for_submit(None, Some(600)),
+            (Some(Duration::from_secs(600)), true)
+        );
+        // Neither: returns (None, false), which uses default 15s budget.
+        assert_eq!(sync_timeout_override_for_submit(None, None), (None, false));
+        // Out of range setting falls back to (None, false).
+        assert_eq!(
+            sync_timeout_override_for_submit(None, Some(0)),
+            (None, false)
+        );
+        assert_eq!(
+            sync_timeout_override_for_submit(None, Some(CURSOR_MAX_SYNC_TIMEOUT_SECS + 1)),
+            (None, false)
+        );
+        // Flag is clamped to max.
+        assert_eq!(
+            sync_timeout_override_for_submit(Some(Duration::from_secs(u64::MAX)), None),
+            (
+                Some(Duration::from_secs(CURSOR_MAX_SYNC_TIMEOUT_SECS)),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn test_setting_budget_for_submit_is_read_only_without_flag() {
+        let unreachable = || -> Option<u64> { panic!("the setting must not be read") };
+        assert_eq!(
+            setting_budget_for_submit(Some(Duration::from_secs(300)), unreachable),
+            None
+        );
+        assert_eq!(setting_budget_for_submit(None, || Some(600)), Some(600));
+        assert_eq!(
+            setting_budget_for_submit(Some(Duration::ZERO), || Some(600)),
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn test_sync_cursor_cache_for_submit_respects_disabled_auto_import() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let home = temp_dir.path();
+        disable_cursor_desktop_auto_import_in_home(home)?;
+        assert!(cursor_desktop_auto_import_is_disabled_in_home(home));
+
+        let mut accounts = HashMap::new();
+        accounts.insert(
+            "desktop-account".to_string(),
+            CursorCredentials {
+                session_token: "test-token".to_string(),
+                user_id: Some("desktop-user".to_string()),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+                label: None,
+            },
+        );
+        save_credentials_store_in_home(
+            home,
+            &CursorCredentialsStore {
+                version: 1,
+                active_account_id: "desktop-account".to_string(),
+                accounts,
+            },
+        )?;
+
+        let sample_usage = owned_cursor_cache(
+            r#"{"usageEventsDisplay":[{"conversationId":"c1","timestamp":"1000","model":"claude-3-7-sonnet","chargedCents":1}]}"#,
+            "desktop-account",
+        )?;
+
+        let rt = tokio::runtime::Runtime::new()?;
+        let result = rt.block_on(sync_cursor_cache_for_submit_with_fetcher_in_home(
+            home,
+            move |_fetch| {
+                let usage = sample_usage.clone();
+                async move { Ok(usage) }
+            },
+        ));
+
+        assert!(
+            result.synced,
+            "submit sync must succeed with seeded account: {:?}",
+            result.error
+        );
+        assert_eq!(result.rows, 1);
+        assert!(
+            cursor_desktop_auto_import_is_disabled_in_home(home),
+            "submit sync must never clear disabled desktop discovery"
+        );
+        assert!(
+            cursor_cache_dir(home).join("usage.json").is_file(),
+            "submit sync must write the usage cache"
+        );
+        Ok(())
     }
 
     #[test]
@@ -4107,7 +4530,7 @@ mod tests {
             serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
         )
         .unwrap();
-        let parsed = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        let parsed = tokscale_core::sessions::cursor::parse_cursor_file_deduped(&path);
         assert!(parsed.len() <= 1);
         parsed.first().map(|row| row.timestamp)
     }
@@ -4502,7 +4925,7 @@ mod tests {
             serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
         )
         .unwrap();
-        let parsed = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        let parsed = tokscale_core::sessions::cursor::parse_cursor_file_deduped(&path);
         assert!(parsed.len() <= 1);
         parsed.first().map(|row| {
             [
@@ -4661,7 +5084,7 @@ mod tests {
             serde_json::json!({"usageEventsDisplay":[event]}).to_string(),
         )
         .unwrap();
-        let rows = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+        let rows = tokscale_core::sessions::cursor::parse_cursor_file_deduped(&path);
         assert!(rows.len() <= 1);
         rows.first().map(|row| serde_json::json!({
             "session":row.session_id,"model":row.model_id,"provider":row.provider_id,
@@ -4986,7 +5409,7 @@ mod tests {
                 serde_json::json!({"usageEventsDisplay":[variant]}).to_string(),
             )
             .unwrap();
-            let messages = tokscale_core::sessions::cursor::parse_cursor_file(&parsed_path);
+            let messages = tokscale_core::sessions::cursor::parse_cursor_file_deduped(&parsed_path);
             assert_eq!(messages.len(), 1);
             let tokens = &messages[0].tokens;
             assert_eq!(
@@ -5041,6 +5464,37 @@ mod tests {
             4,
             "the complete overlap must replace cached variants and keep incoming multiplicity"
         );
+    }
+
+    #[test]
+    fn test_cursor_merge_replaces_the_snapshots_of_one_event() {
+        // Cursor reports one event repeatedly with its running token totals.
+        // The snapshots share the event's id, so the merge must let the newest
+        // one replace the older instead of keeping them side by side — the
+        // cached row would otherwise keep reporting the stale totals.
+        let snapshot = |tokens: i64, cents: f64| {
+            serde_json::json!({
+                "conversationId":"same-event",
+                "timestamp":"7200000",
+                "model":"gpt-5",
+                "usageEventId":"452fb2c1-c17e-4a0f-9b99-95a98967cfed",
+                "chargedCents":cents,
+                "tokenUsage":{"inputTokens":tokens,"outputTokens":0,"totalCents":cents},
+            })
+        };
+        let older = snapshot(10, 1.0);
+        let newer = snapshot(20, 2.0);
+
+        let merged = merge_cursor_usage_events(vec![older.clone()], vec![newer.clone()]);
+        assert_eq!(merged.len(), 1, "the newer snapshot must replace the older");
+        assert_eq!(merged[0], newer);
+
+        // Distinct events stay distinct, even when they share a conversation.
+        let mut other = newer.clone();
+        other["usageEventId"] = serde_json::json!("b039781d-caa8-43ec-b993-ef2002481e3c");
+        let merged =
+            merge_cursor_usage_events(vec![older.clone()], vec![newer.clone(), other.clone()]);
+        assert_eq!(merged.len(), 2, "distinct events must both survive");
     }
 
     #[test]
@@ -5716,7 +6170,7 @@ mod tests {
                 Some(cursor_cache_owner_hash(secondary_id).as_str()),
                 "cleanup must retain the freshly written secondary; active_fails={active_fails}"
             );
-            let rows = tokscale_core::sessions::cursor::parse_cursor_file(&secondary_path);
+            let rows = tokscale_core::sessions::cursor::parse_cursor_file_deduped(&secondary_path);
             assert_eq!(rows.len(), 1, "secondary history must remain reportable");
             assert_eq!(rows[0].session_id, "secondary-history");
             assert_eq!(rows[0].tokens.input, 10);
@@ -6999,7 +7453,7 @@ mod tests {
             };
             let text = fs::read_to_string(&path)?;
             assert_eq!(cursor_cache_owner(&text).as_deref(), Some(id.as_str()));
-            let messages = tokscale_core::sessions::cursor::parse_cursor_file(&path);
+            let messages = tokscale_core::sessions::cursor::parse_cursor_file_deduped(&path);
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].session_id, *id);
         }

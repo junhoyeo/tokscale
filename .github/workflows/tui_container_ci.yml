@@ -2,9 +2,10 @@ name: TUI Container CI
 
 on:
   workflow_dispatch:
+  # Every merge that changes the Rust workspace still builds the image once.
   push:
     branches: [main]
-    paths: &tui_container_paths
+    paths:
       - ".dockerignore"
       - "Dockerfile.tui"
       - "Makefile"
@@ -14,9 +15,23 @@ on:
       - "docker-compose.yml"
       - "scripts/test-tui-mounts.sh"
       - ".github/workflows/tui_container_ci.yml"
+  # A pull request builds the image only when it changes what the image is
+  # made from: the container files, the dependency set, or a build script.
+  # Rust source changes are compiled for musl by the native build workflow on
+  # the pull request and by the push run above after the merge.
   pull_request:
     branches: [main]
-    paths: *tui_container_paths
+    paths:
+      - ".dockerignore"
+      - "Dockerfile.tui"
+      - "Makefile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - "crates/*/build.rs"
+      - "docker-compose.yml"
+      - "scripts/test-tui-mounts.sh"
+      - ".github/workflows/tui_container_ci.yml"
 
 permissions:
   contents: read

@@ -301,7 +301,7 @@ impl CopilotUsageCandidate {
             Some(self.dedup_key),
         );
         message.duration_ms = self.duration_ms;
-        message.agent = self.agent;
+        message.agent = self.agent.map(crate::sessions::SharedStr::from);
         message.copilot_context = Some(self.context);
         message
     }
@@ -1497,9 +1497,11 @@ mod tests {
             for session in 0..3 {
                 for agent in 0..3 {
                     let mut row = snapshot_message(100, 0);
-                    row.model_id = format!("model-{model}");
-                    row.session_id = format!("session-{session}");
-                    row.agent = (agent != 0).then(|| format!("agent-{agent}"));
+                    row.model_id = format!("model-{model}").into();
+                    row.session_id = format!("session-{session}").into();
+                    row.agent = (agent != 0)
+                        .then(|| format!("agent-{agent}"))
+                        .map(crate::sessions::SharedStr::from);
                     let origin = |value| {
                         if value == 0 {
                             ContextOrigin::Missing
@@ -1618,16 +1620,16 @@ mod tests {
         let original = snapshot_message(1000, 0);
         let mut variants = Vec::new();
         let mut changed = original.clone();
-        changed.model_id = "different-model".to_string();
+        changed.model_id = "different-model".to_string().into();
         variants.push(changed);
         let mut changed = original.clone();
-        changed.provider_id = "different-provider".to_string();
+        changed.provider_id = "different-provider".to_string().into();
         variants.push(changed);
         let mut changed = original.clone();
-        changed.session_id = "different-session".to_string();
+        changed.session_id = "different-session".to_string().into();
         variants.push(changed);
         let mut changed = original.clone();
-        changed.agent = Some("direct-agent".to_string());
+        changed.agent = Some("direct-agent".to_string().into());
         variants.push(changed);
         let mut changed = original.clone();
         changed.timestamp += 1000;

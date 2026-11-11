@@ -120,6 +120,8 @@
 | <img width="48px" src=".github/assets/client-aside.png" alt="Aside" /> | [Aside](https://asidehq.com) | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` |
 | <img width="48px" src="https://github.com/mistralai.png" alt="Mistral Vibe" /> | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `~/.vibe/logs/session/<session-dir>/meta.json` (Windows 포함 전 플랫폼 공통 경로, 루트는 `VIBE_HOME`으로 변경 가능) |
 | <img width="48px" src="https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png" alt="Proma" /> | [Proma](https://github.com/proma-ai/Proma) | `~/.proma/agent-sessions/`, `~/.proma/sdk-config/{sessions,projects}/`; `~/.proma-dev/` |
+| <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
+| <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl` (`QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR`로 루트 경로 변경 가능) |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
 
@@ -193,7 +195,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Proma 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -330,6 +332,7 @@ TUI에서 `g`를 누르거나 `--light`/`--json` 모드에서 `--group-by`를 �
 | **워크스페이스 + 모델** | `--group-by workspace,model` | | 로컬 사용량을 워크스페이스 키별로, 그 다음 모델별로 그룹화. [`--merge-worktrees`](#워크스페이스별-비용)를 추가하면 git 워크트리를 상위 리포지터리로 병합합니다 |
 | **세션 + 모델** | `--group-by session,model` | | `session_id`와 모델당 한 행 — 특정 에이전트-CLI 세션에 비용 귀속 |
 | **클라이언트 + 세션 + 모델** | `--group-by client,session,model` | | 클라이언트, 세션, 모델당 한 행 — `session_id`로 조인하는 멀티 에이전트 러너에 유용 |
+| **머신 + 모델** | `--group-by machine,model` | | 머신 라벨과 모델당 한 행 — [머신별 사용량](#머신별-사용량) 참조 |
 
 **`--group-by model`** (가장 통합)
 
@@ -397,6 +400,37 @@ tokscale models --json --group-by workspace,model --merge-worktrees
 
 TUI에서는 `g` → **워크스페이스 + 모델**을 선택한 뒤 `w`로 워크트리 병합을 토글합니다(푸터에 `[w:worktrees]` 또는 `[w:repos]`가 표시됩니다).
 
+#### 머신별 사용량
+
+다른 머신의 세션 폴더를 로컬 디렉터리로 복사하고 `scanner.extraScanPaths`로 추가했다면, `scanner.machineLabels`로 각 폴더에 머신 라벨을 지정하세요. 라벨이 지정된 폴더 아래의 모든 세션 파일은 해당 머신으로 집계되고, 나머지는 모두 `scanner.localMachineLabel`(기본값 `"local"`)로 집계됩니다:
+
+```json
+{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/Users/me/mirrors/steven/.codex/sessions"],
+      "claude": ["/Users/me/mirrors/steven/.claude/projects"]
+    },
+    "machineLabels": {
+      "/Users/me/mirrors/steven": "steven"
+    },
+    "localMachineLabel": "laptop"
+  }
+}
+```
+
+폴더는 그 아래의 모든 파일과 일치하며, 경로 구성 요소 단위로 비교합니다(Windows에서는 대소문자 무시). 폴더가 중첩되면 가장 긴 폴더가 우선합니다. 그런 다음 머신별로 그룹화합니다:
+
+```bash
+# (머신, 모델)당 한 행, Machine 열 포함
+tokscale models --light --group-by machine,model
+
+# JSON 항목에는 이 모드에서만 `machine` 필드가 포함됩니다
+tokscale models --json --group-by machine,model
+```
+
+TUI에서는 `g` → **머신 + 모델**을 선택합니다.
+
 워크스페이스 행의 라벨은 `repo` 또는 `repo ⑃ worktree`입니다. 클라이언트마다 워크스페이스 기록 방식이 달라서(Claude Code는 대시로 변환한 디렉터리 슬러그 `-Users-me-devpro-app`, Codex와 OpenCode는 실제 경로) tokscale은 슬러그를 파일시스템과 대조해 실제 경로로 되돌립니다. 알아둘 점이 네 가지 있습니다:
 
 - **`--merge-worktrees` 없이는 각 git 워크트리가 별도 행입니다.** 작업마다 워크트리를 만드는 에이전트 CLI에서는 하나의 리포지터리가 여러 행으로 흩어집니다. `--merge-worktrees`가 이를 다시 합칩니다(서로 다른 클라이언트가 다른 키 형식으로 기록한 같은 리포지터리도 합칩니다).
@@ -428,7 +462,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `proma`.
+가능한 값: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`, `aside`, `vibe`, `proma`, `bb`, `qoder`.
 
 > **Breaking change (v4.0.0):** 클라이언트별 boolean 플래그(`--opencode`, `--claude`, `--codex` 등)는 제거되었으며 이제 오류를 발생시킵니다. 대신 정식 `--client`/`-c` 플래그를 사용하세요 — 예: `tokscale --client opencode,claude`.
 
@@ -814,7 +848,7 @@ tokscale report --workspace my-project --client opencode
 | `codex` | `codex --quiet` | Codex CLI가 설치되어 인증되어 있어야 함. |
 | `gemini` | `gemini -p` | Gemini CLI가 설치되어 인증되어 있어야 함. |
 | `kiro` | `kiro --non-interactive` | Kiro CLI가 설치되어 인증되어 있어야 함. |
-| `minimax` | (HTTP API) | OpenAI 호환 chat-completions API를 사용하므로 CLI가 필요하지 않음. `MINIMAX_API_KEY` 또는 `MINIMAX_API_TOKEN` 설정. 기본값은 글로벌 엔드포인트(`https://api.minimax.io/v1`)의 `MiniMax-M3`이며, `MINIMAX_API_REGION=cn`을 설정하면 `https://api.minimaxi.com/v1`을 사용하고 `MINIMAX_MODEL`로 다른 모델(예: `MiniMax-M2.7`)을 선택할 수 있음. |
+| `minimax` | (HTTP API) | OpenAI 호환 chat-completions API를 사용하므로 CLI가 필요하지 않음. `MINIMAX_API_KEY` 또는 `MINIMAX_API_TOKEN` 설정. 기본값은 글로벌 엔드포인트(`https://api.minimax.io/v1`)의 `MiniMax-M3.1-Flash`이며, `MINIMAX_API_REGION=cn`을 설정하면 `https://api.minimaxi.com/v1`을 사용하고 `MINIMAX_MODEL`로 다른 모델(예: `MiniMax-M3`)을 선택할 수 있음. |
 
 **동작 방식:**
 
@@ -970,6 +1004,8 @@ Tokscale은 설정 디렉터리의 `settings.json`에 설정을 저장합니다.
 | `minutelyTabEnabled` | boolean | `false` | TUI에 분 단위 Minutely 탭을 표시하고 데이터 로딩 중에 분 단위 집계를 수행합니다. 대부분의 사용자에게 분 단위 세분화는 틈새/진단 뷰이며, 대규모 데이터셋에서는 분 단위 버케팅에 무시할 수 없는 비용이 들기 때문에 기본적으로 비활성화되어 있습니다. |
 | `cursor.syncTimeoutSeconds` | number | 미설정 | `tokscale cursor sync`가 계정별 사용량을 내려받을 때 쓰는 전체 시간 예산(초, 1-86400). 설정하지 않으면 120초에서 시작해 Cursor가 알려 주는 사용량 이벤트 수에 맞춰 최대 1800초까지 늘어납니다. `tokscale cursor sync --timeout <SECONDS>`가 실행별로 우선합니다. [Cursor IDE 명령어](#cursor-ide-명령어)를 참조하세요. |
 | `scanner.extraScanPaths` | object | `{}` | Tokscale의 기본 home-root 위치 밖에 있는 세션을 위한 클라이언트별 추가 스캔 루트 |
+| `scanner.machineLabels` | object | `{}` | 폴더별 머신 라벨, `{ "<folder>": "<label>" }` 형식. `--group-by machine,model`에서 폴더 아래의 세션 파일은 해당 라벨로 집계되며, 일치하는 폴더 중 가장 긴 폴더가 우선합니다. [머신별 사용량](#머신별-사용량)을 참조하세요. |
+| `scanner.localMachineLabel` | string | `"local"` | 어느 `scanner.machineLabels` 폴더에도 속하지 않는 세션 파일의 머신 라벨 |
 | `scanner.bucketTimezone` | string | 자동 감지 | 이 기기가 사용량 날짜를 버킷화하는 시간대의 IANA 이름(예: `"Asia/Seoul"`). 최초 실행 시 자동으로 기록됩니다. 직접 편집하는 대신 `tokscale config set timezone <zone>`을 사용하세요. |
 
 #### 날짜 경계와 `scanner.bucketTimezone`
@@ -1127,7 +1163,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -1554,6 +1590,8 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Aside | `~/.aside/u/<account>/sessions/<session>/messages.jsonl` | `%USERPROFILE%\.aside\u\<account>\sessions\<session>\messages.jsonl` | 계정별 네이티브 브라우저 사용량; `messages.jsonl`만 읽고 artifacts, memory, passwords 제외. |
 | Mistral Vibe | `$VIBE_HOME/logs/session/` (기본값: `~/.vibe/logs/session/`) | `%VIBE_HOME%\logs\session\` (기본값: `%USERPROFILE%\.vibe\logs\session\`) | 전 플랫폼 공통 `~/.vibe` 루트; 각 세션 디렉터리의 `meta.json` 누적 `stats`만 읽고 `messages.jsonl` 대화 내용은 읽지 않음 |
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | Pi SDK 사용량을 표시용 사본보다 우선하며, 이전 Claude SDK 기록과 단독 표시 로그도 지원합니다. [집계 방식과 제한](docs/proma.md)을 참고하세요. |
+| BB | `$BB_DATA_DIR` (기본값: `~/.bb/`), `~/.bb-dev/` | `%BB_DATA_DIR%` (기본값: `%USERPROFILE%\.bb\`), `%USERPROFILE%\.bb-dev\` | `bb.db` SQLite 데이터베이스(`threads`, `events` 테이블) 파싱. 오케스트레이션된 에이전트 하네스 전반의 프롬프트 캐시 및 추론 토큰 분석을 정확히 추출. BB는 Claude Code와 Codex를 평소 홈에서 실행하므로, 두 도구가 함께 기록한 응답은 `claude` 또는 `codex` 아래에 한 번만 집계됩니다. `--client bb`만 지정하면 BB가 기록한 내역을 모두 보여 줍니다. |
+| Qoder | `$QODER_CONFIG_DIR/projects/` (기본값: `~/.qoder/projects/`), `$QODERCN_CONFIG_DIR/projects/` (기본값: `~/.qoder-cn/projects/`) | `%QODER_CONFIG_DIR%\projects\` (기본값: `%USERPROFILE%\.qoder\projects\`), `%QODERCN_CONFIG_DIR%\projects\` (기본값: `%USERPROFILE%\.qoder-cn\projects\`) | Qoder 및 Qoder CN의 JSONL 세션/서브에이전트 트랜스크립트 파싱. 다중 블록 어시스턴트 조각을 병합하고, 매니지드 모델의 토큰 수치가 0으로 마스킹된 경우 대화 텍스트 기반 토큰 추정을 적용 |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 일부 도구는 크로스 플랫폼 일관성을 위해 Unix 스타일 경로(`.local/share` 등)를 사용하고, Goose를 포함한 다른 도구는 위 표의 Windows 기본 경로(`%APPDATA%` 등)를 사용합니다.
 
@@ -1858,11 +1896,18 @@ Hermes는 세션 수준 사용량을 SQLite `sessions` 테이블에 저장합니
 
 위치: `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`. [Oh My Pi](https://github.com/can1357/oh-my-pi)는 동일한 세션 형식을 `~/.omp/agent/sessions/` 아래에 기록하며 별도의 `omp` 클라이언트로 추적됩니다.
 
-세션 헤더와 메시지 항목을 포함하는 JSONL 형식:
+세션, 메시지, 사용량 항목을 포함하는 JSONL 형식:
 ```json
 {"type":"session","id":"pi_ses_001","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
 {"type":"message","id":"msg_001","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-3-5-sonnet","provider":"anthropic","usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"totalTokens":165}}}
+{"type":"usage","id":"usage_001","parentId":"msg_001","timestamp":"2026-01-01T00:00:02.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":100,"cacheWrite":0,"totalTokens":100}}
 ```
+
+Tokscale은 `provider`, `model`, `usage` 필드가 있는 네이티브 독립 `usage` 항목을 읽습니다. 모든 `kind` 값을 허용합니다. Pi는 이 레코드를 [UsageEntry](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md#usageentry)로 정의합니다.
+
+usage가 없는 레코드는 토큰 수에 더하지 않습니다. 독립 usage에 보고된 비용이 있으면 Tokscale은 이를 보존하고, 없으면 기존 가격 데이터를 사용합니다.
+
+이 동작은 Pi, Oh My Pi, Senpi, Kimchi Coding, Prime Agent의 Pi 형식 파서에 적용됩니다. Prime Agent의 독립 usage는 어시스턴트 완료 매칭에 포함되지 않습니다. 복사된 레코드는 중복 제거 식별자를 유지합니다. Kimchi는 기존 세션 범위 식별자를 유지합니다. 업그레이드 후 파서 캐시가 무효화되므로 Tokscale은 세션을 다시 읽습니다.
 
 ### Senpi (OmO Native)
 

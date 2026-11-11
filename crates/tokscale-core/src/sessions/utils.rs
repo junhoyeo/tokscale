@@ -311,6 +311,18 @@ pub(crate) fn open_readonly_sqlite_opt(path: &Path) -> Option<Connection> {
     open_readonly_sqlite(path).ok()
 }
 
+/// Open a read-only SQLite connection and begin one snapshot for every read it performs.
+///
+/// SQLite otherwise gives each completed statement its own implicit transaction,
+/// so a multi-statement parser can combine rows from commits that never existed
+/// together. A deferred transaction starts the snapshot on the first read and
+/// keeps it until the returned connection is dropped.
+pub(crate) fn open_readonly_sqlite_snapshot(path: &Path) -> Option<Connection> {
+    let conn = open_readonly_sqlite_opt(path)?;
+    conn.execute_batch("BEGIN DEFERRED").ok()?;
+    Some(conn)
+}
+
 /// Which stage of a [`sqlite_for_each_row`] scan the driver reached.
 ///
 /// A bare `bool` is not enough: parsers that keep an older query around as a

@@ -277,7 +277,7 @@ fn build_gemini_token_message(
         "gemini",
         model,
         "google",
-        session_id.to_string(),
+        session_id,
         timestamp,
         TokenBreakdown {
             input: input.saturating_add(tool),
@@ -485,7 +485,7 @@ fn build_messages_from_stats(
                 "gemini",
                 usage.model,
                 "google",
-                session_id.to_string(),
+                session_id,
                 timestamp,
                 TokenBreakdown {
                     input,

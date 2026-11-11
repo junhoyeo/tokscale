@@ -3279,6 +3279,12 @@ fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
     let warnings = json["warnings"]
         .as_array()
         .expect("explicit Cursor --home report should expose setup warnings");
+    // With --home the report prints the real joined path, so the tail uses
+    // the platform's separator (`cursor-cache\usage*.json` on Windows).
+    let cache_glob_tail = std::path::Path::new("cursor-cache")
+        .join("usage*.json")
+        .to_string_lossy()
+        .into_owned();
     assert!(
         warnings
             .iter()
@@ -3286,7 +3292,7 @@ fn test_models_cursor_explicit_home_override_reports_fixture_cache_path() {
                 .contains(tmp.path().to_str().unwrap())
                 && text.contains("tokscale cursor login")
                 && text.contains("tokscale cursor sync --json")
-                && text.contains("cursor-cache/usage*.json"))),
+                && text.contains(&cache_glob_tail))),
         "warnings did not explain Cursor --home setup: {warnings:?}"
     );
 }
@@ -5202,6 +5208,180 @@ fn test_models_group_by_machine_model_table_shows_a_machine_column() {
         .stdout(predicate::str::contains("local"));
 }
 
+/// Labels are applied per source after the parse or the cache load and are
+/// never stored in the source message cache (`machine_label` is
+/// `#[serde(skip)]`). So a warm cache must follow a settings change without a
+/// cache version bump: each scan in the same home, after `machineLabels` and
+/// `localMachineLabel` change, must show only the new labels. Claude is in the
+/// fixture because its lane has a second labeling site: the history of a
+/// deleted, compacted transcript comes only from the cache and is labeled by
+/// the path the cache recorded, not by a path the scan found.
+#[test]
+fn test_models_group_by_machine_model_relabels_a_warm_source_cache() {
+    let tmp = create_empty_fixture_dir();
+    let home = tmp.path();
+    let blade_root = home.join("mirrors/blade");
+    let steven_root = home.join("mirrors/steven");
+    let blade_codex = blade_root.join(".codex/sessions");
+    let steven_codex = steven_root.join(".codex/sessions");
+    let blade_claude = blade_root.join(".claude/projects/demo");
+    let steven_claude = steven_root.join(".claude/projects/demo");
+    write_codex_token_session(&blade_codex, "blade.jsonl", "gpt-4o-mini", 100, 10);
+    write_codex_token_session(&steven_codex, "steven.jsonl", "gpt-4o-mini", 200, 20);
+    write_codex_token_session(
+        &home.join(".codex/sessions"),
+        "local.jsonl",
+        "gpt-4o-mini",
+        50,
+        5,
+    );
+    let claude_line = |id: &str, input: i64| {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"req-{id}","message":{{"id":"msg-{id}","model":"claude-sonnet-4-20250514","usage":{{"input_tokens":{input},"output_tokens":5}}}}}}"#
+        )
+    };
+    fs::create_dir_all(&blade_claude).unwrap();
+    fs::create_dir_all(&steven_claude).unwrap();
+    let blade_transcript = blade_claude.join("session.jsonl");
+    let blade_turn_one = claude_line("blade-1", 300);
+    let blade_turn_two = claude_line("blade-2", 30);
+    fs::write(
+        &blade_transcript,
+        format!("{blade_turn_one}\n{blade_turn_two}\n"),
+    )
+    .unwrap();
+    fs::write(
+        steven_claude.join("session.jsonl"),
+        claude_line("steven", 400),
+    )
+    .unwrap();
+
+    let json_path = |path: &Path| serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let write_settings = |labels: &str| {
+        write_settings_json(
+            home,
+            &format!(
+                r#"{{
+                    "scanner": {{
+                        "extraScanPaths": {{
+                            "codex": [{}, {}],
+                            "claude": [{}, {}]
+                        }},
+                        {labels}
+                    }}
+                }}"#,
+                json_path(&blade_codex),
+                json_path(&steven_codex),
+                json_path(&blade_root.join(".claude/projects")),
+                json_path(&steven_root.join(".claude/projects")),
+            ),
+        );
+    };
+    let rows = |pass: &str| -> Vec<(String, String, String, i64)> {
+        let output = cmd_with_home(home)
+            .args([
+                "models",
+                "--json",
+                "--light",
+                "--client",
+                "codex,claude",
+                "--no-spinner",
+                "--group-by",
+                "machine,model",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{pass} pass stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut rows: Vec<_> = json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["machine"].as_str().unwrap().to_string(),
+                    entry["client"].as_str().unwrap().to_string(),
+                    entry["model"].as_str().unwrap().to_string(),
+                    entry["input"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let row = |machine: &str, client: &str, model: &str, input: i64| {
+        (
+            machine.to_string(),
+            client.to_string(),
+            model.to_string(),
+            input,
+        )
+    };
+
+    write_settings(&format!(
+        r#""machineLabels": {{ {}: "steven" }}"#,
+        json_path(&steven_root)
+    ));
+    assert_eq!(
+        rows("cold"),
+        vec![
+            row("local", "claude", "claude-sonnet-4", 330),
+            row("local", "codex", "gpt-4o-mini", 150),
+            row("steven", "claude", "claude-sonnet-4", 400),
+            row("steven", "codex", "gpt-4o-mini", 200),
+        ]
+    );
+    assert!(
+        sandbox_config_dir(home)
+            .join("cache")
+            .join("source-message-cache-v2")
+            .is_dir(),
+        "the cold pass must leave a source cache for the warm pass to load"
+    );
+
+    // Relabel every machine and the local one. Compact the blade transcript so
+    // its first turn survives only as retained history in the cache.
+    write_settings(&format!(
+        r#""machineLabels": {{ {}: "blade", {}: "studio" }}, "localMachineLabel": "laptop""#,
+        json_path(&blade_root),
+        json_path(&steven_root)
+    ));
+    fs::write(&blade_transcript, format!("{blade_turn_two}\n")).unwrap();
+    assert_eq!(
+        rows("warm"),
+        vec![
+            row("blade", "claude", "claude-sonnet-4", 330),
+            row("blade", "codex", "gpt-4o-mini", 100),
+            row("laptop", "codex", "gpt-4o-mini", 50),
+            row("studio", "claude", "claude-sonnet-4", 400),
+            row("studio", "codex", "gpt-4o-mini", 200),
+        ]
+    );
+
+    // Relabel blade again and delete its transcript: both turns now come only
+    // from the Claude retained-history branch.
+    write_settings(&format!(
+        r#""machineLabels": {{ {}: "razor", {}: "studio" }}, "localMachineLabel": "laptop""#,
+        json_path(&blade_root),
+        json_path(&steven_root)
+    ));
+    fs::remove_file(&blade_transcript).unwrap();
+    assert_eq!(
+        rows("deleted"),
+        vec![
+            row("laptop", "codex", "gpt-4o-mini", 50),
+            row("razor", "claude", "claude-sonnet-4", 330),
+            row("razor", "codex", "gpt-4o-mini", 100),
+            row("studio", "claude", "claude-sonnet-4", 400),
+            row("studio", "codex", "gpt-4o-mini", 200),
+        ]
+    );
+}
+
 #[test]
 fn test_models_group_by_other_modes_omit_the_machine_field() {
     let tmp = create_empty_fixture_dir();
@@ -5657,6 +5837,14 @@ fn test_clients_json_explains_cloud_coverage_without_running_providers() {
         assert_eq!(diagnostic["severity"], "info");
         assert!(diagnostic.get("paths").is_none());
     }
+    let gemini = clients
+        .iter()
+        .find(|row| row["client"] == "gemini")
+        .unwrap();
+    assert!(
+        gemini.get("diagnostics").is_none(),
+        "clients without diagnostics must omit the key: {gemini}"
+    );
     assert!(json.get("codexAccountActivity").is_none());
 }
 
@@ -6440,6 +6628,238 @@ fn test_submit_stealth_preview_shorthands_upload_without_warnings() {
     assert!(
         stdout.contains("Total tokens: 6,950"),
         "both preview models (3,000 tokens) must be counted on top of the 3,950-token stock fixture: {stdout}"
+    );
+}
+
+#[test]
+fn test_submit_compacts_repeated_daily_regression_warnings_without_losing_details() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = create_temp_fixture_dir();
+    write_fake_credentials(tmp.path());
+    let warnings: Vec<String> = (1..=9)
+        .map(|day| format!("Day 2026-05-{day:02}: Preserved hermes because this same-device resubmit would reduce 1,000 tokens to {day}00."))
+        .chain([
+            "Ignored Amp changes because this snapshot cannot advance the device high-water.".to_string(),
+            "Day 2026-06-01: Preserved workbuddy because this same-device resubmit would reduce 90 tokens to 80.".to_string(),
+            "Day 2026-06-02: Preserved unrelated warning with a different format.".to_string(),
+        ])
+        .collect();
+    let body = serde_json::json!({"success":true,"warnings":warnings}).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("submit did not reach the fixture server: {error}"),
+            }
+        };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; content_length];
+            reader.read_exact(&mut request).unwrap();
+        }
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_URL", api)
+        .env("TOKSCALE_API_TOKEN", "fixture-token")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--no-spinner", "submit", "--client", "opencode"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Preserved hermes: 9 daily token decreases"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-05-01: Preserved hermes because"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=9 {
+        assert!(
+            stdout.contains(&format!("2026-05-{day:02}: 1,000 -> {day}00")),
+            "{stdout}"
+        );
+    }
+    assert!(stdout.contains("Ignored Amp changes"), "{stdout}");
+    assert!(
+        stdout.contains("Day 2026-06-01: Preserved workbuddy because"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Day 2026-06-02: Preserved unrelated warning"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn test_submit_compacts_missing_client_and_active_time_preservation_warnings() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let tmp = create_temp_fixture_dir();
+    write_fake_credentials(tmp.path());
+    let mut warnings: Vec<String> = (1..=4)
+        .map(|day| {
+            format!("Day 2026-03-{day:02}: Preserved codex because it disappeared from this same-device resubmit; kept {day},154,188,083 tokens.")
+        })
+        .collect();
+    warnings.push("Day 2026-03-27: Preserved opencode because it disappeared from this same-device resubmit; kept 58,503,692 tokens.".to_string());
+    warnings.push("Day 2026-04-01: Preserved zcode because this same-device resubmit would reduce 500 tokens to 400.".to_string());
+    for day in 1..=4 {
+        warnings.push(format!("Day 2026-10-{day:02}: Preserved {day}16300880ms active time because this same-device resubmit reported only {day}0206166ms."));
+    }
+    warnings.push(
+        "Ignored Amp changes because this snapshot cannot advance the device high-water."
+            .to_string(),
+    );
+
+    let body = serde_json::json!({"success":true,"warnings":warnings}).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("submit did not reach the fixture server: {error}"),
+            }
+        };
+        // Windows accepted sockets inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; content_length];
+            reader.read_exact(&mut request).unwrap();
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_API_URL", api)
+        .env("TOKSCALE_API_TOKEN", "fixture-token")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--no-spinner", "submit", "--client", "opencode"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Preserved codex: 4 days missing from this device's resubmit"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-03-01: Preserved codex because it disappeared"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=4 {
+        assert!(
+            stdout.contains(&format!("2026-03-{day:02}: {day},154,188,083")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Preserved active time: 4 daily decreases on this device"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Day 2026-10-01: Preserved 116300880ms active time because"),
+        "the full repeated prose should not also be printed: {stdout}"
+    );
+    for day in 1..=4 {
+        assert!(
+            stdout.contains(&format!("2026-10-{day:02}: {day}16300880 -> {day}0206166")),
+            "{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Day 2026-03-27: Preserved opencode because it disappeared from this same-device resubmit; kept 58,503,692 tokens."),
+        "uncompacted single disappeared warning must be printed verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains("Day 2026-04-01: Preserved zcode because this same-device resubmit would reduce 500 tokens to 400."),
+        "uncompacted single decrease warning must be printed verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Ignored Amp changes because this snapshot cannot advance the device high-water."
+        ),
+        "unrecognized warning must be printed verbatim: {stdout}"
     );
 }
 
@@ -7938,6 +8358,150 @@ fn create_billing_explain_fixture() -> TempDir {
     tmp
 }
 
+fn create_request_tier_pricing_explain_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let litellm = serde_json::to_string(&serde_json::json!({
+        "timestamp": now,
+        "data": {
+            "claude-haiku-5-5": {
+                "input_cost_per_token": 0.0000001,
+                "output_cost_per_token": 0.0000005,
+                "cache_read_input_token_cost": 0.00000001,
+                "cache_creation_input_token_cost": 0.000000125,
+            }
+        }
+    }))
+    .unwrap();
+    let empty = format!(r#"{{"timestamp":{now},"data":{{}}}}"#);
+    write_canonical_pricing_cache_files(tmp.path(), &litellm, &empty, &empty);
+
+    let project = tmp.path().join(".claude/projects/request-tier-gaps");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session.jsonl"),
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-10-25T00:00:01Z","requestId":"req-long","message":{"id":"msg-long","model":"claude-haiku-5-5","usage":{"input_tokens":100001,"output_tokens":1}}}"#,
+            "
+",
+            r#"{"type":"assistant","timestamp":"2026-10-25T00:00:02Z","requestId":"req-hourly","message":{"id":"msg-hourly","model":"claude-haiku-5.5","usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_1h_input_tokens":10}}}}"#,
+            "
+",
+        ),
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
+    let tmp = TempDir::new().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let empty = format!(r#"{{"timestamp":{now},"data":{{}}}}"#);
+    let openrouter = serde_json::json!({
+        "timestamp": now,
+        "data": {"vendor/atlas-chat": {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002
+        }}
+    })
+    .to_string();
+    write_canonical_pricing_cache_files(tmp.path(), &empty, &openrouter, &empty);
+    let session = tmp
+        .path()
+        .join(".local/share/opencode/storage/message/safety");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("message.json"),
+        serde_json::json!({
+            "id": "message", "sessionID": "safety", "role": "assistant",
+            "modelID": "atlas-chat", "providerID": "gateway",
+            "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1780000000000u64}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = cmd_with_home(tmp.path())
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["coverage"], false);
+    assert_eq!(
+        rows[0]["submissionSafetyGap"],
+        "unverified_provider_identity"
+    );
+    cmd_with_home(tmp.path())
+        .args(["pricing", "explain", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "submission_safety_gap=unverified_provider_identity",
+        ));
+}
+
+#[test]
+fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
+    let tmp = create_request_tier_pricing_explain_fixture();
+    let output = cmd_with_home(tmp.path())
+        .timeout(Duration::from_secs(10))
+        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let long = rows
+        .iter()
+        .find(|row| row["rawModelId"] == "claude-haiku-5-5")
+        .expect("long-context explanation");
+    assert_eq!(long["coverage"], false);
+    assert!(long.get("submissionSafetyGap").is_none());
+    assert_eq!(
+        long["uncoveredBuckets"],
+        serde_json::json!(["input_long_context_tier", "output_long_context_tier"])
+    );
+
+    let hourly = rows
+        .iter()
+        .find(|row| row["rawModelId"] == "claude-haiku-5.5")
+        .expect("1-hour cache-write explanation");
+    assert_eq!(hourly["coverage"], false);
+    assert!(hourly.get("submissionSafetyGap").is_none());
+    assert_eq!(
+        hourly["uncoveredBuckets"],
+        serde_json::json!(["cache_write_1h_tier"])
+    );
+
+    cmd_with_home(tmp.path())
+        .timeout(Duration::from_secs(10))
+        .args(["pricing", "explain", "--no-spinner"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-haiku-5-5 billing=unknown"))
+        .stdout(predicate::str::contains(
+            "uncovered=input_long_context_tier,output_long_context_tier",
+        ))
+        .stdout(predicate::str::contains("claude-haiku-5.5 billing=unknown"))
+        .stdout(predicate::str::contains("uncovered=cache_write_1h_tier"));
+}
+
 #[test]
 fn billing_explain_rejects_unknown_and_blank_filters() {
     let tmp = create_billing_explain_fixture();
@@ -8520,4 +9084,118 @@ fn test_proma_native_display_and_fork_usage_count_once_cold_and_warm() {
         assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(30));
         assert_eq!(json["entries"][0]["cacheWrite"].as_i64(), Some(10));
     }
+}
+
+#[test]
+fn test_bb_client_e2e_cold_and_warm() {
+    let tmp = create_empty_fixture_dir();
+    let bb_dir = tmp.path().join(".bb");
+    fs::create_dir_all(&bb_dir).unwrap();
+    let db_path = bb_dir.join("bb.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT,
+            provider_id TEXT NOT NULL,
+            model_override TEXT,
+            title TEXT,
+            parent_thread_id TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL
+        );
+        CREATE TABLE events (
+            id TEXT PRIMARY KEY NOT NULL,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT,
+            sequence INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        INSERT INTO projects (id, name) VALUES ('prj_test', 'cli-project');
+        INSERT INTO threads (id, project_id, provider_id, model_override, title, parent_thread_id, created_at)
+        VALUES ('thr_test', 'prj_test', 'claude-code', 'claude-3-7-sonnet', 'CLI Test Thread', NULL, 1787275000000);
+        INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+        VALUES (
+            'evt_1', 'thr_test', 'turn_1', 1, 'thread/tokenUsage/updated',
+            '{"tokenUsage":{"last":{"totalTokens":1200,"inputTokens":1000,"cachedInputTokens":200,"cacheReadInputTokens":200,"cacheWriteInputTokens":0,"outputTokens":200,"reasoningOutputTokens":0}}}',
+            1787275010000
+        );
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    // Cold pass
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cold: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1), "cold");
+    assert_eq!(json["totalInput"].as_i64(), Some(800), "cold");
+    assert_eq!(json["totalOutput"].as_i64(), Some(200), "cold");
+    assert_eq!(json["entries"][0]["client"].as_str(), Some("bb"));
+    assert_eq!(
+        json["entries"][0]["model"].as_str(),
+        Some("claude-3-7-sonnet")
+    );
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+
+    // Warm pass: unchanged database verifies warm cache replay
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "warm: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(1), "warm");
+    assert_eq!(json["totalInput"].as_i64(), Some(800), "warm");
+    assert_eq!(json["totalOutput"].as_i64(), Some(200), "warm");
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(200));
+
+    // Mutate the database: insert a second event to verify incremental detection and update
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO events (id, thread_id, turn_id, sequence, type, data, created_at)
+        VALUES (
+            'evt_2', 'thr_test', 'turn_2', 2, 'thread/tokenUsage/updated',
+            '{"tokenUsage":{"last":{"totalTokens":700,"inputTokens":500,"cachedInputTokens":100,"cacheReadInputTokens":100,"cacheWriteInputTokens":0,"outputTokens":200,"reasoningOutputTokens":0}}}',
+            1787275020000
+        )
+        "#,
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let output = cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "bb", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mutated: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64(), Some(2), "mutated");
+    assert_eq!(json["totalInput"].as_i64(), Some(1200), "mutated");
+    assert_eq!(json["totalOutput"].as_i64(), Some(400), "mutated");
+    assert_eq!(json["entries"][0]["cacheRead"].as_i64(), Some(300));
 }

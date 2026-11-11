@@ -147,6 +147,20 @@ describe("submission scan scope", () => {
     });
   });
 
+  it("keeps the clients a date-bounded scan declares complete per day", () => {
+    const body = buildSubmission();
+    body.scanScope = {
+      parserVersions: { cursor: 2 },
+      fullHistory: false,
+      fullHistoryClients: [],
+      completeDayClients: ["cursor"],
+    };
+
+    const result = validateSubmission(body);
+    expect(result.errors).toEqual([]);
+    expect(result.data?.scanScope?.completeDayClients).toEqual(["cursor"]);
+  });
+
   it("rejects invalid parser generations and unregistered clients", () => {
     const zero = buildSubmission();
     zero.scanScope = { parserVersions: { copilot: 0 }, fullHistory: true };

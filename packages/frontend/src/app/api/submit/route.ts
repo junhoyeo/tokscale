@@ -1,12 +1,19 @@
 import { NextResponse, after } from "next/server";
+import * as nextCache from "next/cache";
 import { revalidateTag } from "next/cache";
 import { db, apiTokens, submissions, submittedDevices, dailyBreakdown } from "@/lib/db";
-import { and, eq, sql } from "drizzle-orm";
+import { users, moderationActions } from "@/lib/db/schema";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   validateSubmission,
   generateSubmissionHash,
   type SubmissionData,
 } from "@/lib/validation/submission";
+import {
+  evaluateSubmissionForWithholding,
+  getWithholdingUsageTotals,
+  hasAdminUnhideOverride,
+} from "@/lib/moderation/withholding";
 import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import { trackServerEvent } from "@/lib/analytics/server";
 import { getBearerToken } from "../../../lib/auth/bearerToken";
@@ -200,6 +207,13 @@ function expandDaysForRecountProofs(
     }
   }
   return proofOnlyDates;
+}
+
+/** A client's provenance without the floor tag, for a cost known to be complete. */
+function completeCostProvenance(breakdown: ClientBreakdownData) {
+  const provenance = deriveClientBreakdownProvenance(breakdown);
+  delete provenance.costIsComplete;
+  return provenance;
 }
 
 function mergeModelBreakdowns(
@@ -488,6 +502,8 @@ async function recordRatchetCensus(params: {
   }
 }
 
+class SubmissionUserMissingError extends Error {}
+
 /**
  * POST /api/submit
  * Submit token usage data from CLI
@@ -608,6 +624,19 @@ export async function POST(request: Request) {
       isBackfill ? "backfill" : "cli"
     );
     const result = await db.transaction(async (tx) => {
+      // Account deletion locks the parent before cascading to tokens and
+      // submissions. Match that order and keep manual moderation serialized
+      // through commit. NO KEY UPDATE still allows unrelated FK checks.
+      const [currentUser] = await tx
+        .select({ leaderboardHidden: users.leaderboardHidden })
+        .from(users)
+        .where(eq(users.id, tokenRecord.userId))
+        .for("no key update")
+        .limit(1);
+      if (!currentUser) {
+        throw new SubmissionUserMissingError();
+      }
+
       await tx
         .update(apiTokens)
         .set({ lastUsedAt: new Date() })
@@ -842,6 +871,11 @@ export async function POST(request: Request) {
       // because their presentation surfaces can overlap; the remaining
       // clients use independent device/client ledgers.
       const parserPlans = new Map<string, ParserHighWaterPlan>();
+      const costIncompleteDates = new Set(
+        data.contributions
+          .filter((day) => day.totals?.costIsComplete === false)
+          .map((day) => day.date)
+      );
       for (const [client, supportedVersion] of Object.entries(
         SUPPORTED_VERSIONED_PARSERS
       )) {
@@ -863,6 +897,15 @@ export async function POST(request: Request) {
             return stored ? [[day.date, stored] as const] : [];
           })
         );
+        const state = ownValue(deviceParserStates, client);
+        const persistedVersion = ownValue(
+          submittedDevice.parserVersions as Record<string, number> | undefined,
+          client
+        );
+        const incomingDays = foldParserClientSnapshot(data.contributions, client);
+        const completeDays =
+          !isBackfill &&
+          (data.scanScope?.completeDayClients ?? []).includes(client);
         const plan = planParserHighWaterSubmission({
           client,
           incomingVersion: isBackfill
@@ -874,6 +917,7 @@ export async function POST(request: Request) {
                 client
               ),
           fullHistory: scanScopeCoversFullHistory(data.scanScope, [client]),
+          completeDays,
           retentionFloor: isBackfill
             ? undefined
             : ownValue(
@@ -883,12 +927,9 @@ export async function POST(request: Request) {
                 client
               ),
           existingLegacyDays: existingClientDays,
-          incomingDays: foldParserClientSnapshot(data.contributions, client),
-          state: ownValue(deviceParserStates, client),
-          persistedVersion: ownValue(
-            submittedDevice.parserVersions as Record<string, number> | undefined,
-            client
-          ),
+          incomingDays,
+          state,
+          persistedVersion,
           recountProof: isBackfill
             ? undefined
             : ownValue(
@@ -898,17 +939,29 @@ export async function POST(request: Request) {
                 >,
                 client
               ),
+          costIncompleteDates,
         });
         if (plan.mode === "status-quo") continue;
         parserPlans.set(client, plan);
         const label = ownValue(SOURCE_DISPLAY_NAMES, client) ?? client;
         if (plan.mode === "baseline-legacy") {
           warnings.push(
-            `Established the ${label} parser generation ${supportedVersion} baseline; existing same-device history was preserved and only bounded lifetime growth was added.`
+            `Established the ${label} parser generation ${supportedVersion} baseline; existing same-device history was preserved and only bounded growth was added.`
           );
         } else if (plan.mode === "replace") {
           warnings.push(
             `Rewrote ${label} daily layout from the full parser snapshot without changing the lifetime high-water.`
+          );
+        } else if (
+          plan.mode === "freeze" &&
+          completeDays &&
+          Object.keys(incomingDays).length > 0 &&
+          (state == null
+            ? persistedVersion == null
+            : state.baselineEstablished === false)
+        ) {
+          warnings.push(
+            `Ignored ${label} changes from this date-bounded submit because this device has no ${label} baseline yet. Run \`tokscale submit\` without a date filter once; later date-bounded submits then count.`
           );
         } else if (plan.mode === "freeze") {
           warnings.push(
@@ -955,6 +1008,7 @@ export async function POST(request: Request) {
         incomingVersions: data.scanScope?.parserVersions,
         persistedVersions: submittedDevice.parserVersions ?? undefined,
         parserStates: deviceParserStates,
+        recountProofs: data.scanScope?.recountProofs,
         fullHistory: scanScopeCoversFullHistory(data.scanScope, ANTIGRAVITY_FAMILY),
         isBackfill,
         contributions: data.contributions,
@@ -997,7 +1051,11 @@ export async function POST(request: Request) {
       // complete sibling carrying moved spend would double-count it.
       const antigravityReplacing = antigravityPlan.mode === "replace";
       const antigravityFamilyFloor = antigravityReplacing
-        ? quantizeFamilyFloor(existingDeviceDays, ANTIGRAVITY_FAMILY)
+        ? Math.max(
+            0,
+            quantizeFamilyFloor(existingDeviceDays, ANTIGRAVITY_FAMILY) -
+              (antigravityPlan.recountCostReduction ?? 0)
+          )
         : 0;
       const individuallyFlooredClients = replaceClients.filter(
         (client) =>
@@ -1160,12 +1218,20 @@ export async function POST(request: Request) {
           >;
           const { breakdown: existingClientBreakdown, foldedClientFloors } =
             normalizeClientBreakdownAliases(rawExistingBreakdown);
-          // A recount proof corrects the stored cell FIRST; today's bounded
-          // increment is then added on top of the corrected cell, exactly as
-          // the planner credited it. The corrected cell is written directly
-          // after the merge: it is lower than the stored one by design, which
-          // the regression guard would otherwise refuse.
+          // A recount proof corrects the stored cell FIRST (counts only at the
+          // device's transition; afterwards only a floored cost); today's
+          // bounded increment is then added on top of the corrected cell,
+          // exactly as the planner credited it. The corrected cell is written
+          // directly after the merge: it can be lower than the stored one by
+          // design, which the regression guard would otherwise refuse. A cell
+          // the proof leaves unchanged takes the ordinary increment path.
           const recountedCells = new Map<string, ClientBreakdownData>();
+          // Clients whose whole cost a complete proof accounts for, so an
+          // earlier floor tag may clear.
+          const provenCostClients = new Set<string>();
+          // Clients whose recounted cost was kept for want of complete
+          // pricing: their cell is a floor whatever this day's pricing.
+          const deferredCostClients = new Set<string>();
           const incomingCostIsComplete =
             incomingDay.totals?.costIsComplete ?? true;
           for (const [client, plan] of plannedIncrementClients) {
@@ -1183,7 +1249,31 @@ export async function POST(request: Request) {
             if (!stored || !proofDay || !plan.recountDays?.includes(incomingDay.date)) {
               continue;
             }
-            const { cell, removed } = applyRecountProofToCell(stored, proofDay);
+            // What this snapshot submitted for the client, before the
+            // planner's increment replaced it above: a proof cost counts only
+            // where it is the submitted cost.
+            const submitted = ownValue(
+              foldParserClientSnapshot([incomingDay], client),
+              incomingDay.date
+            );
+            const { cell, removed, changed, costProven, costDeferred } = applyRecountProofToCell(
+              stored,
+              proofDay,
+              submitted,
+              {
+                transition: plan.recountTransition === true,
+                residueModels: ownValue(
+                  plan.residueDays ?? {},
+                  incomingDay.date
+                ),
+                costIsComplete: incomingCostIsComplete,
+                storedCostIsFloor: stored.provenance?.costIsComplete === false,
+                costUnsafeModels: new Set(plan.recountCostUnsafeModels ?? []),
+              }
+            );
+            if (incomingCostIsComplete && costProven) provenCostClients.add(client);
+            if (costDeferred) deferredCostClients.add(client);
+            if (!changed) continue;
             const increment = incomingClientBreakdown[client];
             recountedCells.set(
               client,
@@ -1191,10 +1281,8 @@ export async function POST(request: Request) {
             );
             clientsToMerge.delete(client);
             delete incomingClientBreakdown[client];
-            // An incomplete snapshot may not lower cost (the write below
-            // floors it at the stored model costs), so only a complete one
-            // actually removes the proven cost; report what is written.
-            const removedCost = incomingCostIsComplete ? removed.cost : 0;
+            // A restated floor can also raise a cost; only removals are reported.
+            const removedCost = Math.max(0, removed.cost);
             if (removed.tokens > 0 || removedCost > 0 || removed.messages > 0) {
               const total = recountRemoved.get(client) ?? {
                 days: 0,
@@ -1207,6 +1295,7 @@ export async function POST(request: Request) {
               recountRemoved.set(client, total);
             }
           }
+
           for (const [client] of plannedIncrementClients) {
             const increment = incomingClientBreakdown[client];
             if (increment) {
@@ -1243,17 +1332,25 @@ export async function POST(request: Request) {
           }
           const mergedClientBreakdown = mergeResult.merged;
           for (const [client, cell] of recountedCells) {
-            // The proof restates the whole cell's cost, so a complete snapshot
-            // clears an earlier floor exactly, the documented rule for a
-            // complete write. An incomplete one may still only raise cost:
-            // the stored (pre-correction) model costs stay as floors and the
-            // cell stays tagged, and the cost correction lands on the first
-            // complete snapshot of the same layout.
-            const written = applyCostCompleteness(
-              cell,
-              ownValue(existingClientBreakdown, client),
-              incomingCostIsComplete
-            );
+            // The corrected amounts are written as they are: where pricing
+            // could not vouch for the proof's cost, the stored cost was left in
+            // place as a floor. The cell is tagged as a floor when this
+            // snapshot is incomplete, when such a cost was kept, or when it was
+            // tagged before and the proof does not account for its whole
+            // cost.
+            const keepsFloor =
+              !incomingCostIsComplete ||
+              deferredCostClients.has(client) ||
+              (ownValue(existingClientBreakdown, client)?.provenance
+                ?.costIsComplete === false &&
+                !provenCostClients.has(client));
+            const provenance = completeCostProvenance(cell);
+            const written: ClientBreakdownData = {
+              ...cell,
+              provenance: keepsFloor
+                ? { ...provenance, costIsComplete: false }
+                : provenance,
+            };
             // A cell the proof empties entirely (every stored row was a
             // duplicate) leaves nothing to keep; dropping it lets an
             // otherwise empty day row go with it below.
@@ -1265,9 +1362,12 @@ export async function POST(request: Request) {
           }
           for (const [client] of plannedIncrementClients) {
             const merged = mergedClientBreakdown[client];
-            if (
-              merged &&
-              !recountedCells.has(client) &&
+            if (!merged || recountedCells.has(client)) continue;
+            if (provenCostClients.has(client)) {
+              // A complete proof accounts for the cell's whole stored cost, so
+              // an earlier floor clears; no amount changes.
+              merged.provenance = completeCostProvenance(merged);
+            } else if (
               ownValue(existingClientBreakdown, client)?.provenance
                 ?.costIsComplete === false
             ) {
@@ -1277,6 +1377,7 @@ export async function POST(request: Request) {
               };
             }
           }
+
           // A preserved fold must keep its ORIGINAL raw alias keys in storage
           // (e.g. both "kilocode" and "kilo"), not the collapsed sum: the
           // collapsed form is indistinguishable from real usage, so writing it
@@ -1546,7 +1647,7 @@ export async function POST(request: Request) {
           // columns used (migrations 0015/0016).
           dateStart: sql<string>`COALESCE(MIN(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MIN(${dailyBreakdown.date}))`,
           dateEnd: sql<string>`COALESCE(MAX(CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END), MAX(${dailyBreakdown.date}))`,
-          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 THEN ${dailyBreakdown.date} END)::int`,
+          activeDays: sql<number>`COUNT(DISTINCT CASE WHEN ${dailyBreakdown.tokens} > 0 OR ${dailyBreakdown.cost} > 0 THEN ${dailyBreakdown.date} END)::int`,
           rowCount: sql<number>`COUNT(*)::int`,
           // One floored day on ONE device makes the summed total a lower bound,
           // so completeness composes with AND, not OR (#1044). COALESCE covers
@@ -1597,6 +1698,9 @@ export async function POST(request: Request) {
 
       const allDays = await tx
         .select({
+          date: dailyBreakdown.date,
+          tokens: dailyBreakdown.tokens,
+          outputTokens: dailyBreakdown.outputTokens,
           sourceBreakdown: dailyBreakdown.sourceBreakdown,
         })
         .from(dailyBreakdown)
@@ -1618,7 +1722,8 @@ export async function POST(request: Request) {
               for (const modelId of Object.keys(cd.models)) {
                 allModels.add(modelId);
               }
-            } else if (cd.modelId) {
+            }
+            if (cd.modelId) {
               allModels.add(cd.modelId);
             }
             totalCacheRead += cd.cacheRead || 0;
@@ -1627,6 +1732,23 @@ export async function POST(request: Request) {
           }
         }
       }
+
+      const mergedActiveTimeMs = Math.max(
+        deviceTotals?.totalActiveTimeMs ?? 0,
+        storedSessionMetrics?.totalActiveTimeMs ?? 0,
+      );
+      const mergedLongestContinuousMs = Math.max(
+        deviceTotals?.longestContinuousMs ?? 0,
+        storedSessionMetrics?.longestContinuousMs ?? 0,
+      );
+      const mergedMaxConcurrentSessions = Math.max(
+        deviceTotals?.maxConcurrentSessions ?? 0,
+        storedSessionMetrics?.maxConcurrentSessions ?? 0,
+      );
+      const mergedSessionCount = Math.max(
+        deviceTotals?.sessionCount ?? 0,
+        storedSessionMetrics?.sessionCount ?? 0,
+      );
 
       // ------------------------------------------
       // STEP 3e: Update submission record
@@ -1671,26 +1793,80 @@ export async function POST(request: Request) {
           // pre-migration TZ re-split stays frozen at the inflated value; the
           // floor can only hold it, never correct it down. New inflation is
           // prevented, historical inflation is not repaired.
-          totalActiveTimeMs: Math.max(
-            deviceTotals?.totalActiveTimeMs ?? 0,
-            storedSessionMetrics?.totalActiveTimeMs ?? 0,
-          ),
-          longestContinuousMs: Math.max(
-            deviceTotals?.longestContinuousMs ?? 0,
-            storedSessionMetrics?.longestContinuousMs ?? 0,
-          ),
-          maxConcurrentSessions: Math.max(
-            deviceTotals?.maxConcurrentSessions ?? 0,
-            storedSessionMetrics?.maxConcurrentSessions ?? 0,
-          ),
-          sessionCount: Math.max(
-            deviceTotals?.sessionCount ?? 0,
-            storedSessionMetrics?.sessionCount ?? 0,
-          ),
+          totalActiveTimeMs: mergedActiveTimeMs,
+          longestContinuousMs: mergedLongestContinuousMs,
+          maxConcurrentSessions: mergedMaxConcurrentSessions,
+          sessionCount: mergedSessionCount,
           mcpServers: mcpServers && mcpServers.length > 0 ? mcpServers : null,
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
+
+      // Only final ledger volume can change account state.
+      const withholdingUsage = getWithholdingUsageTotals(allDays);
+      const withholdingResult = evaluateSubmissionForWithholding(withholdingUsage);
+      let autoWithheld = false;
+      if (withholdingResult.shouldWithhold) {
+        if (!currentUser.leaderboardHidden) {
+          const [latestModAction] = await tx
+            .select({
+              action: moderationActions.action,
+              actorUserId: moderationActions.actorUserId,
+              actorUsername: moderationActions.actorUsername,
+            })
+            .from(moderationActions)
+            .where(eq(moderationActions.targetUserId, tokenRecord.userId))
+            .orderBy(desc(moderationActions.createdAt), desc(moderationActions.id))
+            .limit(1);
+
+          const isAdminApproved = hasAdminUnhideOverride(latestModAction);
+
+          if (!isAdminApproved) {
+            const updatedRows = await tx
+              .update(users)
+              .set({ leaderboardHidden: true, updatedAt: new Date() })
+              .where(
+                and(
+                  eq(users.id, tokenRecord.userId),
+                  eq(users.leaderboardHidden, false),
+                  sql`NOT EXISTS (
+                    SELECT 1 FROM (
+                      SELECT action, actor_user_id, actor_username
+                      FROM ${moderationActions}
+                      WHERE ${moderationActions.targetUserId} = ${tokenRecord.userId}
+                      ORDER BY ${moderationActions.createdAt} DESC, ${moderationActions.id} DESC
+                      LIMIT 1
+                    ) AS latest_mod
+                    WHERE latest_mod.action = 'unhide'
+                      AND (
+                        latest_mod.actor_user_id IS NOT NULL
+                        OR (
+                          LENGTH(TRIM(COALESCE(latest_mod.actor_username, ''))) > 0
+                          AND LOWER(TRIM(latest_mod.actor_username)) <> 'system'
+                        )
+                      )
+                  )`,
+                ),
+              )
+              .returning({ id: users.id });
+
+            if (updatedRows.length > 0) {
+              autoWithheld = true;
+              await tx.insert(moderationActions).values({
+                targetUserId: tokenRecord.userId,
+                targetUsername: tokenRecord.username,
+                actorUserId: null,
+                actorUsername: "system",
+                action: "hide",
+                reason: "Under investigation",
+                // Match manual decisions: timestamp the change under the user
+                // lock rather than the submission transaction's BEGIN time.
+                createdAt: sql`clock_timestamp()`,
+              });
+            }
+          }
+        }
+      }
 
       // Register durable post-commit work before the transaction exposes its
       // daily rows. If this invocation is interrupted after commit, a later
@@ -1709,6 +1885,9 @@ export async function POST(request: Request) {
       return {
         submissionId,
         isNewSubmission,
+        autoWithheld,
+        withholdingResult,
+        withholdingUsage,
         metrics: {
           totalTokens:
             aggregates.totalTokens >= 9007199254740991
@@ -1724,6 +1903,17 @@ export async function POST(request: Request) {
         },
       };
     });
+
+    // Log after commit so failed submissions never look like accepted
+    // observations. Include clean decisions to preserve the denominator.
+    console.warn(`[moderation] ${JSON.stringify({
+      event: "submission_withholding_evaluated",
+      ruleVersion: 1,
+      userId: tokenRecord.userId,
+      ...result.withholdingResult,
+      usage: result.withholdingUsage,
+      applied: result.autoWithheld,
+    })}`);
 
     if (result.isNewSubmission) {
       trackServerEvent("first_usage_submitted", request);
@@ -1745,6 +1935,10 @@ export async function POST(request: Request) {
       revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
       revalidateTag(`user-rank:${usernameCacheKey}`, "max");
+      if (result.autoWithheld && "revalidatePath" in nextCache && typeof nextCache.revalidatePath === "function") {
+        nextCache.revalidatePath("/");
+        nextCache.revalidatePath("/leaderboard");
+      }
     } catch (e) {
       console.error("Public cache invalidation failed:", e);
     }
@@ -1784,6 +1978,9 @@ export async function POST(request: Request) {
       warnings: warnings.length > 0 ? warnings : undefined,
     });
   } catch (error) {
+    if (error instanceof SubmissionUserMissingError) {
+      return NextResponse.json({ error: "Invalid API token" }, { status: 401 });
+    }
     console.error("Submit error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

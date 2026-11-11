@@ -19,7 +19,9 @@ export async function DELETE(request: Request) {
     // settings route uses. Account deletion deliberately has no Bearer
     // personal-token path: it is a web Settings UI action, so session-only
     // auth is the conservative default.
-    const session = await getSessionFromRequest(request);
+    const session = await getSessionFromRequest(request, {
+      allowAuthorizationHeader: false,
+    });
     if (!session) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }

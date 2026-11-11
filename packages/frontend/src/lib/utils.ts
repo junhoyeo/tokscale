@@ -268,7 +268,8 @@ export function formatCurrency(amount: number): string {
       ? `$${(val / 1000).toFixed(2)}B`
       : `$${val.toFixed(2)}M`;
   }
-  if (amount >= 1000) {
+  // toFixed(2) rounds 999.995+ to "1000.00"; promote to K instead
+  if (amount >= 999.995) {
     const val = amount / 1000;
     return val >= 999.995
       ? `$${(val / 1000).toFixed(2)}M`

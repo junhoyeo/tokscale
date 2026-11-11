@@ -5,8 +5,11 @@ use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::themes::Theme;
-use crate::tui::ui::widgets::truncate_ellipsis_with_marker as truncate;
+use crate::tui::ui::widgets::{
+    display_width, pad_to_width, truncate_ellipsis_to_width_with_marker as truncate,
+};
 use crate::ui_glyphs::Glyphs;
 
 use super::{DialogContent, DialogResult};
@@ -26,6 +29,9 @@ pub struct ConfirmDialog {
     effect: &'static str,
     confirm_label: &'static str,
     confirm_verb: &'static str,
+    /// Language of the labels and the Cancel button. The Codex dialogs have
+    /// no translated text yet, so they stay in English as a whole.
+    language: TuiLanguage,
     tone: ConfirmTone,
     confirmed_value: Rc<RefCell<Option<String>>>,
 }
@@ -43,12 +49,13 @@ impl ConfirmDialog {
     ) -> Self {
         Self {
             value: account_id,
-            title: " Switch Codex Account ",
+            title: "Switch Codex Account",
             message: "This will replace the active Codex auth.json account.",
             target_label: account_label,
             effect: "New Codex requests use this account",
             confirm_label: "Confirm",
             confirm_verb: "confirm",
+            language: TuiLanguage::En,
             tone: ConfirmTone::Accent,
             confirmed_value,
         }
@@ -61,12 +68,13 @@ impl ConfirmDialog {
     ) -> Self {
         Self {
             value: account_id,
-            title: " Remove Codex Account ",
+            title: "Remove Codex Account",
             message: "This will remove the saved Codex account from Tokscale.",
             target_label: account_label,
             effect: "Saved account is deleted; codex CLI login is unchanged",
             confirm_label: "Remove",
             confirm_verb: "remove",
+            language: TuiLanguage::En,
             tone: ConfirmTone::Danger,
             confirmed_value,
         }
@@ -79,13 +87,34 @@ impl ConfirmDialog {
     ) -> Self {
         Self {
             value: account_id,
-            title: " Reset Codex Limits ",
+            title: "Reset Codex Limits",
             message: "This will consume one available Codex reset credit.",
             target_label: account_label,
             effect: "Codex rate-limit windows reset for this account",
             confirm_label: "Reset",
             confirm_verb: "reset",
+            language: TuiLanguage::En,
             tone: ConfirmTone::Warning,
+            confirmed_value,
+        }
+    }
+
+    pub fn antigravity_hook(
+        target_path: String,
+        confirmed_value: Rc<RefCell<Option<String>>>,
+        language: TuiLanguage,
+    ) -> Self {
+        Self {
+            value: target_path.clone(),
+            title: tr(language, MessageKey::AntigravityHookDialogTitle),
+            message: tr(language, MessageKey::AntigravityHookDialogMessage),
+            target_label: target_path,
+            effect: tr(language, MessageKey::AntigravityHookDialogEffect),
+            confirm_label: tr(language, MessageKey::AntigravityHookDialogConfirm),
+            // The key hint line is English in every confirm dialog.
+            confirm_verb: "register",
+            language,
+            tone: ConfirmTone::Accent,
             confirmed_value,
         }
     }
@@ -136,7 +165,7 @@ impl ConfirmDialog {
             };
         };
 
-        let confirm_width = self.confirm_button().chars().count() as u16;
+        let confirm_width = display_width(&self.confirm_button()) as u16;
         if inner.width < confirm_width {
             return ButtonLayout {
                 confirm: None,
@@ -144,7 +173,7 @@ impl ConfirmDialog {
             };
         }
 
-        let cancel_width = 10u16;
+        let cancel_width = display_width(self.cancel_button()) as u16;
         let gap = 2u16;
         let total = confirm_width
             .saturating_add(gap)
@@ -168,6 +197,10 @@ impl ConfirmDialog {
         format!("[ {} ]", self.confirm_label)
     }
 
+    fn cancel_button(&self) -> &'static str {
+        tr(self.language, MessageKey::DialogCancel)
+    }
+
     fn button_line(
         &self,
         layout: &ButtonLayout,
@@ -183,7 +216,10 @@ impl ConfirmDialog {
             spans.push(Span::raw(
                 " ".repeat(cancel.x.saturating_sub(confirm.right()) as usize),
             ));
-            spans.push(Span::styled("[ Cancel ]", Style::default().fg(theme.muted)));
+            spans.push(Span::styled(
+                self.cancel_button(),
+                Style::default().fg(theme.muted),
+            ));
         }
         Some(Line::from(spans))
     }
@@ -207,7 +243,7 @@ impl DialogContent for ConfirmDialog {
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs) {
         let tone = self.tone_color(theme);
         let block = Block::default()
-            .title(self.title)
+            .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .border_set(glyphs.border)
             .border_style(Style::default().fg(tone));
@@ -225,7 +261,7 @@ impl DialogContent for ConfirmDialog {
             )),
             Line::from(""),
             labeled_line(
-                "Target",
+                tr(self.language, MessageKey::DialogTargetLabel),
                 &self.target_label,
                 Style::default().fg(tone).add_modifier(Modifier::BOLD),
                 inner.width,
@@ -233,7 +269,7 @@ impl DialogContent for ConfirmDialog {
                 glyphs.ellipsis,
             ),
             labeled_line(
-                "Effect",
+                tr(self.language, MessageKey::DialogEffectLabel),
                 self.effect,
                 theme.secondary_text_style(),
                 inner.width,
@@ -311,8 +347,8 @@ fn labeled_line(
     ellipsis: &str,
 ) -> Line<'static> {
     let width = width as usize;
-    let label_text = format!("{label:<8}");
-    let label_width = label_text.chars().count();
+    let label_text = pad_to_width(label, 8);
+    let label_width = display_width(&label_text);
     if width <= label_width {
         return Line::from(Span::styled(
             truncate(&label_text, width, ellipsis),
@@ -365,6 +401,109 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn antigravity_dialog_fits_its_default_size_in_every_language() {
+        use crate::tui::ui::header_budget::strip_wide_continuation_cells;
+
+        for language in [
+            TuiLanguage::En,
+            TuiLanguage::Ko,
+            TuiLanguage::Ja,
+            TuiLanguage::ZhCn,
+            TuiLanguage::Fr,
+        ] {
+            let dialog = ConfirmDialog::antigravity_hook(
+                "~/.gemini/config/hooks.json".to_string(),
+                Rc::new(RefCell::new(None)),
+                language,
+            );
+            let (width, height) = dialog.desired_size(Rect::new(0, 0, 120, 40));
+            let area = Rect::new(0, 0, width, height);
+            let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| dialog.render(frame, area, &theme, Glyphs::unicode()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let drawn = |rect: Rect| {
+                let cells: String = (rect.x..rect.right())
+                    .map(|x| buffer[(x, rect.y)].symbol())
+                    .collect();
+                strip_wide_continuation_cells(&cells)
+            };
+            let body = (0..height)
+                .map(|y| drawn(Rect::new(0, y, width, 1)))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Nothing is clipped at the size the dialog asks for.
+            for key in [
+                MessageKey::AntigravityHookDialogTitle,
+                MessageKey::AntigravityHookDialogMessage,
+                MessageKey::AntigravityHookDialogEffect,
+                MessageKey::DialogTargetLabel,
+                MessageKey::DialogEffectLabel,
+            ] {
+                let text = tr(language, key);
+                assert!(body.contains(text), "{language:?}: {text}\n{body}");
+            }
+            assert!(body.contains("Enter/y register"), "{language:?}\n{body}");
+
+            // The clickable rectangles are the cells the buttons occupy, also
+            // for labels made of double-width characters.
+            let layout = dialog.button_layout(ConfirmDialog::content_area(area));
+            assert_eq!(
+                drawn(layout.confirm.expect("confirm button")),
+                dialog.confirm_button(),
+                "{language:?}"
+            );
+            assert_eq!(
+                drawn(layout.cancel.expect("cancel button")),
+                dialog.cancel_button(),
+                "{language:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_antigravity_dialog_marks_a_cut_double_width_effect_line() {
+        use crate::tui::ui::header_budget::strip_wide_continuation_cells;
+
+        let dialog = ConfirmDialog::antigravity_hook(
+            "~/.gemini/config/hooks.json".to_string(),
+            Rc::new(RefCell::new(None)),
+            TuiLanguage::Ko,
+        );
+        let (width, height) = (40, 10);
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                dialog.render(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    &theme,
+                    Glyphs::unicode(),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let effect_label = tr(TuiLanguage::Ko, MessageKey::DialogEffectLabel);
+        let effect_row = (0..height)
+            .map(|y| {
+                let cells: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                strip_wide_continuation_cells(&cells)
+            })
+            .find(|row| row.contains(effect_label))
+            .expect("effect row");
+
+        let ellipsis = Glyphs::unicode().ellipsis;
+        assert!(
+            effect_row.trim_end_matches(['│', ' ']).ends_with(ellipsis),
+            "{effect_row}"
+        );
     }
 
     #[test]

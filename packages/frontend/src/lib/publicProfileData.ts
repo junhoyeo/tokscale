@@ -670,7 +670,9 @@ export async function getPublicProfileResponse(
       };
     });
 
-    const activeDays = scopedContributions.filter((c) => c.tokens > 0).length;
+    const activeDays = scopedContributions.filter(
+      (c) => c.tokens > 0 || c.cost > 0
+    ).length;
 
     const modelUsageMap = new Map<string, { tokens: number; cost: number }>();
     for (const day of scopedContributions) {

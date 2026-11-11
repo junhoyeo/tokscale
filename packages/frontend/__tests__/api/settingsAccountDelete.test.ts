@@ -126,10 +126,13 @@ beforeEach(() => {
 
 // The route goes through the real getSessionFromRequest, so cookie-auth
 // DELETEs must carry an allowlisted Origin header (CSRF gate from #615).
-function createRequest(options: { origin?: string | null } = {}) {
+function createRequest(options: { origin?: string | null; authorization?: string } = {}) {
   const headers = new Headers();
   if (options.origin !== null) {
     headers.set("Origin", options.origin ?? "http://localhost:3000");
+  }
+  if (options.authorization) {
+    headers.set("Authorization", options.authorization);
   }
   return new Request("http://localhost/api/settings/account", {
     method: "DELETE",
@@ -147,6 +150,59 @@ describe("DELETE /api/settings/account", () => {
     expect(await response.json()).toEqual({ error: "Not authenticated" });
     expect(mockState.db.delete).not.toHaveBeenCalled();
     expect(mockState.revalidateUserGroupLeaderboards).not.toHaveBeenCalled();
+  });
+
+  it("rejects Authorization-header bearer auth", async () => {
+    mockState.getSession.mockResolvedValue(null);
+    mockState.getSessionFromHeader.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+    });
+
+    const bearerResponse = await DELETE(
+      createRequest({
+        origin: "http://localhost:3000",
+        authorization: "Bearer tt_personal_token",
+      })
+    );
+
+    expect(bearerResponse.status).toBe(401);
+    expect(await bearerResponse.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getSessionFromHeader).not.toHaveBeenCalled();
+    expect(mockState.db.delete).not.toHaveBeenCalled();
+  });
+
+  it("enforces the Origin allowlist even when an Authorization header is sent", async () => {
+    mockState.getSession.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+    });
+    mockState.getSessionFromHeader.mockResolvedValue({
+      id: "user-1",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      isAdmin: false,
+    });
+
+    const csrfBypassAttempt = await DELETE(
+      createRequest({
+        origin: "https://attacker.example",
+        authorization: "Bearer tt_personal_token",
+      })
+    );
+
+    expect(csrfBypassAttempt.status).toBe(401);
+    expect(await csrfBypassAttempt.json()).toEqual({ error: "Not authenticated" });
+    expect(mockState.getSessionFromHeader).not.toHaveBeenCalled();
+    expect(mockState.getSession).not.toHaveBeenCalled();
+    expect(mockState.db.delete).not.toHaveBeenCalled();
   });
 
   it("returns 401 when Origin is missing and never touches the DB", async () => {

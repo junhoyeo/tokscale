@@ -350,9 +350,17 @@ pub enum MessageKey {
     ActionRefreshSyncing,
     ActionAddCodex,
     ActionAddingCodex,
+    ActionLinkAntigravity,
+    ActionAntigravityLinked,
     ActionShowEmails,
     ActionHideEmails,
     ActionReset,
+
+    // Antigravity hook confirmation
+    AntigravityHookDialogTitle,
+    AntigravityHookDialogMessage,
+    AntigravityHookDialogEffect,
+    AntigravityHookDialogConfirm,
 
     // Usage section headings
     HeadingAttention,
@@ -486,6 +494,8 @@ pub enum MessageKey {
     ActionRefreshSyncingShort,
     ActionAddingCodexShort,
     ActionAddCodexShort,
+    ActionLinkAntigravityShort,
+    ActionAntigravityLinkedShort,
     ActionShowEmailsShort,
     ActionHideEmailsShort,
 
@@ -803,9 +813,17 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ActionRefreshSyncing => "r Syncing",
         MessageKey::ActionAddCodex => "a Add Codex",
         MessageKey::ActionAddingCodex => "a Adding Codex",
+        MessageKey::ActionLinkAntigravity => "Link Antigravity",
+        MessageKey::ActionAntigravityLinked => "Antigravity Linked",
         MessageKey::ActionShowEmails => "m Show Emails",
         MessageKey::ActionHideEmails => "m Hide Emails",
         MessageKey::ActionReset => "x Reset",
+        MessageKey::AntigravityHookDialogTitle => "Link Antigravity CLI",
+        MessageKey::AntigravityHookDialogMessage =>
+            "Add a SessionStart hook so agy syncs quota without token copying.",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy writes session env; tokscale auto-discovers quota",
+        MessageKey::AntigravityHookDialogConfirm => "Register",
 
         MessageKey::HeadingAttention => "Attention",
         MessageKey::HeadingDiagnostics => "Diagnostics",
@@ -937,6 +955,8 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ActionRefreshSyncingShort => "r Sync",
         MessageKey::ActionAddingCodexShort => "a Adding",
         MessageKey::ActionAddCodexShort => "a Add",
+        MessageKey::ActionLinkAntigravityShort => "Link agy",
+        MessageKey::ActionAntigravityLinkedShort => "Linked",
         MessageKey::ActionShowEmailsShort => "m Show",
         MessageKey::ActionHideEmailsShort => "m Hide",
 
@@ -1226,9 +1246,17 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncing => "r 동기화 중",
         MessageKey::ActionAddCodex => "a Codex 추가",
         MessageKey::ActionAddingCodex => "a Codex 추가 중",
+        MessageKey::ActionLinkAntigravity => "Antigravity 연동",
+        MessageKey::ActionAntigravityLinked => "Antigravity 연동됨",
         MessageKey::ActionShowEmails => "m 이메일 표시",
         MessageKey::ActionHideEmails => "m 이메일 숨기기",
         MessageKey::ActionReset => "x 초기화",
+        MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 연동",
+        MessageKey::AntigravityHookDialogMessage =>
+            "SessionStart 훅을 추가해 토큰 복사 없이 사용량을 동기화합니다.",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy가 세션 정보를 기록하고 tokscale이 사용량을 찾습니다",
+        MessageKey::AntigravityHookDialogConfirm => "등록",
 
         MessageKey::HeadingAttention => "주의",
         MessageKey::HeadingDiagnostics => "진단",
@@ -1375,6 +1403,8 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncingShort => "r 동기화",
         MessageKey::ActionAddingCodexShort => "a 추가 중",
         MessageKey::ActionAddCodexShort => "a 추가",
+        MessageKey::ActionLinkAntigravityShort => "연동",
+        MessageKey::ActionAntigravityLinkedShort => "연동됨",
         MessageKey::ActionShowEmailsShort => "m 표시",
         MessageKey::ActionHideEmailsShort => "m 숨김",
 
@@ -1656,9 +1686,17 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncing => "r 同期中",
         MessageKey::ActionAddCodex => "a Codex 追加",
         MessageKey::ActionAddingCodex => "a Codex 追加中",
+        MessageKey::ActionLinkAntigravity => "Antigravity 連携",
+        MessageKey::ActionAntigravityLinked => "Antigravity 連携済",
         MessageKey::ActionShowEmails => "m メール表示",
         MessageKey::ActionHideEmails => "m メール非表示",
         MessageKey::ActionReset => "x リセット",
+        MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 連携",
+        MessageKey::AntigravityHookDialogMessage =>
+            "SessionStart フックでトークンをコピーせず使用量を同期します。",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy がセッション環境を書き、tokscale が使用量を自動検出",
+        MessageKey::AntigravityHookDialogConfirm => "登録",
 
         MessageKey::HeadingAttention => "注意",
         MessageKey::HeadingDiagnostics => "診断",
@@ -1801,6 +1839,8 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncingShort => "r 同期",
         MessageKey::ActionAddingCodexShort => "a 追加中",
         MessageKey::ActionAddCodexShort => "a 追加",
+        MessageKey::ActionLinkAntigravityShort => "連携",
+        MessageKey::ActionAntigravityLinkedShort => "連携済",
         MessageKey::ActionShowEmailsShort => "m 表示",
         MessageKey::ActionHideEmailsShort => "m 非表示",
 
@@ -2077,9 +2117,17 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncing => "r 同步中",
         MessageKey::ActionAddCodex => "a 添加 Codex",
         MessageKey::ActionAddingCodex => "a 正在添加 Codex",
+        MessageKey::ActionLinkAntigravity => "关联 Antigravity",
+        MessageKey::ActionAntigravityLinked => "Antigravity 已关联",
         MessageKey::ActionShowEmails => "m 显示邮箱",
         MessageKey::ActionHideEmails => "m 隐藏邮箱",
         MessageKey::ActionReset => "x 重置",
+        MessageKey::AntigravityHookDialogTitle => "关联 Antigravity CLI",
+        MessageKey::AntigravityHookDialogMessage =>
+            "添加 SessionStart 钩子，无需复制令牌即可同步用量。",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy 写入会话环境，tokscale 自动发现用量",
+        MessageKey::AntigravityHookDialogConfirm => "注册",
 
         MessageKey::HeadingAttention => "注意",
         MessageKey::HeadingDiagnostics => "诊断",
@@ -2211,6 +2259,8 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncingShort => "r 同步",
         MessageKey::ActionAddingCodexShort => "a 添加中",
         MessageKey::ActionAddCodexShort => "a 添加",
+        MessageKey::ActionLinkAntigravityShort => "关联",
+        MessageKey::ActionAntigravityLinkedShort => "已关联",
         MessageKey::ActionShowEmailsShort => "m 显示",
         MessageKey::ActionHideEmailsShort => "m 隐藏",
 
@@ -2490,9 +2540,17 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncing => "r Synchronisation",
         MessageKey::ActionAddCodex => "a Ajouter Codex",
         MessageKey::ActionAddingCodex => "a Ajout de Codex",
+        MessageKey::ActionLinkAntigravity => "Associer Antigravity",
+        MessageKey::ActionAntigravityLinked => "Antigravity Associé",
         MessageKey::ActionShowEmails => "m Afficher e-mails",
         MessageKey::ActionHideEmails => "m Masquer e-mails",
         MessageKey::ActionReset => "x Réinitialiser",
+        MessageKey::AntigravityHookDialogTitle => "Associer Antigravity CLI",
+        MessageKey::AntigravityHookDialogMessage =>
+            "Hook SessionStart pour synchroniser sans copier le jeton.",
+        MessageKey::AntigravityHookDialogEffect =>
+            "agy écrit la session, tokscale détecte le quota",
+        MessageKey::AntigravityHookDialogConfirm => "Ajouter",
 
         MessageKey::HeadingAttention => "Attention",
         MessageKey::HeadingDiagnostics => "Diagnostics",
@@ -2640,6 +2698,8 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionRefreshSyncingShort => "r Synchro",
         MessageKey::ActionAddingCodexShort => "a Ajout",
         MessageKey::ActionAddCodexShort => "a Ajout",
+        MessageKey::ActionLinkAntigravityShort => "Associer",
+        MessageKey::ActionAntigravityLinkedShort => "Associé",
         MessageKey::ActionShowEmailsShort => "m Voir",
         MessageKey::ActionHideEmailsShort => "m Masq.",
 
@@ -3050,9 +3110,15 @@ mod tests {
             MessageKey::ActionRefreshSyncing,
             MessageKey::ActionAddCodex,
             MessageKey::ActionAddingCodex,
+            MessageKey::ActionLinkAntigravity,
+            MessageKey::ActionAntigravityLinked,
             MessageKey::ActionShowEmails,
             MessageKey::ActionHideEmails,
             MessageKey::ActionReset,
+            MessageKey::AntigravityHookDialogTitle,
+            MessageKey::AntigravityHookDialogMessage,
+            MessageKey::AntigravityHookDialogEffect,
+            MessageKey::AntigravityHookDialogConfirm,
             MessageKey::HeadingAttention,
             MessageKey::HeadingDiagnostics,
             MessageKey::HeadingProviders,
@@ -3153,6 +3219,8 @@ mod tests {
             MessageKey::ActionRefreshSyncingShort,
             MessageKey::ActionAddingCodexShort,
             MessageKey::ActionAddCodexShort,
+            MessageKey::ActionLinkAntigravityShort,
+            MessageKey::ActionAntigravityLinkedShort,
             MessageKey::ActionShowEmailsShort,
             MessageKey::ActionHideEmailsShort,
             MessageKey::CredentialSavedActive,

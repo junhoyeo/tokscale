@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    # The smoke test covers the npm launcher packages. It builds the native
+    # binary only as a fixture and runs nothing but `--version` on it, which
+    # the Rust suite already pins (`test_version_flag`). So Rust sources are
+    # not listed: only the manifests that name the binary and its version.
     paths: &launcher_paths
       - "packages/cli/bin.js"
       - "packages/cli/src/**"
@@ -19,9 +23,8 @@ on:
       - "package.json"
       - "bun.lock"
       - "Cargo.toml"
-      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
       - "rust-toolchain.toml"
-      - "crates/**"
   pull_request:
     branches: [main]
     paths: *launcher_paths

@@ -178,7 +178,7 @@ async fn load_wrapped_data(options: &WrappedOptions) -> Result<WrappedData> {
     let mut cursor_sync_result: Option<cursor::SyncCursorResult> = None;
 
     if include_cursor && cursor_logged_in {
-        cursor_sync_result = Some(cursor::sync_cursor_cache(false).await);
+        cursor_sync_result = Some(cursor::sync_cursor_cache_for_submit(None).await);
     }
 
     if let Some(sync) = cursor_sync_result.as_ref() {
@@ -1383,9 +1383,11 @@ fn date_diff_days(date1: &str, date2: &str) -> i64 {
 }
 
 fn format_tokens_short(tokens: i64) -> String {
-    if tokens >= 1_000_000_000 {
+    // Switch units where the rounded value would reach 1000: `{:.2}` turns
+    // 999_995_000 into "1000.00M" and `{:.1}` turns 999_950 into "1000.0K".
+    if tokens >= 999_995_000 {
         format!("{:.2}B", tokens as f64 / 1_000_000_000.0)
-    } else if tokens >= 1_000_000 {
+    } else if tokens >= 999_950 {
         format!("{:.2}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
         format!("{:.1}K", tokens as f64 / 1_000.0)
@@ -1869,14 +1871,24 @@ mod tests {
     fn test_format_tokens_short_millions() {
         assert_eq!(format_tokens_short(234_000_000), "234.00M");
         assert_eq!(format_tokens_short(1_500_000), "1.50M");
-        assert_eq!(format_tokens_short(999_999_999), "1000.00M");
+        assert_eq!(format_tokens_short(999_999_999), "1.00B");
     }
 
     #[test]
     fn test_format_tokens_short_thousands() {
         assert_eq!(format_tokens_short(5_678), "5.7K");
         assert_eq!(format_tokens_short(1_000), "1.0K");
-        assert_eq!(format_tokens_short(999_999), "1000.0K");
+        assert_eq!(format_tokens_short(999_999), "1.00M");
+    }
+
+    #[test]
+    fn test_format_tokens_short_promotes_to_the_next_unit_at_the_rounding_boundary() {
+        assert_eq!(format_tokens_short(999_949), "999.9K");
+        assert_eq!(format_tokens_short(999_950), "1.00M");
+        assert_eq!(format_tokens_short(1_000_000), "1.00M");
+        assert_eq!(format_tokens_short(999_994_999), "999.99M");
+        assert_eq!(format_tokens_short(999_995_000), "1.00B");
+        assert_eq!(format_tokens_short(1_000_000_000), "1.00B");
     }
 
     #[test]
@@ -3022,6 +3034,23 @@ fn cursor_setup_warning_for_wrapped(
     include_cursor_in_graph: bool,
     cursor_logged_in: bool,
 ) -> Option<String> {
+    let cache_glob = crate::paths::home_dir()
+        .map(|home| cursor::usage_cache_glob(&home, true))
+        .unwrap_or_else(|| "~/.config/tokscale/cursor-cache/usage*.json".to_string());
+    cursor_setup_warning_with_cache_glob(
+        explicit_cursor,
+        include_cursor_in_graph,
+        cursor_logged_in,
+        &cache_glob,
+    )
+}
+
+fn cursor_setup_warning_with_cache_glob(
+    explicit_cursor: bool,
+    include_cursor_in_graph: bool,
+    cursor_logged_in: bool,
+    cache_glob: &str,
+) -> Option<String> {
     if !explicit_cursor || include_cursor_in_graph {
         return None;
     }
@@ -3033,13 +3062,13 @@ fn cursor_setup_warning_for_wrapped(
     };
 
     Some(format!(
-        "Cursor usage requires Tokscale's Cursor API cache at `~/.config/tokscale/cursor-cache/usage*.json`; {action}. Tokscale does not parse local `~/.cursor` session data."
+        "Cursor usage requires Tokscale's Cursor API cache at `{cache_glob}`; {action}. Tokscale does not parse local `~/.cursor` session data."
     ))
 }
 
 #[cfg(test)]
 mod cursor_setup_warning_tests {
-    use super::cursor_setup_warning_for_wrapped;
+    use super::{cursor_setup_warning_for_wrapped, cursor_setup_warning_with_cache_glob};
 
     #[test]
     fn wrapped_cursor_warning_suggests_login_when_not_authenticated() {
@@ -3057,6 +3086,22 @@ mod cursor_setup_warning_tests {
         let warning = cursor_setup_warning_for_wrapped(true, false, true).unwrap();
         assert!(!warning.contains("tokscale cursor login"));
         assert!(warning.contains("tokscale cursor sync --json"));
+    }
+
+    #[test]
+    fn wrapped_cursor_warning_names_the_resolved_cache_location() {
+        let warning = cursor_setup_warning_with_cache_glob(
+            true,
+            false,
+            true,
+            "/custom/cursor-cache/usage*.json",
+        )
+        .unwrap();
+        assert!(
+            warning.contains("`/custom/cursor-cache/usage*.json`"),
+            "{warning}"
+        );
+        assert!(!warning.contains("~/.config/tokscale"), "{warning}");
     }
 
     #[test]

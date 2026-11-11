@@ -756,7 +756,7 @@ pub fn fetch() -> Result<UsageOutput> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let client = tokscale_core::http::client();
+        let client = super::helpers::http_client()?;
         let resp = fetch_api(&client, &api_host, &token).await.map_err(|e| {
             if e.to_string().contains("NEEDS_AUTH") {
                 {
@@ -771,100 +771,117 @@ pub fn fetch() -> Result<UsageOutput> {
             }
         })?;
 
-        let plan = resp
-            .get("copilot_plan")
+        parse_usage_response(&resp)
+    })
+}
+
+fn parse_usage_response(resp: &serde_json::Value) -> Result<UsageOutput> {
+    let plan = resp
+        .get("copilot_plan")
+        .and_then(|v| v.as_str())
+        .map(capitalize);
+
+    let mut metrics = Vec::new();
+
+    // Try paid tier response (quota_snapshots)
+    if let Some(snapshots) = resp.get("quota_snapshots").and_then(|v| v.as_object()) {
+        let reset_date = resp
+            .get("quota_reset_date")
             .and_then(|v| v.as_str())
-            .map(capitalize);
+            .map(String::from);
 
-        let mut metrics = Vec::new();
+        for (key, value) in snapshots {
+            let remaining = value.get("remaining").and_then(|v| v.as_i64());
+            let entitlement = value.get("entitlement").and_then(|v| v.as_i64());
+            let unlimited = value.get("unlimited").and_then(|v| v.as_bool()) == Some(true);
+            let pct_remaining = if unlimited {
+                Some(100.0)
+            } else {
+                value
+                    .get("percent_remaining")
+                    .and_then(|v| v.as_f64())
+                    .filter(|pct| pct.is_finite())
+                    .or_else(|| match (remaining, entitlement) {
+                        (Some(r), Some(e)) if r >= 0 && e > 0 => Some(r as f64 / e as f64 * 100.0),
+                        _ => None,
+                    })
+            };
+            let Some(pct_remaining) = pct_remaining else {
+                continue;
+            };
+            let remaining_pct = pct_remaining.clamp(0.0, 100.0);
+            let used_pct = 100.0 - remaining_pct;
 
-        // Try paid tier response (quota_snapshots)
-        if let Some(snapshots) = resp.get("quota_snapshots").and_then(|v| v.as_object()) {
+            let remaining_label = if unlimited {
+                Some("unlimited".into())
+            } else {
+                match (remaining, entitlement) {
+                    (Some(r), Some(e)) if r >= 0 && e > 0 => Some(format!("{r}/{e} left")),
+                    _ => None,
+                }
+            };
+
+            metrics.push(UsageMetric {
+                label: pretty_category(key),
+                used_percent: used_pct,
+                remaining_percent: remaining_pct,
+                remaining_label,
+                resets_at: reset_date.clone(),
+            });
+        }
+    }
+
+    // Try free tier response (limited_user_quotas)
+    if metrics.is_empty() {
+        if let Some(quotas) = resp.get("limited_user_quotas").and_then(|v| v.as_object()) {
+            let monthly = resp.get("monthly_quotas").and_then(|v| v.as_object());
             let reset_date = resp
-                .get("quota_reset_date")
+                .get("limited_user_reset_date")
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
-            for (key, value) in snapshots {
-                let remaining = value.get("remaining").and_then(|v| v.as_i64());
-                let entitlement = value.get("entitlement").and_then(|v| v.as_i64());
-                let pct_remaining = value
-                    .get("percent_remaining")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or_else(|| match (remaining, entitlement) {
-                        (Some(r), Some(e)) if e > 0 => {
-                            (r as f64 / e as f64 * 100.0).clamp(0.0, 100.0)
-                        }
-                        _ => 100.0,
-                    })
-                    .clamp(0.0, 100.0);
-
-                let used_pct = 100.0 - pct_remaining;
-                let remaining_pct = pct_remaining;
-
-                let remaining_label = match (remaining, entitlement) {
-                    (Some(r), Some(e)) => Some(format!("{r}/{e} left")),
-                    _ => None,
+            for (key, value) in quotas {
+                let Some(remaining) = value.as_i64().filter(|remaining| *remaining >= 0) else {
+                    continue;
+                };
+                let Some(total) = monthly
+                    .and_then(|m| m.get(key))
+                    .and_then(|v| v.as_i64())
+                    .filter(|total| *total > 0)
+                else {
+                    continue;
                 };
 
+                let used = (total - remaining).max(0);
+                let used_pct = (used as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
                 metrics.push(UsageMetric {
                     label: pretty_category(key),
                     used_percent: used_pct,
-                    remaining_percent: remaining_pct,
-                    remaining_label,
+                    remaining_percent: 100.0 - used_pct,
+                    remaining_label: Some(format!("{remaining}/{total} left")),
                     resets_at: reset_date.clone(),
                 });
             }
         }
+    }
 
-        // Try free tier response (limited_user_quotas)
-        if metrics.is_empty() {
-            if let Some(quotas) = resp.get("limited_user_quotas").and_then(|v| v.as_object()) {
-                let monthly = resp.get("monthly_quotas").and_then(|v| v.as_object());
-                let reset_date = resp
-                    .get("limited_user_reset_date")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+    if metrics.is_empty() {
+        anyhow::bail!(
+            "Copilot returned no parseable usage (quota response format may have changed)"
+        );
+    }
 
-                for (key, value) in quotas {
-                    let remaining = value.as_i64().unwrap_or(0);
-                    let total = monthly
-                        .and_then(|m| m.get(key))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(remaining);
-
-                    if total > 0 {
-                        let used = (total - remaining).max(0);
-                        let used_pct = (used as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
-                        metrics.push(UsageMetric {
-                            label: pretty_category(key),
-                            used_percent: used_pct,
-                            remaining_percent: 100.0 - used_pct,
-                            remaining_label: Some(format!("{remaining}/{total} left")),
-                            resets_at: reset_date.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        if metrics.is_empty() {
-            anyhow::bail!(
-                "Copilot returned no parseable usage (quota response format may have changed)"
-            );
-        }
-
-        Ok(UsageOutput {
-            provider: "Copilot".into(),
-            account: None,
-            credential_source: None,
-            plan,
-            email: None,
-            metrics,
-            reset_credits: None,
-            credit_status: None,
-            spend_control: None,
-        })
+    Ok(UsageOutput {
+        freshness: None,
+        provider: "Copilot".into(),
+        account: None,
+        credential_source: None,
+        plan,
+        email: None,
+        metrics,
+        reset_credits: None,
+        credit_status: None,
+        spend_control: None,
     })
 }
 
@@ -875,6 +892,72 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn known_quota_copilot_paid_unknown_is_not_full_availability() {
+        for quota in [
+            serde_json::json!({}),
+            serde_json::json!({"percent_remaining":null}),
+            serde_json::json!({"remaining":5}),
+            serde_json::json!({"remaining":-1,"entitlement":10}),
+            serde_json::json!({"remaining":0,"entitlement":0}),
+            serde_json::json!({"unlimited":false}),
+        ] {
+            let response = serde_json::json!({"quota_snapshots":{"premium_interactions":quota}});
+            assert!(parse_usage_response(&response).is_err(), "{response}");
+        }
+    }
+
+    #[test]
+    fn known_quota_copilot_paid_partial_zero_ratio_and_unlimited() {
+        let output = parse_usage_response(&serde_json::json!({"quota_reset_date":"2026-11-01",
+            "quota_snapshots":{"unknown":{},"zero":{"percent_remaining":0},
+                "ratio":{"remaining":5,"entitlement":10},"all":{"unlimited":true}}}))
+        .unwrap();
+        assert_eq!(output.metrics.len(), 3);
+        let zero = output.metrics.iter().find(|m| m.label == "Zero").unwrap();
+        assert_eq!(zero.remaining_percent, 0.0);
+        assert_eq!(zero.resets_at.as_deref(), Some("2026-11-01"));
+        assert_eq!(
+            output
+                .metrics
+                .iter()
+                .find(|m| m.label == "Ratio")
+                .unwrap()
+                .remaining_percent,
+            50.0
+        );
+        assert_eq!(
+            output
+                .metrics
+                .iter()
+                .find(|m| m.label == "All")
+                .unwrap()
+                .remaining_label
+                .as_deref(),
+            Some("unlimited")
+        );
+    }
+
+    #[test]
+    fn known_quota_copilot_free_requires_remaining_and_monthly_total() {
+        for response in [
+            serde_json::json!({}),
+            serde_json::json!({"limited_user_quotas":{"chat":null},"monthly_quotas":{"chat":50}}),
+            serde_json::json!({"limited_user_quotas":{"chat":5}}),
+            serde_json::json!({"limited_user_quotas":{"chat":-1},"monthly_quotas":{"chat":50}}),
+            serde_json::json!({"limited_user_quotas":{"chat":0},"monthly_quotas":{"chat":0}}),
+        ] {
+            assert!(parse_usage_response(&response).is_err(), "{response}");
+        }
+        let output = parse_usage_response(
+            &serde_json::json!({"limited_user_quotas":{"chat":0,"unknown":null},
+            "monthly_quotas":{"chat":50,"unknown":50}}),
+        )
+        .unwrap();
+        assert_eq!(output.metrics.len(), 1);
+        assert_eq!(output.metrics[0].remaining_percent, 0.0);
+    }
 
     /// RAII restore of process-global env vars, mirroring
     /// `tokscale_core::paths::test_env::EnvGuard` (which is `pub(crate)` to

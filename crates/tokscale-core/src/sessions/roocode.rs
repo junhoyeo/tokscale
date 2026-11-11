@@ -179,7 +179,7 @@ pub(crate) fn parse_roo_kilo_file(path: &Path, source: &str) -> Vec<UnifiedMessa
                 reasoning: 0,
             },
             payload.cost,
-            agent.clone(),
+            agent.as_deref(),
         )
         .with_billing(
             entry

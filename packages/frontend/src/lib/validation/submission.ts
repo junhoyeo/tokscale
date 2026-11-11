@@ -26,18 +26,35 @@ const LEGACY_COST_FLOAT_EPSILON = 1e-6;
 const TOKEN_RELATIVE_TOLERANCE = 0.01;
 const TOKEN_ABSOLUTE_TOLERANCE = 100;
 
-const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const NonNegativeNumberSchema = z.number().finite().min(0);
+// Upper bounds aligned with PostgreSQL column types in src/lib/db/schema.ts:
+// - integer (int4): maxConcurrentSessions, sessionCount
+// - decimal(14, 4): daily_breakdown.cost, daily_breakdown_reported.cost
+// - decimal(18, 4): submissions.total_cost, submitted_device_client_totals.cost_highwater
+// - varchar(20): submissions.cli_version
+const MAX_PG_INT4 = 2_147_483_647;
+const MAX_DAILY_COST = 9_999_999_999.9999;
+const MAX_TOTAL_COST = 99_999_999_999_999;
+const MAX_CLI_VERSION_LENGTH = 20;
 
-// Keep the protocol field calendar-safe even while the allocator deliberately
-// treats its client-reported value as unverified metadata.
-const RetentionFloorSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
+const NonNegativeIntegerSchema = z.number().finite().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const NonNegativeInt32Schema = z.number().finite().int().min(0).max(MAX_PG_INT4);
+const DailyCostSchema = z.number().finite().min(0).max(MAX_DAILY_COST);
+const TotalCostSchema = z.number().finite().min(0).max(MAX_TOTAL_COST);
+
+// Keep date fields calendar-safe so out-of-range dates (e.g. "2025-02-29",
+// "2025-99-99", or non-AD year "0000-01-01") fail validation with 400
+// instead of raising SQLSTATE 22008 on PostgreSQL `date` columns.
+const CalendarDateSchema = z.string().regex(/^(?!0000-)\d{4}-\d{2}-\d{2}$/).refine(
   (value) => {
     const parsed = new Date(`${value}T00:00:00.000Z`);
     return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
   },
   { message: "Invalid calendar date" },
 );
+
+// Keep the protocol field calendar-safe even while the allocator deliberately
+// treats its client-reported value as unverified metadata.
+const RetentionFloorSchema = CalendarDateSchema;
 
 const TokenBreakdownSchema = z.object({
   input: NonNegativeIntegerSchema,
@@ -49,7 +66,7 @@ const TokenBreakdownSchema = z.object({
 
 const RecountProofCellSchema = z.object({
   tokens: TokenBreakdownSchema,
-  cost: NonNegativeNumberSchema,
+  cost: DailyCostSchema,
   messages: NonNegativeIntegerSchema,
 });
 
@@ -80,18 +97,18 @@ const ClientContributionSchema = z.object({
   modelId: z.string().min(1),
   providerId: z.string().optional(),
   tokens: TokenBreakdownSchema,
-  cost: NonNegativeNumberSchema,
+  cost: DailyCostSchema,
   messages: NonNegativeIntegerSchema,
   provenance: ClientContributionProvenanceSchema.optional(),
 });
 
 const DailyContributionSchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: CalendarDateSchema,
   timestampMs: z.number().int().min(1e12).max(Number.MAX_SAFE_INTEGER).optional(),
-  activeTimeMs: z.number().int().min(0).optional(),
+  activeTimeMs: NonNegativeIntegerSchema.optional(),
   totals: z.object({
     tokens: NonNegativeIntegerSchema,
-    cost: NonNegativeNumberSchema,
+    cost: DailyCostSchema,
     messages: NonNegativeIntegerSchema,
     /**
      * Whether `cost` accounts for every token counted in `tokens`.
@@ -115,30 +132,30 @@ const DailyContributionSchema = z.object({
 const YearSummarySchema = z.object({
   year: z.string().regex(/^\d{4}$/),
   totalTokens: NonNegativeIntegerSchema,
-  totalCost: NonNegativeNumberSchema,
+  totalCost: TotalCostSchema,
   range: z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    start: CalendarDateSchema,
+    end: CalendarDateSchema,
   }),
 });
 
 const DataSummarySchema = z.object({
   totalTokens: NonNegativeIntegerSchema,
-  totalCost: NonNegativeNumberSchema,
+  totalCost: TotalCostSchema,
   totalDays: NonNegativeIntegerSchema,
   activeDays: NonNegativeIntegerSchema,
-  averagePerDay: NonNegativeNumberSchema,
-  maxCostInSingleDay: NonNegativeNumberSchema,
+  averagePerDay: DailyCostSchema,
+  maxCostInSingleDay: DailyCostSchema,
   clients: z.array(SourceSchema),
   models: z.array(z.string()),
 });
 
 const ExportMetaSchema = z.object({
   generatedAt: z.string(),
-  version: z.string(),
+  version: z.string().max(MAX_CLI_VERSION_LENGTH),
   dateRange: z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    start: CalendarDateSchema,
+    end: CalendarDateSchema,
   }),
 });
 
@@ -211,10 +228,10 @@ function normalizeLegacySources(data: unknown): unknown {
 }
 
 const TimeMetricsSchema = z.object({
-  totalActiveTimeMs: z.number().int().min(0),
-  longestContinuousMs: z.number().int().min(0),
-  maxConcurrentSessions: z.number().int().min(0),
-  sessionCount: z.number().int().min(0),
+  totalActiveTimeMs: NonNegativeIntegerSchema,
+  longestContinuousMs: NonNegativeIntegerSchema,
+  maxConcurrentSessions: NonNegativeInt32Schema,
+  sessionCount: NonNegativeInt32Schema,
 });
 
 /**
@@ -254,6 +271,9 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
     // New CLIs declare completeness per client. Absence preserves the legacy
     // meaning where `fullHistory` applies to every declared parser.
     fullHistoryClients: z.array(SourceSchema).optional(),
+    // Clients a date-bounded scan read in full for every day it dates. Only
+    // clients whose growth the receiver budgets per day can use it.
+    completeDayClients: z.array(SourceSchema).optional(),
     // Retained protocol metadata. The high-water cannot yet use it as proof
     // that local history was pruned.
     retentionFloors: z
@@ -269,7 +289,7 @@ const SubmissionDataSchema = z.preprocess(normalizeLegacySources, z.object({
       .record(
         SourceSchema,
         z.record(
-          z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+          CalendarDateSchema,
           z.record(z.string().min(1), RecountProofEntrySchema)
         )
       )
@@ -467,7 +487,12 @@ export function validateSubmission(data: unknown): ValidationResult {
   }
 
   // 3b. Active days should match
-  const activeDays = submission.contributions.filter((d) => d.totals.tokens > 0).length;
+  const activeDays = submission.contributions.filter(
+    (d) =>
+      d.totals.tokens > 0 ||
+      d.totals.cost > 0 ||
+      (d.totals.messages ?? 0) > 0
+  ).length;
   if (activeDays !== submission.summary.activeDays) {
     warnings.push(
       `Active days mismatch: summary=${submission.summary.activeDays}, calculated=${activeDays}`
@@ -523,6 +548,12 @@ export function validateSubmission(data: unknown): ValidationResult {
       if (exceedsTolerance(clientsCostSum, day.totals.cost, COST_RELATIVE_TOLERANCE, COST_ABSOLUTE_TOLERANCE)) {
         errors.push(
           `Day ${day.date}: client cost (${clientsCostSum.toFixed(2)}) does not match total (${day.totals.cost.toFixed(2)})`
+        );
+      }
+
+      if (clientsCostSum > MAX_DAILY_COST) {
+        errors.push(
+          `Day ${day.date}: client cost sum (${clientsCostSum.toFixed(4)}) exceeds maximum allowed daily cost (${MAX_DAILY_COST.toFixed(4)})`
         );
       }
     }

@@ -265,6 +265,7 @@ function existingSubmissionRow() {
 
 function selectResult(columns: Record<string, unknown>, store: Store) {
   const keys = new Set(Object.keys(columns));
+  if (keys.has("leaderboardHidden")) return [{ leaderboardHidden: false }];
   if (keys.has("date") && keys.has("sourceBreakdown")) return store.days;
   if (keys.size === 1 && keys.has("sourceBreakdown")) {
     return store.days.map(({ sourceBreakdown }) => ({ sourceBreakdown }));
@@ -396,6 +397,7 @@ function submissionBody(
     parserVersions?: Record<string, number>;
     fullHistory: boolean;
     fullHistoryClients?: string[];
+    completeDayClients?: string[];
   },
 ) {
   const dates = days.map((day) => day.date).sort();
@@ -411,6 +413,7 @@ function submissionBody(
       parserVersions: options.parserVersions ?? {},
       fullHistory: options.fullHistory,
       ...(options.fullHistoryClients ? { fullHistoryClients: options.fullHistoryClients } : {}),
+      ...(options.completeDayClients ? { completeDayClients: options.completeDayClients } : {}),
     },
     summary: { clients: options.clients },
     years: [],
@@ -607,5 +610,96 @@ describe("POST /api/submit bounded-window preserve notices", () => {
     expect(disappeared(json.warnings, "codex")).toHaveLength(1);
     expect(activeTimeNotices(json.warnings)).toHaveLength(1);
     expect(storedDay(store, "2026-01-15")!.sourceBreakdown.codex.tokens).toBe(500);
+  });
+});
+
+describe("POST /api/submit complete-day windows", () => {
+  const ignoredCursor = (warnings: string[] | undefined) =>
+    (warnings ?? []).filter((w) => w.startsWith("Ignored Cursor"));
+
+  it("credits a week of Cursor usage without its older history once a full submit set the baseline", async () => {
+    const store = newStore();
+    await submit(
+      store,
+      submissionBody(
+        [
+          { date: "2025-12-01", clients: [{ client: "cursor", tokens: 1_000 }] },
+          { date: "2026-02-09", clients: [{ client: "cursor", tokens: 100 }] },
+        ],
+        {
+          clients: ["cursor"],
+          parserVersions: { cursor: 2 },
+          fullHistory: true,
+          fullHistoryClients: ["cursor"],
+        },
+      ),
+    );
+
+    const json = await submit(
+      store,
+      submissionBody(
+        [
+          { date: "2026-02-09", clients: [{ client: "cursor", tokens: 150 }] },
+          { date: "2026-02-10", clients: [{ client: "cursor", tokens: 200 }] },
+        ],
+        {
+          clients: ["cursor"],
+          parserVersions: { cursor: 2 },
+          fullHistory: false,
+          fullHistoryClients: [],
+          completeDayClients: ["cursor"],
+        },
+      ),
+    );
+
+    expect(ignoredCursor(json.warnings)).toEqual([]);
+    expect(storedDay(store, "2025-12-01")!.sourceBreakdown.cursor.tokens).toBe(1_000);
+    expect(storedDay(store, "2026-02-09")!.sourceBreakdown.cursor.tokens).toBe(150);
+    expect(storedDay(store, "2026-02-10")!.sourceBreakdown.cursor.tokens).toBe(200);
+  });
+
+  it("asks for one full submit when no Cursor baseline exists yet", async () => {
+    const store = newStore();
+    const json = await submit(
+      store,
+      submissionBody(
+        [{ date: "2026-02-10", clients: [{ client: "cursor", tokens: 200 }] }],
+        {
+          clients: ["cursor"],
+          parserVersions: { cursor: 2 },
+          fullHistory: false,
+          fullHistoryClients: [],
+          completeDayClients: ["cursor"],
+        },
+      ),
+    );
+
+    expect(ignoredCursor(json.warnings)).toEqual([
+      expect.stringContaining("`tokscale submit` without a date filter"),
+    ]);
+    expect(storedDay(store, "2026-02-10")?.sourceBreakdown.cursor).toBeUndefined();
+  });
+
+  it("does not ask for a full submit for a client the window has no usage for", async () => {
+    // A full submit with no Cursor rows keeps the baseline pending too, so the
+    // advice would repeat on every bounded submit.
+    const store = newStore();
+    const json = await submit(
+      store,
+      submissionBody(
+        [{ date: "2026-02-10", clients: [{ client: "codex", tokens: 200 }] }],
+        {
+          clients: ["codex", "cursor"],
+          parserVersions: { codex: 1, cursor: 2 },
+          fullHistory: false,
+          fullHistoryClients: [],
+          completeDayClients: ["cursor"],
+        },
+      ),
+    );
+
+    expect(
+      (json.warnings ?? []).filter((w) => w.includes("without a date filter")),
+    ).toEqual([]);
   });
 });
