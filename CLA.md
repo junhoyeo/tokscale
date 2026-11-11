@@ -1,6 +1,6 @@
 # Tokscale Contributor License Agreement
 
-> **Draft for legal review.** This agreement follows the structure of the Apache Software Foundation Individual Contributor License Agreement v2.2, with an added section on licensing of contributions (section 3).
+> This agreement follows the structure of the Apache Software Foundation Individual Contributor License Agreement v2.2, with an added section on licensing of contributions (section 3).
 
 Thank you for contributing to Tokscale. This agreement sets out the rights you give Junho Yeo ("the Maintainer") for your contributions. You keep the copyright in your contributions. This agreement gives the Maintainer a license to use them.
 
