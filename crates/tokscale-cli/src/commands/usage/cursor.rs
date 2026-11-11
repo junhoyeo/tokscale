@@ -964,6 +964,7 @@ mod tests {
             format!("{local:?}"),
             format!("{refreshed:?}"),
             format!("{local:#?}"),
+            format!("{refreshed:#?}"),
         ] {
             assert!(!out.contains("ACCESS_SECRET"), "{out}");
             assert!(!out.contains("REFRESH_SECRET"), "{out}");
