@@ -96,10 +96,16 @@ const require = createRequire(import.meta.url);
 const { IncrementalCache } = require("next/dist/server/lib/incremental-cache/index.js");
 const { workAsyncStorage } = require("next/dist/server/app-render/work-async-storage.external.js");
 const { workUnitAsyncStorage } = require("next/dist/server/app-render/work-unit-async-storage.external.js");
+const previewProps = {
+  previewModeEncryptionKey: "test",
+  previewModeId: "test",
+  previewModeSigningKey: "test",
+};
 const cache = new IncrementalCache({
   fs, dev: false, flushToDisk: false, minimalMode: false,
   serverDistDir: "/tmp/tokscale-analytics-test/server", requestHeaders: {}, maxMemoryCacheSize: 50 * 1024 * 1024,
-  getPrerenderManifest: () => ({ version: 4, routes: {}, dynamicRoutes: {}, notFoundRoutes: [], preview: { previewModeId: "test" } }),
+  previewProps,
+  prerenderManifest: { version: 4, routes: {}, dynamicRoutes: {}, notFoundRoutes: [], preview: previewProps },
 });
 interface Store {
   page: string;
