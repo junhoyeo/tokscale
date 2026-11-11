@@ -2170,6 +2170,8 @@ Tokscale은 [LiteLLM의 가격 데이터베이스](https://github.com/BerriAI/li
 6. 브랜치에 푸시 (`git push origin feature/amazing-feature`)
 7. Pull Request 열기
 
+`packages/frontend`를 변경하는 Pull Request는 [기여자 라이선스 계약(CLA)](CLA.md)에 한 번 서명해야 합니다. CLA 체크가 Pull Request에 서명 방법을 댓글로 안내합니다. 자세한 내용은 [CONTRIBUTING.md](CONTRIBUTING.md)를 참고하세요.
+
 ### 개발 가이드라인
 
 - 기존 코드 스타일 따르기

@@ -2169,6 +2169,8 @@ Tokscale 从 [LiteLLM 的价格数据库](https://github.com/BerriAI/litellm/blo
 6. 推送到分支（`git push origin feature/amazing-feature`）
 7. 打开 Pull Request
 
+修改 `packages/frontend` 的 Pull Request 需要一次性签署[贡献者许可协议（CLA）](CLA.md)。CLA 检查会在 Pull Request 中评论签署方法。详情请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ### 开发指南
 
 - 遵循现有代码风格

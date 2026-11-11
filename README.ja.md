@@ -2133,6 +2133,8 @@ Tokscaleは[LiteLLMの価格データベース](https://github.com/BerriAI/litel
 6. ブランチにプッシュ（`git push origin feature/amazing-feature`）
 7. プルリクエストを開く
 
+`packages/frontend` を変更するプルリクエストには、[コントリビューターライセンス契約（CLA）](CLA.md) への一度きりの署名が必要です。CLA チェックがプルリクエストに手順をコメントします。詳しくは [CONTRIBUTING.md](CONTRIBUTING.md) をご覧ください。
+
 ### 開発ガイドライン
 
 - 既存のコードスタイルに従う

@@ -2248,6 +2248,8 @@ Contributions are welcome! Please follow these steps:
 6. Push to the branch (`git push origin feature/amazing-feature`)
 7. Open a Pull Request
 
+Pull requests that change `packages/frontend` need a one-time signature of the [Contributor License Agreement](CLA.md). The CLA check comments on the pull request with instructions. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
 ### Development Guidelines
 
 - Follow existing code style
