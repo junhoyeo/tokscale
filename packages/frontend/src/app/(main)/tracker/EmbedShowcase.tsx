@@ -80,7 +80,13 @@ export function EmbedShowcase({ intro }: { intro?: ReactNode } = {}) {
 
         <Field as="div">
           <span>Markdown for your README</span>
-          <CopyCommand command={snippet} label="Copy README markdown" prompt={false} wrap />
+          <CopyCommand
+            command={snippet}
+            analytics={{ event: "readme_snippet_copied", location: "tracker_embed" }}
+            label="Copy README markdown"
+            prompt={false}
+            wrap
+          />
         </Field>
       </Controls>
 

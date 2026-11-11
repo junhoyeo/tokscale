@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type DragEvent } from "react";
 import styled, { keyframes } from "styled-components";
+import type { LocalViewerSource } from "@/lib/analytics/events";
 import type { TokenContributionData } from "@/lib/types";
 import { isValidContributionData, normalizeContributionData } from "@/lib/utils";
 import { SecondaryButton } from "@/components/leaderboard/RankingUI";
 
 interface DataInputProps {
-  onDataLoaded: (data: TokenContributionData) => void;
+  onDataLoaded: (data: TokenContributionData, source: LocalViewerSource) => void;
 }
 
 // Graph exports contain daily client/model aggregates rather than raw messages. 64 MiB leaves ample
@@ -46,7 +47,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
     };
   }, []);
 
-  const parseText = useCallback((text: string) => {
+  const parseText = useCallback((text: string, source: LocalViewerSource) => {
     setError(null);
 
     if (!text.trim()) {
@@ -62,7 +63,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
         return;
       }
 
-      onDataLoaded(parsed);
+      onDataLoaded(parsed, source);
     } catch (err) {
       setError(`Invalid JSON: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
@@ -71,11 +72,11 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
   const parseJson = useCallback(() => {
     loadGenerationRef.current += 1;
     setIsLoading(false);
-    parseText(rawJson);
+    parseText(rawJson, "paste");
   }, [parseText, rawJson]);
 
   // A file is read in the browser, like pasted text: nothing leaves the machine.
-  const loadFile = useCallback(async (file: File) => {
+  const loadFile = useCallback(async (file: File, source: "file" | "drop") => {
     const generation = ++loadGenerationRef.current;
     setIsLoading(false);
     setError(null);
@@ -91,7 +92,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
       const text = await readFileText(file);
       if (!mountedRef.current || generation !== loadGenerationRef.current) return;
       setRawJson(text);
-      parseText(text);
+      parseText(text, source);
     } catch (err) {
       if (!mountedRef.current || generation !== loadGenerationRef.current) return;
       setError(`Failed to read ${file.name}: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -114,7 +115,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
       if (!mountedRef.current || generation !== loadGenerationRef.current) return;
 
       setRawJson(JSON.stringify(data, null, 2));
-      onDataLoaded(data);
+      onDataLoaded(data, "sample");
     } catch (err) {
       if (!mountedRef.current || generation !== loadGenerationRef.current) return;
       setError(`Failed to load sample data: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -147,7 +148,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
           event.preventDefault();
           setIsDragging(false);
           const file = event.dataTransfer.files[0];
-          if (file) void loadFile(file);
+          if (file) void loadFile(file, "drop");
         }}
       >
         <CardHeader>
@@ -205,7 +206,7 @@ export function DataInput({ onDataLoaded }: DataInputProps) {
                 const file = event.target.files?.[0];
                 // Clear it so choosing the same file again still loads it.
                 event.target.value = "";
-                if (file) void loadFile(file);
+                if (file) void loadFile(file, "file");
               }}
             />
 

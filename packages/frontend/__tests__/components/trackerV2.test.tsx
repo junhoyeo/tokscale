@@ -71,7 +71,11 @@ describe("tracker page", () => {
   });
 
   it("server-renders the whole typed command", () => {
-    const html = renderToStaticMarkup(<CopyCommand command="bunx tokscale@latest" typed />);
+    const html = renderToStaticMarkup(<CopyCommand
+        command="bunx tokscale@latest"
+        analytics={{ event: "install_command_copied", location: "tracker_hero" }}
+        typed
+      />);
     expect(html).toContain("bunx tokscale@latest");
     expect(html).toContain("--chars:20");
   });

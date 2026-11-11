@@ -2,6 +2,7 @@
 
 import styled, { css } from "styled-components";
 import { TOKSCALE_INSTAGRAM_HANDLE, TOKSCALE_INSTAGRAM_URL } from "@/lib/community";
+import { trackEvent } from "@/lib/analytics/events";
 import { Container, Eyebrow, focusRing, Lead, Section, SectionHeader, SectionTitle, TextLink } from "./primitives";
 
 export interface InstagramPost {
@@ -32,14 +33,34 @@ export function InstagramSection({ posts = INSTAGRAM_POSTS }: { posts?: Instagra
             <Eyebrow>Instagram</Eyebrow>
             <SectionTitle id="home-instagram-title">Tokscale data, in your feed.</SectionTitle>
             <Lead>Cards on how people build with AI, drawn from Tokscale data, and on the money behind AI.</Lead>
-            <TextLink href={TOKSCALE_INSTAGRAM_URL} target="_blank" rel="noopener noreferrer">
+            <TextLink
+              href={TOKSCALE_INSTAGRAM_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() =>
+                trackEvent("outbound_link_clicked", {
+                  target: "instagram",
+                  location: "home_instagram_follow",
+                })
+              }
+            >
               Follow {TOKSCALE_INSTAGRAM_HANDLE} <span aria-hidden="true">↗</span>
             </TextLink>
           </SectionHeader>
           <Posts $single={posts.length === 1}>
             {posts.map((post) => (
               <li key={post.href}>
-                <PostLink href={post.href} target="_blank" rel="noopener noreferrer">
+                <PostLink
+                  href={post.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() =>
+                    trackEvent("outbound_link_clicked", {
+                      target: "instagram",
+                      location: "home_instagram_post",
+                    })
+                  }
+                >
                   {/* eslint-disable-next-line @next/next/no-img-element -- small vendored card images */}
                   <img src={post.image} alt={post.alt} width={540} height={720} loading="lazy" decoding="async" />
                   <Caption>{post.caption}</Caption>

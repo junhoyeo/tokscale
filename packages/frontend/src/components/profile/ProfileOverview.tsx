@@ -7,6 +7,7 @@ import Image from "next/image";
 import styled, { css } from "styled-components";
 import { toast } from "react-toastify";
 import { formatCurrency, formatNumber } from "@/lib/utils";
+import { trackEvent } from "@/lib/analytics/events";
 import { ProfileEmbedDialog } from "./ProfileEmbedDialog";
 import type { ProfileStatsData, ProfileUser } from "./types";
 
@@ -381,6 +382,7 @@ export function ProfileOverview({
   const handleShareClick = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
+      trackEvent("profile_shared");
       toast.success("Link copied to clipboard!");
     } catch {
       toast.error("Failed to copy link");

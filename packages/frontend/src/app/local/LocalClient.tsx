@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import styled from "styled-components";
+import { trackEvent, type LocalViewerSource } from "@/lib/analytics/events";
 import type { TokenContributionData } from "@/lib/types";
 import { DataInput } from "@/components/DataInput";
 import { GraphContainer } from "@/components/GraphContainer";
@@ -41,6 +42,11 @@ export function formatExportRange(range: { start?: string; end?: string } | unde
 export default function LocalClient() {
   const [data, setData] = useState<TokenContributionData | null>(null);
 
+  const handleDataLoaded = (loadedData: TokenContributionData, source: LocalViewerSource) => {
+    setData(loadedData);
+    trackEvent("local_viewer_loaded", { source });
+  };
+
   return (
     <div className="service-page-shell">
       <Navigation />
@@ -54,7 +60,7 @@ export default function LocalClient() {
         </PageHeader>
 
         {!data ? (
-          <DataInput onDataLoaded={setData} />
+          <DataInput onDataLoaded={handleDataLoaded} />
         ) : (
           <Content>
             <LoadedBar>
