@@ -29,11 +29,13 @@ export function trackServerEvent(name: ServerAnalyticsEvent, request: Request): 
   try {
     after(async () => {
       try {
-        await fetch(`${origin}/_vercel/insights/event`, {
+        const response = await fetch(`${origin}/_vercel/insights/event`, {
           method: "POST",
           headers,
           body: JSON.stringify({ o: `${origin}${pathname}`, ts: Date.now(), r: "", en: name }),
         });
+        // Drain the body so the connection is released.
+        await response.text();
       } catch {
         // Analytics must not affect the response.
       }

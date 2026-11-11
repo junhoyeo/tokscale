@@ -54,12 +54,15 @@ describe("trackServerEvent", () => {
 
   it("sends the event after the response, without the query, cookies or referer", async () => {
     process.env.VERCEL = "1";
+    const response = new Response("ok");
+    fetchMock.mockResolvedValue(response);
 
     trackServerEvent("signed_up", callbackRequest());
     expect(fetchMock).not.toHaveBeenCalled();
     await runDeferred();
 
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(response.bodyUsed).toBe(true);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://tokscale.ai/_vercel/insights/event");
     expect(init.method).toBe("POST");
