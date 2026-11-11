@@ -258,7 +258,7 @@ export async function runCla({ api, eventName, event, repository, dryRun = false
     const prompt = findPrompt(comments);
     const body = passed
       ? `${MARKER}\nAll identified contributors have signed the frontend CLA or are exempt.`
-      : `${MARKER}\nThis pull request changes \`packages/frontend/\`. Please read the [CLA](https://github.com/${repository}/blob/main/CLA.md) (currently a draft for legal review).\n\n` +
+      : `${MARKER}\nThis pull request changes \`packages/frontend/\`. Please read the [CLA](https://github.com/${repository}/blob/main/CLA.md).\n\n` +
         (unsigned.length ? `Awaiting a signature from: ${unsigned.map((user) => `@${user.name}`).join(", ")}.\n\nPost this exact text as the entire comment (no quotes or extra text):\n\n${SIGN_TEXT}\n\n` : "") +
         (contributors.unknown.length ? "Some commit authors are not linked to a GitHub account. Link their commit email to the correct GitHub account, then post `recheck`. A signed committer is not a substitute for an unidentified author.\n\n" : "") +
         "Signatures are public and apply to later frontend pull requests. Post `recheck` to run this check again.";
