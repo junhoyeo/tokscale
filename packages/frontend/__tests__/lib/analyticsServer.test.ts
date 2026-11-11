@@ -1,17 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  after: vi.fn(),
-  track: vi.fn(),
-}));
+const mocks = vi.hoisted(() => ({ after: vi.fn() }));
 
 vi.mock("next/server", () => ({ after: mocks.after }));
-vi.mock("@vercel/analytics/server", () => ({ track: mocks.track }));
 
 import { trackServerEvent } from "@/lib/analytics/server";
 
+const fetchMock = vi.fn();
 let originalVercel: string | undefined;
-let pending: Promise<unknown> | undefined;
 
 function callbackRequest(): Request {
   return new Request("https://tokscale.ai/api/auth/github/callback?code=oauth-code&state=csrf", {
@@ -25,18 +21,22 @@ function callbackRequest(): Request {
   });
 }
 
+function runDeferred(): Promise<unknown> {
+  const [callback] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+  return callback();
+}
+
 beforeEach(() => {
   originalVercel = process.env.VERCEL;
   delete process.env.VERCEL;
-  pending = undefined;
-  mocks.track.mockReset();
   mocks.after.mockReset();
-  mocks.after.mockImplementation((callback: () => unknown) => {
-    pending = Promise.resolve(callback());
-  });
+  fetchMock.mockReset();
+  fetchMock.mockResolvedValue(new Response(""));
+  vi.stubGlobal("fetch", fetchMock);
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (originalVercel === undefined) {
     delete process.env.VERCEL;
   } else {
@@ -49,31 +49,49 @@ describe("trackServerEvent", () => {
     trackServerEvent("signed_up", callbackRequest());
 
     expect(mocks.after).not.toHaveBeenCalled();
-    expect(mocks.track).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("forwards only the user agent, the client IP and the site origin", async () => {
+  it("sends the event after the response, without the query, cookies or referer", async () => {
     process.env.VERCEL = "1";
-    mocks.track.mockResolvedValue(undefined);
 
     trackServerEvent("signed_up", callbackRequest());
-    await pending;
+    expect(fetchMock).not.toHaveBeenCalled();
+    await runDeferred();
 
-    expect(mocks.track).toHaveBeenCalledExactlyOnceWith("signed_up", undefined, {
-      headers: {
-        "user-agent": "Mozilla/5.0",
-        "x-forwarded-for": "203.0.113.7",
-        referer: "https://tokscale.ai",
-      },
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://tokscale.ai/_vercel/insights/event");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({
+      "content-type": "application/json",
+      "user-agent": "Mozilla/5.0",
+      "x-vercel-ip": "203.0.113.7",
+      "x-va-server": "1",
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      o: "https://tokscale.ai/api/auth/github/callback",
+      ts: expect.any(Number),
+      r: "",
+      en: "signed_up",
     });
   });
 
-  it("runs tracking after the response and swallows a rejection", async () => {
+  it("swallows a failed request", async () => {
     process.env.VERCEL = "1";
-    mocks.track.mockRejectedValue(new Error("analytics unavailable"));
+    fetchMock.mockRejectedValue(new Error("analytics unavailable"));
 
-    expect(() => trackServerEvent("group_created", callbackRequest())).not.toThrow();
-    expect(mocks.after).toHaveBeenCalledOnce();
-    await expect(pending).resolves.toBeUndefined();
+    trackServerEvent("group_created", callbackRequest());
+
+    await expect(runDeferred()).resolves.toBeUndefined();
+  });
+
+  it("does not throw when the event cannot be scheduled", () => {
+    process.env.VERCEL = "1";
+    mocks.after.mockImplementation(() => {
+      throw new Error("outside a request scope");
+    });
+
+    expect(() => trackServerEvent("cli_authorized", callbackRequest())).not.toThrow();
   });
 });
