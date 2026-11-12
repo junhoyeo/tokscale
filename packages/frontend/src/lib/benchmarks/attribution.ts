@@ -79,11 +79,11 @@ const SOURCE_TEXT: Record<SourceId, Omit<SourceNote, "retrievedAt" | "dataDate">
   tbench: {
     id: "tbench",
     name: "Terminal-Bench",
-    provides: "Terminal-Bench 4.0 official leaderboard rows (results only, no task content)",
+    provides: "Terminal-Bench 4.1 official leaderboard rows (results only, no task content)",
     license: "Terms not stated",
     licenseUrl: null,
     url: "https://www.tbench.ai/leaderboard",
-    credit: "Terminal-Bench 4.0 leaderboard, tbench.ai. Every score links back to the leaderboard.",
+    credit: "Terminal-Bench 4.1 leaderboard, tbench.ai. Every score links back to the leaderboard.",
   },
 };
 

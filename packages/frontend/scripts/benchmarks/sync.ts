@@ -2,7 +2,7 @@
  * Sync benchmark, spec and price snapshots for the Models dashboard.
  *
  * Fetches models.dev, the Epoch AI benchmark archive, the LMArena boards
- * (Hugging Face datasets-server API) and the Terminal-Bench 4.0 leaderboard;
+ * (Hugging Face datasets-server API) and the Terminal-Bench leaderboard;
  * maps external model ids to Tokscale model keys; validates with zod; and
  * writes src/content/benchmarks/*.json plus a mapping report. Raw downloads
  * are cached under .stealth-cache/benchmarks (gitignored, never committed).

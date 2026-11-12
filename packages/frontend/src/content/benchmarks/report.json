@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-12T04:27:29.523Z",
+  "generatedAt": "2026-11-12T05:16:50.033Z",
   "sources": [
     {"source":"models.dev","ok":true,"error":null,"results":288,"mappedResults":288,"externalModels":288,"mappedModels":288},
     {"source":"epoch","ok":true,"error":null,"results":1093,"mappedResults":903,"externalModels":504,"mappedModels":331},
-    {"source":"lmarena","ok":false,"error":"Error: https://datasets-server.huggingface.co/filter?dataset=lmarena-ai%2Fleaderboard-dataset&config=agent&split=latest&where=%22category%22%3D%27overall%27&offset=0&length=100: HTTP 502","results":201,"mappedResults":181,"externalModels":133,"mappedModels":115},
-    {"source":"tbench","ok":false,"error":"Error: Terminal-Bench 4.0 leaderboard not found in the page","results":35,"mappedResults":35,"externalModels":23,"mappedModels":23}
+    {"source":"lmarena","ok":false,"error":"TimeoutError: The operation timed out.","results":201,"mappedResults":181,"externalModels":133,"mappedModels":115},
+    {"source":"tbench","ok":true,"error":null,"results":35,"mappedResults":35,"externalModels":23,"mappedModels":23}
   ],
   "methods": {
     "exact": 300,
