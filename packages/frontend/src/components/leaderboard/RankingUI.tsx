@@ -257,6 +257,13 @@ const MobileMeta = styled.p`
   white-space: nowrap;
 `;
 
+/**
+ * Requested size of a row avatar. A ranking renders a table row and a phone row
+ * for each account and CSS shows one of them, so both ask for the same URL and
+ * load lazily: the browser then fetches one image per account, near the viewport.
+ */
+export const ROW_AVATAR_PX = 38;
+
 export function MobileRankingRow({
   rank,
   href,
@@ -288,8 +295,10 @@ export function MobileRankingRow({
       >
         <MobileRank data-rank={rank <= 3 ? rank : undefined}>#{rank}</MobileRank>
         <MobileAvatar
-          src={avatarSrc(avatarUrl, username, 38)}
+          src={avatarSrc(avatarUrl, username, ROW_AVATAR_PX)}
           alt=""
+          loading="lazy"
+          decoding="async"
         />
         <MobileIdentity>
           <MobileName>{displayName}</MobileName>

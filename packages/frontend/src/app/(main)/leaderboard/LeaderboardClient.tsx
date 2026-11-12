@@ -13,6 +13,7 @@ import {
   MetricValue,
   MobileRankingList,
   MobileRankingRow,
+  ROW_AVATAR_PX,
   SegmentedControl,
 } from "@/components/leaderboard/RankingUI";
 import { getLeaderboardPeriodLabel } from "@/components/leaderboard/presentation";
@@ -850,8 +851,10 @@ const LeaderboardRow = memo(function LeaderboardRow({
           aria-current={isCurrentUser ? "true" : undefined}
         >
           <DesktopAvatar
-            src={avatarSrc(user.avatarUrl, user.username, 36)}
+            src={avatarSrc(user.avatarUrl, user.username, ROW_AVATAR_PX)}
             alt=""
+            loading="lazy"
+            decoding="async"
           />
           <UserInfo>
             <UserDisplayName>

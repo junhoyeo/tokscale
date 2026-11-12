@@ -16,6 +16,7 @@ import {
   MetricValue,
   MobileRankingList,
   MobileRankingRow,
+  ROW_AVATAR_PX,
   SecondaryActionLink,
   SecondaryButton,
   SegmentedControl,
@@ -465,7 +466,7 @@ function GroupRow({
           data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
-          <UserAvatar src={avatarSrc(user.avatarUrl, user.username, 34)} alt="" />
+          <UserAvatar src={avatarSrc(user.avatarUrl, user.username, ROW_AVATAR_PX)} alt="" loading="lazy" decoding="async" />
           <span>
             {user.displayName || user.username}
             <Muted>@{user.username}</Muted>
