@@ -4,6 +4,7 @@ import { JetBrains_Mono, Figtree, Instrument_Serif } from "next/font/google";
 import NextTopLoader from "nextjs-toploader";
 import { ToastContainer } from "react-toastify";
 import { WebAnalytics } from "@/components/analytics/WebAnalytics";
+import { isPrerenderedDeployment } from "@/lib/prerender";
 import { Providers } from "@/lib/providers";
 import { getRootMetadata } from "@/lib/seo/rootMetadata";
 import "./globals.css";
@@ -32,7 +33,9 @@ const jetbrainsMono = JetBrains_Mono({
 export async function generateMetadata(): Promise<Metadata> {
   // APP_URL belongs to the container runtime, not the Docker build. Make
   // metadata request-dynamic so self-hosted deployments emit their own origin.
-  await connection();
+  // Calling connection() here makes every route render per request, so skip it
+  // where the origin is known at build time.
+  if (!isPrerenderedDeployment()) await connection();
   return getRootMetadata();
 }
 

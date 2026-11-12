@@ -22,6 +22,9 @@ export const metadata: Metadata = {
   },
 };
 
+/** Where pages are prerendered, rebuild this one in the background as often as the leaderboard totals refresh. */
+export const revalidate = 300;
+
 export default async function TrackerPage() {
   // All-time totals, the same numbers as the leaderboard's "Ranked users" and "Tokens".
   const board = await getLeaderboardData("all", 1, 1, "tokens").catch(() => null);
