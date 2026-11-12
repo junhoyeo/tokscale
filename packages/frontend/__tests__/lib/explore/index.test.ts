@@ -36,6 +36,17 @@ describe("@/lib/explore without DATABASE_URL", () => {
     expect(await explore.getModelDetail("claude-opus-5", "7d")).not.toBeNull();
     expect(await explore.getModelDetail("does-not-exist")).toBeNull();
   });
+
+  it("returns the pinned human with their own rank, or the first-ranked human when they have no row", async () => {
+    const explore = await import("@/lib/explore");
+
+    const pinned = await explore.getFeaturedHuman("dicklesworthstone", "30d");
+    expect(pinned.human).toMatchObject({ username: "Dicklesworthstone", rank: 2 });
+    expect(pinned.coverage.period).toBe("30d");
+
+    const fallback = await explore.getFeaturedHuman("no-such-account", "30d");
+    expect(fallback.human).toMatchObject({ username: "P-0001", rank: 1 });
+  });
   it.each(["production", undefined])("does not invent usage in %s without a database", async (mode) => {
     vi.stubEnv("NODE_ENV", mode);
     try {
@@ -43,6 +54,7 @@ describe("@/lib/explore without DATABASE_URL", () => {
       const loaders = [
         () => explore.getCommunitySnapshot(), () => explore.getModelLeaderboard(),
         () => explore.getAgentLeaderboard(), () => explore.getHumansLeaderboard(),
+        () => explore.getFeaturedHuman("Dicklesworthstone"),
         () => explore.getModelDetail("claude-opus-5"), () => explore.listModelKeys(),
       ];
       for (const load of loaders) await expect(load()).rejects.toThrow("DATABASE_URL is required");
