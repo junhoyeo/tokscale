@@ -226,6 +226,24 @@ function inList(values: string[]): SQL {
 }
 
 /**
+ * jsonpath that is true for a day whose breakdown names one of `rawModels`,
+ * either as a key of a client's per-model map or as its legacy `modelId`.
+ *
+ * It is a cheap necessary condition, checked on the stored JSON before any
+ * expansion, so a model's detail only expands the days that mention it rather
+ * than every day in the window. MODEL_CELLS still decides which cells count.
+ * JSON string syntax is valid jsonpath string syntax, so the names are quoted
+ * with JSON.stringify.
+ */
+export function mentionsModelPath(rawModels: string[]): string {
+  const tests = rawModels.flatMap((raw) => {
+    const name = JSON.stringify(raw);
+    return [`exists(@.models.${name})`, `@.modelId == ${name}`];
+  });
+  return `$.* ? (${tests.join(" || ")})`;
+}
+
+/**
  * The catalog covers all time, so a known model can have no usage in a
  * shorter period. Such a period has no detail: the model page then falls
  * back to all time instead of showing an empty window.
@@ -265,6 +283,7 @@ export async function computeModelDetail(
       WHERE u.leaderboard_hidden = false
         AND d.date >= ${window.start} AND d.date <= ${window.end}
         AND jsonb_typeof(d.source_breakdown) = 'object'
+        AND d.source_breakdown @? ${mentionsModelPath(aliases)}::jsonpath
         AND jsonb_typeof(c.value) = 'object'
         AND m.key IN (${inList(aliases)})
         AND ${CELL_TOKENS} > 0
