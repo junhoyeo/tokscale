@@ -4,7 +4,7 @@ import type { CapitalEvent, EventType, Measure } from "./schema";
 
 /** Financing is an economic category, independent of an event's canonical route. */
 const FINANCING_TYPES: ReadonlySet<EventType> = new Set([
-  "equity_round", "strategic_investment", "debt_facility", "tender_offer", "ipo", "registration", "form_d",
+  "equity_round", "strategic_investment", "debt_facility", "tender_offer", "ipo", "public_offering", "registration", "form_d",
 ]);
 
 export const EQUITY_MEASURES: readonly Measure[] = ["equity_raised", "equity_investment", "investment_commitment"];

@@ -339,6 +339,7 @@ export const EVENT_TYPES = [
   "debt_facility",
   "tender_offer",
   "ipo",
+  "public_offering",
   "registration",
   "form_d",
   "compute_contract",

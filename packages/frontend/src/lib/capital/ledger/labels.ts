@@ -110,6 +110,7 @@ export const EVENT_TYPE_LABELS: Record<EventType, string> = {
   debt_facility: "Debt financing",
   tender_offer: "Tender offer",
   ipo: "IPO",
+  public_offering: "Public offering",
   registration: "Registration statement",
   form_d: "Form D",
   compute_contract: "Compute contract",
@@ -170,6 +171,7 @@ export const BASIS_TEXT: Record<Basis, { symbol: string; words: string }> = {
 const FEED_TAGS: Array<[EventType, string]> = [
   ["equity_round", "Round"],
   ["ipo", "IPO"],
+  ["public_offering", "Offering"],
   ["debt_facility", "Debt"],
   ["tender_offer", "Tender"],
   ["form_d", "Filing"],
