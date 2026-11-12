@@ -19071,9 +19071,10 @@ mod tests {
         .unwrap();
         drop(conn);
         std::fs::create_dir_all(root.join("sessions")).unwrap();
+        // Keep the second event SQL-only so ignoring archives cannot pass.
         std::fs::write(
             root.join("sessions/session.jsonl.reset.2026-08-30"),
-            &transcript,
+            format!("{}\n{shared}\n", header_event("session")),
         )
         .unwrap();
         let clients = vec!["openclaw".to_string()];
