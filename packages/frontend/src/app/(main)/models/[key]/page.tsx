@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Navigation } from "@/components/layout/Navigation";
 import { PublicFooter } from "@/components/layout/PublicFooter";
-import { getModelDetail, type ExplorePeriod, type ModelDetail, type ModelRef } from "@/lib/explore";
+import { getModelDetail, getModelSummary, type ExplorePeriod, type ModelDetail, type ModelRef, type ModelUsageRow } from "@/lib/explore";
 import { modelKey } from "@/lib/explore/modelKey";
 import { modelRef } from "@/lib/explore/modelMeta";
 import { benchmarkData } from "@/lib/benchmarks";
@@ -85,11 +85,22 @@ function researchModelRef(key: string): ModelRef {
   return { ...ref, labSlug: companySlugForLab(ref.labSlug) };
 }
 
+/**
+ * The row behind the title and description, with the same all-time fallback as
+ * loadDetail. Metadata also runs for every link prefetch, so it reads the
+ * cached leaderboard rollup instead of the detail, which scans usage.
+ */
+async function loadSummary(key: string): Promise<ModelUsageRow | null> {
+  const summary = await getModelSummary(key, DEFAULT_EXPLORE_PERIOD);
+  if (summary || DEFAULT_EXPLORE_PERIOD === "all") return summary;
+  return getModelSummary(key, "all");
+}
+
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { key: rawKey } = await params;
   const key = decodeKey(rawKey);
-  const loaded = key ? await loadDetail(key, DEFAULT_EXPLORE_PERIOD) : null;
-  if (key && !loaded) {
+  const summary = key ? await loadSummary(key) : null;
+  if (key && !summary) {
     const researchKey = researchOnlyKey(key);
     if (researchKey) {
       const model = modelRef(researchKey);
@@ -111,16 +122,15 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
       };
     }
   }
-  if (!key || !loaded) {
+  if (!key || !summary) {
     return { title: "Model not found | Tokscale", robots: { index: false } };
   }
 
-  const { model, summary } = loaded.detail;
-  const canonical = modelUrl(model.key);
-  const by = model.lab ? ` by ${model.lab}` : "";
-  const benchmarks = benchmarkData.forModel(model.key).length > 0 ? ", benchmark results" : "";
-  const title = `${model.name}${by} - Usage, Active Users, Est. Cost | Tokscale`;
-  const description = `${model.name}${by}: ${formatCount(summary.activeUsers)} active users and ${formatTokens(summary.tokens)} tokens in public Tokscale submissions, with daily trend, token mix, estimated cost${benchmarks}, and the coding agents that use it.`;
+  const canonical = modelUrl(summary.key);
+  const by = summary.lab ? ` by ${summary.lab}` : "";
+  const benchmarks = benchmarkData.forModel(summary.key).length > 0 ? ", benchmark results" : "";
+  const title = `${summary.name}${by} - Usage, Active Users, Est. Cost | Tokscale`;
+  const description = `${summary.name}${by}: ${formatCount(summary.activeUsers)} active users and ${formatTokens(summary.tokens)} tokens in public Tokscale submissions, with daily trend, token mix, estimated cost${benchmarks}, and the coding agents that use it.`;
 
   return {
     title,

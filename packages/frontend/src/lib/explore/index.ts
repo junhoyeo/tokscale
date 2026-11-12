@@ -7,6 +7,7 @@
  * when the database is not configured; it never publishes invented activity.
  */
 import { fixtureAgents, fixtureHumans, fixtureModelDetail, fixtureModels, fixtureSnapshot, fixtureCoverage } from "./fixtures";
+import { isIdentifiedModelKey, modelKey } from "./modelKey";
 import { pageRows, rankRows, indexableModelKeys } from "./rollup";
 import type {
   AgentUsageRow,
@@ -90,6 +91,19 @@ export async function getFeaturedHuman(
 export async function getModelDetail(key: string, period: ExplorePeriod = "30d"): Promise<ModelDetail | null> {
   if (!hasDatabase()) return fixtureModelDetail(key, period);
   return (await loadDb()).getModelDetailCached(key, period);
+}
+
+/**
+ * A model's leaderboard row in `period`: its name, lab, active users and tokens.
+ * It comes from the period rollup the leaderboards already cache, so unlike
+ * getModelDetail it never scans usage. Null where getModelDetail is null.
+ */
+export async function getModelSummary(key: string, period: ExplorePeriod = "30d"): Promise<ModelUsageRow | null> {
+  if (!hasDatabase()) return fixtureModels(period).find((m) => m.key === key) ?? null;
+  const canonical = modelKey(key);
+  if (!isIdentifiedModelKey(canonical)) return null;
+  const rollup = await (await loadDb()).getPeriodRollup(period);
+  return rollup.models.find((m) => m.key === canonical) ?? null;
 }
 
 export async function getCommunitySnapshot(period: ExplorePeriod = "30d"): Promise<CommunitySnapshot> {
