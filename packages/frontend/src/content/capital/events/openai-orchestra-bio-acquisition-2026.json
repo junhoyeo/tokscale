@@ -1,0 +1,65 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_orchestra_bio_2026_10_20",
+      "url": "https://openai.com/index/openai-to-acquire-orchestra-bio/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "OpenAI acquires Orchestra Bio",
+      "publishedAt": "2026-10-20",
+      "retrievedAt": "2026-11-12",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_orchestra_bio_acquisition_2026",
+    "slug": "openai-orchestra-bio-acquisition-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "OpenAI acquires Orchestra Bio",
+    "summary": "OpenAI acquired Orchestra Bio and plans to combine its drug-development coordination platform with OpenAI’s Rosalind models and tools for life-sciences research.",
+    "date": "2026-10-20",
+    "dates": {
+      "completed": "2026-10-20"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "acquirer"
+        ]
+      },
+      {
+        "org": "org_orchestra_bio",
+        "roles": [
+          "target"
+        ]
+      }
+    ],
+    "amounts": [],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Acquisition",
+        "text": "OpenAI acquired Orchestra Bio, a drug-development coordination platform.",
+        "sourceId": "src_openai_orchestra_bio_2026_10_20",
+        "quote": "OpenAI has acquired Orchestra Bio"
+      },
+      {
+        "label": "Integration",
+        "text": "OpenAI is bringing Orchestra’s team and technology together with Rosalind.",
+        "sourceId": "src_openai_orchestra_bio_2026_10_20",
+        "quote": "We're bringing Orchestra's team and technology together with Rosalind, our AI models and tools for life sciences research."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_openai_orchestra_bio_2026_10_20"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

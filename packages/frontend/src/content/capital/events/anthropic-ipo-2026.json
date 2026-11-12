@@ -1,0 +1,116 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_s1a_2026_11_10",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Amendment No. 2 to Form S-1, November 10, 2026",
+      "publishedAt": "2026-11-10",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1/A",
+        "accession": "0001628280-26-072484",
+        "cik": "0002130357",
+        "filedAt": "2026-11-10"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_anthropic_s1_2026_10_26",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026067168/anthropicpbc-sx1.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Form S-1, October 26, 2026",
+      "publishedAt": "2026-10-26",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001628280-26-067168",
+        "cik": "0002130357",
+        "filedAt": "2026-10-26"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_ipo_2026",
+    "slug": "anthropic-ipo-2026",
+    "kind": "ipo",
+    "types": [
+      "ipo",
+      "registration"
+    ],
+    "title": "Anthropic sets terms for its initial public offering",
+    "summary": "Anthropic filed its initial registration statement on October 26. Its amendment of November 10 set the size and expected price range of a proposed offering of Class A common stock. Strategic partners agreed to a concurrent private placement, which is recorded as a separate event.",
+    "date": "2026-11-10",
+    "dates": {
+      "announced": "2026-11-10",
+      "filed": "2026-10-26"
+    },
+    "status": "filed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "issuer",
+          "filer"
+        ]
+      }
+    ],
+    "amounts": [],
+    "quantities": [
+      {
+        "id": "offering_shares",
+        "label": "Class A shares in the proposed offering",
+        "measure": "shares",
+        "value": 825000000,
+        "basis": "exact",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "This is an initial public offering of shares of Class A common stock of Anthropic, PBC. We are selling 801,351,354 shares of Class A common stock and the selling stockholders identified in this prospectus are selling an additional 23,648,646 shares of Class A common stock."
+      },
+      {
+        "id": "underwriter_option",
+        "label": "Additional shares covered by the underwriters’ option",
+        "measure": "shares",
+        "value": 123750000,
+        "basis": "up_to",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "the underwriters have the option to purchase up to an additional 123,750,000 shares of Class A common stock from Anthropic, PBC at the initial public offering price less the underwriting discount."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Initial filing",
+        "text": "Anthropic filed its initial Form S-1 on October 26, 2026.",
+        "sourceId": "src_anthropic_s1_2026_10_26",
+        "quote": "As filed with the Securities and Exchange Commission on October 26, 2026."
+      },
+      {
+        "label": "Expected price range",
+        "text": "The initial public offering price is expected to be between $70.00 and $78.00 per share.",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "It is currently estimated that the initial public offering price per share will be between $70.00 and $78.00."
+      },
+      {
+        "label": "Listing plan",
+        "text": "Anthropic applied to list its Class A common stock on the Nasdaq Global Select Market under ANT.",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "We have applied to list our Class A common stock on the Nasdaq Global Select Market under the symbol \"ANT.\""
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_anthropic_ipo_private_placement_2026",
+        "note": "The concurrent private placement is contingent on this offering."
+      }
+    ],
+    "sourceIds": [
+      "src_anthropic_s1a_2026_11_10",
+      "src_anthropic_s1_2026_10_26"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

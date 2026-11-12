@@ -27,8 +27,38 @@ export interface SyncContext {
 
 export function createSyncContext(knownKeys: ReadonlySet<string>, rules: readonly AliasRule[]): SyncContext {
   const aliases = new Map<string, AliasRule>();
-  for (const rule of rules) aliases.set(aliasRuleId(rule.source, rule.externalId), rule);
-  return { knownKeys, aliases, decisions: new Map(), unmapped: new Map() };
+  // A key an earlier run mapped to stays mappable: models.dev drops retired models, and a run
+  // without the production database does not see every model in use.
+  const keys = new Set(knownKeys);
+  for (const rule of rules) {
+    aliases.set(aliasRuleId(rule.source, rule.externalId), rule);
+    if (rule.modelKey) keys.add(rule.modelKey);
+  }
+  return { knownKeys: keys, aliases, decisions: new Map(), unmapped: new Map() };
+}
+
+/**
+ * A source whose fetch failed keeps its previous snapshot, so its alias rules and
+ * its unmapped models from the previous report carry over unchanged.
+ */
+export function keepPreviousSource(
+  ctx: SyncContext,
+  source: AliasSource,
+  previousUnmapped: ReadonlyArray<{ source: string; externalModel: string; name: string | null; benchmarks: string[]; newestDate: string | null }>,
+): void {
+  for (const [id, rule] of ctx.aliases) {
+    if (rule.source === source) ctx.decisions.set(id, rule);
+  }
+  for (const row of previousUnmapped) {
+    if (row.source !== source) continue;
+    ctx.unmapped.set(aliasRuleId(source, row.externalModel), {
+      source,
+      externalModel: row.externalModel,
+      name: row.name,
+      benchmarks: new Set(row.benchmarks),
+      newestDate: row.newestDate,
+    });
+  }
 }
 
 /**

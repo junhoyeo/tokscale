@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import path from "node:path";
 import { isIdentifiedModelKey } from "@/lib/explore/modelKey";
 import type { ModelUsageRow } from "@/lib/explore/types";
-import { aliasRuleId, type AliasRule } from "@/lib/benchmarks/mapping";
+import type { AliasRule } from "@/lib/benchmarks/mapping";
 import {
   aliasFileSchema,
   catalogSnapshotSchema,
@@ -33,7 +33,7 @@ import {
   type SourceId,
   type SourceSnapshot,
 } from "@/lib/benchmarks/schema";
-import { aliasRulesForWrite, createSyncContext, type SyncContext } from "@/lib/benchmarks/sync/context";
+import { aliasRulesForWrite, createSyncContext, keepPreviousSource, type SyncContext } from "@/lib/benchmarks/sync/context";
 import { buildEpochSnapshot, epochRequiredFiles, EPOCH_ZIP_URL } from "@/lib/benchmarks/sync/epoch";
 import {
   buildArenaSnapshot,
@@ -247,6 +247,8 @@ async function main(): Promise<void> {
   const previousAliases = readJson<unknown>(path.join(OUT_DIR, "aliases.json"));
   const rules: AliasRule[] = previousAliases ? aliasFileSchema.parse(previousAliases).aliases : [];
   const previousCatalog = readJson<unknown>(path.join(OUT_DIR, "models-dev.json"));
+  const previousReport = readJson<unknown>(path.join(OUT_DIR, "report.json"));
+  const previousUnmapped = previousReport ? reportSchema.parse(previousReport).unmapped : [];
 
   const statuses: SourceStatus[] = [];
   let api: ModelsDevApi | null = null;
@@ -285,10 +287,7 @@ async function main(): Promise<void> {
       console.error(`[sync] ${source.id} failed, keeping the previous snapshot: ${error}`);
       const previous = readJson<unknown>(path.join(OUT_DIR, source.file));
       if (previous) snapshots.push(sourceSnapshotSchema.parse(previous));
-      // Keep that source's alias rules as they were.
-      for (const rule of rules) {
-        if (rule.source === source.id) ctx.decisions.set(aliasRuleId(rule.source, rule.externalId), rule);
-      }
+      keepPreviousSource(ctx, source.id, previousUnmapped);
     }
   }
 

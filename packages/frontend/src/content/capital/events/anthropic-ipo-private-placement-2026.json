@@ -1,0 +1,237 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_s1a_2026_11_10",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Amendment No. 2 to Form S-1, November 10, 2026",
+      "publishedAt": "2026-11-10",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1/A",
+        "accession": "0001628280-26-072484",
+        "cik": "0002130357",
+        "filedAt": "2026-11-10"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_ipo_private_placement_2026",
+    "slug": "anthropic-ipo-private-placement-2026",
+    "kind": "financing",
+    "types": [
+      "strategic_investment"
+    ],
+    "title": "Anthropic $26 billion strategic private placement alongside its IPO",
+    "summary": "Seven strategic partners agreed to buy Class N shares of Anthropic in a private placement that is contingent on its initial public offering and scheduled to close right after it.",
+    "date": "2026-11-10",
+    "dates": {
+      "filed": "2026-11-10"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "issuer"
+        ]
+      },
+      {
+        "org": "org_alphabet",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "Google LLC"
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_amd",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_broadcom",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_micron",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "Micron Technology, Inc."
+      },
+      {
+        "org": "org_microsoft",
+        "roles": [
+          "strategic_investor"
+        ]
+      },
+      {
+        "org": "org_tsmc",
+        "roles": [
+          "strategic_investor"
+        ],
+        "note": "TSMC Partners, Ltd."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "strategic_placement",
+        "label": "Concurrent strategic private placement",
+        "measure": "investment_commitment",
+        "value": 26000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "to": "org_anthropic",
+        "condition": "Contingent on completion of the IPO and satisfaction of other conditions",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "We have entered into an agreement with each of Advanced Micro Devices, Inc., Broadcom Inc., Google LLC (funding a portion of its previously committed investment obligations under the Google 2026 NPA (as defined below)), Micron Technology, Inc., Microsoft Corporation, NVIDIA Corporation, and TSMC Partners, Ltd., pursuant to which they have agreed, severally and not jointly, to purchase an aggregate of $26.0 billion of our Class N common stock in a private placement at a price per share equal to the initial public offering price."
+      },
+      {
+        "id": "google",
+        "label": "Google LLC",
+        "measure": "investment_commitment",
+        "value": 10000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_alphabet",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO. Funds part of Google's earlier investment commitment under the Google 2026 NPA.",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      },
+      {
+        "id": "nvidia",
+        "label": "NVIDIA",
+        "measure": "investment_commitment",
+        "value": 10000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_nvidia",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      },
+      {
+        "id": "amd",
+        "label": "AMD",
+        "measure": "investment_commitment",
+        "value": 2500000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_amd",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      },
+      {
+        "id": "broadcom",
+        "label": "Broadcom",
+        "measure": "investment_commitment",
+        "value": 1000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_broadcom",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      },
+      {
+        "id": "micron",
+        "label": "Micron",
+        "measure": "investment_commitment",
+        "value": 1000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_micron",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      },
+      {
+        "id": "microsoft",
+        "label": "Microsoft",
+        "measure": "investment_commitment",
+        "value": 1000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_microsoft",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      },
+      {
+        "id": "tsmc",
+        "label": "TSMC Partners",
+        "measure": "investment_commitment",
+        "value": 500000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_tsmc",
+        "to": "org_anthropic",
+        "partOf": "strategic_placement",
+        "condition": "Based on an assumed $74.00 IPO price per share and contingent on completion of the IPO",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Based on an assumed initial public offering price of $74.00 per share, which is the midpoint of the estimated offering price range set forth on the cover page of this prospectus, Google LLC would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, NVIDIA Corporation (\"NVIDIA\") would purchase 135,135,135 shares of our Class N common stock for approximately $10.0 billion, Advanced Micro Devices, Inc. (\"AMD\") would purchase 33,783,783 shares of our Class N common stock for approximately $2.5 billion, Broadcom Inc. (\"Broadcom\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Micron Technology, Inc. (\"Micron\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, Microsoft Corporation (\"Microsoft\") would purchase 13,513,513 shares of our Class N common stock for approximately $1.0 billion, and TSMC Partners, Ltd. (\"TSMC\") would purchase 6,756,756 shares of our Class N common stock for approximately $500 million."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Placement condition",
+        "text": "The concurrent private placement is scheduled to close after the IPO, subject to the IPO closing and other conditions.",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "The private placement is contingent upon, and is scheduled to close immediately subsequent to, the completion of this offering as well as the satisfaction of certain conditions as further described in the section titled \"Concurrent Private Placement.\""
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_anthropic_ipo_2026",
+        "note": "The placement closes only if the initial public offering is completed."
+      }
+    ],
+    "sourceIds": [
+      "src_anthropic_s1a_2026_11_10"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

@@ -1,6 +1,6 @@
 {
   "source": "models.dev",
-  "retrievedAt": "2026-10-21T00:58:42.069Z",
+  "retrievedAt": "2026-11-12T04:27:32.100Z",
   "fetchUrls": [
     "https://models.dev/api.json"
   ],
@@ -203,6 +203,35 @@
         {"provider":"azure","id":"claude-fable-5-1","input":10,"output":50,"cacheRead":0.25,"cacheWrite":12.5,"context":1000000,"maxOutput":128000},
         {"provider":"openrouter","id":"anthropic/claude-fable-5.1","input":10,"output":50,"cacheRead":0.25,"cacheWrite":12.5,"context":1000000,"maxOutput":128000},
         {"provider":"vercel","id":"anthropic/claude-fable-5.1","input":10,"output":50,"cacheRead":0.25,"cacheWrite":12.5,"context":1000000,"maxOutput":128000}
+      ]
+    },
+    {
+      "modelKey": "claude-fable-5-2",
+      "name": "Claude Fable 5.2",
+      "labProvider": "anthropic",
+      "releaseDate": "2026-11-09",
+      "knowledgeCutoff": "2026-06",
+      "context": 1000000,
+      "maxOutput": 128000,
+      "inputModalities": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": false,
+      "reasoning": true,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"anthropic","id":"claude-fable-5-2","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000},
+        {"provider":"amazon-bedrock","id":"anthropic.claude-fable-5-2","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000},
+        {"provider":"google-vertex","id":"claude-fable-5-2@default","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000},
+        {"provider":"google-vertex-anthropic","id":"claude-fable-5-2@default","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000},
+        {"provider":"azure","id":"claude-fable-5-2","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000},
+        {"provider":"openrouter","id":"anthropic/claude-fable-5.2","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000},
+        {"provider":"vercel","id":"anthropic/claude-fable-5.2","input":8,"output":40,"cacheRead":0.2,"cacheWrite":10,"context":1000000,"maxOutput":128000}
       ]
     },
     {
@@ -533,7 +562,8 @@
         {"provider":"amazon-bedrock","id":"anthropic.claude-sonnet-4-5-20250929-v1:0","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75,"context":200000,"maxOutput":64000},
         {"provider":"google-vertex","id":"claude-sonnet-4-5@20250929","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75,"context":200000,"maxOutput":64000},
         {"provider":"google-vertex-anthropic","id":"claude-sonnet-4-5@20250929","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75,"context":200000,"maxOutput":64000},
-        {"provider":"openrouter","id":"anthropic/claude-sonnet-4.5","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75,"context":1000000,"maxOutput":64000}
+        {"provider":"openrouter","id":"anthropic/claude-sonnet-4.5","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75,"context":1000000,"maxOutput":64000},
+        {"provider":"vercel","id":"anthropic/claude-sonnet-4.5","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75,"context":1000000,"maxOutput":64000}
       ]
     },
     {
@@ -677,7 +707,7 @@
       "releaseDate": "2025-12-01",
       "knowledgeCutoff": "2025-09",
       "context": 163840,
-      "maxOutput": 16000,
+      "maxOutput": 16384,
       "inputModalities": [
         "text"
       ],
@@ -688,7 +718,7 @@
       "reasoning": false,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"deepseek/deepseek-chat","input":0.2574,"output":1.0287,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":16000}
+        {"provider":"openrouter","id":"deepseek/deepseek-chat","input":0.32,"output":0.89,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":16384}
       ]
     },
     {
@@ -698,7 +728,7 @@
       "releaseDate": "2025-08-21",
       "knowledgeCutoff": "2025-03-31",
       "context": 163840,
-      "maxOutput": 32768,
+      "maxOutput": 147456,
       "inputModalities": [
         "text"
       ],
@@ -709,7 +739,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"deepseek/deepseek-chat-v3.1","input":0.25,"output":0.95,"cacheRead":0.13,"cacheWrite":null,"context":163840,"maxOutput":32768}
+        {"provider":"openrouter","id":"deepseek/deepseek-chat-v3.1","input":0.25,"output":0.95,"cacheRead":0.13,"cacheWrite":null,"context":163840,"maxOutput":147456}
       ]
     },
     {
@@ -731,7 +761,8 @@
       "toolCall": false,
       "offerings": [
         {"provider":"amazon-bedrock","id":"deepseek.r1-v1:0","input":1.35,"output":5.4,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":32768},
-        {"provider":"vercel","id":"deepseek/deepseek-r1","input":1.35,"output":5.4,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":32768}
+        {"provider":"vercel","id":"deepseek/deepseek-r1","input":1.35,"output":5.4,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":32768},
+        {"provider":"togetherai","id":"deepseek-ai/DeepSeek-R1","input":3,"output":7,"cacheRead":null,"cacheWrite":null,"context":163839,"maxOutput":163839}
       ]
     },
     {
@@ -752,7 +783,8 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"deepseek/deepseek-r1-0528","input":0.5,"output":2.15,"cacheRead":0.35,"cacheWrite":null,"context":163840,"maxOutput":32768}
+        {"provider":"openrouter","id":"deepseek/deepseek-r1-0528","input":0.5,"output":2.15,"cacheRead":0.35,"cacheWrite":null,"context":163840,"maxOutput":32768},
+        {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-R1-0528","input":0.5,"output":2.15,"cacheRead":0.35,"cacheWrite":null,"context":163840,"maxOutput":64000}
       ]
     },
     {
@@ -761,8 +793,8 @@
       "labProvider": null,
       "releaseDate": "2024-12-26",
       "knowledgeCutoff": null,
-      "context": 163840,
-      "maxOutput": 8192,
+      "context": 131072,
+      "maxOutput": 131072,
       "inputModalities": [
         "text"
       ],
@@ -773,6 +805,7 @@
       "reasoning": false,
       "toolCall": true,
       "offerings": [
+        {"provider":"togetherai","id":"deepseek-ai/DeepSeek-V3","input":1.25,"output":1.25,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V3","input":0.32,"output":0.89,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":8192}
       ]
     },
@@ -817,6 +850,7 @@
       "offerings": [
         {"provider":"amazon-bedrock","id":"deepseek.v3-v1:0","input":0.58,"output":1.68,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":81920},
         {"provider":"vercel","id":"deepseek/deepseek-v3.1","input":0.25,"output":0.95,"cacheRead":0.13,"cacheWrite":null,"context":163840,"maxOutput":128000},
+        {"provider":"togetherai","id":"deepseek-ai/DeepSeek-V3-1","input":0.6,"output":1.7,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V3.1","input":0.25,"output":0.95,"cacheRead":0.13,"cacheWrite":null,"context":163840,"maxOutput":8192}
       ]
     },
@@ -827,7 +861,7 @@
       "releaseDate": "2025-12-01",
       "knowledgeCutoff": "2024-07",
       "context": 163840,
-      "maxOutput": 65536,
+      "maxOutput": 147456,
       "inputModalities": [
         "text"
       ],
@@ -839,8 +873,9 @@
       "toolCall": true,
       "offerings": [
         {"provider":"amazon-bedrock","id":"deepseek.v3.2","input":0.62,"output":1.85,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":81920},
-        {"provider":"openrouter","id":"deepseek/deepseek-v3.2","input":0.28,"output":0.42,"cacheRead":0.028,"cacheWrite":null,"context":163840,"maxOutput":65536},
-        {"provider":"vercel","id":"deepseek/deepseek-v3.2","input":0.62,"output":1.85,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8000}
+        {"provider":"openrouter","id":"deepseek/deepseek-v3.2","input":0.26,"output":0.38,"cacheRead":0.13,"cacheWrite":null,"context":163840,"maxOutput":147456},
+        {"provider":"vercel","id":"deepseek/deepseek-v3.2","input":0.62,"output":1.85,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8000},
+        {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V3.2","input":0.26,"output":0.38,"cacheRead":0.13,"cacheWrite":null,"context":163840,"maxOutput":64000}
       ]
     },
     {
@@ -859,12 +894,12 @@
       ],
       "openWeights": true,
       "reasoning": true,
-      "toolCall": false,
+      "toolCall": true,
       "offerings": [
         {"provider":"azure","id":"deepseek-v4-flash","input":0.19,"output":0.51,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":384000},
-        {"provider":"openrouter","id":"deepseek/deepseek-v4-flash","input":0.091,"output":0.182,"cacheRead":0.0182,"cacheWrite":null,"context":1048576,"maxOutput":943717},
+        {"provider":"openrouter","id":"deepseek/deepseek-v4-flash","input":0.09,"output":0.18,"cacheRead":0.018,"cacheWrite":null,"context":1048576,"maxOutput":393216},
         {"provider":"vercel","id":"deepseek/deepseek-v4-flash","input":0.13,"output":0.26,"cacheRead":0.028,"cacheWrite":null,"context":1000000,"maxOutput":384000},
-        {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Flash","input":0.09,"output":0.18,"cacheRead":0.018,"cacheWrite":null,"context":1048576,"maxOutput":16384}
+        {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Flash","input":0.09,"output":0.18,"cacheRead":0.018,"cacheWrite":0.1125,"context":1048576,"maxOutput":16384}
       ]
     },
     {
@@ -874,7 +909,7 @@
       "releaseDate": "2026-07-31",
       "knowledgeCutoff": "2025-05",
       "context": 1048576,
-      "maxOutput": 131072,
+      "maxOutput": 943718,
       "inputModalities": [
         "text"
       ],
@@ -885,8 +920,8 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"deepseek/deepseek-v4-flash-0731","input":0.1298,"output":0.3894,"cacheRead":0.00413,"cacheWrite":null,"context":1048576,"maxOutput":131072},
-        {"provider":"vercel","id":"deepseek/deepseek-v4-flash-0731","input":0.076,"output":0.153,"cacheRead":0.014,"cacheWrite":null,"context":1000000,"maxOutput":384000},
+        {"provider":"openrouter","id":"deepseek/deepseek-v4-flash-0731","input":0.0434,"output":0.3,"cacheRead":0.035,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"vercel","id":"deepseek/deepseek-v4-flash-0731","input":0.13,"output":0.26,"cacheRead":0.028,"cacheWrite":null,"context":1000000,"maxOutput":384000},
         {"provider":"togetherai","id":"deepseek-ai/DeepSeek-V4-Flash-0731","input":0.14,"output":0.28,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":384000},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Flash-0731","input":0.06,"output":0.18,"cacheRead":0.015,"cacheWrite":null,"context":1048576,"maxOutput":384000},
         {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4-Flash-0731","input":0.13,"output":0.26,"cacheRead":0.028,"cacheWrite":null,"context":1048576,"maxOutput":384000}
@@ -899,7 +934,7 @@
       "releaseDate": "2026-08-21",
       "knowledgeCutoff": null,
       "context": 1048576,
-      "maxOutput": 262144,
+      "maxOutput": 943717,
       "inputModalities": [
         "text",
         "image"
@@ -911,7 +946,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"deepseek/deepseek-v4-flash-vision-exp","input":0.2156,"output":0.6468,"cacheRead":0.00686,"cacheWrite":null,"context":1048576,"maxOutput":262144},
+        {"provider":"openrouter","id":"deepseek/deepseek-v4-flash-vision-exp","input":0.44,"output":1.32,"cacheRead":0.014,"cacheWrite":null,"context":1048576,"maxOutput":943717},
         {"provider":"vercel","id":"deepseek/deepseek-v4-flash-vision-exp","input":0.2156,"output":0.6468,"cacheRead":0.0068,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","input":0.44,"output":1.32,"cacheRead":0.014,"cacheWrite":null,"context":1048576,"maxOutput":384000}
       ]
@@ -932,13 +967,12 @@
       ],
       "openWeights": true,
       "reasoning": true,
-      "toolCall": false,
+      "toolCall": true,
       "offerings": [
         {"provider":"azure","id":"deepseek-v4-pro","input":1.74,"output":3.48,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":384000},
-        {"provider":"openrouter","id":"deepseek/deepseek-v4-pro","input":0.331122,"output":0.662244,"cacheRead":0.027594,"cacheWrite":null,"context":1048576,"maxOutput":384000},
-        {"provider":"vercel","id":"deepseek/deepseek-v4-pro","input":0.66,"output":1.98,"cacheRead":0.022,"cacheWrite":null,"context":1000000,"maxOutput":384000},
-        {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Pro","input":1.3,"output":2.6,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":16384},
-        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4-Pro","input":1.74,"output":3.48,"cacheRead":0.145,"cacheWrite":null,"context":1048576,"maxOutput":262144}
+        {"provider":"openrouter","id":"deepseek/deepseek-v4-pro","input":0.95526,"output":1.91052,"cacheRead":0.079605,"cacheWrite":null,"context":1048576,"maxOutput":384000},
+        {"provider":"vercel","id":"deepseek/deepseek-v4-pro","input":1.32,"output":3.96,"cacheRead":0.132,"cacheWrite":null,"context":1048600,"maxOutput":1048600},
+        {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Pro","input":1.3,"output":2.6,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":16384}
       ]
     },
     {
@@ -960,11 +994,11 @@
       "toolCall": true,
       "offerings": [
         {"provider":"deepseek","id":"deepseek-v4-pro","input":0.66,"output":1.98,"cacheRead":0.022,"cacheWrite":null,"context":1048576,"maxOutput":393216},
-        {"provider":"openrouter","id":"deepseek/deepseek-v4-pro-0813","input":0.66,"output":1.98,"cacheRead":0.022,"cacheWrite":null,"context":1048576,"maxOutput":384000},
+        {"provider":"openrouter","id":"deepseek/deepseek-v4-pro-0813","input":0.111,"output":4.44,"cacheRead":0.097,"cacheWrite":null,"context":1048576,"maxOutput":943718},
         {"provider":"vercel","id":"deepseek/deepseek-v4-pro-0813","input":0.66,"output":1.98,"cacheRead":0.066,"cacheWrite":null,"context":1000000,"maxOutput":384000},
         {"provider":"togetherai","id":"deepseek-ai/DeepSeek-V4-Pro-0813","input":1.32,"output":3.96,"cacheRead":0.13,"cacheWrite":null,"context":1048576,"maxOutput":384000},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4-Pro-0813","input":1.3,"output":2.6,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":384000},
-        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4-Pro-0813","input":1.32,"output":3.96,"cacheRead":null,"cacheWrite":null,"context":1048576,"maxOutput":262144}
+        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4-Pro-0813","input":1.32,"output":3.96,"cacheRead":0.132,"cacheWrite":null,"context":1048576,"maxOutput":262144}
       ]
     },
     {
@@ -987,12 +1021,12 @@
       "toolCall": true,
       "offerings": [
         {"provider":"azure","id":"deepseek-v4.1-flash","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1000000,"maxOutput":128000},
-        {"provider":"openrouter","id":"deepseek/deepseek-v4.1-flash","input":0.02832,"output":0.12,"cacheRead":0.000566,"cacheWrite":null,"context":1048576,"maxOutput":943718},
-        {"provider":"vercel","id":"deepseek/deepseek-v4.1-flash","input":0.075,"output":0.3,"cacheRead":0.0015,"cacheWrite":null,"context":1048576,"maxOutput":32768},
+        {"provider":"openrouter","id":"deepseek/deepseek-v4.1-flash","input":0.006,"output":0.5,"cacheRead":0.005,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"vercel","id":"deepseek/deepseek-v4.1-flash","input":0.3,"output":1.2,"cacheRead":0.007,"cacheWrite":null,"context":1048576,"maxOutput":32768},
         {"provider":"togetherai","id":"deepseek-ai/DeepSeek-V4.1-Flash","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":384000},
         {"provider":"fireworks-ai","id":"accounts/fireworks/models/deepseek-v4p1-flash","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1000000,"maxOutput":384000},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4.1-Flash","input":0.2,"output":0.6,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":384000},
-        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4.1-Flash","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":32768}
+        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4.1-Flash","input":0.3,"output":1.2,"cacheRead":0.007,"cacheWrite":null,"context":1048576,"maxOutput":32768}
       ]
     },
     {
@@ -1015,11 +1049,11 @@
       "toolCall": true,
       "offerings": [
         {"provider":"deepseek","id":"deepseek-flash","input":0.15,"output":0.6,"cacheRead":0.003,"cacheWrite":null,"context":1048576,"maxOutput":393216},
-        {"provider":"openrouter","id":"deepseek/deepseek-v4.1-flash-1017","input":0.15,"output":0.6,"cacheRead":0.003,"cacheWrite":null,"context":1048576,"maxOutput":393216},
-        {"provider":"vercel","id":"deepseek/deepseek-v4.1-flash-1017","input":0.075,"output":0.3,"cacheRead":0.0015,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
-        {"provider":"fireworks-ai","id":"accounts/fireworks/models/deepseek-v4p1-flash-1017","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1000000,"maxOutput":384000},
+        {"provider":"openrouter","id":"deepseek/deepseek-v4.1-flash-1017","input":0.006,"output":0.5,"cacheRead":0.005,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"vercel","id":"deepseek/deepseek-v4.1-flash-1017","input":0.3,"output":1.2,"cacheRead":0.007,"cacheWrite":null,"context":1048576,"maxOutput":262144},
+        {"provider":"fireworks-ai","id":"accounts/fireworks/routers/deepseek-flash-latest","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1000000,"maxOutput":384000},
         {"provider":"deepinfra","id":"deepseek-ai/DeepSeek-V4.1-Flash-1017","input":0.2,"output":0.6,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":384000},
-        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4.1-Flash-1017","input":0.3,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":1048576,"maxOutput":262144}
+        {"provider":"baseten","id":"deepseek-ai/DeepSeek-V4.1-Flash-1017","input":0.3,"output":1.2,"cacheRead":0.007,"cacheWrite":null,"context":1048576,"maxOutput":262144}
       ]
     },
     {
@@ -1067,27 +1101,6 @@
       ]
     },
     {
-      "modelKey": "devstral-medium-2507",
-      "name": "Devstral Medium",
-      "labProvider": "mistral",
-      "releaseDate": "2025-07-10",
-      "knowledgeCutoff": "2025-05",
-      "context": 128000,
-      "maxOutput": 128000,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"mistral","id":"devstral-medium-2507","input":0.4,"output":2,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":128000}
-      ]
-    },
-    {
       "modelKey": "devstral-medium-latest",
       "name": "Devstral 2 (latest)",
       "labProvider": "mistral",
@@ -1106,48 +1119,6 @@
       "toolCall": true,
       "offerings": [
         {"provider":"mistral","id":"devstral-medium-latest","input":0.4,"output":2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144}
-      ]
-    },
-    {
-      "modelKey": "devstral-small-2505",
-      "name": "Devstral Small 2505",
-      "labProvider": "mistral",
-      "releaseDate": "2025-05-07",
-      "knowledgeCutoff": "2025-05",
-      "context": 128000,
-      "maxOutput": 128000,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"mistral","id":"devstral-small-2505","input":0.1,"output":0.3,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":128000}
-      ]
-    },
-    {
-      "modelKey": "devstral-small-2507",
-      "name": "Devstral Small",
-      "labProvider": "mistral",
-      "releaseDate": "2025-07-10",
-      "knowledgeCutoff": "2025-05",
-      "context": 128000,
-      "maxOutput": 128000,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"mistral","id":"devstral-small-2507","input":0.1,"output":0.3,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":128000}
       ]
     },
     {
@@ -1196,7 +1167,7 @@
       "offerings": [
         {"provider":"google","id":"gemini-2.5-flash","input":0.3,"output":2.5,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":65536},
         {"provider":"openrouter","id":"google/gemini-2.5-flash","input":0.3,"output":2.5,"cacheRead":0.03,"cacheWrite":0.083333,"context":1048576,"maxOutput":65535},
-        {"provider":"vercel","id":"google/gemini-2.5-flash","input":0.3,"output":2.5,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":65536}
+        {"provider":"vercel","id":"google/gemini-2.5-flash","input":0.3,"output":2.5,"cacheRead":0.03,"cacheWrite":null,"context":1000000,"maxOutput":65535}
       ]
     },
     {
@@ -1216,7 +1187,7 @@
         "image"
       ],
       "openWeights": false,
-      "reasoning": true,
+      "reasoning": false,
       "toolCall": false,
       "offerings": [
         {"provider":"google","id":"gemini-2.5-flash-image","input":0.3,"output":30,"cacheRead":0.075,"cacheWrite":null,"context":32768,"maxOutput":32768},
@@ -1278,7 +1249,7 @@
         {"provider":"google","id":"gemini-2.5-pro","input":1.25,"output":10,"cacheRead":0.125,"cacheWrite":null,"context":1048576,"maxOutput":65536},
         {"provider":"google-vertex","id":"gemini-2.5-pro","input":1.25,"output":10,"cacheRead":0.125,"cacheWrite":null,"context":1048576,"maxOutput":65536},
         {"provider":"openrouter","id":"google/gemini-2.5-pro","input":1.25,"output":10,"cacheRead":0.125,"cacheWrite":0.375,"context":1048576,"maxOutput":65536},
-        {"provider":"vercel","id":"google/gemini-2.5-pro","input":1.25,"output":10,"cacheRead":0.125,"cacheWrite":null,"context":1048576,"maxOutput":65536}
+        {"provider":"vercel","id":"google/gemini-2.5-pro","input":1.25,"output":10,"cacheRead":0.125,"cacheWrite":null,"context":1048576,"maxOutput":65535}
       ]
     },
     {
@@ -1335,30 +1306,6 @@
       ]
     },
     {
-      "modelKey": "gemini-3-pro-image-preview",
-      "name": "Nano Banana Pro",
-      "labProvider": "google",
-      "releaseDate": "2025-11-20",
-      "knowledgeCutoff": "2025-01",
-      "context": 131072,
-      "maxOutput": 32768,
-      "inputModalities": [
-        "text",
-        "image"
-      ],
-      "outputModalities": [
-        "text",
-        "image"
-      ],
-      "openWeights": false,
-      "reasoning": true,
-      "toolCall": false,
-      "offerings": [
-        {"provider":"google","id":"gemini-3-pro-image-preview","input":2,"output":120,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":32768},
-        {"provider":"openrouter","id":"google/gemini-3-pro-image-preview","input":2,"output":12,"cacheRead":0.2,"cacheWrite":0.375,"context":65536,"maxOutput":32768}
-      ]
-    },
-    {
       "modelKey": "gemini-3.1-flash-image",
       "name": "Nano Banana 2",
       "labProvider": "google",
@@ -1384,32 +1331,6 @@
         {"provider":"google-vertex","id":"gemini-3.1-flash-image","input":0.5,"output":60,"cacheRead":0.05,"cacheWrite":null,"context":131072,"maxOutput":32768},
         {"provider":"openrouter","id":"google/gemini-3.1-flash-image","input":0.5,"output":3,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":32768},
         {"provider":"vercel","id":"google/gemini-3.1-flash-image","input":0.5,"output":3,"cacheRead":0.05,"cacheWrite":null,"context":131072,"maxOutput":32768}
-      ]
-    },
-    {
-      "modelKey": "gemini-3.1-flash-image-preview",
-      "name": "Nano Banana 2",
-      "labProvider": "google",
-      "releaseDate": "2026-02-26",
-      "knowledgeCutoff": "2025-01",
-      "context": 65536,
-      "maxOutput": 65536,
-      "inputModalities": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "outputModalities": [
-        "text",
-        "image"
-      ],
-      "openWeights": false,
-      "reasoning": true,
-      "toolCall": false,
-      "offerings": [
-        {"provider":"google","id":"gemini-3.1-flash-image-preview","input":0.5,"output":60,"cacheRead":null,"cacheWrite":null,"context":65536,"maxOutput":65536},
-        {"provider":"openrouter","id":"google/gemini-3.1-flash-image-preview","input":0.5,"output":3,"cacheRead":null,"cacheWrite":null,"context":65536,"maxOutput":58982},
-        {"provider":"vercel","id":"google/gemini-3.1-flash-image-preview","input":0.5,"output":3,"cacheRead":0.05,"cacheWrite":null,"context":131072,"maxOutput":32768}
       ]
     },
     {
@@ -1708,7 +1629,7 @@
       "offerings": [
         {"provider":"google","id":"gemini-3.8-flash","input":0.75,"output":3.75,"cacheRead":0.075,"cacheWrite":null,"context":1048576,"maxOutput":65536},
         {"provider":"google-vertex","id":"gemini-3.8-flash","input":0.75,"output":3.75,"cacheRead":0.075,"cacheWrite":null,"context":1048576,"maxOutput":65536},
-        {"provider":"openrouter","id":"google/gemini-3.8-flash","input":0.825,"output":4.125,"cacheRead":0.0825,"cacheWrite":0.041667,"context":1048576,"maxOutput":65536},
+        {"provider":"openrouter","id":"google/gemini-3.8-flash","input":0.75,"output":3.75,"cacheRead":0.075,"cacheWrite":0.041667,"context":1048576,"maxOutput":65536},
         {"provider":"vercel","id":"google/gemini-3.8-flash","input":0.75,"output":3.75,"cacheRead":0.075,"cacheWrite":null,"context":1000000,"maxOutput":65535}
       ]
     },
@@ -1738,6 +1659,34 @@
         {"provider":"google-vertex","id":"gemini-4-argon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":65536},
         {"provider":"openrouter","id":"google/gemini-4-argon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":0.1875,"context":1048576,"maxOutput":943718},
         {"provider":"vercel","id":"google/gemini-4-argon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":null,"context":1000000,"maxOutput":1000000}
+      ]
+    },
+    {
+      "modelKey": "gemini-4-carbon",
+      "name": "Gemini 4 Carbon",
+      "labProvider": "google",
+      "releaseDate": "2026-11-10",
+      "knowledgeCutoff": "2026-03",
+      "context": 1048576,
+      "maxOutput": 32768,
+      "inputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": false,
+      "reasoning": true,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"google","id":"gemini-4-carbon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":32768},
+        {"provider":"google-vertex","id":"gemini-4-carbon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":65536},
+        {"provider":"openrouter","id":"google/gemini-4-carbon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":0.1875,"context":1048576,"maxOutput":943718},
+        {"provider":"vercel","id":"google/gemini-4-carbon","input":2,"output":10,"cacheRead":0.1,"cacheWrite":null,"context":1000000,"maxOutput":1000000}
       ]
     },
     {
@@ -1913,7 +1862,7 @@
       "releaseDate": "2025-03-12",
       "knowledgeCutoff": "2024-08",
       "context": 131072,
-      "maxOutput": 117964,
+      "maxOutput": 16384,
       "inputModalities": [
         "text",
         "image"
@@ -1926,7 +1875,7 @@
       "toolCall": false,
       "offerings": [
         {"provider":"amazon-bedrock","id":"google.gemma-3-4b-it","input":0.04,"output":0.08,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":4096},
-        {"provider":"openrouter","id":"google/gemma-3-4b-it","input":0.04,"output":0.05,"cacheRead":0.02,"cacheWrite":null,"context":131072,"maxOutput":117964},
+        {"provider":"openrouter","id":"google/gemma-3-4b-it","input":0.05,"output":0.1,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
         {"provider":"deepinfra","id":"google/gemma-3-4b-it","input":0.05,"output":0.1,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072}
       ]
     },
@@ -1951,7 +1900,7 @@
       "offerings": [
         {"provider":"amazon-bedrock","id":"google.gemma-4-26b-a4b","input":0.13,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":32768},
         {"provider":"google-vertex","id":"google/gemma-4-26b-a4b-it-maas","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":262144,"maxOutput":128000},
-        {"provider":"openrouter","id":"google/gemma-4-26b-a4b-it","input":0.0765,"output":0.255,"cacheRead":0.0425,"cacheWrite":null,"context":262144,"maxOutput":235929},
+        {"provider":"openrouter","id":"google/gemma-4-26b-a4b-it","input":0.08,"output":0.1,"cacheRead":0.046,"cacheWrite":null,"context":262144,"maxOutput":128000},
         {"provider":"vercel","id":"google/gemma-4-26b-a4b-it","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":262144,"maxOutput":131072},
         {"provider":"deepinfra","id":"google/gemma-4-26B-A4B-it","input":0.07,"output":0.34,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":32768}
       ]
@@ -2046,7 +1995,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"zai","id":"glm-4.5-air","input":0.2,"output":1.1,"cacheRead":0.03,"cacheWrite":0,"context":131072,"maxOutput":98304},
-        {"provider":"openrouter","id":"z-ai/glm-4.5-air","input":0.13,"output":0.85,"cacheRead":0.025,"cacheWrite":null,"context":131072,"maxOutput":98304},
+        {"provider":"openrouter","id":"z-ai/glm-4.5-air","input":0.2,"output":1.1,"cacheRead":0.03,"cacheWrite":null,"context":131072,"maxOutput":98304},
         {"provider":"vercel","id":"zai/glm-4.5-air","input":0.2,"output":1.1,"cacheRead":0.03,"cacheWrite":null,"context":128000,"maxOutput":96000}
       ]
     },
@@ -2115,8 +2064,9 @@
       "toolCall": true,
       "offerings": [
         {"provider":"zai","id":"glm-4.6","input":0.6,"output":2.2,"cacheRead":0.11,"cacheWrite":0,"context":204800,"maxOutput":131072},
-        {"provider":"openrouter","id":"z-ai/glm-4.6","input":0.55,"output":2.2,"cacheRead":0.11,"cacheWrite":null,"context":204800,"maxOutput":131072},
-        {"provider":"vercel","id":"zai/glm-4.6","input":0.6,"output":2.2,"cacheRead":0.11,"cacheWrite":null,"context":200000,"maxOutput":96000}
+        {"provider":"openrouter","id":"z-ai/glm-4.6","input":0.5,"output":2,"cacheRead":0.1,"cacheWrite":null,"context":204800,"maxOutput":131072},
+        {"provider":"vercel","id":"zai/glm-4.6","input":0.6,"output":2.2,"cacheRead":0.11,"cacheWrite":null,"context":200000,"maxOutput":96000},
+        {"provider":"deepinfra","id":"zai-org/GLM-4.6","input":0.5,"output":2,"cacheRead":0.1,"cacheWrite":null,"context":202752,"maxOutput":131072}
       ]
     },
     {
@@ -2186,8 +2136,9 @@
       "offerings": [
         {"provider":"zai","id":"glm-4.7","input":0.6,"output":2.2,"cacheRead":0.11,"cacheWrite":0,"context":204800,"maxOutput":131072},
         {"provider":"amazon-bedrock","id":"zai.glm-4.7","input":0.6,"output":2.2,"cacheRead":null,"cacheWrite":null,"context":202752,"maxOutput":131072},
-        {"provider":"openrouter","id":"z-ai/glm-4.7","input":0.54,"output":1.98,"cacheRead":0.099,"cacheWrite":null,"context":204800,"maxOutput":131072},
-        {"provider":"vercel","id":"zai/glm-4.7","input":0.6,"output":2.2,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":120000}
+        {"provider":"openrouter","id":"z-ai/glm-4.7","input":0.6,"output":2.2,"cacheRead":0.11,"cacheWrite":null,"context":204800,"maxOutput":131072},
+        {"provider":"vercel","id":"zai/glm-4.7","input":0.6,"output":2.2,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":120000},
+        {"provider":"deepinfra","id":"zai-org/GLM-4.7","input":0.4,"output":1.75,"cacheRead":0.08,"cacheWrite":null,"context":202752,"maxOutput":16384}
       ]
     },
     {
@@ -2211,7 +2162,8 @@
         {"provider":"zai","id":"glm-4.7-flash","input":0,"output":0,"cacheRead":0,"cacheWrite":0,"context":200000,"maxOutput":131072},
         {"provider":"amazon-bedrock","id":"zai.glm-4.7-flash","input":0.07,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":202752,"maxOutput":131072},
         {"provider":"openrouter","id":"z-ai/glm-4.7-flash","input":0.0605,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":117964},
-        {"provider":"vercel","id":"zai/glm-4.7-flash","input":0.07,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":131000}
+        {"provider":"vercel","id":"zai/glm-4.7-flash","input":0.07,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":131000},
+        {"provider":"deepinfra","id":"zai-org/GLM-4.7-Flash","input":0.06,"output":0.4,"cacheRead":0.01,"cacheWrite":null,"context":202752,"maxOutput":16384}
       ]
     },
     {
@@ -2259,7 +2211,8 @@
         {"provider":"google-vertex","id":"zai-org/glm-5-maas","input":1,"output":3.2,"cacheRead":0.1,"cacheWrite":null,"context":200000,"maxOutput":128000},
         {"provider":"openrouter","id":"z-ai/glm-5","input":1,"output":3.2,"cacheRead":0.2,"cacheWrite":null,"context":204800,"maxOutput":131072},
         {"provider":"vercel","id":"zai/glm-5","input":1,"output":3.2,"cacheRead":null,"cacheWrite":null,"context":202800,"maxOutput":131100},
-        {"provider":"togetherai","id":"zai-org/GLM-5","input":1,"output":3.2,"cacheRead":null,"cacheWrite":null,"context":202752,"maxOutput":131072}
+        {"provider":"togetherai","id":"zai-org/GLM-5","input":1,"output":3.2,"cacheRead":null,"cacheWrite":null,"context":202752,"maxOutput":131072},
+        {"provider":"deepinfra","id":"zai-org/GLM-5","input":0.6,"output":2.08,"cacheRead":0.12,"cacheWrite":null,"context":202752,"maxOutput":16384}
       ]
     },
     {
@@ -2304,9 +2257,10 @@
       "toolCall": true,
       "offerings": [
         {"provider":"zai","id":"glm-5.1","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":0,"context":200000,"maxOutput":131072},
-        {"provider":"openrouter","id":"z-ai/glm-5.1","input":0.966,"output":3.036,"cacheRead":0.1794,"cacheWrite":null,"context":204800,"maxOutput":128000},
+        {"provider":"openrouter","id":"z-ai/glm-5.1","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":204800,"maxOutput":131072},
         {"provider":"vercel","id":"zai/glm-5.1","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":202800,"maxOutput":64000},
-        {"provider":"baseten","id":"zai-org/GLM-5.1","input":1.3,"output":4.3,"cacheRead":0.26,"cacheWrite":null,"context":202800,"maxOutput":202800}
+        {"provider":"togetherai","id":"zai-org/GLM-5.1","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":202752,"maxOutput":131072},
+        {"provider":"deepinfra","id":"zai-org/GLM-5.1","input":1.05,"output":3.5,"cacheRead":0.205,"cacheWrite":null,"context":202752,"maxOutput":16384}
       ]
     },
     {
@@ -2329,11 +2283,11 @@
       "offerings": [
         {"provider":"zai","id":"glm-5.2","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":0,"context":1000000,"maxOutput":131072},
         {"provider":"google-vertex","id":"zai-org/glm-5.2-maas","input":1.4,"output":4.4,"cacheRead":0.14,"cacheWrite":null,"context":1000000,"maxOutput":64000},
-        {"provider":"openrouter","id":"z-ai/glm-5.2","input":0.62,"output":2.42,"cacheRead":0.14,"cacheWrite":null,"context":1048576,"maxOutput":943718},
-        {"provider":"vercel","id":"zai/glm-5.2","input":0.8,"output":2.55,"cacheRead":0.16,"cacheWrite":null,"context":1000000,"maxOutput":128000},
+        {"provider":"openrouter","id":"z-ai/glm-5.2","input":0.007,"output":6.8,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"vercel","id":"zai/glm-5.2","input":1.4,"output":4.4,"cacheRead":0.14,"cacheWrite":null,"context":1000000,"maxOutput":128000},
         {"provider":"togetherai","id":"zai-org/GLM-5.2","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":1048575,"maxOutput":164000},
-        {"provider":"deepinfra","id":"zai-org/GLM-5.2","input":0.75,"output":2.4,"cacheRead":0.14,"cacheWrite":null,"context":1048576,"maxOutput":32768},
-        {"provider":"baseten","id":"zai-org/GLM-5.2","input":1.4,"output":4.4,"cacheRead":0.3,"cacheWrite":null,"context":1048576,"maxOutput":262144}
+        {"provider":"deepinfra","id":"zai-org/GLM-5.2","input":0.75,"output":2.4,"cacheRead":0.14,"cacheWrite":0.9375,"context":1048576,"maxOutput":32768},
+        {"provider":"baseten","id":"zai-org/GLM-5.2","input":1.4,"output":4.4,"cacheRead":0.14,"cacheWrite":null,"context":1048576,"maxOutput":262144}
       ]
     },
     {
@@ -2356,9 +2310,9 @@
       "offerings": [
         {"provider":"zai","id":"glm-5.3","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":0,"context":1000000,"maxOutput":131072},
         {"provider":"amazon-bedrock","id":"us.zai.glm-5.3","input":1.848,"output":5.808,"cacheRead":0.3432,"cacheWrite":2.31,"context":1000000,"maxOutput":128000},
-        {"provider":"openrouter","id":"z-ai/glm-5.3","input":0.079,"output":1.4,"cacheRead":0.078,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"openrouter","id":"z-ai/glm-5.3","input":0.0699,"output":1.4,"cacheRead":0.0689,"cacheWrite":null,"context":1048576,"maxOutput":943718},
         {"provider":"vercel","id":"zai/glm-5.3","input":1.4,"output":4.4,"cacheRead":0.14,"cacheWrite":null,"context":1000000,"maxOutput":1000000},
-        {"provider":"togetherai","id":"zai-org/GLM-5.3","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":1048576,"maxOutput":262144},
+        {"provider":"togetherai","id":"zai-org/GLM-5.3","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":1048575,"maxOutput":262144},
         {"provider":"fireworks-ai","id":"accounts/fireworks/models/glm-5p3","input":1.4,"output":4.4,"cacheRead":0.26,"cacheWrite":null,"context":1048573,"maxOutput":262144},
         {"provider":"deepinfra","id":"zai-org/GLM-5.3","input":0.9,"output":4,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":131072},
         {"provider":"baseten","id":"zai-org/GLM-5.3","input":1.4,"output":4.4,"cacheRead":0.14,"cacheWrite":null,"context":1048576,"maxOutput":262144}
@@ -2386,12 +2340,12 @@
       "toolCall": true,
       "offerings": [
         {"provider":"zai","id":"glm-5.3-flash","input":0.15,"output":0.5,"cacheRead":0.03,"cacheWrite":0,"context":1000000,"maxOutput":131072},
-        {"provider":"openrouter","id":"z-ai/glm-5.3-flash","input":0.047076,"output":0.12,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"openrouter","id":"z-ai/glm-5.3-flash","input":0.0399,"output":0.0784,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":131072},
         {"provider":"vercel","id":"zai/glm-5.3-flash","input":0.15,"output":0.5,"cacheRead":0.03,"cacheWrite":null,"context":1000000,"maxOutput":131000},
         {"provider":"togetherai","id":"zai-org/GLM-5.3-Flash","input":0.15,"output":0.5,"cacheRead":0.03,"cacheWrite":null,"context":1048575,"maxOutput":400000},
         {"provider":"fireworks-ai","id":"accounts/fireworks/models/glm-5p3-flash","input":0.15,"output":0.5,"cacheRead":0.03,"cacheWrite":null,"context":1048573,"maxOutput":131072},
         {"provider":"deepinfra","id":"zai-org/GLM-5.3-Flash","input":0.15,"output":0.5,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":131072},
-        {"provider":"baseten","id":"zai-org/GLM-5.3-Flash","input":0.15,"output":0.5,"cacheRead":null,"cacheWrite":null,"context":1048576,"maxOutput":131072}
+        {"provider":"baseten","id":"zai-org/GLM-5.3-Flash","input":0.15,"output":0.5,"cacheRead":0.03,"cacheWrite":null,"context":1048576,"maxOutput":131072}
       ]
     },
     {
@@ -2438,9 +2392,7 @@
       "reasoning": false,
       "toolCall": false,
       "offerings": [
-        {"provider":"openai","id":"gpt-3.5-turbo","input":0.5,"output":1.5,"cacheRead":0,"cacheWrite":null,"context":16385,"maxOutput":4096},
-        {"provider":"openrouter","id":"openai/gpt-3.5-turbo","input":0.5,"output":1.5,"cacheRead":null,"cacheWrite":null,"context":16385,"maxOutput":4096},
-        {"provider":"vercel","id":"openai/gpt-3.5-turbo","input":0.5,"output":1.5,"cacheRead":null,"cacheWrite":null,"context":16385,"maxOutput":4096}
+        {"provider":"openai","id":"gpt-3.5-turbo","input":0.5,"output":1.5,"cacheRead":0,"cacheWrite":null,"context":16385,"maxOutput":4096}
       ]
     },
     {
@@ -2485,8 +2437,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"openai","id":"gpt-4-turbo","input":10,"output":30,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096},
-        {"provider":"azure","id":"gpt-4-turbo","input":10,"output":30,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096},
-        {"provider":"openrouter","id":"openai/gpt-4-turbo","input":10,"output":30,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096}
+        {"provider":"azure","id":"gpt-4-turbo","input":10,"output":30,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096}
       ]
     },
     {
@@ -2512,7 +2463,7 @@
         {"provider":"openai","id":"gpt-4.1","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":1047576,"maxOutput":32768},
         {"provider":"azure","id":"gpt-4.1","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":1047576,"maxOutput":32768},
         {"provider":"openrouter","id":"openai/gpt-4.1","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":1047576,"maxOutput":32768},
-        {"provider":"vercel","id":"openai/gpt-4.1-fast","input":3.5,"output":14,"cacheRead":0.875,"cacheWrite":null,"context":1047576,"maxOutput":32768}
+        {"provider":"vercel","id":"openai/gpt-4.1","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":1047576,"maxOutput":32768}
       ]
     },
     {
@@ -2538,7 +2489,7 @@
         {"provider":"openai","id":"gpt-4.1-mini","input":0.4,"output":1.6,"cacheRead":0.1,"cacheWrite":null,"context":1047576,"maxOutput":32768},
         {"provider":"azure","id":"gpt-4.1-mini","input":0.4,"output":1.6,"cacheRead":0.1,"cacheWrite":null,"context":1047576,"maxOutput":32768},
         {"provider":"openrouter","id":"openai/gpt-4.1-mini","input":0.4,"output":1.6,"cacheRead":0.1,"cacheWrite":null,"context":1047576,"maxOutput":32768},
-        {"provider":"vercel","id":"openai/gpt-4.1-mini-fast","input":0.7,"output":2.8,"cacheRead":0.175,"cacheWrite":null,"context":1047576,"maxOutput":32768}
+        {"provider":"vercel","id":"openai/gpt-4.1-mini","input":0.4,"output":1.6,"cacheRead":0.1,"cacheWrite":null,"context":1047576,"maxOutput":32768}
       ]
     },
     {
@@ -2562,8 +2513,8 @@
       "offerings": [
         {"provider":"openai","id":"gpt-4.1-nano","input":0.1,"output":0.4,"cacheRead":0.025,"cacheWrite":null,"context":1047576,"maxOutput":32768},
         {"provider":"azure","id":"gpt-4.1-nano","input":0.1,"output":0.4,"cacheRead":0.025,"cacheWrite":null,"context":1047576,"maxOutput":32768},
-        {"provider":"openrouter","id":"openai/gpt-4.1-nano","input":0.1,"output":0.4,"cacheRead":0.025,"cacheWrite":null,"context":1047576,"maxOutput":32768},
-        {"provider":"vercel","id":"openai/gpt-4.1-nano-fast","input":0.2,"output":0.8,"cacheRead":0.05,"cacheWrite":null,"context":1047576,"maxOutput":32768}
+        {"provider":"openrouter","id":"openai/gpt-4.1-nano","input":0.1,"output":0.4,"cacheRead":0.03,"cacheWrite":null,"context":1047576,"maxOutput":942818},
+        {"provider":"vercel","id":"openai/gpt-4.1-nano","input":0.1,"output":0.4,"cacheRead":0.03,"cacheWrite":null,"context":1047576,"maxOutput":32768}
       ]
     },
     {
@@ -2589,7 +2540,7 @@
         {"provider":"openai","id":"gpt-4o","input":2.5,"output":10,"cacheRead":1.25,"cacheWrite":null,"context":128000,"maxOutput":16384},
         {"provider":"azure","id":"gpt-4o","input":2.5,"output":10,"cacheRead":1.25,"cacheWrite":null,"context":128000,"maxOutput":16384},
         {"provider":"openrouter","id":"openai/gpt-4o","input":2.5,"output":10,"cacheRead":1.25,"cacheWrite":null,"context":128000,"maxOutput":16384},
-        {"provider":"vercel","id":"openai/gpt-4o-fast","input":4.25,"output":17,"cacheRead":2.125,"cacheWrite":null,"context":128000,"maxOutput":16384}
+        {"provider":"vercel","id":"openai/gpt-4o","input":2.5,"output":10,"cacheRead":1.25,"cacheWrite":null,"context":128000,"maxOutput":16384}
       ]
     },
     {
@@ -2684,7 +2635,7 @@
         {"provider":"openai","id":"gpt-4o-mini","input":0.15,"output":0.6,"cacheRead":0.075,"cacheWrite":null,"context":128000,"maxOutput":16384},
         {"provider":"azure","id":"gpt-4o-mini","input":0.15,"output":0.6,"cacheRead":0.075,"cacheWrite":null,"context":128000,"maxOutput":16384},
         {"provider":"openrouter","id":"openai/gpt-4o-mini","input":0.15,"output":0.6,"cacheRead":0.075,"cacheWrite":null,"context":128000,"maxOutput":16384},
-        {"provider":"vercel","id":"openai/gpt-4o-mini-fast","input":0.25,"output":1,"cacheRead":0.125,"cacheWrite":null,"context":128000,"maxOutput":16384}
+        {"provider":"vercel","id":"openai/gpt-4o-mini","input":0.15,"output":0.6,"cacheRead":0.075,"cacheWrite":null,"context":128000,"maxOutput":16384}
       ]
     },
     {
@@ -2755,7 +2706,7 @@
       "offerings": [
         {"provider":"openai","id":"gpt-5-mini","input":0.25,"output":2,"cacheRead":0.025,"cacheWrite":null,"context":400000,"maxOutput":128000},
         {"provider":"openrouter","id":"openai/gpt-5-mini","input":0.25,"output":2,"cacheRead":0.025,"cacheWrite":null,"context":400000,"maxOutput":128000},
-        {"provider":"vercel","id":"openai/gpt-5-mini-fast","input":0.45,"output":3.6,"cacheRead":0.045,"cacheWrite":null,"context":400000,"maxOutput":128000}
+        {"provider":"vercel","id":"openai/gpt-5-mini","input":0.25,"output":2,"cacheRead":0.025,"cacheWrite":null,"context":400000,"maxOutput":128000}
       ]
     },
     {
@@ -2778,7 +2729,8 @@
       "toolCall": true,
       "offerings": [
         {"provider":"openai","id":"gpt-5-nano","input":0.05,"output":0.4,"cacheRead":0.005,"cacheWrite":null,"context":400000,"maxOutput":128000},
-        {"provider":"openrouter","id":"openai/gpt-5-nano","input":0.05,"output":0.4,"cacheRead":0.005,"cacheWrite":null,"context":400000,"maxOutput":128000}
+        {"provider":"openrouter","id":"openai/gpt-5-nano","input":0.05,"output":0.4,"cacheRead":0.005,"cacheWrite":null,"context":400000,"maxOutput":128000},
+        {"provider":"vercel","id":"openai/gpt-5-nano","input":0.05,"output":0.4,"cacheRead":0.005,"cacheWrite":null,"context":400000,"maxOutput":128000}
       ]
     },
     {
@@ -3408,11 +3360,38 @@
       ]
     },
     {
+      "modelKey": "gpt-6.1-terra",
+      "name": "GPT-6.1 Terra",
+      "labProvider": "openai",
+      "releaseDate": "2026-10-26",
+      "knowledgeCutoff": "2026-06-01",
+      "context": 1050000,
+      "maxOutput": 128000,
+      "inputModalities": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": false,
+      "reasoning": true,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"openai","id":"gpt-6.1-terra","input":1,"output":5,"cacheRead":0.05,"cacheWrite":1.25,"context":1050000,"maxOutput":128000},
+        {"provider":"amazon-bedrock","id":"openai.gpt-6.1-terra","input":1.1,"output":5.5,"cacheRead":0.055,"cacheWrite":1.375,"context":1050000,"maxOutput":128000},
+        {"provider":"azure","id":"gpt-6.1-terra","input":1,"output":5,"cacheRead":0.05,"cacheWrite":1.25,"context":1050000,"maxOutput":128000},
+        {"provider":"openrouter","id":"openai/gpt-6.1-terra","input":1,"output":5,"cacheRead":0.05,"cacheWrite":1.25,"context":1050000,"maxOutput":128000},
+        {"provider":"vercel","id":"openai/gpt-6.1-terra","input":1,"output":5,"cacheRead":0.05,"cacheWrite":1.25,"context":1050000,"maxOutput":128000}
+      ]
+    },
+    {
       "modelKey": "gpt-oss-120b",
       "name": "GPT OSS 120B",
       "labProvider": null,
       "releaseDate": "2025-08-05",
-      "knowledgeCutoff": null,
+      "knowledgeCutoff": "2024-06",
       "context": 131072,
       "maxOutput": 40960,
       "inputModalities": [
@@ -3429,8 +3408,11 @@
         {"provider":"google-vertex","id":"openai/gpt-oss-120b-maas","input":0.09,"output":0.36,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
         {"provider":"openrouter","id":"openai/gpt-oss-120b","input":0.15,"output":0.6,"cacheRead":0.075,"cacheWrite":null,"context":131072,"maxOutput":65536},
         {"provider":"vercel","id":"openai/gpt-oss-120b","input":0.1,"output":0.5,"cacheRead":0.1,"cacheWrite":null,"context":131072,"maxOutput":131072},
+        {"provider":"togetherai","id":"openai/gpt-oss-120b","input":0.15,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
+        {"provider":"deepinfra","id":"openai/gpt-oss-120b","input":0.037,"output":0.17,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
         {"provider":"groq","id":"openai/gpt-oss-120b","input":0.15,"output":0.6,"cacheRead":0.075,"cacheWrite":null,"context":131072,"maxOutput":65536},
-        {"provider":"cerebras","id":"gpt-oss-120b","input":0.35,"output":0.75,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":40960}
+        {"provider":"cerebras","id":"gpt-oss-120b","input":0.35,"output":0.75,"cacheRead":0.35,"cacheWrite":null,"context":131072,"maxOutput":40960},
+        {"provider":"baseten","id":"openai/gpt-oss-120b","input":0.1,"output":0.5,"cacheRead":0.1,"cacheWrite":null,"context":128072,"maxOutput":128072}
       ]
     },
     {
@@ -3438,9 +3420,9 @@
       "name": "GPT OSS 20B",
       "labProvider": null,
       "releaseDate": "2025-08-05",
-      "knowledgeCutoff": null,
+      "knowledgeCutoff": "2024-06",
       "context": 131072,
-      "maxOutput": 32768,
+      "maxOutput": 117964,
       "inputModalities": [
         "text"
       ],
@@ -3452,8 +3434,10 @@
       "toolCall": true,
       "offerings": [
         {"provider":"amazon-bedrock","id":"openai.gpt-oss-20b","input":0.07,"output":0.3,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
-        {"provider":"openrouter","id":"openai/gpt-oss-20b","input":0.018,"output":0.09,"cacheRead":0.009,"cacheWrite":null,"context":131072,"maxOutput":32768},
-        {"provider":"vercel","id":"openai/gpt-oss-20b","input":0.03,"output":0.14,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
+        {"provider":"openrouter","id":"openai/gpt-oss-20b","input":0.03,"output":0.13,"cacheRead":0.03,"cacheWrite":null,"context":131072,"maxOutput":117964},
+        {"provider":"vercel","id":"openai/gpt-oss-20b","input":0.03,"output":0.14,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192},
+        {"provider":"deepinfra","id":"openai/gpt-oss-20b","input":0.03,"output":0.14,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
+        {"provider":"groq","id":"openai/gpt-oss-20b","input":0.075,"output":0.3,"cacheRead":0.0375,"cacheWrite":null,"context":131072,"maxOutput":65536}
       ]
     },
     {
@@ -3500,8 +3484,7 @@
       "reasoning": false,
       "toolCall": true,
       "offerings": [
-        {"provider":"google-vertex","id":"xai/grok-4.1-fast-non-reasoning","input":0.2,"output":0.5,"cacheRead":0.05,"cacheWrite":null,"context":128000,"maxOutput":30000},
-        {"provider":"vercel","id":"spacexai/grok-4.1-fast-non-reasoning","input":0.2,"output":0.5,"cacheRead":0.05,"cacheWrite":null,"context":1000000,"maxOutput":1000000}
+        {"provider":"google-vertex","id":"xai/grok-4.1-fast-non-reasoning","input":0.2,"output":0.5,"cacheRead":0.05,"cacheWrite":null,"context":128000,"maxOutput":30000}
       ]
     },
     {
@@ -3727,7 +3710,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"tencent/hy3","input":0.0825,"output":0.33,"cacheRead":0.020625,"cacheWrite":null,"context":262144,"maxOutput":128000},
+        {"provider":"openrouter","id":"tencent/hy3","input":0.132,"output":0.528,"cacheRead":0.033,"cacheWrite":null,"context":262144,"maxOutput":128000},
         {"provider":"vercel","id":"tencent/hy3","input":0.14,"output":0.58,"cacheRead":0.035,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"deepinfra","id":"tencent/Hy3","input":0.13,"output":0.53,"cacheRead":0.033,"cacheWrite":null,"context":262144,"maxOutput":128000}
       ]
@@ -3771,7 +3754,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"tencent/hy4-preview","input":0.7506,"output":2.2509,"cacheRead":0.0378,"cacheWrite":null,"context":1048576,"maxOutput":64000},
+        {"provider":"openrouter","id":"tencent/hy4-preview","input":0.834,"output":2.501,"cacheRead":0.042,"cacheWrite":null,"context":1048576,"maxOutput":64000},
         {"provider":"vercel","id":"tencent/hy4-preview","input":0.834,"output":2.501,"cacheRead":0.042,"cacheWrite":null,"context":1024000,"maxOutput":64000},
         {"provider":"deepinfra","id":"tencent/Hy4-preview","input":0.834,"output":2.501,"cacheRead":0.042,"cacheWrite":null,"context":1048576,"maxOutput":64000}
       ]
@@ -3799,9 +3782,7 @@
         {"provider":"openrouter","id":"thinkingmachines/inkling","input":1,"output":4.05,"cacheRead":0.17,"cacheWrite":null,"context":524288,"maxOutput":471859},
         {"provider":"vercel","id":"thinkingmachines/inkling","input":1,"output":4.05,"cacheRead":0.17,"cacheWrite":null,"context":256000,"maxOutput":256000},
         {"provider":"togetherai","id":"thinkingmachines/Inkling","input":1,"output":4.05,"cacheRead":0.17,"cacheWrite":null,"context":524288,"maxOutput":131072},
-        {"provider":"fireworks-ai","id":"accounts/fireworks/models/inkling","input":1,"output":4.05,"cacheRead":0.17,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
-        {"provider":"deepinfra","id":"thinkingmachines/Inkling","input":0.95,"output":4.05,"cacheRead":0.16,"cacheWrite":null,"context":524288,"maxOutput":1048576},
-        {"provider":"baseten","id":"thinkingmachines/inkling","input":1,"output":4.05,"cacheRead":null,"cacheWrite":null,"context":1048576,"maxOutput":32768}
+        {"provider":"deepinfra","id":"thinkingmachines/Inkling","input":0.95,"output":4.05,"cacheRead":0.16,"cacheWrite":null,"context":524288,"maxOutput":1048576}
       ]
     },
     {
@@ -3826,8 +3807,7 @@
       "offerings": [
         {"provider":"openrouter","id":"thinkingmachines/inkling-small","input":0.45,"output":1.2,"cacheRead":0.1,"cacheWrite":null,"context":524288,"maxOutput":262144},
         {"provider":"vercel","id":"thinkingmachines/inkling-small","input":0.45,"output":1.2,"cacheRead":0.1,"cacheWrite":null,"context":1000000,"maxOutput":1000000},
-        {"provider":"deepinfra","id":"thinkingmachines/Inkling-Small","input":0.45,"output":1.2,"cacheRead":0.1,"cacheWrite":null,"context":524288,"maxOutput":1048576},
-        {"provider":"baseten","id":"thinkingmachines/inkling-small","input":0.5,"output":1.2,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":32768}
+        {"provider":"deepinfra","id":"thinkingmachines/Inkling-Small","input":0.45,"output":1.2,"cacheRead":0.1,"cacheWrite":null,"context":524288,"maxOutput":1048576}
       ]
     },
     {
@@ -3873,8 +3853,9 @@
       "offerings": [
         {"provider":"amazon-bedrock","id":"moonshotai.kimi-k2.5","input":0.6,"output":3,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":16384},
         {"provider":"azure","id":"kimi-k2.5","input":0.6,"output":3,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144},
-        {"provider":"openrouter","id":"moonshotai/kimi-k2.5","input":0.5,"output":2.5,"cacheRead":0.15,"cacheWrite":null,"context":262144,"maxOutput":235929},
-        {"provider":"vercel","id":"moonshotai/kimi-k2.5","input":0.6,"output":3,"cacheRead":null,"cacheWrite":null,"context":256000,"maxOutput":256000}
+        {"provider":"openrouter","id":"moonshotai/kimi-k2.5","input":0.532,"output":3.325,"cacheRead":0.209,"cacheWrite":null,"context":262144,"maxOutput":65536},
+        {"provider":"vercel","id":"moonshotai/kimi-k2.5","input":0.6,"output":3,"cacheRead":null,"cacheWrite":null,"context":256000,"maxOutput":256000},
+        {"provider":"deepinfra","id":"moonshotai/Kimi-K2.5","input":0.45,"output":2.25,"cacheRead":0.07,"cacheWrite":null,"context":262144,"maxOutput":32768}
       ]
     },
     {
@@ -3900,7 +3881,8 @@
         {"provider":"moonshotai","id":"kimi-k2.6","input":0.95,"output":4,"cacheRead":0.16,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"azure","id":"kimi-k2.6","input":0.95,"output":4,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"openrouter","id":"moonshotai/kimi-k2.6","input":0.65,"output":3.41,"cacheRead":0.15,"cacheWrite":null,"context":262144,"maxOutput":235929},
-        {"provider":"vercel","id":"moonshotai/kimi-k2.6","input":0.95,"output":4,"cacheRead":0.16,"cacheWrite":null,"context":262000,"maxOutput":262000}
+        {"provider":"vercel","id":"moonshotai/kimi-k2.6","input":0.95,"output":4,"cacheRead":0.16,"cacheWrite":null,"context":262000,"maxOutput":262000},
+        {"provider":"deepinfra","id":"moonshotai/Kimi-K2.6","input":0.75,"output":3.5,"cacheRead":0.15,"cacheWrite":null,"context":262144,"maxOutput":16384}
       ]
     },
     {
@@ -3925,10 +3907,9 @@
       "offerings": [
         {"provider":"moonshotai","id":"kimi-k2.7-code","input":0.95,"output":4,"cacheRead":0.19,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"azure","id":"kimi-k2.7-code","input":0.95,"output":4,"cacheRead":0.19,"cacheWrite":null,"context":262144,"maxOutput":262144},
-        {"provider":"openrouter","id":"moonshotai/kimi-k2.7-code","input":0.6712,"output":3.35,"cacheRead":0.18,"cacheWrite":null,"context":262144,"maxOutput":235929},
+        {"provider":"openrouter","id":"moonshotai/kimi-k2.7-code","input":0.6,"output":3.5,"cacheRead":0.16,"cacheWrite":null,"context":262144,"maxOutput":235929},
         {"provider":"vercel","id":"moonshotai/kimi-k2.7-code","input":0.95,"output":4,"cacheRead":0.19,"cacheWrite":null,"context":256000,"maxOutput":32768},
-        {"provider":"deepinfra","id":"moonshotai/Kimi-K2.7-Code","input":0.68,"output":3.4,"cacheRead":0.136,"cacheWrite":null,"context":262144,"maxOutput":262144},
-        {"provider":"baseten","id":"moonshotai/Kimi-K2.7-Code","input":0.95,"output":4,"cacheRead":0.16,"cacheWrite":null,"context":262000,"maxOutput":262000}
+        {"provider":"deepinfra","id":"moonshotai/Kimi-K2.7-Code","input":0.68,"output":3.4,"cacheRead":0.136,"cacheWrite":0.85,"context":262144,"maxOutput":262144}
       ]
     },
     {
@@ -3953,24 +3934,26 @@
       "offerings": [
         {"provider":"moonshotai","id":"kimi-k3","input":3,"output":15,"cacheRead":0.3,"cacheWrite":3,"context":1048576,"maxOutput":1048576},
         {"provider":"amazon-bedrock","id":"us.moonshotai.kimi-k3","input":3.3,"output":16.5,"cacheRead":0.33,"cacheWrite":4.125,"context":1048576,"maxOutput":128000},
-        {"provider":"openrouter","id":"moonshotai/kimi-k3","input":0.239,"output":11.936,"cacheRead":0.21,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"openrouter","id":"moonshotai/kimi-k3","input":0.192,"output":16,"cacheRead":0.182,"cacheWrite":null,"context":1048576,"maxOutput":943718},
         {"provider":"vercel","id":"moonshotai/kimi-k3","input":3,"output":15,"cacheRead":0.3,"cacheWrite":null,"context":1000000,"maxOutput":131072},
         {"provider":"togetherai","id":"moonshotai/Kimi-K3","input":3,"output":15,"cacheRead":0.3,"cacheWrite":null,"context":1048576,"maxOutput":131072},
         {"provider":"fireworks-ai","id":"accounts/fireworks/models/kimi-k3","input":3,"output":15,"cacheRead":0.3,"cacheWrite":null,"context":1048576,"maxOutput":131072},
-        {"provider":"deepinfra","id":"moonshotai/Kimi-K3","input":2.85,"output":14.25,"cacheRead":0.285,"cacheWrite":null,"context":1048576,"maxOutput":131072},
-        {"provider":"baseten","id":"moonshotai/Kimi-K3","input":3,"output":15,"cacheRead":null,"cacheWrite":null,"context":1048576,"maxOutput":262144}
+        {"provider":"deepinfra","id":"moonshotai/Kimi-K3","input":2.85,"output":14.25,"cacheRead":0.285,"cacheWrite":3.5625,"context":1048576,"maxOutput":131072},
+        {"provider":"baseten","id":"moonshotai/Kimi-K3","input":3,"output":15,"cacheRead":0.3,"cacheWrite":null,"context":1048576,"maxOutput":262144}
       ]
     },
     {
-      "modelKey": "laguna-xs-2.1",
-      "name": "Laguna XS 2.1",
-      "labProvider": null,
-      "releaseDate": "2026-07-02",
+      "modelKey": "kimi-k3.1-pro",
+      "name": "Kimi K3.1 Pro",
+      "labProvider": "moonshotai",
+      "releaseDate": "2026-10-23",
       "knowledgeCutoff": null,
-      "context": 262144,
-      "maxOutput": 32768,
+      "context": 1048576,
+      "maxOutput": 1048576,
       "inputModalities": [
-        "text"
+        "text",
+        "image",
+        "video"
       ],
       "outputModalities": [
         "text"
@@ -3979,12 +3962,42 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"poolside/laguna-xs-2.1","input":0.06,"output":0.12,"cacheRead":0.03,"cacheWrite":null,"context":262144,"maxOutput":32768}
+        {"provider":"moonshotai","id":"kimi-k3.1-pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":2,"context":1048576,"maxOutput":1048576},
+        {"provider":"amazon-bedrock","id":"us.moonshotai.kimi-k3.1","input":4.4,"output":22,"cacheRead":0.22,"cacheWrite":5.5,"context":1048576,"maxOutput":1048576},
+        {"provider":"openrouter","id":"moonshotai/kimi-k3.1-pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"vercel","id":"moonshotai/kimi-k3.1-pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":null,"context":1000000,"maxOutput":262144},
+        {"provider":"togetherai","id":"moonshotai/Kimi-K3.1-Pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":131072},
+        {"provider":"fireworks-ai","id":"accounts/fireworks/models/kimi-k3p1-pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":131072},
+        {"provider":"deepinfra","id":"moonshotai/Kimi-K3.1-Pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"baseten","id":"moonshotai/Kimi-K3.1-Pro","input":2,"output":10,"cacheRead":0.2,"cacheWrite":null,"context":1000000,"maxOutput":262144}
       ]
     },
     {
       "modelKey": "llama-3.1-70b-instruct",
       "name": "Llama-3.1-70B-Instruct",
+      "labProvider": null,
+      "releaseDate": "2024-07-23",
+      "knowledgeCutoff": "2023-12",
+      "context": 131072,
+      "maxOutput": 8192,
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": true,
+      "reasoning": false,
+      "toolCall": false,
+      "offerings": [
+        {"provider":"amazon-bedrock","id":"meta.llama3-1-70b-instruct-v1:0","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096},
+        {"provider":"openrouter","id":"meta-llama/llama-3.1-70b-instruct","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192},
+        {"provider":"vercel","id":"meta/llama-3.1-70b","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8192}
+      ]
+    },
+    {
+      "modelKey": "llama-3.1-8b-instruct",
+      "name": "Llama-3.1-8B-Instruct",
       "labProvider": null,
       "releaseDate": "2024-07-23",
       "knowledgeCutoff": "2023-12",
@@ -4000,32 +4013,10 @@
       "reasoning": false,
       "toolCall": true,
       "offerings": [
-        {"provider":"amazon-bedrock","id":"meta.llama3-1-70b-instruct-v1:0","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096},
-        {"provider":"openrouter","id":"meta-llama/llama-3.1-70b-instruct","input":0.4,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
-        {"provider":"vercel","id":"meta/llama-3.1-70b","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8192}
-      ]
-    },
-    {
-      "modelKey": "llama-3.1-8b-instruct",
-      "name": "Llama-3.1-8B-Instruct",
-      "labProvider": null,
-      "releaseDate": "2024-07-23",
-      "knowledgeCutoff": "2023-12",
-      "context": 131072,
-      "maxOutput": 117964,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
         {"provider":"amazon-bedrock","id":"meta.llama3-1-8b-instruct-v1:0","input":0.22,"output":0.22,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096},
-        {"provider":"openrouter","id":"meta-llama/llama-3.1-8b-instruct","input":0.05,"output":0.08,"cacheRead":0.025,"cacheWrite":null,"context":131072,"maxOutput":117964},
-        {"provider":"vercel","id":"meta/llama-3.1-8b","input":0.22,"output":0.22,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8192}
+        {"provider":"openrouter","id":"meta-llama/llama-3.1-8b-instruct","input":0.02,"output":0.04,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
+        {"provider":"vercel","id":"meta/llama-3.1-8b","input":0.22,"output":0.22,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8192},
+        {"provider":"groq","id":"llama-3.1-8b-instant","input":0.05,"output":0.08,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072}
       ]
     },
     {
@@ -4033,7 +4024,7 @@
       "name": "Llama 3.2 1B Instruct",
       "labProvider": null,
       "releaseDate": "2024-09-25",
-      "knowledgeCutoff": null,
+      "knowledgeCutoff": "2023-12",
       "context": 60000,
       "maxOutput": 54000,
       "inputModalities": [
@@ -4056,7 +4047,7 @@
       "releaseDate": "2024-12-06",
       "knowledgeCutoff": "2023-12",
       "context": 131072,
-      "maxOutput": 16384,
+      "maxOutput": 115200,
       "inputModalities": [
         "text"
       ],
@@ -4068,28 +4059,34 @@
       "toolCall": true,
       "offerings": [
         {"provider":"amazon-bedrock","id":"meta.llama3-3-70b-instruct-v1:0","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096},
-        {"provider":"openrouter","id":"meta-llama/llama-3.3-70b-instruct","input":0.1,"output":0.32,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384}
+        {"provider":"openrouter","id":"meta-llama/llama-3.3-70b-instruct","input":0.71,"output":0.71,"cacheRead":0.71,"cacheWrite":null,"context":131072,"maxOutput":115200},
+        {"provider":"vercel","id":"meta/llama-3.3-70b","input":0.72,"output":0.72,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8192},
+        {"provider":"togetherai","id":"meta-llama/Llama-3.3-70B-Instruct-Turbo","input":1.04,"output":1.04,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
+        {"provider":"deepinfra","id":"meta-llama/Llama-3.3-70B-Instruct-Turbo","input":0.1,"output":0.32,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
+        {"provider":"groq","id":"llama-3.3-70b-versatile","input":0.59,"output":0.79,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":32768}
       ]
     },
     {
-      "modelKey": "llama-3.3-nemotron-super-49b-v1.5",
-      "name": "Llama 3.3 Nemotron Super 49B v1.5",
+      "modelKey": "llama-guard-4-12b",
+      "name": "Llama Guard 4 12B",
       "labProvider": null,
-      "releaseDate": "2025-07-25",
+      "releaseDate": "2025-04-29",
       "knowledgeCutoff": null,
-      "context": 131072,
-      "maxOutput": 131072,
+      "context": 163840,
+      "maxOutput": 163840,
       "inputModalities": [
-        "text"
+        "text",
+        "image"
       ],
       "outputModalities": [
         "text"
       ],
       "openWeights": true,
-      "reasoning": true,
-      "toolCall": true,
+      "reasoning": false,
+      "toolCall": false,
       "offerings": [
-        {"provider":"deepinfra","id":"nvidia/Llama-3.3-Nemotron-Super-49B-v1.5","input":0.4,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072}
+        {"provider":"openrouter","id":"meta-llama/llama-guard-4-12b","input":0.18,"output":0.18,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":16384},
+        {"provider":"deepinfra","id":"meta-llama/Llama-Guard-4-12B","input":0.18,"output":0.18,"cacheRead":null,"cacheWrite":null,"context":163840,"maxOutput":163840}
       ]
     },
     {
@@ -4098,7 +4095,7 @@
       "labProvider": "longcat",
       "releaseDate": "2026-06-30",
       "knowledgeCutoff": null,
-      "context": 1000000,
+      "context": 1048576,
       "maxOutput": 131072,
       "inputModalities": [
         "text"
@@ -4110,8 +4107,30 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"longcat","id":"LongCat-2.0","input":0.75,"output":2.95,"cacheRead":0.015,"cacheWrite":null,"context":1000000,"maxOutput":131072},
+        {"provider":"longcat","id":"LongCat-2.0","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":131072},
         {"provider":"openrouter","id":"meituan/longcat-2.0","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1048756,"maxOutput":262144}
+      ]
+    },
+    {
+      "modelKey": "longcat-2.5-preview",
+      "name": "LongCat-2.5-Preview",
+      "labProvider": "longcat",
+      "releaseDate": "2026-09-25",
+      "knowledgeCutoff": null,
+      "context": 1048576,
+      "maxOutput": 262144,
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": false,
+      "reasoning": true,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"longcat","id":"LongCat-2.5-Preview","input":0.3,"output":1.2,"cacheRead":0.006,"cacheWrite":null,"context":1048576,"maxOutput":262144}
       ]
     },
     {
@@ -4223,7 +4242,6 @@
       "toolCall": true,
       "offerings": [
         {"provider":"inception","id":"mercury-2","input":0.25,"output":0.75,"cacheRead":0.025,"cacheWrite":null,"context":128000,"maxOutput":50000},
-        {"provider":"openrouter","id":"inception/mercury-2","input":0.25,"output":0.75,"cacheRead":0.025,"cacheWrite":null,"context":128000,"maxOutput":50000},
         {"provider":"vercel","id":"inception/mercury-2","input":0.25,"output":0.75,"cacheRead":0.025,"cacheWrite":null,"context":128000,"maxOutput":50000}
       ]
     },
@@ -4245,8 +4263,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"inception","id":"mercury-2.5","input":0.04,"output":0.15,"cacheRead":0.004,"cacheWrite":null,"context":260000,"maxOutput":65536},
-        {"provider":"openrouter","id":"inception/mercury-2.5","input":0.04,"output":0.15,"cacheRead":0.004,"cacheWrite":null,"context":260000,"maxOutput":65536},
+        {"provider":"inception","id":"mercury-2.5","input":0.2,"output":0.75,"cacheRead":0.02,"cacheWrite":null,"context":260000,"maxOutput":65536},
         {"provider":"vercel","id":"inception/mercury-2.5","input":0.04,"output":0.15,"cacheRead":0.004,"cacheWrite":null,"context":260000,"maxOutput":65536}
       ]
     },
@@ -4272,73 +4289,6 @@
       ]
     },
     {
-      "modelKey": "mimo-v2-flash",
-      "name": "MiMo-V2-Flash",
-      "labProvider": "xiaomi",
-      "releaseDate": "2025-12-16",
-      "knowledgeCutoff": "2024-12-01",
-      "context": 262144,
-      "maxOutput": 65536,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"xiaomi","id":"mimo-v2-flash","input":0.14,"output":0.28,"cacheRead":0.0028,"cacheWrite":null,"context":262144,"maxOutput":65536}
-      ]
-    },
-    {
-      "modelKey": "mimo-v2-omni",
-      "name": "MiMo-V2-Omni",
-      "labProvider": "xiaomi",
-      "releaseDate": "2026-03-18",
-      "knowledgeCutoff": "2024-12",
-      "context": 262144,
-      "maxOutput": 131072,
-      "inputModalities": [
-        "text",
-        "image",
-        "audio",
-        "video",
-        "pdf"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": false,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"xiaomi","id":"mimo-v2-omni","input":0.14,"output":0.28,"cacheRead":0.0028,"cacheWrite":null,"context":262144,"maxOutput":131072}
-      ]
-    },
-    {
-      "modelKey": "mimo-v2-pro",
-      "name": "MiMo-V2-Pro",
-      "labProvider": "xiaomi",
-      "releaseDate": "2026-03-18",
-      "knowledgeCutoff": "2024-12",
-      "context": 1048576,
-      "maxOutput": 131072,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": false,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"xiaomi","id":"mimo-v2-pro","input":0.435,"output":0.87,"cacheRead":0.0036,"cacheWrite":null,"context":1048576,"maxOutput":131072}
-      ]
-    },
-    {
       "modelKey": "mimo-v2.5",
       "name": "MiMo-V2.5",
       "labProvider": "xiaomi",
@@ -4360,8 +4310,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"xiaomi","id":"mimo-v2.5","input":0.14,"output":0.28,"cacheRead":0.0028,"cacheWrite":null,"context":1048576,"maxOutput":131072},
-        {"provider":"openrouter","id":"xiaomi/mimo-v2.5","input":0.14,"output":0.28,"cacheRead":0.0028,"cacheWrite":null,"context":1050000,"maxOutput":131072},
-        {"provider":"vercel","id":"xiaomi/mimo-v2.5","input":0.14,"output":0.28,"cacheRead":0.0028,"cacheWrite":null,"context":1050000,"maxOutput":131100},
+        {"provider":"openrouter","id":"xiaomi/mimo-v2.5","input":0.4,"output":2,"cacheRead":0.08,"cacheWrite":null,"context":1000000,"maxOutput":65536},
         {"provider":"deepinfra","id":"XiaomiMiMo/MiMo-V2.5","input":0.14,"output":0.28,"cacheRead":0.0028,"cacheWrite":null,"context":262144,"maxOutput":16384}
       ]
     },
@@ -4384,8 +4333,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"xiaomi","id":"mimo-v2.5-pro","input":0.435,"output":0.87,"cacheRead":0.0036,"cacheWrite":null,"context":1048576,"maxOutput":131072},
-        {"provider":"openrouter","id":"xiaomi/mimo-v2.5-pro","input":0.435,"output":0.87,"cacheRead":0.0036,"cacheWrite":null,"context":1050000,"maxOutput":131072},
-        {"provider":"vercel","id":"xiaomi/mimo-v2.5-pro","input":0.3045,"output":0.609,"cacheRead":0.0028,"cacheWrite":null,"context":1050000,"maxOutput":131000},
+        {"provider":"openrouter","id":"xiaomi/mimo-v2.5-pro","input":0.48,"output":1.8,"cacheRead":0.096,"cacheWrite":null,"context":1024000,"maxOutput":235929},
         {"provider":"deepinfra","id":"XiaomiMiMo/MiMo-V2.5-Pro","input":1,"output":3,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":16384}
       ]
     },
@@ -4510,7 +4458,6 @@
       "offerings": [
         {"provider":"minimax","id":"MiniMax-M2","input":0.3,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":204800,"maxOutput":131072},
         {"provider":"amazon-bedrock","id":"minimax.minimax-m2","input":0.3,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":204608,"maxOutput":128000},
-        {"provider":"openrouter","id":"minimax/minimax-m2","input":0.255,"output":1.02,"cacheRead":null,"cacheWrite":null,"context":204800,"maxOutput":131072},
         {"provider":"vercel","id":"minimax/minimax-m2","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":0.375,"context":205000,"maxOutput":196608}
       ]
     },
@@ -4534,7 +4481,6 @@
       "offerings": [
         {"provider":"minimax","id":"MiniMax-M2.1","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":0.375,"context":204800,"maxOutput":131072},
         {"provider":"amazon-bedrock","id":"minimax.minimax-m2.1","input":0.3,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":196608,"maxOutput":131072},
-        {"provider":"openrouter","id":"minimax/minimax-m2.1","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":null,"context":204800,"maxOutput":131072},
         {"provider":"vercel","id":"minimax/minimax-m2.1","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":0.375,"context":204800,"maxOutput":131072}
       ]
     },
@@ -4558,8 +4504,10 @@
       "offerings": [
         {"provider":"minimax","id":"MiniMax-M2.5","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":0.375,"context":204800,"maxOutput":131072},
         {"provider":"amazon-bedrock","id":"minimax.minimax-m2.5","input":0.3,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":196608,"maxOutput":98304},
-        {"provider":"openrouter","id":"minimax/minimax-m2.5","input":0.27,"output":0.95,"cacheRead":0.03,"cacheWrite":null,"context":204800,"maxOutput":32768},
-        {"provider":"vercel","id":"minimax/minimax-m2.5","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":0.375,"context":204800,"maxOutput":131000}
+        {"provider":"openrouter","id":"minimax/minimax-m2.5","input":0.27,"output":1.08,"cacheRead":0.027,"cacheWrite":null,"context":200000,"maxOutput":128000},
+        {"provider":"vercel","id":"minimax/minimax-m2.5","input":0.3,"output":1.2,"cacheRead":0.03,"cacheWrite":0.375,"context":204800,"maxOutput":131000},
+        {"provider":"togetherai","id":"MiniMaxAI/MiniMax-M2.5","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":204800,"maxOutput":131072},
+        {"provider":"deepinfra","id":"MiniMaxAI/MiniMax-M2.5","input":0.15,"output":1.15,"cacheRead":0.03,"cacheWrite":null,"context":196608,"maxOutput":131072}
       ]
     },
     {
@@ -4603,7 +4551,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"minimax","id":"MiniMax-M2.7","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":0.375,"context":204800,"maxOutput":131072},
-        {"provider":"openrouter","id":"minimax/minimax-m2.7","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":204800,"maxOutput":131072},
+        {"provider":"openrouter","id":"minimax/minimax-m2.7","input":0.21,"output":0.84,"cacheRead":0.042,"cacheWrite":null,"context":196608,"maxOutput":176947},
         {"provider":"vercel","id":"minimax/minimax-m2.7","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":0.375,"context":204800,"maxOutput":131000},
         {"provider":"togetherai","id":"MiniMaxAI/MiniMax-M2.7","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":196608,"maxOutput":131072},
         {"provider":"deepinfra","id":"MiniMaxAI/MiniMax-M2.7","input":0.25,"output":1,"cacheRead":0.05,"cacheWrite":null,"context":196608,"maxOutput":131072}
@@ -4654,7 +4602,8 @@
         {"provider":"minimax","id":"MiniMax-M3","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":1000000,"maxOutput":524288},
         {"provider":"openrouter","id":"minimax/minimax-m3","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":1048576,"maxOutput":512000},
         {"provider":"vercel","id":"minimax/minimax-m3","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":512000,"maxOutput":512000},
-        {"provider":"fireworks-ai","id":"accounts/fireworks/routers/minimax-latest","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":512000,"maxOutput":512000},
+        {"provider":"togetherai","id":"MiniMaxAI/MiniMax-M3","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":524288,"maxOutput":524288},
+        {"provider":"fireworks-ai","id":"accounts/fireworks/models/minimax-m3","input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":null,"context":512000,"maxOutput":512000},
         {"provider":"deepinfra","id":"MiniMaxAI/MiniMax-M3","input":0.28,"output":1.1,"cacheRead":0.056,"cacheWrite":null,"context":524288,"maxOutput":512000}
       ]
     },
@@ -4674,13 +4623,14 @@
       "outputModalities": [
         "text"
       ],
-      "openWeights": false,
+      "openWeights": true,
       "reasoning": true,
       "toolCall": true,
       "offerings": [
         {"provider":"minimax","id":"MiniMax-M3.1-Flash","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":1000000,"maxOutput":524288},
-        {"provider":"openrouter","id":"minimax/minimax-m3.1-flash:free","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":524288},
-        {"provider":"vercel","id":"minimax/minimax-m3.1-flash","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":524288}
+        {"provider":"openrouter","id":"minimax/minimax-m3.1-flash","input":0.075,"output":0.3,"cacheRead":0.0075,"cacheWrite":null,"context":1048576,"maxOutput":524288},
+        {"provider":"vercel","id":"minimax/minimax-m3.1-flash","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
+        {"provider":"fireworks-ai","id":"accounts/fireworks/models/minimax-m3p1-flash","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":1000000,"maxOutput":512000}
       ]
     },
     {
@@ -4807,32 +4757,11 @@
       "outputModalities": [
         "text"
       ],
-      "openWeights": false,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"openrouter","id":"mistralai/mistral-large-2407","input":2,"output":6,"cacheRead":0.2,"cacheWrite":null,"context":131072,"maxOutput":104857}
-      ]
-    },
-    {
-      "modelKey": "mistral-large-2411",
-      "name": "Mistral Large 2.1",
-      "labProvider": "mistral",
-      "releaseDate": "2024-11-18",
-      "knowledgeCutoff": "2024-11",
-      "context": 131072,
-      "maxOutput": 16384,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
       "openWeights": true,
       "reasoning": false,
       "toolCall": true,
       "offerings": [
-        {"provider":"mistral","id":"mistral-large-2411","input":2,"output":6,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384}
+        {"provider":"openrouter","id":"mistralai/mistral-large-2407","input":2,"output":6,"cacheRead":0.2,"cacheWrite":null,"context":131072,"maxOutput":104857}
       ]
     },
     {
@@ -4881,9 +4810,9 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"mistral","id":"mistral-large-4","input":0.68,"output":2.09,"cacheRead":0.07,"cacheWrite":null,"context":1048576,"maxOutput":262144},
-        {"provider":"openrouter","id":"mistralai/mistral-large-4-0","input":1.36,"output":4.18,"cacheRead":0.14,"cacheWrite":null,"context":1048576,"maxOutput":262144},
-        {"provider":"vercel","id":"mistral/mistral-large-4","input":1.36,"output":4.18,"cacheRead":0.14,"cacheWrite":null,"context":524288,"maxOutput":262144}
+        {"provider":"mistral","id":"mistral-large-4","input":0.7,"output":2.1,"cacheRead":0.07,"cacheWrite":null,"context":1048576,"maxOutput":262144},
+        {"provider":"openrouter","id":"mistralai/mistral-large-4-0","input":0.7,"output":2.1,"cacheRead":0.07,"cacheWrite":null,"context":1048576,"maxOutput":262144},
+        {"provider":"vercel","id":"mistral/mistral-large-4","input":0.7,"output":2.1,"cacheRead":0.07,"cacheWrite":null,"context":1048576,"maxOutput":262144}
       ]
     },
     {
@@ -4978,6 +4907,29 @@
       ]
     },
     {
+      "modelKey": "mistral-medium-3",
+      "name": "Mistral Medium 3",
+      "labProvider": null,
+      "releaseDate": "2025-05-07",
+      "knowledgeCutoff": "2025-03-31",
+      "context": 131072,
+      "maxOutput": 104857,
+      "inputModalities": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": false,
+      "reasoning": false,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"openrouter","id":"mistralai/mistral-medium-3","input":0.4,"output":2,"cacheRead":0.04,"cacheWrite":null,"context":131072,"maxOutput":104857}
+      ]
+    },
+    {
       "modelKey": "mistral-medium-latest",
       "name": "Mistral Medium (latest)",
       "labProvider": "mistral",
@@ -5003,11 +4955,11 @@
     {
       "modelKey": "mistral-nemo",
       "name": "Mistral Nemo",
-      "labProvider": "mistral",
-      "releaseDate": "2024-07-01",
+      "labProvider": null,
+      "releaseDate": "2024-07-18",
       "knowledgeCutoff": "2024-07",
-      "context": 128000,
-      "maxOutput": 128000,
+      "context": 131072,
+      "maxOutput": 131072,
       "inputModalities": [
         "text"
       ],
@@ -5018,7 +4970,6 @@
       "reasoning": false,
       "toolCall": true,
       "offerings": [
-        {"provider":"mistral","id":"mistral-nemo","input":0.15,"output":0.15,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":128000},
         {"provider":"openrouter","id":"mistralai/mistral-nemo","input":0.029,"output":0.03,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
         {"provider":"vercel","id":"mistral/mistral-nemo","input":0.029,"output":0.03,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072}
       ]
@@ -5091,28 +5042,6 @@
       "offerings": [
         {"provider":"mistral","id":"mistral-small-latest","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":262144,"maxOutput":256000},
         {"provider":"vercel","id":"mistral/mistral-small","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":262144,"maxOutput":4000}
-      ]
-    },
-    {
-      "modelKey": "mixtral-8x22b-instruct",
-      "name": "Mixtral 8x22B Instruct",
-      "labProvider": null,
-      "releaseDate": "2024-04-17",
-      "knowledgeCutoff": "2024-01-31",
-      "context": 65536,
-      "maxOutput": 52428,
-      "inputModalities": [
-        "text",
-        "pdf"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"openrouter","id":"mistralai/mixtral-8x22b-instruct","input":2,"output":6,"cacheRead":0.2,"cacheWrite":null,"context":65536,"maxOutput":52428}
       ]
     },
     {
@@ -5225,7 +5154,7 @@
       "releaseDate": "2026-10-15",
       "knowledgeCutoff": "2026-01-04",
       "context": 1048576,
-      "maxOutput": 943718,
+      "maxOutput": 262144,
       "inputModalities": [
         "text",
         "image",
@@ -5240,7 +5169,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"meta/muse-spark-open","input":1.25,"output":4.25,"cacheRead":0.15,"cacheWrite":null,"context":1048576,"maxOutput":943718},
+        {"provider":"openrouter","id":"meta/muse-spark-open","input":1.25,"output":4.25,"cacheRead":0.15,"cacheWrite":null,"context":1048576,"maxOutput":262144},
         {"provider":"vercel","id":"meta/muse-spark-open","input":1.25,"output":4.25,"cacheRead":0.15,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
         {"provider":"togetherai","id":"meta-models/Muse-Spark-Open-816B-A42B","input":1.25,"output":4.25,"cacheRead":0.15,"cacheWrite":null,"context":1048576,"maxOutput":131072},
         {"provider":"fireworks-ai","id":"accounts/fireworks/models/muse-spark-open","input":1.25,"output":4.25,"cacheRead":0.15,"cacheWrite":null,"context":1048576,"maxOutput":131072}
@@ -5270,52 +5199,6 @@
       "offerings": [
         {"provider":"meta","id":"muse-wonder-1.0","input":4,"output":20,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":131072},
         {"provider":"vercel","id":"meta/muse-wonder-1.0","input":4,"output":20,"cacheRead":0.2,"cacheWrite":null,"context":1048576,"maxOutput":1048576}
-      ]
-    },
-    {
-      "modelKey": "nemotron-3-content-safety",
-      "name": "nemotron-3-content-safety",
-      "labProvider": "nvidia",
-      "releaseDate": "2026-04-16",
-      "knowledgeCutoff": null,
-      "context": 128000,
-      "maxOutput": 4096,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": false,
-      "offerings": [
-        {"provider":"nvidia","id":"nvidia/nemotron-3-content-safety","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096}
-      ]
-    },
-    {
-      "modelKey": "nemotron-3-nano-30b-a3b",
-      "name": "nemotron-3-nano-30b-a3b",
-      "labProvider": "nvidia",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-09",
-      "context": 131072,
-      "maxOutput": 131072,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"nvidia","id":"nvidia/nemotron-3-nano-30b-a3b","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
-        {"provider":"amazon-bedrock","id":"nvidia.nemotron-nano-3-30b","input":0.06,"output":0.24,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":8192},
-        {"provider":"openrouter","id":"nvidia/nemotron-3-nano-30b-a3b","input":0.06,"output":0.24,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":235929},
-        {"provider":"vercel","id":"nvidia/nemotron-3-nano-30b-a3b","input":0.05,"output":0.2,"cacheRead":0.025,"cacheWrite":null,"context":262144,"maxOutput":262144},
-        {"provider":"deepinfra","id":"nvidia/Nemotron-3-Nano-30B-A3B","input":0.05,"output":0.2,"cacheRead":0.025,"cacheWrite":null,"context":262144,"maxOutput":262144}
       ]
     },
     {
@@ -5362,11 +5245,10 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"nvidia","id":"nvidia/nemotron-3-ultra-550b-a55b","input":0.5,"output":2.5,"cacheRead":0.15,"cacheWrite":null,"context":1000000,"maxOutput":65536},
+        {"provider":"nvidia","id":"nvidia/nemotron-3-ultra-550b-a55b","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":65536},
         {"provider":"openrouter","id":"nvidia/nemotron-3-ultra-550b-a55b","input":0.6,"output":2.4,"cacheRead":0.12,"cacheWrite":null,"context":262144,"maxOutput":182520},
         {"provider":"vercel","id":"nvidia/nemotron-3-ultra-550b-a55b","input":0.6,"output":2.4,"cacheRead":0.12,"cacheWrite":null,"context":1000000,"maxOutput":65000},
         {"provider":"togetherai","id":"nvidia/nemotron-3-ultra-550b-a55b","input":0.6,"output":3.6,"cacheRead":0.2,"cacheWrite":null,"context":512300,"maxOutput":512300},
-        {"provider":"fireworks-ai","id":"accounts/fireworks/models/nemotron-3-ultra-nvfp4","input":0.6,"output":2.4,"cacheRead":0.12,"cacheWrite":null,"context":262144,"maxOutput":128000},
         {"provider":"baseten","id":"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B","input":0.6,"output":2.4,"cacheRead":0.12,"cacheWrite":null,"context":202800,"maxOutput":202800}
       ]
     },
@@ -5413,8 +5295,7 @@
       "offerings": [
         {"provider":"nvidia","id":"nvidia/nemotron-3.5-lightning-30b-a3b","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"openrouter","id":"nvidia/nemotron-3.5-lightning","input":0.07,"output":0.2,"cacheRead":0.04,"cacheWrite":null,"context":262144,"maxOutput":235929},
-        {"provider":"vercel","id":"nvidia/nemotron-3.5-lightning","input":0.05,"output":0.2,"cacheRead":0.01,"cacheWrite":null,"context":262144,"maxOutput":131072},
-        {"provider":"fireworks-ai","id":"accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b","input":0.05,"output":0.2,"cacheRead":0.01,"cacheWrite":null,"context":262144,"maxOutput":262144}
+        {"provider":"vercel","id":"nvidia/nemotron-3.5-lightning","input":0.06,"output":0.16,"cacheRead":0.03,"cacheWrite":null,"context":262144,"maxOutput":131072}
       ]
     },
     {
@@ -5438,99 +5319,9 @@
       "toolCall": true,
       "offerings": [
         {"provider":"nvidia","id":"nvidia/nemotron-3.5-super-vl-120b-a12b","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":1048576,"maxOutput":8192},
-        {"provider":"openrouter","id":"nvidia/nemotron-3.5-super-vl","input":0.15,"output":0.5,"cacheRead":0.02,"cacheWrite":null,"context":1048576,"maxOutput":235929},
+        {"provider":"openrouter","id":"nvidia/nemotron-3.5-super-vl","input":0.15,"output":0.47,"cacheRead":0.02,"cacheWrite":null,"context":1048576,"maxOutput":943718},
         {"provider":"vercel","id":"nvidia/nemotron-3.5-super-vl","input":0.2,"output":0.5,"cacheRead":0.04,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
         {"provider":"togetherai","id":"nvidia/NVIDIA-Nemotron-3.5-Super-VL","input":0.15,"output":0.5,"cacheRead":0.02,"cacheWrite":null,"context":262144,"maxOutput":262144}
-      ]
-    },
-    {
-      "modelKey": "nemotron-content-safety-reasoning-4b",
-      "name": "nemotron-content-safety-reasoning-4b",
-      "labProvider": "nvidia",
-      "releaseDate": "2026-01-22",
-      "knowledgeCutoff": null,
-      "context": 128000,
-      "maxOutput": 4096,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": true,
-      "toolCall": false,
-      "offerings": [
-        {"provider":"nvidia","id":"nvidia/nemotron-content-safety-reasoning-4b","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":4096}
-      ]
-    },
-    {
-      "modelKey": "nemotron-mini-4b-instruct",
-      "name": "nemotron-mini-4b-instruct",
-      "labProvider": "nvidia",
-      "releaseDate": "2024-08-21",
-      "knowledgeCutoff": null,
-      "context": 128000,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"nvidia","id":"nvidia/nemotron-mini-4b-instruct","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":8192}
-      ]
-    },
-    {
-      "modelKey": "nemotron-nano-12b-v2-vl",
-      "name": "Nemotron Nano 12B v2 VL",
-      "labProvider": "nvidia",
-      "releaseDate": "2025-10-28",
-      "knowledgeCutoff": null,
-      "context": 128000,
-      "maxOutput": 128000,
-      "inputModalities": [
-        "text",
-        "image",
-        "video"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"nvidia","id":"nvidia/nemotron-nano-12b-v2-vl","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":128000},
-        {"provider":"amazon-bedrock","id":"nvidia.nemotron-nano-12b-v2","input":0.2,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192},
-        {"provider":"vercel","id":"nvidia/nemotron-nano-12b-v2-vl","input":0.2,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072}
-      ]
-    },
-    {
-      "modelKey": "nemotron-nano-9b-v2",
-      "name": "nvidia-nemotron-nano-9b-v2",
-      "labProvider": "nvidia",
-      "releaseDate": "2025-08-18",
-      "knowledgeCutoff": "2024-09",
-      "context": 131072,
-      "maxOutput": 131072,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"nvidia","id":"nvidia/nvidia-nemotron-nano-9b-v2","input":0,"output":0,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072},
-        {"provider":"amazon-bedrock","id":"nvidia.nemotron-nano-9b-v2","input":0.06,"output":0.23,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192},
-        {"provider":"vercel","id":"nvidia/nemotron-nano-9b-v2","input":0.06,"output":0.23,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":131072}
       ]
     },
     {
@@ -5626,7 +5417,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"openai","id":"o1","input":15,"output":60,"cacheRead":7.5,"cacheWrite":null,"context":200000,"maxOutput":100000},
-        {"provider":"openrouter","id":"openai/o1","input":15,"output":60,"cacheRead":7.5,"cacheWrite":null,"context":200000,"maxOutput":100000}
+        {"provider":"vercel","id":"openai/o1","input":15,"output":60,"cacheRead":7.5,"cacheWrite":null,"context":200000,"maxOutput":100000}
       ]
     },
     {
@@ -5648,8 +5439,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openai","id":"o1-pro","input":150,"output":600,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":100000},
-        {"provider":"openrouter","id":"openai/o1-pro","input":150,"output":600,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":100000}
+        {"provider":"openai","id":"o1-pro","input":150,"output":600,"cacheRead":null,"cacheWrite":null,"context":200000,"maxOutput":100000}
       ]
     },
     {
@@ -5675,7 +5465,7 @@
         {"provider":"openai","id":"o3","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":200000,"maxOutput":100000},
         {"provider":"azure","id":"o3","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":200000,"maxOutput":100000},
         {"provider":"openrouter","id":"openai/o3","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":200000,"maxOutput":100000},
-        {"provider":"vercel","id":"openai/o3-fast","input":3.5,"output":14,"cacheRead":0.875,"cacheWrite":null,"context":200000,"maxOutput":100000}
+        {"provider":"vercel","id":"openai/o3","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":200000,"maxOutput":100000}
       ]
     },
     {
@@ -5698,7 +5488,7 @@
       "offerings": [
         {"provider":"openai","id":"o3-mini","input":1.1,"output":4.4,"cacheRead":0.55,"cacheWrite":null,"context":200000,"maxOutput":100000},
         {"provider":"azure","id":"o3-mini","input":1.1,"output":4.4,"cacheRead":0.55,"cacheWrite":null,"context":200000,"maxOutput":100000},
-        {"provider":"openrouter","id":"openai/o3-mini","input":1.1,"output":4.4,"cacheRead":0.55,"cacheWrite":null,"context":200000,"maxOutput":100000}
+        {"provider":"vercel","id":"openai/o3-mini","input":1.1,"output":4.4,"cacheRead":0.55,"cacheWrite":null,"context":200000,"maxOutput":100000}
       ]
     },
     {
@@ -5746,8 +5536,7 @@
       "offerings": [
         {"provider":"openai","id":"o4-mini","input":1.1,"output":4.4,"cacheRead":0.275,"cacheWrite":null,"context":200000,"maxOutput":100000},
         {"provider":"azure","id":"o4-mini","input":1.1,"output":4.4,"cacheRead":0.275,"cacheWrite":null,"context":200000,"maxOutput":100000},
-        {"provider":"openrouter","id":"openai/o4-mini","input":1.1,"output":4.4,"cacheRead":0.275,"cacheWrite":null,"context":200000,"maxOutput":100000},
-        {"provider":"vercel","id":"openai/o4-mini-fast","input":2,"output":8,"cacheRead":0.5,"cacheWrite":null,"context":200000,"maxOutput":100000}
+        {"provider":"vercel","id":"openai/o4-mini","input":1.1,"output":4.4,"cacheRead":0.275,"cacheWrite":null,"context":200000,"maxOutput":100000}
       ]
     },
     {
@@ -5768,7 +5557,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"alibaba","id":"qwen-flash","input":0.05,"output":0.4,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":32768}
+        {"provider":"alibaba","id":"qwen-flash","input":0.05,"output":0.4,"cacheRead":0.01,"cacheWrite":0.0625,"context":1000000,"maxOutput":32768}
       ]
     },
     {
@@ -5901,7 +5690,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"alibaba","id":"qwen-plus","input":0.4,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":32768},
+        {"provider":"alibaba","id":"qwen-plus","input":0.4,"output":1.2,"cacheRead":0.08,"cacheWrite":0.5,"context":1000000,"maxOutput":32768},
         {"provider":"openrouter","id":"qwen/qwen-plus","input":0.26,"output":0.78,"cacheRead":0.052,"cacheWrite":0.325,"context":1000000,"maxOutput":32768}
       ]
     },
@@ -6014,90 +5803,6 @@
       ]
     },
     {
-      "modelKey": "qwen2-5-14b-instruct",
-      "name": "Qwen2.5 14B Instruct",
-      "labProvider": "alibaba",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-04",
-      "context": 131072,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"alibaba","id":"qwen2-5-14b-instruct","input":0.35,"output":1.4,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
-      ]
-    },
-    {
-      "modelKey": "qwen2-5-32b-instruct",
-      "name": "Qwen2.5 32B Instruct",
-      "labProvider": "alibaba",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-04",
-      "context": 131072,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"alibaba","id":"qwen2-5-32b-instruct","input":0.7,"output":2.8,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
-      ]
-    },
-    {
-      "modelKey": "qwen2-5-72b-instruct",
-      "name": "Qwen2.5 72B Instruct",
-      "labProvider": "alibaba",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-04",
-      "context": 131072,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"alibaba","id":"qwen2-5-72b-instruct","input":1.4,"output":5.6,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
-      ]
-    },
-    {
-      "modelKey": "qwen2-5-7b-instruct",
-      "name": "Qwen2.5 7B Instruct",
-      "labProvider": "alibaba",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-04",
-      "context": 131072,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"alibaba","id":"qwen2-5-7b-instruct","input":0.175,"output":0.7,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
-      ]
-    },
-    {
       "modelKey": "qwen2-5-omni-7b",
       "name": "Qwen2.5-Omni 7B",
       "labProvider": "alibaba",
@@ -6123,58 +5828,13 @@
       ]
     },
     {
-      "modelKey": "qwen2-5-vl-72b-instruct",
-      "name": "Qwen2.5-VL 72B Instruct",
-      "labProvider": "alibaba",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-04",
-      "context": 131072,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text",
-        "image"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"alibaba","id":"qwen2-5-vl-72b-instruct","input":2.8,"output":8.4,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192},
-        {"provider":"openrouter","id":"qwen/qwen2.5-vl-72b-instruct","input":0.8,"output":1,"cacheRead":0.4,"cacheWrite":null,"context":128000,"maxOutput":115200}
-      ]
-    },
-    {
-      "modelKey": "qwen2-5-vl-7b-instruct",
-      "name": "Qwen2.5-VL 7B Instruct",
-      "labProvider": "alibaba",
-      "releaseDate": null,
-      "knowledgeCutoff": "2024-04",
-      "context": 131072,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text",
-        "image"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"alibaba","id":"qwen2-5-vl-7b-instruct","input":0.35,"output":1.05,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
-      ]
-    },
-    {
-      "modelKey": "qwen2.5-coder-32b-instruct",
-      "name": "Qwen2.5-Coder-32B-Instruct",
+      "modelKey": "qwen2.5-7b-instruct",
+      "name": "Qwen 2.5 7B Instruct Turbo",
       "labProvider": null,
-      "releaseDate": "2024-11-12",
+      "releaseDate": "2024-09-19",
       "knowledgeCutoff": null,
       "context": 32768,
-      "maxOutput": 29491,
+      "maxOutput": 32768,
       "inputModalities": [
         "text"
       ],
@@ -6183,9 +5843,9 @@
       ],
       "openWeights": true,
       "reasoning": false,
-      "toolCall": false,
+      "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"qwen/qwen-2.5-coder-32b-instruct","input":0.66,"output":1,"cacheRead":null,"cacheWrite":null,"context":32768,"maxOutput":29491}
+        {"provider":"togetherai","id":"Qwen/Qwen2.5-7B-Instruct-Turbo","input":0.3,"output":0.3,"cacheRead":null,"cacheWrite":null,"context":32768,"maxOutput":32768}
       ]
     },
     {
@@ -6249,9 +5909,31 @@
       "toolCall": true,
       "offerings": [
         {"provider":"amazon-bedrock","id":"qwen.qwen3-235b-a22b-2507-v1:0","input":0.22,"output":0.88,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":131072},
-        {"provider":"openrouter","id":"qwen/qwen3-235b-a22b-2507","input":0.09,"output":0.55,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":16384},
+        {"provider":"openrouter","id":"qwen/qwen3-235b-a22b-2507","input":0.14,"output":0.8,"cacheRead":0.05,"cacheWrite":null,"context":262144,"maxOutput":117964},
         {"provider":"vercel","id":"alibaba/qwen-3-235b","input":0.22,"output":0.88,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":16384},
+        {"provider":"togetherai","id":"Qwen/Qwen3-235B-A22B-Instruct-2507-tput","input":0.2,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"deepinfra","id":"Qwen/Qwen3-235B-A22B-Instruct-2507","input":0.09,"output":0.55,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":16384}
+      ]
+    },
+    {
+      "modelKey": "qwen3-235b-a22b-thinking-2507",
+      "name": "Qwen3 235B-A22B Thinking 2507",
+      "labProvider": null,
+      "releaseDate": "2025-07-25",
+      "knowledgeCutoff": null,
+      "context": 128000,
+      "maxOutput": 16384,
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": true,
+      "reasoning": true,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"openrouter","id":"qwen/qwen3-235b-a22b-thinking-2507","input":0.45,"output":3.5,"cacheRead":null,"cacheWrite":null,"context":128000,"maxOutput":16384}
       ]
     },
     {
@@ -6275,6 +5957,27 @@
         {"provider":"openrouter","id":"qwen/qwen3-30b-a3b","input":0.12,"output":0.5,"cacheRead":null,"cacheWrite":null,"context":40960,"maxOutput":16384},
         {"provider":"vercel","id":"alibaba/qwen-3-30b","input":0.12,"output":0.5,"cacheRead":null,"cacheWrite":null,"context":40960,"maxOutput":16384},
         {"provider":"deepinfra","id":"Qwen/Qwen3-30B-A3B","input":0.12,"output":0.5,"cacheRead":null,"cacheWrite":null,"context":40960,"maxOutput":16384}
+      ]
+    },
+    {
+      "modelKey": "qwen3-30b-a3b-instruct-2507",
+      "name": "Qwen3 30B-A3B Instruct 2507",
+      "labProvider": null,
+      "releaseDate": "2025-07-28",
+      "knowledgeCutoff": null,
+      "context": 262144,
+      "maxOutput": 235929,
+      "inputModalities": [
+        "text"
+      ],
+      "outputModalities": [
+        "text"
+      ],
+      "openWeights": true,
+      "reasoning": false,
+      "toolCall": true,
+      "offerings": [
+        {"provider":"openrouter","id":"qwen/qwen3-30b-a3b-instruct-2507","input":0.1,"output":0.3,"cacheRead":0.1,"cacheWrite":null,"context":262144,"maxOutput":235929}
       ]
     },
     {
@@ -6343,7 +6046,7 @@
       "offerings": [
         {"provider":"alibaba","id":"qwen3-coder-30b-a3b-instruct","input":0.45,"output":2.25,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
         {"provider":"amazon-bedrock","id":"qwen.qwen3-coder-30b-a3b-v1:0","input":0.15,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":131072},
-        {"provider":"openrouter","id":"qwen/qwen3-coder-30b-a3b-instruct","input":0.07,"output":0.28,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":235929},
+        {"provider":"openrouter","id":"qwen/qwen3-coder-30b-a3b-instruct","input":0.15,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":235929},
         {"provider":"vercel","id":"alibaba/qwen3-coder-30b-a3b","input":0.15,"output":0.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":8192}
       ]
     },
@@ -6368,7 +6071,9 @@
         {"provider":"alibaba","id":"qwen3-coder-480b-a35b-instruct","input":1.5,"output":7.5,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
         {"provider":"amazon-bedrock","id":"qwen.qwen3-coder-480b-a35b-v1:0","input":0.45,"output":1.8,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":65536},
         {"provider":"openrouter","id":"qwen/qwen3-coder","input":0.3,"output":1,"cacheRead":0.1,"cacheWrite":null,"context":262144,"maxOutput":65536},
-        {"provider":"vercel","id":"alibaba/qwen3-coder","input":0.22,"output":1.8,"cacheRead":0.022,"cacheWrite":null,"context":262144,"maxOutput":32768}
+        {"provider":"vercel","id":"alibaba/qwen3-coder","input":0.22,"output":1.8,"cacheRead":0.022,"cacheWrite":null,"context":262144,"maxOutput":32768},
+        {"provider":"togetherai","id":"Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8","input":2,"output":2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144},
+        {"provider":"deepinfra","id":"Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo","input":0.3,"output":1,"cacheRead":0.1,"cacheWrite":null,"context":262144,"maxOutput":66536}
       ]
     },
     {
@@ -6389,7 +6094,7 @@
       "reasoning": false,
       "toolCall": true,
       "offerings": [
-        {"provider":"alibaba","id":"qwen3-coder-flash","input":0.3,"output":1.5,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":65536},
+        {"provider":"alibaba","id":"qwen3-coder-flash","input":0.3,"output":1.5,"cacheRead":0.06,"cacheWrite":0.375,"context":1000000,"maxOutput":65536},
         {"provider":"openrouter","id":"qwen/qwen3-coder-flash","input":0.195,"output":0.975,"cacheRead":0.039,"cacheWrite":0.24375,"context":1000000,"maxOutput":65536}
       ]
     },
@@ -6413,7 +6118,8 @@
       "offerings": [
         {"provider":"amazon-bedrock","id":"qwen.qwen3-coder-next","input":0.5,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
         {"provider":"openrouter","id":"qwen/qwen3-coder-next","input":0.12,"output":0.8,"cacheRead":0.07,"cacheWrite":null,"context":262144,"maxOutput":235929},
-        {"provider":"vercel","id":"alibaba/qwen3-coder-next","input":0.5,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":256000,"maxOutput":256000}
+        {"provider":"vercel","id":"alibaba/qwen3-coder-next","input":0.5,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":256000,"maxOutput":256000},
+        {"provider":"togetherai","id":"Qwen/Qwen3-Coder-Next-FP8","input":0.5,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144}
       ]
     },
     {
@@ -6504,7 +6210,7 @@
       "offerings": [
         {"provider":"alibaba","id":"qwen3-next-80b-a3b-instruct","input":0.5,"output":2,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":32768},
         {"provider":"amazon-bedrock","id":"qwen.qwen3-next-80b-a3b","input":0.15,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262000},
-        {"provider":"openrouter","id":"qwen/qwen3-next-80b-a3b-instruct","input":0.1,"output":1.1,"cacheRead":0.07,"cacheWrite":null,"context":262144,"maxOutput":235929},
+        {"provider":"openrouter","id":"qwen/qwen3-next-80b-a3b-instruct","input":0.09,"output":1.1,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":16384},
         {"provider":"vercel","id":"alibaba/qwen3-next-80b-a3b-instruct","input":0.15,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":262114,"maxOutput":262114},
         {"provider":"deepinfra","id":"Qwen/Qwen3-Next-80B-A3B-Instruct","input":0.09,"output":1.1,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":32768}
       ]
@@ -6528,7 +6234,6 @@
       "toolCall": true,
       "offerings": [
         {"provider":"alibaba","id":"qwen3-next-80b-a3b-thinking","input":0.5,"output":6,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":32768},
-        {"provider":"openrouter","id":"qwen/qwen3-next-80b-a3b-thinking","input":0.15,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":235929},
         {"provider":"vercel","id":"alibaba/qwen3-next-80b-a3b-thinking","input":0.15,"output":1.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":262144}
       ]
     },
@@ -6645,7 +6350,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"alibaba","id":"qwen3-vl-plus","input":0.2,"output":1.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":32768}
+        {"provider":"alibaba","id":"qwen3-vl-plus","input":0.2,"output":1.6,"cacheRead":0.04,"cacheWrite":0.25,"context":262144,"maxOutput":32768}
       ]
     },
     {
@@ -6694,7 +6399,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"alibaba","id":"qwen3.5-27b","input":0.3,"output":2.4,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
-        {"provider":"openrouter","id":"qwen/qwen3.5-27b","input":0.27,"output":2.16,"cacheRead":0.27,"cacheWrite":null,"context":262144,"maxOutput":65536},
+        {"provider":"openrouter","id":"qwen/qwen3.5-27b","input":0.26,"output":2.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":81920},
         {"provider":"deepinfra","id":"Qwen/Qwen3.5-27B","input":0.26,"output":2.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536}
       ]
     },
@@ -6719,7 +6424,8 @@
       "toolCall": true,
       "offerings": [
         {"provider":"alibaba","id":"qwen3.5-35b-a3b","input":0.25,"output":2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
-        {"provider":"openrouter","id":"qwen/qwen3.5-35b-a3b","input":0.14,"output":1,"cacheRead":0.05,"cacheWrite":null,"context":262144,"maxOutput":81920}
+        {"provider":"openrouter","id":"qwen/qwen3.5-35b-a3b","input":0.14,"output":1,"cacheRead":0.05,"cacheWrite":null,"context":262144,"maxOutput":81920},
+        {"provider":"deepinfra","id":"Qwen/Qwen3.5-35B-A3B","input":0.14,"output":1,"cacheRead":0.05,"cacheWrite":null,"context":262144,"maxOutput":81920}
       ]
     },
     {
@@ -6743,7 +6449,9 @@
       "toolCall": true,
       "offerings": [
         {"provider":"alibaba","id":"qwen3.5-397b-a17b","input":0.6,"output":3.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
-        {"provider":"openrouter","id":"qwen/qwen3.5-397b-a17b","input":0.39,"output":2.34,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536}
+        {"provider":"openrouter","id":"qwen/qwen3.5-397b-a17b","input":0.6,"output":3.6,"cacheRead":0.12,"cacheWrite":null,"context":262144,"maxOutput":64000},
+        {"provider":"togetherai","id":"Qwen/Qwen3.5-397B-A17B","input":0.6,"output":3.6,"cacheRead":0.35,"cacheWrite":null,"context":262144,"maxOutput":130000},
+        {"provider":"deepinfra","id":"Qwen/Qwen3.5-397B-A17B","input":0.45,"output":3,"cacheRead":0.22,"cacheWrite":null,"context":262144,"maxOutput":81920}
       ]
     },
     {
@@ -6766,7 +6474,8 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"qwen/qwen3.5-9b","input":0.1,"output":0.15,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":32768},
+        {"provider":"openrouter","id":"qwen/qwen3.5-9b","input":0.158,"output":0.232,"cacheRead":0.142,"cacheWrite":null,"context":262144,"maxOutput":40960},
+        {"provider":"togetherai","id":"Qwen/Qwen3.5-9B","input":0.17,"output":0.25,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
         {"provider":"deepinfra","id":"Qwen/Qwen3.5-9B","input":0.1,"output":0.15,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536}
       ]
     },
@@ -6839,7 +6548,7 @@
       "toolCall": true,
       "offerings": [
         {"provider":"alibaba","id":"qwen3.6-27b","input":0.6,"output":3.6,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
-        {"provider":"openrouter","id":"qwen/qwen3.6-27b","input":0.25,"output":2,"cacheRead":0.025,"cacheWrite":null,"context":262144,"maxOutput":65536},
+        {"provider":"openrouter","id":"qwen/qwen3.6-27b","input":0.32,"output":3.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":81920},
         {"provider":"vercel","id":"alibaba/qwen3.6-27b","input":0.6,"output":3.6,"cacheRead":null,"cacheWrite":null,"context":256000,"maxOutput":65536},
         {"provider":"deepinfra","id":"Qwen/Qwen3.6-27B","input":0.32,"output":3.2,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
         {"provider":"groq","id":"qwen/qwen3.6-27b","input":0.6,"output":3,"cacheRead":0.3,"cacheWrite":null,"context":131072,"maxOutput":16384}
@@ -6866,7 +6575,9 @@
       "toolCall": true,
       "offerings": [
         {"provider":"alibaba","id":"qwen3.6-35b-a3b","input":0.375,"output":2.25,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
-        {"provider":"openrouter","id":"qwen/qwen3.6-35b-a3b","input":0.1,"output":0.95,"cacheRead":0.05,"cacheWrite":null,"context":262144,"maxOutput":235929}
+        {"provider":"openrouter","id":"qwen/qwen3.6-35b-a3b","input":0.1,"output":0.9,"cacheRead":0.025,"cacheWrite":null,"context":262144,"maxOutput":235929},
+        {"provider":"vercel","id":"alibaba/qwen3.6-35b-a3b","input":0.375,"output":2.25,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536},
+        {"provider":"deepinfra","id":"Qwen/Qwen3.6-35B-A3B","input":0.1,"output":0.95,"cacheRead":0.1,"cacheWrite":null,"context":262144,"maxOutput":81920}
       ]
     },
     {
@@ -6936,7 +6647,8 @@
       "offerings": [
         {"provider":"alibaba","id":"qwen3.6-plus","input":0.5,"output":3,"cacheRead":0.05,"cacheWrite":0.625,"context":1000000,"maxOutput":65536},
         {"provider":"openrouter","id":"qwen/qwen3.6-plus","input":0.325,"output":1.95,"cacheRead":null,"cacheWrite":0.40625,"context":1000000,"maxOutput":65536},
-        {"provider":"vercel","id":"alibaba/qwen3.6-plus","input":0.5,"output":3,"cacheRead":0.05,"cacheWrite":0.625,"context":1000000,"maxOutput":64000}
+        {"provider":"vercel","id":"alibaba/qwen3.6-plus","input":0.5,"output":3,"cacheRead":0.05,"cacheWrite":0.625,"context":1000000,"maxOutput":64000},
+        {"provider":"togetherai","id":"Qwen/Qwen3.6-Plus","input":0.5,"output":3,"cacheRead":null,"cacheWrite":null,"context":1000000,"maxOutput":65536}
       ]
     },
     {
@@ -6959,7 +6671,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"alibaba","id":"qwen3.7-flash","input":0.03,"output":0.13,"cacheRead":0.003,"cacheWrite":0.0375,"context":1000000,"maxOutput":131072},
+        {"provider":"alibaba","id":"qwen3.7-flash","input":0.03,"output":0.13,"cacheRead":0.006,"cacheWrite":0.0375,"context":1000000,"maxOutput":131072},
         {"provider":"openrouter","id":"qwen/qwen3.7-flash","input":0.03,"output":0.13,"cacheRead":0.006,"cacheWrite":0.038,"context":1000000,"maxOutput":65536},
         {"provider":"vercel","id":"alibaba/qwen3.7-flash","input":0.03,"output":0.13,"cacheRead":0.006,"cacheWrite":0.038,"context":991000,"maxOutput":64000}
       ]
@@ -6985,6 +6697,7 @@
         {"provider":"alibaba","id":"qwen3.7-max","input":2.5,"output":7.5,"cacheRead":0.5,"cacheWrite":3.125,"context":1000000,"maxOutput":131072},
         {"provider":"openrouter","id":"qwen/qwen3.7-max","input":1.475,"output":4.425,"cacheRead":0.295,"cacheWrite":1.84375,"context":1000000,"maxOutput":131072},
         {"provider":"vercel","id":"alibaba/qwen3.7-max","input":2.5,"output":7.5,"cacheRead":0.5,"cacheWrite":3.125,"context":991000,"maxOutput":64000},
+        {"provider":"togetherai","id":"Qwen/Qwen3.7-Max","input":2.5,"output":7.5,"cacheRead":0.5,"cacheWrite":null,"context":1000000,"maxOutput":131072},
         {"provider":"deepinfra","id":"Qwen/Qwen3.7-Max","input":2.5,"output":7.5,"cacheRead":0.5,"cacheWrite":null,"context":256000,"maxOutput":131072}
       ]
     },
@@ -7008,7 +6721,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"alibaba","id":"qwen3.7-plus","input":0.4,"output":1.6,"cacheRead":0.04,"cacheWrite":0.5,"context":1000000,"maxOutput":131072},
+        {"provider":"alibaba","id":"qwen3.7-plus","input":0.4,"output":1.6,"cacheRead":0.08,"cacheWrite":0.5,"context":1000000,"maxOutput":131072},
         {"provider":"openrouter","id":"qwen/qwen3.7-plus","input":0.32,"output":1.28,"cacheRead":0.064,"cacheWrite":0.4,"context":1000000,"maxOutput":131072},
         {"provider":"vercel","id":"alibaba/qwen3.7-plus","input":0.4,"output":1.6,"cacheRead":0.08,"cacheWrite":0.5,"context":1000000,"maxOutput":64000}
       ]
@@ -7033,10 +6746,10 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"openrouter","id":"qwen/qwen3.8-27b","input":0.04,"output":1.35,"cacheRead":0.018,"cacheWrite":null,"context":1000000,"maxOutput":65536},
-        {"provider":"vercel","id":"alibaba/qwen3.8-27b","input":0.5,"output":3,"cacheRead":0.1,"cacheWrite":0.625,"context":1000000,"maxOutput":131072},
+        {"provider":"openrouter","id":"qwen/qwen3.8-27b","input":0.15,"output":1.875,"cacheRead":0.0375,"cacheWrite":null,"context":1048575,"maxOutput":235929},
+        {"provider":"vercel","id":"alibaba/qwen3.8-27b","input":0.06,"output":2.2,"cacheRead":0.059,"cacheWrite":null,"context":262144,"maxOutput":262144},
         {"provider":"deepinfra","id":"Qwen/Qwen3.8-27B","input":0.2,"output":2.5,"cacheRead":0.05,"cacheWrite":null,"context":262144,"maxOutput":32768},
-        {"provider":"groq","id":"qwen/qwen3.8-27b","input":0.8,"output":4,"cacheRead":null,"cacheWrite":null,"context":131042,"maxOutput":16384},
+        {"provider":"groq","id":"qwen/qwen3.8-27b","input":0.8,"output":4,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":16384},
         {"provider":"cerebras","id":"qwen-3.8-27b","input":0.99,"output":1.49,"cacheRead":0.99,"cacheWrite":null,"context":131072,"maxOutput":40960}
       ]
     },
@@ -7255,7 +6968,7 @@
       "modelKey": "solar-pro3",
       "name": "solar-pro3",
       "labProvider": "upstage",
-      "releaseDate": null,
+      "releaseDate": "2026-01-26",
       "knowledgeCutoff": "2025-03",
       "context": 131072,
       "maxOutput": 8192,
@@ -7269,8 +6982,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"upstage","id":"solar-pro3","input":0.25,"output":0.25,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192},
-        {"provider":"openrouter","id":"upstage/solar-pro-3","input":0.15,"output":0.6,"cacheRead":0.015,"cacheWrite":null,"context":131072,"maxOutput":117964}
+        {"provider":"upstage","id":"solar-pro3","input":0.25,"output":0.25,"cacheRead":null,"cacheWrite":null,"context":131072,"maxOutput":8192}
       ]
     },
     {
@@ -7296,48 +7008,6 @@
       ]
     },
     {
-      "modelKey": "step-1-32k",
-      "name": "Step 1 (32K)",
-      "labProvider": "stepfun",
-      "releaseDate": "2025-01-01",
-      "knowledgeCutoff": "2024-06",
-      "context": 32768,
-      "maxOutput": 32768,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": false,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"stepfun","id":"step-1-32k","input":2.05,"output":9.59,"cacheRead":0.41,"cacheWrite":null,"context":32768,"maxOutput":32768}
-      ]
-    },
-    {
-      "modelKey": "step-2-16k",
-      "name": "Step 2 (16K)",
-      "labProvider": "stepfun",
-      "releaseDate": "2025-01-01",
-      "knowledgeCutoff": "2024-06",
-      "context": 16384,
-      "maxOutput": 8192,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": false,
-      "reasoning": false,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"stepfun","id":"step-2-16k","input":5.21,"output":16.44,"cacheRead":1.04,"cacheWrite":null,"context":16384,"maxOutput":8192}
-      ]
-    },
-    {
       "modelKey": "step-3.5-flash",
       "name": "Step 3.5 Flash",
       "labProvider": "stepfun",
@@ -7355,7 +7025,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"stepfun","id":"step-3.5-flash","input":0.1,"output":0.3,"cacheRead":0.02,"cacheWrite":null,"context":256000,"maxOutput":256000},
+        {"provider":"stepfun","id":"step-3.5-flash","input":0.10461,"output":0.31384,"cacheRead":0.02092,"cacheWrite":null,"context":256000,"maxOutput":256000},
         {"provider":"openrouter","id":"stepfun/step-3.5-flash","input":0.1,"output":0.3,"cacheRead":null,"cacheWrite":null,"context":262144,"maxOutput":65536}
       ]
     },
@@ -7377,7 +7047,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"stepfun","id":"step-3.5-flash-2603","input":0.1,"output":0.3,"cacheRead":0.02,"cacheWrite":null,"context":256000,"maxOutput":256000}
+        {"provider":"stepfun","id":"step-3.5-flash-2603","input":0.10461,"output":0.31384,"cacheRead":0.02092,"cacheWrite":null,"context":256000,"maxOutput":256000}
       ]
     },
     {
@@ -7400,7 +7070,7 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"stepfun","id":"step-3.7-flash","input":0.185,"output":1.11,"cacheRead":0.037,"cacheWrite":null,"context":256000,"maxOutput":256000},
+        {"provider":"stepfun","id":"step-3.7-flash","input":0.20175,"output":1.21052,"cacheRead":0.04035,"cacheWrite":null,"context":256000,"maxOutput":256000},
         {"provider":"openrouter","id":"stepfun/step-3.7-flash","input":0.2,"output":1.15,"cacheRead":0.04,"cacheWrite":null,"context":262144,"maxOutput":230400},
         {"provider":"vercel","id":"stepfun/step-3.7-flash","input":0.2,"output":1.15,"cacheRead":0.04,"cacheWrite":null,"context":256000,"maxOutput":256000},
         {"provider":"deepinfra","id":"stepfun-ai/Step-3.7-Flash","input":0.2,"output":1.15,"cacheRead":0.04,"cacheWrite":null,"context":262144,"maxOutput":256000}
@@ -7426,36 +7096,14 @@
       "reasoning": true,
       "toolCall": true,
       "offerings": [
-        {"provider":"stepfun","id":"step-5-preview","input":0.959,"output":2.741,"cacheRead":0.048,"cacheWrite":null,"context":1000000,"maxOutput":65536},
-        {"provider":"openrouter","id":"stepfun/step-5-preview","input":1,"output":2.7,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":64000},
+        {"provider":"stepfun","id":"step-5-preview","input":1.04613,"output":2.98895,"cacheRead":0.10461,"cacheWrite":null,"context":1000000,"maxOutput":65536},
+        {"provider":"openrouter","id":"stepfun/step-5-preview","input":1,"output":2.7,"cacheRead":0.1,"cacheWrite":null,"context":1000000,"maxOutput":64000},
         {"provider":"vercel","id":"stepfun/step-5-preview","input":1,"output":2.7,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":1048576},
         {"provider":"deepinfra","id":"stepfun-ai/Step-5-Preview","input":1,"output":2.7,"cacheRead":0.1,"cacheWrite":null,"context":1048576,"maxOutput":1000000}
       ]
     },
     {"modelKey":"text-embedding-3-large","name":"text-embedding-3-large","labProvider":null,"releaseDate":"2024-01-25","knowledgeCutoff":null,"context":8192,"maxOutput":null,"inputModalities":["text"],"outputModalities":["text"],"openWeights":false,"reasoning":false,"toolCall":false,"offerings":[]},
     {"modelKey":"text-embedding-3-small","name":"text-embedding-3-small","labProvider":null,"releaseDate":"2024-01-25","knowledgeCutoff":null,"context":8192,"maxOutput":null,"inputModalities":["text"],"outputModalities":["text"],"openWeights":false,"reasoning":false,"toolCall":false,"offerings":[]},
-    {"modelKey":"text-embedding-ada-002","name":"text-embedding-ada-002","labProvider":null,"releaseDate":"2022-12-15","knowledgeCutoff":null,"context":8192,"maxOutput":null,"inputModalities":["text"],"outputModalities":["text"],"openWeights":false,"reasoning":false,"toolCall":false,"offerings":[]},
-    {
-      "modelKey": "trinity-large-thinking",
-      "name": "Trinity Large Thinking",
-      "labProvider": null,
-      "releaseDate": "2026-04-01",
-      "knowledgeCutoff": null,
-      "context": 262144,
-      "maxOutput": 80000,
-      "inputModalities": [
-        "text"
-      ],
-      "outputModalities": [
-        "text"
-      ],
-      "openWeights": true,
-      "reasoning": true,
-      "toolCall": true,
-      "offerings": [
-        {"provider":"openrouter","id":"arcee-ai/trinity-large-thinking","input":0.25,"output":0.8,"cacheRead":0.06,"cacheWrite":null,"context":262144,"maxOutput":80000},
-        {"provider":"vercel","id":"arcee-ai/trinity-large-thinking","input":0.25,"output":0.8,"cacheRead":null,"cacheWrite":null,"context":262100,"maxOutput":80000}
-      ]
-    }
+    {"modelKey":"text-embedding-ada-002","name":"text-embedding-ada-002","labProvider":null,"releaseDate":"2022-12-15","knowledgeCutoff":null,"context":8192,"maxOutput":null,"inputModalities":["text"],"outputModalities":["text"],"openWeights":false,"reasoning":false,"toolCall":false,"offerings":[]}
   ]
 }

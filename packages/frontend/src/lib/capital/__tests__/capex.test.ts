@@ -327,7 +327,7 @@ describe("metrics/capex.json (SEC XBRL companyfacts)", () => {
     expect(year.source.url).toContain(year.source.accession);
   });
 
-  it("this build (2026-10-21) has all of those annual figures", () => {
+  it("the committed build has all of those annual figures", () => {
     for (const [org, fiscalYear] of annual) {
       expect(view(org).years.some((y) => y.fiscalYear === fiscalYear), `${org} FY${fiscalYear}`).toBe(true);
     }

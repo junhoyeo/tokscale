@@ -1,0 +1,96 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_s1_2026_10_26",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026067168/anthropicpbc-sx1.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Form S-1, October 26, 2026",
+      "publishedAt": "2026-10-26",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1",
+        "accession": "0001628280-26-067168",
+        "cik": "0002130357",
+        "filedAt": "2026-10-26"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_spacexai_compute_2026",
+    "slug": "anthropic-spacexai-compute-2026",
+    "kind": "deal",
+    "types": [
+      "compute_contract"
+    ],
+    "title": "Anthropic discloses SpaceXAI GPU compute agreements",
+    "summary": "Anthropic disclosed agreements with SpaceXAI for NVIDIA GPU compute that were entered into and amended between May and October 2026. The agreements extend into 2029 and can be canceled after initial non-cancelable periods.",
+    "date": "2026-10-26",
+    "dates": {
+      "filed": "2026-10-26"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "buyer"
+        ]
+      },
+      {
+        "org": "org_xai",
+        "roles": [
+          "provider"
+        ],
+        "note": "SpaceX.AI LLC, formerly X.AI LLC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "commitment",
+        "label": "Aggregate spend under SpaceXAI arrangements",
+        "measure": "compute_commitment",
+        "value": 120500000000,
+        "currency": "USD",
+        "basis": "up_to",
+        "status": "signed",
+        "asOf": "2026-10-26",
+        "from": "org_anthropic",
+        "to": "org_xai",
+        "term": {
+          "starts": "Capacity ramping through December 2026; agreements extend into 2029"
+        },
+        "sourceId": "src_anthropic_s1_2026_10_26",
+        "quote": "Under the SpaceXAI Arrangements, we agreed to spend an aggregate of up to $120.5 billion over terms extending into 2029, consisting of approximately $3.1 billion in the aggregate per month once all capacity has been delivered, which we expect in December 2026, with different fees during capacity ramping periods."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Scope",
+        "text": "The agreements provide Anthropic access to compute powered by NVIDIA GPUs.",
+        "sourceId": "src_anthropic_s1_2026_10_26",
+        "quote": "Between May and October 2026, we entered into and amended several agreements with SpaceX.AI LLC (formerly known as X.AI LLC) (\"SpaceXAI\"), a wholly owned subsidiary of Space Exploration Technologies Corp. (collectively, the \"SpaceXAI Arrangements\"), to access compute powered by NVIDIA GPUs."
+      },
+      {
+        "label": "Monthly spend at full delivery",
+        "text": "Anthropic expects aggregate fees of about $3.1 billion a month after all capacity is delivered in December 2026.",
+        "sourceId": "src_anthropic_s1_2026_10_26",
+        "quote": "Under the SpaceXAI Arrangements, we agreed to spend an aggregate of up to $120.5 billion over terms extending into 2029, consisting of approximately $3.1 billion in the aggregate per month once all capacity has been delivered, which we expect in December 2026, with different fees during capacity ramping periods."
+      },
+      {
+        "label": "Cancellation",
+        "text": "After initial non-cancelable periods ending in January and March 2027, either party may cancel an agreement with 90 days’ written notice.",
+        "sourceId": "src_anthropic_s1_2026_10_26",
+        "quote": "Following initial non-cancelable periods ending in January 2027 and March 2027 under the respective agreements, each agreement may be cancelled by either party upon 90 days' advance written notice."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_anthropic_s1_2026_10_26"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

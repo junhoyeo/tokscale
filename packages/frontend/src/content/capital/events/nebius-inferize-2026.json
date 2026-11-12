@@ -1,0 +1,73 @@
+{
+  "sources": [
+    {
+      "id": "src_nebius_ex99_2026_10_01",
+      "url": "https://www.sec.gov/Archives/edgar/data/1513845/000110465926112824/tm2626792d1_ex99-1.htm",
+      "publisher": "SEC EDGAR (Nebius Group N.V.)",
+      "type": "sec_filing",
+      "title": "Nebius press release, October 1, 2026 (Exhibit 99.1): acquisition of Inferize",
+      "publishedAt": "2026-10-01",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "6-K",
+        "accession": "0001104659-26-112824",
+        "cik": "0001513845",
+        "filedAt": "2026-10-01"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_nebius_inferize_2026",
+    "slug": "nebius-inferize-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "Nebius acquires Inferize",
+    "summary": "Nebius acquired inference-optimization company Inferize and moved its technology and team into Nebius Token Factory. The transaction terms were not disclosed.",
+    "date": "2026-10-01",
+    "dates": {
+      "announced": "2026-10-01",
+      "completed": "2026-10-01",
+      "filed": "2026-10-01"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_nebius",
+        "roles": [
+          "acquirer"
+        ]
+      },
+      {
+        "org": "org_inferize",
+        "roles": [
+          "target"
+        ]
+      }
+    ],
+    "amounts": [],
+    "facts": [
+      {
+        "label": "Acquisition",
+        "text": "Nebius acquired Inferize, an inference optimization company. Its technology and team joined Nebius Token Factory.",
+        "sourceId": "src_nebius_ex99_2026_10_01",
+        "quote": "Amsterdam, October 1, 2026—Nebius (Nasdaq: NBIS), the AI cloud company, today announced it has acquired Inferize, an inference optimization company whose technology shortens the time needed to launch and scale large AI models, making inference workloads elastic. Inferize's technology and team have joined Nebius Token Factory, Nebius's managed inference platform for production AI."
+      },
+      {
+        "label": "Terms",
+        "text": "The transaction terms were not disclosed.",
+        "sourceId": "src_nebius_ex99_2026_10_01",
+        "quote": "The terms of the transaction were not disclosed."
+      }
+    ],
+    "sourceIds": [
+      "src_nebius_ex99_2026_10_01"
+    ]
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_pierre_2026_11_04",
+      "url": "https://openai.com/index/openai-to-acquire-pierre/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "OpenAI to acquire Pierre Computer Company, Inc.",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "license": "publisher"
+    },
+    {
+      "id": "src_openai_orchestra_bio_2026_10_20",
+      "url": "https://openai.com/index/openai-to-acquire-orchestra-bio/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "OpenAI acquires Orchestra Bio",
+      "publishedAt": "2026-10-20",
+      "retrievedAt": "2026-11-12",
+      "license": "publisher"
+    }
+  ],
+  "orgs": [
+    {
+      "id": "org_pierre_computer",
+      "slug": "pierre-computer",
+      "name": "Pierre Computer",
+      "legalNames": [
+        "Pierre Computer Company, Inc."
+      ],
+      "aliases": [
+        "Pierre"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-app"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "website": "https://pierre.computer/",
+      "description": "Developer-tools company behind Code Storage, Trees, Diffs and other open-source tools.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    },
+    {
+      "id": "org_orchestra_bio",
+      "slug": "orchestra-bio",
+      "name": "Orchestra Bio",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-app"
+      ],
+      "investorTypes": [],
+      "status": "acquired",
+      "parent": {
+        "org": "org_openai",
+        "since": "2026-10-20",
+        "sourceId": "src_openai_orchestra_bio_2026_10_20",
+        "quote": "OpenAI has acquired Orchestra Bio"
+      },
+      "website": "https://orchestra.bio/",
+      "description": "Platform for coordinating drug-development work across biopharma teams.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    },
+    {
+      "id": "org_micron",
+      "slug": "micron",
+      "name": "Micron",
+      "legalNames": [
+        "Micron Technology, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Boise",
+        "country": "US"
+      },
+      "website": "https://www.micron.com",
+      "description": "Chip company that makes memory and storage.",
+      "ids": {
+        "secCik": [
+          "0000723125"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "MU"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    }
+  ]
+}

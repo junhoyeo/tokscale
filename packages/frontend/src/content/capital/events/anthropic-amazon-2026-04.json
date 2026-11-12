@@ -9,6 +9,22 @@
       "publishedAt": "2026-04-20",
       "retrievedAt": "2026-10-21",
       "license": "publisher"
+    },
+    {
+      "id": "src_anthropic_s1a_2026_11_10",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Amendment No. 2 to Form S-1, November 10, 2026",
+      "publishedAt": "2026-11-10",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1/A",
+        "accession": "0001628280-26-072484",
+        "cik": "0002130357",
+        "filedAt": "2026-11-10"
+      },
+      "license": "public-domain-sec"
     }
   ],
   "event": {
@@ -45,20 +61,20 @@
     "amounts": [
       {
         "id": "compute",
-        "label": "Compute commitment to AWS",
+        "label": "Minimum compute commitment to AWS",
         "measure": "compute_commitment",
-        "value": 100000000000,
+        "value": 110000000000,
         "currency": "USD",
-        "basis": "more_than",
-        "status": "announced",
-        "asOf": "2026-04-20",
+        "basis": "at_least",
+        "status": "signed",
+        "asOf": "2026-11-10",
         "from": "org_anthropic",
         "to": "org_amazon",
         "term": {
-          "years": 10
+          "starts": "May 2026 through April 2036"
         },
-        "sourceId": "src_anthropic_amazon_compute",
-        "quote": "We are committing more than $100 billion over the next ten years to AWS technologies, securing up to 5GW of new capacity to train and run Claude."
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "In April 2026, we entered into an agreement with Amazon, pursuant to which we committed to spend an aggregate of at least $110.0 billion between May 2026 and April 2036, regardless of actual usage."
       },
       {
         "id": "investment",
@@ -138,9 +154,15 @@
       }
     ],
     "sourceIds": [
-      "src_anthropic_amazon_compute"
+      "src_anthropic_amazon_compute",
+      "src_anthropic_s1a_2026_11_10"
     ],
-    "reviewedAt": "2026-10-21",
-    "corrections": []
+    "reviewedAt": "2026-11-12",
+    "corrections": [
+      {
+        "date": "2026-11-12",
+        "text": "Updated the minimum AWS commitment from the earlier more-than-$100-billion announcement to the $110.0 billion minimum disclosed in Anthropic's S-1/A."
+      }
+    ]
   }
 }

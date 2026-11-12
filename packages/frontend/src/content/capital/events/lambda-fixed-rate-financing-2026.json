@@ -1,0 +1,83 @@
+{
+  "sources": [
+    {
+      "id": "src_lambda_financing_2026_10_01",
+      "url": "https://lambda.com/blog/lambda-closes-1-billion-senior-secured-fixed-rate-financing",
+      "publisher": "Lambda",
+      "type": "company_announcement",
+      "title": "Lambda closes $1 billion senior secured fixed rate financing",
+      "publishedAt": "2026-10-01",
+      "retrievedAt": "2026-11-12",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_lambda_fixed_rate_financing_2026",
+    "slug": "lambda-fixed-rate-financing-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "Lambda closes $1.008 billion delayed-draw term loan",
+    "summary": "Lambda closed an investment-grade delayed-draw term loan to fund GPU infrastructure for three customer deployments across multiple data centers.",
+    "date": "2026-10-01",
+    "dates": {
+      "closed": "2026-10-01"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_lambda",
+        "roles": [
+          "issuer",
+          "borrower"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "facility",
+        "label": "Delayed-draw term loan",
+        "measure": "debt_raised",
+        "value": 1008000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-10-01",
+        "to": "org_lambda",
+        "term": {
+          "through": "2033-05-30"
+        },
+        "sourceId": "src_lambda_financing_2026_10_01",
+        "quote": "$1.008 billion delayed draw term loan"
+      }
+    ],
+    "facts": [
+      {
+        "label": "Use of proceeds",
+        "text": "GPU infrastructure for three committed customer deployments with two investment-grade offtakers across multiple data centers.",
+        "sourceId": "src_lambda_financing_2026_10_01",
+        "quote": "SAN FRANCISCO, CA, October 1, 2026—Lambda, Inc. (\"Lambda\"), the Superintelligence Cloud, today announced the closing of a $1 billion investment-grade, delayed draw term loan (the \"Facility\") marketed to insurance companies and fixed income investors to fund the purchase and development of GPU infrastructure supporting three committed customer deployments with two investment-grade offtakers across multiple data centers."
+      },
+      {
+        "label": "Interest",
+        "text": "6.78% fixed interest rate on a semi-annual coupon basis.",
+        "sourceId": "src_lambda_financing_2026_10_01",
+        "quote": "6.78% fixed interest rate on a semi-annual coupon basis"
+      },
+      {
+        "label": "Maturity",
+        "text": "Final maturity on May 30, 2033, with a fully amortizing repayment profile.",
+        "sourceId": "src_lambda_financing_2026_10_01",
+        "quote": "Facility final maturity of May 30, 2033, with a fully amortizing repayment profile"
+      }
+    ],
+    "sourceIds": [
+      "src_lambda_financing_2026_10_01"
+    ]
+  }
+}

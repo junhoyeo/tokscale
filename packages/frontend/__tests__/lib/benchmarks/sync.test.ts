@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aliasRulesForWrite, createSyncContext, mapExternalModel } from "@/lib/benchmarks/sync/context";
+import { aliasRulesForWrite, createSyncContext, keepPreviousSource, mapExternalModel } from "@/lib/benchmarks/sync/context";
 import { buildEpochSnapshot, parseEciScores, parseEpochBenchmark, parseModelGroups } from "@/lib/benchmarks/sync/epoch";
 import { lmarenaFilterUrl, parseArenaRows } from "@/lib/benchmarks/sync/lmarena";
 import { buildCatalogSnapshot, catalogKeyFor, type ModelsDevApi } from "@/lib/benchmarks/sync/modelsdev";
@@ -214,6 +214,35 @@ describe("sync bookkeeping", () => {
     const report = buildReport(ctx, [], null, [{ source: "epoch", ok: true, error: null }], rules, "2026-10-21T00:00:00.000Z");
     expect(report.methods).toEqual({ exact: 1, normalized: 0, manual: 1, unreviewed: 1 });
     expect(report.unmapped.map((u) => u.externalModel)).toEqual(["mystery-1"]);
+  });
+
+  it("keeps a key that an earlier run mapped to when no catalog or usage lists it now", () => {
+    const earlier = { source: "epoch" as const, externalId: "Ministral 3B", modelKey: "ministral-3b", method: "exact" as const, reviewed: false };
+    const ctx = createSyncContext(KNOWN, [earlier]);
+    const resolution = mapExternalModel(
+      ctx,
+      "epoch",
+      { externalId: "Ministral 3B", names: ["Ministral 3B"] },
+      { benchmark: "epoch-capabilities-index", name: "Ministral 3B", date: "2026-11-09" },
+    );
+    expect(resolution.key).toBe("ministral-3b");
+    expect(ctx.unmapped.size).toBe(0);
+  });
+
+  it("carries a failed source's alias rules and unmapped models over from the previous run", () => {
+    const kept = { source: "lmarena" as const, externalId: "Kimi K3", modelKey: "kimi-k3", method: "normalized" as const, reviewed: false };
+    const other = { source: "epoch" as const, externalId: "glm-5.3", modelKey: "glm-5.3", method: "exact" as const, reviewed: false };
+    const ctx = createSyncContext(KNOWN, [kept, other]);
+    keepPreviousSource(ctx, "lmarena", [
+      { source: "lmarena", externalModel: "DeepSeek-V3.2-Exp", name: "DeepSeek-V3.2-Exp", benchmarks: ["webdev-arena"], newestDate: "2026-10-19" },
+      { source: "epoch", externalModel: "mystery-1", name: null, benchmarks: ["hle"], newestDate: null },
+    ]);
+    const rules = aliasRulesForWrite(ctx);
+    expect(rules.map((r) => `${r.source}:${r.externalId}`)).toEqual(["lmarena:Kimi K3"]);
+    const report = buildReport(ctx, [], null, [{ source: "lmarena", ok: false, error: "HTTP 500" }], rules, "2026-11-12T00:00:00.000Z");
+    expect(report.unmapped).toEqual([
+      { source: "lmarena", externalModel: "DeepSeek-V3.2-Exp", name: "DeepSeek-V3.2-Exp", benchmarks: ["webdev-arena"], newestDate: "2026-10-19" },
+    ]);
   });
 
   it("formats snapshots with one flat array element per line", () => {
