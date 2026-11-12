@@ -9,6 +9,22 @@
       "publishedAt": "2025-11-18",
       "retrievedAt": "2026-10-21",
       "license": "publisher"
+    },
+    {
+      "id": "src_anthropic_s1a_2026_11_10",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Amendment No. 2 to Form S-1, November 10, 2026",
+      "publishedAt": "2026-11-10",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1/A",
+        "accession": "0001628280-26-072484",
+        "cik": "0002130357",
+        "filedAt": "2026-11-10"
+      },
+      "license": "public-domain-sec"
     }
   ],
   "event": {
@@ -20,12 +36,13 @@
       "strategic_investment"
     ],
     "title": "Microsoft, NVIDIA and Anthropic strategic partnerships",
-    "summary": "Anthropic committed to buy $30 billion of Azure compute capacity from Microsoft and to work with NVIDIA on its systems. NVIDIA and Microsoft committed to invest up to $10 billion and up to $5 billion in Anthropic.",
+    "summary": "Anthropic committed to buy Azure compute capacity from Microsoft and later disclosed that amendments through November 2026 increased its aggregate commitment to at least $47.2 billion and up to $49.2 billion. NVIDIA and Microsoft also committed to invest up to $10 billion and up to $5 billion in Anthropic.",
     "date": "2025-11-18",
     "dates": {
-      "announced": "2025-11-18"
+      "announced": "2025-11-18",
+      "filed": "2026-11-10"
     },
-    "status": "announced",
+    "status": "signed",
     "participants": [
       {
         "org": "org_anthropic",
@@ -52,17 +69,39 @@
     "amounts": [
       {
         "id": "azure_compute",
-        "label": "Azure compute commitment",
+        "label": "Minimum Azure compute commitment after amendments",
         "measure": "compute_commitment",
-        "value": 30000000000,
+        "value": 47200000000,
         "currency": "USD",
-        "basis": "exact",
-        "status": "announced",
-        "asOf": "2025-11-18",
+        "basis": "at_least",
+        "status": "signed",
+        "asOf": "2026-11-10",
         "from": "org_anthropic",
         "to": "org_microsoft",
-        "sourceId": "src_anthropic_microsoft_nvidia",
-        "quote": "Anthropic has committed to purchase $30 billion of Azure compute capacity and to contract additional compute capacity up to one gigawatt."
+        "term": {
+          "starts": "November 2026 through June 2033"
+        },
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "In November 2025, we entered into an agreement with Microsoft, which was subsequently amended between February and November 2026, pursuant to which we committed to spend an aggregate of at least $47.2 billion and up to $49.2 billion between November 2026 and June 2033, regardless of actual usage."
+      },
+      {
+        "id": "azure_compute_maximum",
+        "label": "Maximum Azure compute commitment after amendments",
+        "measure": "compute_commitment",
+        "value": 49200000000,
+        "currency": "USD",
+        "basis": "up_to",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_anthropic",
+        "to": "org_microsoft",
+        "term": {
+          "starts": "November 2026 through June 2033"
+        },
+        "condition": "Maximum aggregate spend under the amended agreement",
+        "alternativeTo": "azure_compute",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "In November 2025, we entered into an agreement with Microsoft, which was subsequently amended between February and November 2026, pursuant to which we committed to spend an aggregate of at least $47.2 billion and up to $49.2 billion between November 2026 and June 2033, regardless of actual usage."
       },
       {
         "id": "nvidia_investment",
@@ -132,9 +171,15 @@
       }
     ],
     "sourceIds": [
-      "src_anthropic_microsoft_nvidia"
+      "src_anthropic_microsoft_nvidia",
+      "src_anthropic_s1a_2026_11_10"
     ],
-    "reviewedAt": "2026-10-21",
-    "corrections": []
+    "reviewedAt": "2026-11-12",
+    "corrections": [
+      {
+        "date": "2026-11-12",
+        "text": "Updated the Azure commitment to the $47.2 billion minimum and $49.2 billion maximum disclosed after amendments through November 2026."
+      }
+    ]
   }
 }

@@ -33,6 +33,23 @@
         "periodOfReport": "2026-07-06"
       },
       "license": "public-domain-sec"
+    },
+    {
+      "id": "src_terawulf_10q_2026_11_06",
+      "url": "https://www.sec.gov/Archives/edgar/data/1083301/000162828026071671/wulf-20260930.htm",
+      "publisher": "SEC EDGAR (TeraWulf Inc.)",
+      "type": "sec_filing",
+      "title": "TeraWulf Form 10-Q for the quarter ended September 30, 2026",
+      "publishedAt": "2026-11-06",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001628280-26-071671",
+        "cik": "0001083301",
+        "filedAt": "2026-11-06",
+        "periodOfReport": "2026-09-30"
+      },
+      "license": "public-domain-sec"
     }
   ],
   "event": {
@@ -43,13 +60,14 @@
       "asset_sale"
     ],
     "title": "TeraWulf sells its Abernathy joint-venture interest to a Fluidstack-led group",
-    "summary": "TeraWulf agreed to sell its interest in the Abernathy joint venture, which is developing an AI data-center campus in Abernathy, Texas, to purchasers led by Fluidstack. The price is paid in three installments.",
-    "date": "2026-07-06",
+    "summary": "TeraWulf sold its interest in the Abernathy joint venture, which is developing an AI data-center campus in Abernathy, Texas, to purchasers led by Fluidstack. The price is payable in three installments.",
+    "date": "2026-07-05",
     "dates": {
-      "signed": "2026-07-06",
-      "filed": "2026-07-06"
+      "signed": "2026-07-05",
+      "filed": "2026-07-06",
+      "completed": "2026-07-05"
     },
-    "status": "signed",
+    "status": "completed",
     "participants": [
       {
         "org": "org_terawulf",
@@ -74,8 +92,8 @@
         "value": 530000000,
         "currency": "USD",
         "basis": "approximately",
-        "status": "signed",
-        "asOf": "2026-07-06",
+        "status": "closed",
+        "asOf": "2026-07-05",
         "from": "org_fluidstack",
         "to": "org_terawulf",
         "sourceId": "src_terawulf_8k_2026_07_06",
@@ -105,6 +123,12 @@
         "text": "$250 million within 14 days, $150 million by December 31, 2026, and about $130 million by April 30, 2027.",
         "sourceId": "src_terawulf_8k_2026_07_06",
         "quote": "(i) $250 million within 14 days following execution of the Purchase Agreement, (ii) $150 million on or before December 31, 2026, and (iii) approximately $130 million, subject to certain adjustments, on or before April 30, 2027."
+      },
+      {
+        "label": "Completion",
+        "text": "The sale became effective on July 5, 2026; TeraWulf no longer holds an interest in the joint venture.",
+        "sourceId": "src_terawulf_10q_2026_11_06",
+        "quote": "The sale was effective as of July 5, 2026. The consideration is payable in three installments: $ 250.0 million within 14 days following the effective date which was received in July 2026; $ 150.0 million on or before December 31, 2026; and approximately $ 130.0 million due on or before the earlier of the date the Abernathy HPC Campus commences operations and April 30, 2027. As a result of the transaction, the TeraWulf Member no longer holds any equity interest in the Abernathy Joint Venture."
       }
     ],
     "relations": [
@@ -116,9 +140,15 @@
     ],
     "sourceIds": [
       "src_terawulf_8k_2026_07_06",
-      "src_terawulf_ex99_2026_07_06"
+      "src_terawulf_ex99_2026_07_06",
+      "src_terawulf_10q_2026_11_06"
     ],
-    "reviewedAt": "2026-10-21",
-    "corrections": []
+    "reviewedAt": "2026-11-12",
+    "corrections": [
+      {
+        "date": "2026-11-12",
+        "text": "Updated the transaction from signed to completed using TeraWulf's November 2026 Form 10-Q, which states the sale was effective July 5, 2026."
+      }
+    ]
   }
 }

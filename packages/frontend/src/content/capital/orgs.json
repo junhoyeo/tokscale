@@ -372,7 +372,9 @@
       "description": "AI safety and research company that builds the Claude models.",
       "ids": {
         "wikidata": "Q116758847",
-        "secCik": [],
+        "secCik": [
+          "0002130357"
+        ],
         "tickers": [],
         "hfOrg": "Anthropic",
         "githubOrg": "anthropics"
@@ -383,7 +385,7 @@
       "nportIssuerNames": [],
       "avatar": "/assets/v2/orgs/anthropic.webp",
       "seed": true,
-      "reviewedAt": "2026-10-21"
+      "reviewedAt": "2026-11-12"
     },
     {
       "id": "org_openai",

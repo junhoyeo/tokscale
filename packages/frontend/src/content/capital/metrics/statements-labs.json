@@ -19,6 +19,22 @@
       "publishedAt": "2026-02-12",
       "retrievedAt": "2026-10-21",
       "license": "publisher"
+    },
+    {
+      "id": "src_anthropic_s1a_2026_11_10",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Amendment No. 2 to Form S-1, November 10, 2026",
+      "publishedAt": "2026-11-10",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1/A",
+        "accession": "0001628280-26-072484",
+        "cik": "0002130357",
+        "filedAt": "2026-11-10"
+      },
+      "license": "public-domain-sec"
     }
   ],
   "statements": [
@@ -60,6 +76,19 @@
       "asOf": "2026-02-12",
       "sourceId": "src_anthropic_series_g",
       "quote": "Today, our run-rate revenue is $14 billion, with this figure growing over 10x annually in each of those past three years."
+    },
+    {
+      "id": "met_anthropic_run_rate_2026_10",
+      "org": "org_anthropic",
+      "label": "Run-rate revenue",
+      "measure": "revenue_run_rate",
+      "value": 81000000000,
+      "currency": "USD",
+      "basis": "approximately",
+      "status": "filed",
+      "asOf": "2026-10-31",
+      "sourceId": "src_anthropic_s1a_2026_11_10",
+      "quote": "Additionally, our Run-Rate Revenue was approximately $81 billion as of October 31, 2026, up $10 billion from September 30, 2026."
     }
   ]
 }
