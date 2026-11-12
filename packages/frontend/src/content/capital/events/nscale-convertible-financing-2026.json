@@ -12,10 +12,6 @@
     }
   ],
   "event": {
-    "quantities": [],
-    "relations": [],
-    "reviewedAt": "2026-11-12",
-    "corrections": [],
     "id": "evt_nscale_convertible_financing_2026",
     "slug": "nscale-convertible-financing-2026",
     "kind": "financing",
@@ -97,6 +93,7 @@
         "quote": "The financing consists of an initial $2.36bn tranche at closing and an additional $1bn commitment from NVIDIA with funding expected in mid-November, 2026."
       }
     ],
+    "quantities": [],
     "facts": [
       {
         "label": "IPO conversion",
@@ -105,8 +102,11 @@
         "quote": "The loan notes are convertible into ordinary shares (or non-voting shares in the case of NVIDIA) automatically upon completion of Nscale's initial public offering."
       }
     ],
+    "relations": [],
     "sourceIds": [
       "src_nscale_convertible_financing_2026_09_25"
-    ]
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
   }
 }

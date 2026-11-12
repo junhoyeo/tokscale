@@ -18,10 +18,6 @@
     }
   ],
   "event": {
-    "quantities": [],
-    "relations": [],
-    "reviewedAt": "2026-11-12",
-    "corrections": [],
     "id": "evt_nebius_bridge_facility_2026",
     "slug": "nebius-bridge-facility-2026",
     "kind": "financing",
@@ -64,6 +60,7 @@
         "quote": "The Facility Agreement provides for a senior secured term loan facility in an aggregate principal amount of $3.5 billion for the purpose of financing the buildout of the Borrowers' GPU infrastructure capacity and for other general corporate purposes."
       }
     ],
+    "quantities": [],
     "facts": [
       {
         "label": "Interest",
@@ -78,8 +75,11 @@
         "quote": "The obligations under the Facility Agreement are secured by a security interest on substantially all of each Borrower's assets"
       }
     ],
+    "relations": [],
     "sourceIds": [
       "src_nebius_6k_2026_10_22"
-    ]
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
   }
 }
