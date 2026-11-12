@@ -26,6 +26,7 @@ import type { GroupLeaderboardData, GroupLeaderboardUser } from "@/lib/groups/ge
 import type { SortBy } from "@/lib/leaderboard/types";
 import type { GroupPeriod } from "@/lib/reportingPeriods";
 import { GroupReportingSettings } from "@/components/leaderboard/GroupReportingSettings";
+import { avatarSrc } from "@/lib/avatar";
 
 type GroupRole = "owner" | "admin" | "member";
 
@@ -464,7 +465,7 @@ function GroupRow({
           data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
-          <UserAvatar src={user.avatarUrl || `https://github.com/${user.username}.png`} alt="" />
+          <UserAvatar src={avatarSrc(user.avatarUrl, user.username, 34)} alt="" />
           <span>
             {user.displayName || user.username}
             <Muted>@{user.username}</Muted>

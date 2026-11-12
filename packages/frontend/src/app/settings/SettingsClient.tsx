@@ -12,6 +12,7 @@ import { formatNumber, formatCurrency } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
 import { useSettings } from "@/lib/useSettings";
 import { COMMON_TIMEZONE_GROUPS, getBrowserTimeZone } from "@/lib/timezone";
+import { avatarSrc } from "@/lib/avatar";
 
 interface User {
   id: string;
@@ -936,7 +937,7 @@ export default function SettingsClient() {
           </SectionTitle>
           <ProfileWrapper>
             <AvatarImg
-              src={user.avatarUrl || `https://github.com/${user.username}.png`}
+              src={avatarSrc(user.avatarUrl, user.username, 64)}
               alt={user.username}
               width={64}
               height={64}

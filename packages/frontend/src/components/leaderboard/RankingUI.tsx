@@ -3,6 +3,7 @@
 import Link from "next/link";
 import styled from "styled-components";
 import { getGroupMonogram } from "./presentation";
+import { avatarSrc, sizedAvatarUrl } from "@/lib/avatar";
 
 export const CompactBadge = styled.span`
   display: inline-flex;
@@ -127,7 +128,7 @@ export function GroupMark({
 }) {
   return (
     <Mark $size={size} aria-hidden="true">
-      {avatarUrl ? <MarkImage src={avatarUrl} alt="" /> : getGroupMonogram(name)}
+      {avatarUrl ? <MarkImage src={sizedAvatarUrl(avatarUrl, size === "detail" ? 64 : 42)} alt="" /> : getGroupMonogram(name)}
     </Mark>
   );
 }
@@ -287,7 +288,7 @@ export function MobileRankingRow({
       >
         <MobileRank data-rank={rank <= 3 ? rank : undefined}>#{rank}</MobileRank>
         <MobileAvatar
-          src={avatarUrl || `https://github.com/${username}.png`}
+          src={avatarSrc(avatarUrl, username, 38)}
           alt=""
         />
         <MobileIdentity>

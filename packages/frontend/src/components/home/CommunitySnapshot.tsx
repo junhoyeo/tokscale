@@ -8,6 +8,7 @@ import { ModelMark } from "@/components/explore/ModelMark";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import { Arrow, focusRing, VisuallyHidden } from "./primitives";
 import { compactCost, compactNumber, userChange, wholeNumber } from "./format";
+import { avatarSrc } from "@/lib/avatar";
 
 interface CommunitySnapshotProps {
   snapshot: Snapshot | null;
@@ -84,7 +85,7 @@ function HumanItem({ human }: { human: HumanRow }) {
         <Rank>{human.rank}</Rank>
         <Identity>
           <AvatarImg
-            src={human.avatarUrl || `https://github.com/${encodeURIComponent(human.username)}.png?size=48`}
+            src={avatarSrc(human.avatarUrl, human.username, 22)}
             alt=""
             width={22}
             height={22}

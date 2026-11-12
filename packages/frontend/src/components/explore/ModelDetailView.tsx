@@ -47,6 +47,7 @@ import { ModelPricing } from "./ModelPricing";
 import { ModelSpecs } from "./ModelSpecs";
 import { SourcesFooter } from "./SourcesFooter";
 import { TrendChart } from "./TrendChart";
+import { avatarSrc } from "@/lib/avatar";
 
 const Notice = styled.p`
   margin: 0 0 16px;
@@ -531,7 +532,7 @@ export function ModelDetailView({ detail, period, periodOptions, fallbackFrom, r
               {detail.humans.map((human) => (
                 <PersonRow key={human.username} data-row-link="">
                   <PersonRank>{human.rank}</PersonRank>
-                  <Avatar src={human.avatarUrl ?? `https://github.com/${human.username}.png?size=72`} alt="" width={36} height={36} loading="lazy" />
+                  <Avatar src={avatarSrc(human.avatarUrl, human.username, 36)} alt="" width={36} height={36} loading="lazy" />
                   <PersonName>
                     <RowLink href={profilePath(human.username)} prefetch={false} data-row-primary="">
                       {human.displayName ?? human.username}

@@ -25,6 +25,7 @@ import {
 import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 import { trackEvent, type AnalyticsEventMap } from "@/lib/analytics/events";
 import type { LeaderboardData, LeaderboardUser, Period } from "@/lib/leaderboard/types";
+import { avatarSrc } from "@/lib/avatar";
 
 const Section = styled.div`
   display: grid;
@@ -849,7 +850,7 @@ const LeaderboardRow = memo(function LeaderboardRow({
           aria-current={isCurrentUser ? "true" : undefined}
         >
           <DesktopAvatar
-            src={user.avatarUrl || `https://github.com/${user.username}.png`}
+            src={avatarSrc(user.avatarUrl, user.username, 36)}
             alt=""
           />
           <UserInfo>
@@ -1180,7 +1181,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
         <CurrentUserCard href={`/u/${currentUser.username}`} prefetch={false}>
           <CurrentUserInfo>
             <CurrentUserAvatar
-              src={currentUser.avatarUrl || `https://github.com/${currentUser.username}.png`}
+              src={avatarSrc(currentUser.avatarUrl, currentUser.username, 48)}
               alt=""
             />
             <CurrentUserDetails>
