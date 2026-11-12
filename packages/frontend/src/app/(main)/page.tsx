@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Navigation } from "@/components/layout/Navigation";
 import { HomePage } from "@/components/home/HomePage";
-import { getCommunitySnapshot, getHumansLeaderboard, getModelLeaderboard } from "@/lib/explore";
+import { getCommunitySnapshot, getFeaturedHuman, getModelLeaderboard } from "@/lib/explore";
 import { getHomeCapital } from "@/lib/capital/ledger/home";
 import { homeUrl } from "@/lib/seo/urls";
 
@@ -14,10 +14,13 @@ export const metadata: Metadata = {
   },
 };
 
+/** The home page features this account. It is pinned by hand: change the username to feature someone else. */
+const FEATURED_HUMAN_USERNAME = "Dicklesworthstone";
+
 export default async function Page() {
-  const [snapshot, humans, models, capital] = await Promise.all([
+  const [snapshot, featured, models, capital] = await Promise.all([
     getCommunitySnapshot("30d").catch(() => null),
-    getHumansLeaderboard({ period: "30d", limit: 1 }).catch(() => null),
+    getFeaturedHuman(FEATURED_HUMAN_USERNAME, "30d").catch(() => null),
     getModelLeaderboard({ period: "30d", sort: "users", limit: 2 }).catch(() => null),
     getHomeCapital().catch(() => null),
   ]);
@@ -27,8 +30,8 @@ export default async function Page() {
       <Navigation />
       <HomePage
         snapshot={snapshot}
-        featuredHuman={humans?.rows[0] ?? null}
-        humansCoverage={humans?.coverage ?? null}
+        featuredHuman={featured?.human ?? null}
+        humansCoverage={featured?.coverage ?? null}
         models={models?.rows ?? []}
         modelsCoverage={models?.coverage ?? null}
         capital={capital}

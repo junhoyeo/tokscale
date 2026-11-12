@@ -11,6 +11,7 @@ import { pageRows, rankRows, indexableModelKeys } from "./rollup";
 import type {
   AgentUsageRow,
   CommunitySnapshot,
+  Coverage,
   HumanRow,
   LeaderboardQuery,
   ModelDetail,
@@ -61,6 +62,22 @@ export async function getHumansLeaderboard(q: LeaderboardQuery = {}): Promise<Ra
   }
   const rollup = await (await loadDb()).getPeriodRollup(period);
   return { rows: pageRows(rollup.humans, q.limit, q.offset), coverage: rollup.coverage };
+}
+
+/**
+ * The profile the home page features: `username`'s row, with their real rank in
+ * `period`. When that account has no public usage in the period, the first-ranked
+ * human takes its place so the section is not empty.
+ */
+export async function getFeaturedHuman(
+  username: string,
+  period: ExplorePeriod = "30d",
+): Promise<{ human: HumanRow | null; coverage: Coverage }> {
+  const { humans, coverage } = hasDatabase()
+    ? await (await loadDb()).getPeriodRollup(period)
+    : { humans: fixtureHumans(period), coverage: fixtureCoverage(period) };
+  const wanted = username.toLowerCase();
+  return { human: humans.find((h) => h.username.toLowerCase() === wanted) ?? humans[0] ?? null, coverage };
 }
 
 /**
