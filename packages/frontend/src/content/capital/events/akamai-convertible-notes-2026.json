@@ -16,6 +16,23 @@
         "periodOfReport": "2026-11-09"
       },
       "license": "public-domain-sec"
+    },
+    {
+      "id": "src_akamai_ex99_2026_11_09",
+      "url": "https://www.sec.gov/Archives/edgar/data/1086222/000119312526455539/d51061dex991.htm",
+      "publisher": "SEC EDGAR (Akamai Technologies, Inc.)",
+      "type": "sec_filing",
+      "title": "Akamai press release, November 9, 2026 (Exhibit 99.1): pricing of convertible senior notes",
+      "publishedAt": "2026-11-09",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-455539",
+        "cik": "0001086222",
+        "filedAt": "2026-11-10",
+        "periodOfReport": "2026-11-09"
+      },
+      "license": "public-domain-sec"
     }
   ],
   "event": {
@@ -44,6 +61,19 @@
     ],
     "amounts": [
       {
+        "id": "notes",
+        "label": "Both series (computed by Tokscale: $1.1B + $1.1B)",
+        "measure": "debt_raised",
+        "value": 2200000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-11-09",
+        "to": "org_akamai",
+        "sourceId": "src_akamai_ex99_2026_11_09",
+        "quote": "today announced that it has priced its private offering of $1.1 billion in aggregate principal amount of 1.00% convertible senior notes due 2028 (the \"2028 Notes\") and $1.1 billion in aggregate principal amount of 1.00% convertible senior notes due 2031 (the \"2031 Notes\" and, together with the 2028 Notes, the \"notes\")."
+      },
+      {
         "id": "notes_2028",
         "label": "Convertible Senior Notes due 2028",
         "measure": "debt_raised",
@@ -54,7 +84,8 @@
         "asOf": "2026-11-09",
         "to": "org_akamai",
         "sourceId": "src_akamai_8k_2026_11_10",
-        "quote": "On November 9, 2026, Akamai Technologies, Inc. issued a press release announcing that it has priced $1.1 billion of Convertible Senior Notes due 2028 and $1.1 billion of Convertible Senior Notes due 2031 in a private offering to persons reasonably believed to be qualified institutional buyers."
+        "quote": "On November 9, 2026, Akamai Technologies, Inc. issued a press release announcing that it has priced $1.1 billion of Convertible Senior Notes due 2028 and $1.1 billion of Convertible Senior Notes due 2031 in a private offering to persons reasonably believed to be qualified institutional buyers.",
+        "partOf": "notes"
       },
       {
         "id": "notes_2031",
@@ -67,14 +98,29 @@
         "asOf": "2026-11-09",
         "to": "org_akamai",
         "sourceId": "src_akamai_8k_2026_11_10",
-        "quote": "On November 9, 2026, Akamai Technologies, Inc. issued a press release announcing that it has priced $1.1 billion of Convertible Senior Notes due 2028 and $1.1 billion of Convertible Senior Notes due 2031 in a private offering to persons reasonably believed to be qualified institutional buyers."
+        "quote": "On November 9, 2026, Akamai Technologies, Inc. issued a press release announcing that it has priced $1.1 billion of Convertible Senior Notes due 2028 and $1.1 billion of Convertible Senior Notes due 2031 in a private offering to persons reasonably believed to be qualified institutional buyers.",
+        "partOf": "notes"
       }
     ],
     "quantities": [],
-    "facts": [],
+    "facts": [
+      {
+        "label": "Expected closing",
+        "text": "The sale was expected to close on November 12, 2026, subject to customary closing conditions.",
+        "sourceId": "src_akamai_ex99_2026_11_09",
+        "quote": "The sale of the notes is expected to close on November 12, 2026, subject to customary closing conditions."
+      },
+      {
+        "label": "Use of proceeds",
+        "text": "To repay part of the convertible notes due 2027 and to fund capital expenditure of the Cloud Infrastructure Services business.",
+        "sourceId": "src_akamai_ex99_2026_11_09",
+        "quote": "Akamai intends to use the remaining net proceeds from the offering to repay at maturity a portion of Akamai's $1.15 billion outstanding aggregate principal amount of 0.375% Convertible Senior Notes due 2027"
+      }
+    ],
     "relations": [],
     "sourceIds": [
-      "src_akamai_8k_2026_11_10"
+      "src_akamai_8k_2026_11_10",
+      "src_akamai_ex99_2026_11_09"
     ],
     "reviewedAt": "2026-11-12",
     "corrections": []

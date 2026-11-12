@@ -224,6 +224,8 @@ describe("event and profile display", () => {
     expect(offering.tag).toBe("Offering");
     expect(offering.typeLabels).toEqual(["Public offering", "Debt financing"]);
     const oracle = ledger.getDirectoryRows().find((row) => row.org.id === "org_oracle")!;
+    expect(oracle.lastFinancing?.id).toBe("evt_oracle_stock_and_notes_2026");
+    expect(oracle.roundsCount).toBe(0);
     expect(oracle.lastRound).toBeNull();
   });
 

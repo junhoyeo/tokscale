@@ -44,6 +44,19 @@
     ],
     "amounts": [
       {
+        "id": "notes",
+        "label": "Both series (computed by Tokscale: $850M + $650M)",
+        "measure": "debt_raised",
+        "value": 1500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-24",
+        "to": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_09_24",
+        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")"
+      },
+      {
         "id": "series_a",
         "label": "Series A Junior Subordinated Notes due 2057",
         "measure": "debt_raised",
@@ -54,7 +67,8 @@
         "asOf": "2026-09-24",
         "to": "org_vistra",
         "sourceId": "src_vistra_8k_2026_09_24",
-        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")"
+        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")",
+        "partOf": "notes"
       },
       {
         "id": "series_b",
@@ -67,7 +81,8 @@
         "asOf": "2026-09-24",
         "to": "org_vistra",
         "sourceId": "src_vistra_8k_2026_09_24",
-        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")"
+        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")",
+        "partOf": "notes"
       }
     ],
     "quantities": [],

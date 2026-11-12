@@ -67,6 +67,19 @@
     ],
     "amounts": [
       {
+        "id": "consideration",
+        "label": "Cash and stock consideration (computed by Tokscale: about $2.2B cash + 5,000,000 shares × $185)",
+        "measure": "purchase_price",
+        "value": 3125000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "closed",
+        "asOf": "2026-10-30",
+        "from": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_11_05",
+        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\")."
+      },
+      {
         "id": "cash",
         "label": "Cash consideration",
         "measure": "purchase_price",
@@ -77,7 +90,8 @@
         "asOf": "2026-10-30",
         "from": "org_vistra",
         "sourceId": "src_vistra_8k_2026_11_05",
-        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\")."
+        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\").",
+        "partOf": "consideration"
       },
       {
         "id": "share_value",
