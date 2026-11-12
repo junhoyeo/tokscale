@@ -507,6 +507,74 @@ fn session_file_paths() -> Vec<PathBuf> {
     paths
 }
 
+fn primary_session_file_path() -> Option<PathBuf> {
+    if let Ok(override_path) = std::env::var("ANTIGRAVITY_SESSION_FILE") {
+        let trimmed = override_path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(dir) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed).join("active_session.env"));
+        }
+    }
+    tokscale_core::paths::home_dir().map(|h| {
+        h.join(".gemini")
+            .join("antigravity-cli")
+            .join("active_session.env")
+    })
+}
+
+fn sync_active_session_file(token: &str, address: &str) {
+    let token = token.trim();
+    let address = address.trim();
+    if token.is_empty() || address.is_empty() {
+        return;
+    }
+    let Some(target) = primary_session_file_path() else {
+        return;
+    };
+    let Some(dir) = target.parent() else {
+        return;
+    };
+    if !dir.is_dir() {
+        return;
+    }
+    let content = format!("ANTIGRAVITY_CSRF_TOKEN={token}\nANTIGRAVITY_LS_ADDRESS={address}\n");
+    if let Ok(existing) = std::fs::read_to_string(&target) {
+        if existing.trim() == content.trim() {
+            return;
+        }
+    }
+    let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
+    let write_res = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, &content)?;
+        }
+        tokscale_core::fs_atomic::replace_file(&tmp, &target)?;
+        Ok(())
+    })();
+    if write_res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 fn active_session() -> Option<ParsedSession> {
     for path in session_file_paths() {
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -536,13 +604,16 @@ pub const HOOK_SPEC_KEY: &str = "tokscale-session-sync";
 const HOOK_COMMAND: &str = r#"set -eu; token=${ANTIGRAVITY_CSRF_TOKEN-}; address=${ANTIGRAVITY_LS_ADDRESS-}; if [ -z "$token" ] || [ -z "$address" ]; then echo "{}"; exit 0; fi; dir="$HOME/.gemini/antigravity-cli"; mkdir -p "$dir"; umask 077; tmp=$(mktemp "$dir/active_session.env.XXXXXX"); printf "ANTIGRAVITY_CSRF_TOKEN=%s\nANTIGRAVITY_LS_ADDRESS=%s\n" "$token" "$address" > "$tmp"; mv -f "$tmp" "$dir/active_session.env"; echo "{}""#;
 
 fn hook_spec() -> serde_json::Value {
+    let handler = serde_json::json!([
+        {
+            "type": "command",
+            "command": HOOK_COMMAND
+        }
+    ]);
     serde_json::json!({
-        "SessionStart": [
-            {
-                "type": "command",
-                "command": HOOK_COMMAND
-            }
-        ]
+        "SessionStart": handler,
+        "PreInvocation": handler,
+        "PostInvocation": handler
     })
 }
 
@@ -731,6 +802,9 @@ fn targets_from_env() -> Vec<CandidateTarget> {
                 port,
                 csrf_token: token.clone(),
             });
+            if let Some(ref tok) = token {
+                sync_active_session_file(tok, &addr);
+            }
         }
     }
 
@@ -741,6 +815,9 @@ fn targets_from_env() -> Vec<CandidateTarget> {
                     port,
                     csrf_token: token.clone(),
                 });
+                if let Some(ref tok) = token {
+                    sync_active_session_file(tok, &format!("localhost:{port}"));
+                }
             }
         }
     }
@@ -779,16 +856,24 @@ fn parse_port_from_address(addr: &str) -> Option<u16> {
 }
 
 /// Candidate targets from the CLI log (`cli.log`), pairing each logged port with
-/// `ANTIGRAVITY_CSRF_TOKEN` if present in the environment or active session file.
+/// `ANTIGRAVITY_CSRF_TOKEN` if present in the environment or active session file,
+/// alongside an unauthenticated probe for language server variants that do not enforce CSRF tokens.
 fn targets_from_cli_log() -> Vec<CandidateTarget> {
     let token = resolve_csrf_token(None);
-    ports_from_cli_log()
-        .into_iter()
-        .map(|port| CandidateTarget {
+    let mut targets = Vec::new();
+    for port in ports_from_cli_log() {
+        if let Some(ref token) = token {
+            targets.push(CandidateTarget {
+                port,
+                csrf_token: Some(token.clone()),
+            });
+        }
+        targets.push(CandidateTarget {
             port,
-            csrf_token: token.clone(),
-        })
-        .collect()
+            csrf_token: None,
+        });
+    }
+    targets
 }
 
 /// Candidate targets of IDE language servers found by scanning processes.
@@ -2167,6 +2252,37 @@ mod tests {
         );
     }
 
+    #[test]
+    #[serial]
+    fn targets_from_env_syncs_session_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("active_session.env");
+
+        let mut env = EnvGuard::capture(&[
+            "ANTIGRAVITY_SESSION_FILE",
+            "ANTIGRAVITY_CSRF_TOKEN",
+            "ANTIGRAVITY_LS_ADDRESS",
+        ]);
+        env.set("ANTIGRAVITY_SESSION_FILE", session_file.to_str().unwrap());
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "auto-sync-token-123");
+        env.set("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:44437");
+
+        let targets = targets_from_env();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0],
+            CandidateTarget {
+                port: 44437,
+                csrf_token: Some("auto-sync-token-123".to_string()),
+            }
+        );
+
+        assert!(session_file.is_file());
+        let content = std::fs::read_to_string(&session_file).unwrap();
+        assert!(content.contains("ANTIGRAVITY_CSRF_TOKEN=auto-sync-token-123"));
+        assert!(content.contains("ANTIGRAVITY_LS_ADDRESS=127.0.0.1:44437"));
+    }
+
     #[cfg(not(unix))]
     #[test]
     #[serial]
@@ -2202,15 +2318,17 @@ mod tests {
         let content = std::fs::read_to_string(&hooks_file).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(json.as_object().unwrap().contains_key(HOOK_SPEC_KEY));
-        let session_start = &json[HOOK_SPEC_KEY]["SessionStart"];
-        assert!(session_start.is_array());
-        assert_eq!(session_start[0]["type"], "command");
-        let cmd = session_start[0]["command"].as_str().unwrap();
-        assert!(cmd.contains("umask 077"));
-        assert!(cmd.contains("mktemp"));
-        assert!(cmd.contains("token=${ANTIGRAVITY_CSRF_TOKEN-}"));
-        assert!(cmd.contains("address=${ANTIGRAVITY_LS_ADDRESS-}"));
-        assert!(cmd.contains(r#"[ -z "$token" ] || [ -z "$address" ]"#));
+        for event in ["SessionStart", "PreInvocation", "PostInvocation"] {
+            let event_hook = &json[HOOK_SPEC_KEY][event];
+            assert!(event_hook.is_array());
+            assert_eq!(event_hook[0]["type"], "command");
+            let cmd = event_hook[0]["command"].as_str().unwrap();
+            assert!(cmd.contains("umask 077"));
+            assert!(cmd.contains("mktemp"));
+            assert!(cmd.contains("token=${ANTIGRAVITY_CSRF_TOKEN-}"));
+            assert!(cmd.contains("address=${ANTIGRAVITY_LS_ADDRESS-}"));
+            assert!(cmd.contains(r#"[ -z "$token" ] || [ -z "$address" ]"#));
+        }
     }
 
     #[cfg(unix)]

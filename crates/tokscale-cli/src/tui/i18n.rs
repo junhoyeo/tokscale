@@ -820,7 +820,7 @@ const fn tr_en(key: MessageKey) -> &'static str {
         MessageKey::ActionReset => "x Reset",
         MessageKey::AntigravityHookDialogTitle => "Link Antigravity CLI",
         MessageKey::AntigravityHookDialogMessage =>
-            "Add a SessionStart hook so agy syncs quota without token copying.",
+            "Add lifecycle hooks so agy syncs quota without token copying.",
         MessageKey::AntigravityHookDialogEffect =>
             "agy writes session env; tokscale auto-discovers quota",
         MessageKey::AntigravityHookDialogConfirm => "Register",
@@ -1253,7 +1253,7 @@ const fn tr_ko(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionReset => "x 초기화",
         MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 연동",
         MessageKey::AntigravityHookDialogMessage =>
-            "SessionStart 훅을 추가해 토큰 복사 없이 사용량을 동기화합니다.",
+            "동기화 훅을 추가해 토큰 복사 없이 사용량을 동기화합니다.",
         MessageKey::AntigravityHookDialogEffect =>
             "agy가 세션 정보를 기록하고 tokscale이 사용량을 찾습니다",
         MessageKey::AntigravityHookDialogConfirm => "등록",
@@ -1693,7 +1693,7 @@ const fn tr_ja(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionReset => "x リセット",
         MessageKey::AntigravityHookDialogTitle => "Antigravity CLI 連携",
         MessageKey::AntigravityHookDialogMessage =>
-            "SessionStart フックでトークンをコピーせず使用量を同期します。",
+            "同期フックでトークンをコピーせず使用量を同期します。",
         MessageKey::AntigravityHookDialogEffect =>
             "agy がセッション環境を書き、tokscale が使用量を自動検出",
         MessageKey::AntigravityHookDialogConfirm => "登録",
@@ -2124,7 +2124,7 @@ const fn tr_zh_cn(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionReset => "x 重置",
         MessageKey::AntigravityHookDialogTitle => "关联 Antigravity CLI",
         MessageKey::AntigravityHookDialogMessage =>
-            "添加 SessionStart 钩子，无需复制令牌即可同步用量。",
+            "添加同步钩子，无需复制令牌即可同步用量。",
         MessageKey::AntigravityHookDialogEffect =>
             "agy 写入会话环境，tokscale 自动发现用量",
         MessageKey::AntigravityHookDialogConfirm => "注册",
@@ -2547,7 +2547,7 @@ const fn tr_fr(key: MessageKey) -> Option<&'static str> {
         MessageKey::ActionReset => "x Réinitialiser",
         MessageKey::AntigravityHookDialogTitle => "Associer Antigravity CLI",
         MessageKey::AntigravityHookDialogMessage =>
-            "Hook SessionStart pour synchroniser sans copier le jeton.",
+            "Hooks de session pour synchroniser sans copier le jeton.",
         MessageKey::AntigravityHookDialogEffect =>
             "agy écrit la session, tokscale détecte le quota",
         MessageKey::AntigravityHookDialogConfirm => "Ajouter",
