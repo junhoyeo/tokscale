@@ -55,7 +55,7 @@ function FeaturedProfile({ human, coverage }: { human: HumanRow; coverage: Cover
 
   return (
     <Card aria-labelledby="featured-human-name">
-      <Identity href={profileHref}>
+      <Identity href={profileHref} prefetch={false}>
         <Avatar
           src={human.avatarUrl || `https://github.com/${encodeURIComponent(human.username)}.png?size=128`}
           alt=""

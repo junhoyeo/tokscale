@@ -80,7 +80,7 @@ function HumanItem({ human }: { human: HumanRow }) {
   const topAgent = human.topAgents[0];
   return (
     <li>
-      <RowLink href={`/u/${encodeURIComponent(human.username)}`} $kind="humans">
+      <RowLink href={`/u/${encodeURIComponent(human.username)}`} prefetch={false} $kind="humans">
         <Rank>{human.rank}</Rank>
         <Identity>
           <AvatarImg
@@ -132,7 +132,7 @@ function ModelItem({ model }: { model: ModelUsageRow }) {
   const change = userChange(model);
   return (
     <li>
-      <RowLink href={`/models/${encodeURIComponent(model.key)}`} $kind="models">
+      <RowLink href={`/models/${encodeURIComponent(model.key)}`} prefetch={false} $kind="models">
         <Rank>{model.rank}</Rank>
         <Identity>
           <ModelMark model={model} size={22} />

@@ -131,7 +131,17 @@ export interface LinkOption {
  * Link-based segmented navigation. Each option is a real URL, so state lives
  * in the address bar, works without JavaScript, and survives back/forward.
  */
-export function LinkSegments({ label, visibleLabel, options }: { label: string; visibleLabel?: string; options: LinkOption[] }) {
+export function LinkSegments({
+  label,
+  visibleLabel,
+  options,
+  prefetch,
+}: {
+  label: string;
+  visibleLabel?: string;
+  options: LinkOption[];
+  prefetch?: boolean;
+}) {
   return (
     <ControlGroup>
       {visibleLabel ? <ControlLabel aria-hidden="true">{visibleLabel}</ControlLabel> : null}
@@ -141,6 +151,7 @@ export function LinkSegments({ label, visibleLabel, options }: { label: string; 
             key={option.href + option.label}
             as={Link}
             href={option.href}
+            prefetch={prefetch}
             scroll={false}
             $active={option.active}
             aria-current={option.active ? "page" : undefined}

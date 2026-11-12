@@ -157,7 +157,7 @@ export function WorldwideSection({
                 </WidgetHeader>
                 <UserList>
                   {users.map((user) => (
-                    <UserRow key={user.userId} href={`/u/${user.username}`}>
+                    <UserRow key={user.userId} href={`/u/${user.username}`} prefetch={false}>
                       <RankBadge data-rank={user.rank}>
                         #{user.rank}
                       </RankBadge>

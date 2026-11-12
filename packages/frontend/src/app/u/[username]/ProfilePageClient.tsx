@@ -557,6 +557,7 @@ function ProfilePeriodSelector({
           <PeriodLink
             key={option.value}
             href={buildProfilePeriodHref(username, option.value)}
+            prefetch={false}
             $active={isActive}
             aria-current={isActive ? "page" : undefined}
           >

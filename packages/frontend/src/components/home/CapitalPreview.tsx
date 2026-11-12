@@ -165,7 +165,7 @@ function LabRow({ lab }: { lab: HomeCapitalLab }) {
         {lab.topModel ? (
           <ModelCell>
             <ModelMark model={lab.topModel} size={18} />
-            <CellLink href={lab.topModel.href}>{lab.topModel.name}</CellLink>
+            <CellLink href={lab.topModel.href} prefetch={false}>{lab.topModel.name}</CellLink>
           </ModelCell>
         ) : (
           "—"

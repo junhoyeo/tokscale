@@ -444,7 +444,7 @@ export default async function CompaniesPage({ searchParams }: PageProps) {
                     <td data-label="Top model">
                       {row.usage && row.usage.models[0] ? (
                         <>
-                          <Link href={`/models/${encodeURIComponent(row.usage.models[0].key)}`}>{row.usage.models[0].name}</Link>
+                          <Link href={`/models/${encodeURIComponent(row.usage.models[0].key)}`} prefetch={false}>{row.usage.models[0].name}</Link>
                           <span className={styles.cellSub}>{row.usage.models[0].activeUsers} active users</span>
                         </>
                       ) : (

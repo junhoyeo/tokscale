@@ -765,7 +765,7 @@ function ResultRowView({
           {matched ? <ModelMark model={{ name, logoUrl: row.logoUrl }} size={20} /> : <UnmatchedMark aria-hidden="true" />}
           <ModelText>
             {row.href ? (
-              <ModelLink href={row.href} data-row-primary="">
+              <ModelLink href={row.href} prefetch={false} data-row-primary="">
                 {name}
               </ModelLink>
             ) : (

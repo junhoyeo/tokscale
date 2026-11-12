@@ -844,6 +844,7 @@ const LeaderboardRow = memo(function LeaderboardRow({
       <TableCell>
         <UserContainer
           href={`/u/${user.username}`}
+          prefetch={false}
           data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >
@@ -1176,7 +1177,7 @@ export default function LeaderboardClient({ initialData, currentUser, initialSor
       )}
 
       {currentUser && currentUserRank && (
-        <CurrentUserCard href={`/u/${currentUser.username}`}>
+        <CurrentUserCard href={`/u/${currentUser.username}`} prefetch={false}>
           <CurrentUserInfo>
             <CurrentUserAvatar
               src={currentUser.avatarUrl || `https://github.com/${currentUser.username}.png`}

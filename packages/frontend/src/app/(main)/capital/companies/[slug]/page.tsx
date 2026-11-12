@@ -507,7 +507,7 @@ function ModelsSection({ usage, org }: { usage: LabUsage | null | "unavailable";
                 <span className={styles.modelCell}>
                   <ModelMark model={m} size={24} />
                   <span>
-                    <Link className={styles.cellMain} href={`/models/${encodeURIComponent(m.key)}`} data-row-primary="">
+                    <Link className={styles.cellMain} href={`/models/${encodeURIComponent(m.key)}`} prefetch={false} data-row-primary="">
                       {m.name}
                     </Link>
                     <span className={styles.cellSub}>{m.key}</span>

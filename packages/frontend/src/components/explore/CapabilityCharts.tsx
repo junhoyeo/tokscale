@@ -393,7 +393,7 @@ export function CapabilityCharts({
               {unused.map((m, i) => (
                 <span key={m.key}>
                   {i > 0 ? ", " : null}
-                  <InlineLink href={modelPath(m.key)}>{m.name}</InlineLink> ({m.eci.toFixed(1)})
+                  <InlineLink href={modelPath(m.key)} prefetch={false}>{m.name}</InlineLink> ({m.eci.toFixed(1)})
                 </span>
               ))}
               .

@@ -281,6 +281,7 @@ export function MobileRankingRow({
     <MobileRankingItem>
       <MobileRankingLink
         href={href}
+        prefetch={false}
         $current={isCurrentUser}
         aria-current={isCurrentUser ? "true" : undefined}
       >

@@ -436,7 +436,7 @@ export function ModelDetailView({ detail, period, periodOptions, fallbackFrom, r
       </ModelIdentity>
 
       <ControlBar>
-        <LinkSegments label="Period" visibleLabel="Period" options={periodOptions} />
+        <LinkSegments label="Period" visibleLabel="Period" options={periodOptions} prefetch={false} />
       </ControlBar>
 
       {fallbackFrom ? (
@@ -533,7 +533,7 @@ export function ModelDetailView({ detail, period, periodOptions, fallbackFrom, r
                   <PersonRank>{human.rank}</PersonRank>
                   <Avatar src={human.avatarUrl ?? `https://github.com/${human.username}.png?size=72`} alt="" width={36} height={36} loading="lazy" />
                   <PersonName>
-                    <RowLink href={profilePath(human.username)} data-row-primary="">
+                    <RowLink href={profilePath(human.username)} prefetch={false} data-row-primary="">
                       {human.displayName ?? human.username}
                     </RowLink>
                     <span>@{human.username}</span>
@@ -572,7 +572,7 @@ export function ModelDetailView({ detail, period, periodOptions, fallbackFrom, r
                 <Row key={related.key} data-row-link="">
                   <RowName>
                     <ModelMark model={related} size={20} />
-                    <RowLink href={modelPath(related.key)} data-row-primary="">
+                    <RowLink href={modelPath(related.key)} prefetch={false} data-row-primary="">
                       {related.name}
                     </RowLink>
                   </RowName>
@@ -589,7 +589,7 @@ export function ModelDetailView({ detail, period, periodOptions, fallbackFrom, r
           ) : (
             <Empty>No other {labName} models with data in this period.</Empty>
           )}
-          <SmallLink href={modelsAllPath()}>All models</SmallLink>
+          <SmallLink href={modelsAllPath()} prefetch={false}>All models</SmallLink>
         </Section>
 
         {research && hasResearch ? (

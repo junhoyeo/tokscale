@@ -416,7 +416,7 @@ export function ModelBoard({ rows, coverage, period, sort }: BoardProps<ModelUsa
                     <ModelIdentity>
                       <ModelMark model={row} size={28} />
                       <Identity>
-                        <NameLink href={modelPath(row.key)} data-row-primary="">
+                        <NameLink href={modelPath(row.key)} prefetch={false} data-row-primary="">
                           {row.name}
                         </NameLink>
                         <SubText>{row.lab ?? UNKNOWN_LAB_NAME}</SubText>
@@ -464,7 +464,7 @@ export function ModelBoard({ rows, coverage, period, sort }: BoardProps<ModelUsa
                 <MobileRank>{row.rank}</MobileRank>
                 <MobileName>
                   <ModelMark model={row} size={20} />
-                  <MobileNameLink href={modelPath(row.key)} data-row-primary="">
+                  <MobileNameLink href={modelPath(row.key)} prefetch={false} data-row-primary="">
                     {row.name}
                   </MobileNameLink>
                 </MobileName>
@@ -571,7 +571,7 @@ export function AgentBoard({ rows, coverage, period, sort }: BoardProps<AgentUsa
                       {row.topModels.map((model) => (
                         <TopItem key={model.key}>
                           <ModelMark model={model} size={16} />
-                          <TopModelLink href={modelPath(model.key)}>{model.name}</TopModelLink>
+                          <TopModelLink href={modelPath(model.key)} prefetch={false}>{model.name}</TopModelLink>
                           <TopShare>{formatShare(model.share)}</TopShare>
                         </TopItem>
                       ))}
@@ -623,7 +623,7 @@ export function AgentBoard({ rows, coverage, period, sort }: BoardProps<AgentUsa
                     Top models: {row.topModels.map((model, index) => (
                       <span key={model.key}>
                         {index > 0 ? ", " : ""}
-                        <TopModelLink href={modelPath(model.key)}>{model.name}</TopModelLink>{" "}
+                        <TopModelLink href={modelPath(model.key)} prefetch={false}>{model.name}</TopModelLink>{" "}
                         {formatShare(model.share)}
                       </span>
                     ))}

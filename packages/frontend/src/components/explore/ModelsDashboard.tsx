@@ -715,7 +715,7 @@ export function ModelsDashboard({
           {formatCount(rows.length)} models: {usersInfo}.
         </span>
         <span>
-          <InlineLink href="/models/all">All models</InlineLink>
+          <InlineLink href="/models/all" prefetch={false}>All models</InlineLink>
           {" · "}
           <InlineLink href="/benchmarks">About the benchmarks</InlineLink>
         </span>
@@ -785,7 +785,7 @@ export function ModelsDashboard({
                   <th className="model" scope="row">
                     <ModelCell>
                       <ModelMark model={row} size={24} />
-                      <ModelLink href={modelPath(row.key)} data-row-primary="">
+                      <ModelLink href={modelPath(row.key)} prefetch={false} data-row-primary="">
                         {row.name}
                       </ModelLink>
                       <LabText>
@@ -822,7 +822,7 @@ export function ModelsDashboard({
               <span>{index + 1}</span>
               <ModelMark model={row} size={28} />
               <CardName>
-                <ModelLink href={modelPath(row.key)} data-row-primary="">
+                <ModelLink href={modelPath(row.key)} prefetch={false} data-row-primary="">
                   {row.name}
                 </ModelLink>
                 <LabText>{row.lab ?? "Lab unknown"}</LabText>

@@ -64,7 +64,7 @@ function ModelColumn({ model, accounts, period }: { model: ModelUsageRow; accoun
   const titleId = `home-model-${model.key.replace(/[^a-z0-9-]/gi, "-")}`;
   return (
     <Column aria-labelledby={titleId}>
-      <ModelHead href={`/models/${encodeURIComponent(model.key)}`}>
+      <ModelHead href={`/models/${encodeURIComponent(model.key)}`} prefetch={false}>
         <MarkSlot>
           <ModelMark model={model} size={40} />
         </MarkSlot>

@@ -446,7 +446,7 @@ export function ModelCatalog({
             </ClearButton>
           ) : null}
         </SearchField>
-        <LinkSegments label="Period" visibleLabel="Period" options={periodOptions} />
+        <LinkSegments label="Period" visibleLabel="Period" options={periodOptions} prefetch={false} />
         <LinkSegments label="Sort by" visibleLabel="Sort" options={sortOptions} />
       </ControlBar>
 
@@ -507,7 +507,7 @@ export function ModelCatalog({
                   <Item key={model.key} data-row-link="">
                     <NameBlock>
                       <ModelMark model={model} size={28} />
-                      <NameLink href={modelPath(model.key)} data-row-primary="">
+                      <NameLink href={modelPath(model.key)} prefetch={false} data-row-primary="">
                         {model.name}
                       </NameLink>
                       <Key>{model.key}</Key>

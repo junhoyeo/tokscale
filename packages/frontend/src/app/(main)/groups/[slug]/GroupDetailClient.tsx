@@ -460,6 +460,7 @@ function GroupRow({
       <Td>
         <UserCell
           href={`/u/${user.username}`}
+          prefetch={false}
           data-row-primary=""
           aria-current={isCurrentUser ? "true" : undefined}
         >

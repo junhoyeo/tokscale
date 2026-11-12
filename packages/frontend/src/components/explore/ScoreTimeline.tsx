@@ -576,7 +576,7 @@ export function ScoreTimeline({ timeline, unit, unitLabel, benchmarkName, source
                 <tr key={p.key} data-row-link={p.href ? "" : undefined}>
                   <th scope="row">
                     {p.href ? (
-                      <DataLink href={p.href} data-row-primary="">
+                      <DataLink href={p.href} prefetch={false} data-row-primary="">
                         {p.name}
                       </DataLink>
                     ) : (

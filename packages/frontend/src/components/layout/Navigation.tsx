@@ -477,7 +477,7 @@ function UserMenu({ user }: { user: User }) {
             <UserHandle>@{user.username}</UserHandle>
           </UserInfo>
           <MenuGroup>
-            <MenuLink href={`/u/${user.username}`} onClick={() => close(false)}>
+            <MenuLink href={`/u/${user.username}`} prefetch={false} onClick={() => close(false)}>
               <PersonIcon />
               Your profile
             </MenuLink>
@@ -613,7 +613,7 @@ export function Navigation() {
                   <UserHandle>@{user.username}</UserHandle>
                 </div>
               </MobileUserRow>
-              <MobileAction href={`/u/${user.username}`} onClick={closeMobile}>
+              <MobileAction href={`/u/${user.username}`} prefetch={false} onClick={closeMobile}>
                 <PersonIcon />
                 Your profile
               </MobileAction>

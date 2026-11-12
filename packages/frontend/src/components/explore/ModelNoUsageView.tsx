@@ -73,7 +73,7 @@ export function ModelNoUsageView({
         <p>
           No public Tokscale submission includes {model.name} yet, so this page has no active users, tokens or agent
           shares. The {shows} below come from public sources.{" "}
-          <InlineLink href={modelsAllPath()}>See models with usage</InlineLink>
+          <InlineLink href={modelsAllPath()} prefetch={false}>See models with usage</InlineLink>
         </p>
       </Notice>
 
