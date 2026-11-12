@@ -1,0 +1,106 @@
+{
+  "sources": [
+    {
+      "id": "src_nscale_convertible_financing_2026_09_25",
+      "url": "https://www.nscale.com/press-releases/pre-ipo-convertible-financing",
+      "publisher": "Nscale",
+      "type": "company_announcement",
+      "title": "Nscale Raises $3.36 Billion in Pre-IPO Convertible Financing",
+      "publishedAt": "2026-09-25",
+      "retrievedAt": "2026-11-12",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_nscale_convertible_financing_2026",
+    "slug": "nscale-convertible-financing-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "Nscale $3.36 billion pre-IPO convertible financing",
+    "summary": "Nscale announced convertible loan notes led by Third Point. The initial tranche closed, with an additional NVIDIA commitment expected to fund later.",
+    "date": "2026-09-25",
+    "dates": {
+      "announced": "2026-09-25",
+      "signed": "2026-09-25"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_nscale",
+        "roles": [
+          "issuer",
+          "borrower"
+        ]
+      },
+      {
+        "org": "org_nvidia",
+        "roles": [
+          "investor",
+          "lender"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "total",
+        "label": "Convertible loan notes",
+        "measure": "debt_raised",
+        "value": 3360000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "signed",
+        "asOf": "2026-09-25",
+        "to": "org_nscale",
+        "sourceId": "src_nscale_convertible_financing_2026_09_25",
+        "quote": "London, U.K., 25 September, 2026—Nscale Limited, the full-stack AI cloud platform, today announced its $3.36bn raise via convertible loan notes, led by Third Point."
+      },
+      {
+        "id": "initial",
+        "label": "Initial tranche at closing (included)",
+        "measure": "debt_raised",
+        "value": 2360000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-25",
+        "to": "org_nscale",
+        "partOf": "total",
+        "sourceId": "src_nscale_convertible_financing_2026_09_25",
+        "quote": "The financing consists of an initial $2.36bn tranche at closing and an additional $1bn commitment from NVIDIA with funding expected in mid-November, 2026."
+      },
+      {
+        "id": "nvidia",
+        "label": "NVIDIA commitment (included)",
+        "measure": "debt_raised",
+        "value": 1000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "announced",
+        "asOf": "2026-09-25",
+        "from": "org_nvidia",
+        "to": "org_nscale",
+        "condition": "Funding expected in mid-November 2026",
+        "partOf": "total",
+        "sourceId": "src_nscale_convertible_financing_2026_09_25",
+        "quote": "The financing consists of an initial $2.36bn tranche at closing and an additional $1bn commitment from NVIDIA with funding expected in mid-November, 2026."
+      }
+    ],
+    "facts": [
+      {
+        "label": "IPO conversion",
+        "text": "The loan notes convert automatically into shares when Nscale completes its initial public offering.",
+        "sourceId": "src_nscale_convertible_financing_2026_09_25",
+        "quote": "The loan notes are convertible into ordinary shares (or non-voting shares in the case of NVIDIA) automatically upon completion of Nscale's initial public offering."
+      }
+    ],
+    "sourceIds": [
+      "src_nscale_convertible_financing_2026_09_25"
+    ]
+  }
+}

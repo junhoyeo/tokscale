@@ -1,0 +1,85 @@
+{
+  "sources": [
+    {
+      "id": "src_nebius_6k_2026_10_22",
+      "url": "https://www.sec.gov/Archives/edgar/data/1513845/000110465926117978/tm2628078d1_6k.htm",
+      "publisher": "SEC EDGAR (Nebius Group N.V.)",
+      "type": "sec_filing",
+      "title": "Nebius Group N.V. Form 6-K, October 22, 2026 (bridge facility)",
+      "publishedAt": "2026-10-22",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "6-K",
+        "accession": "0001104659-26-117978",
+        "cik": "0001513845",
+        "filedAt": "2026-10-22"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_nebius_bridge_facility_2026",
+    "slug": "nebius-bridge-facility-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "Nebius $3.5 billion senior secured bridge facility",
+    "summary": "Nebius and two subsidiaries signed a bridge facility with Citibank to finance GPU infrastructure and for other corporate purposes.",
+    "date": "2026-10-17",
+    "dates": {
+      "signed": "2026-10-17",
+      "filed": "2026-10-22"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_nebius",
+        "roles": [
+          "issuer",
+          "borrower"
+        ],
+        "note": "Citibank, N.A. is the mandated lead arranger and lender."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "facility",
+        "label": "Senior secured term loan facility",
+        "measure": "debt_raised",
+        "value": 3500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "signed",
+        "asOf": "2026-10-17",
+        "to": "org_nebius",
+        "term": {
+          "through": "2027-10-16"
+        },
+        "sourceId": "src_nebius_6k_2026_10_22",
+        "quote": "The Facility Agreement provides for a senior secured term loan facility in an aggregate principal amount of $3.5 billion for the purpose of financing the buildout of the Borrowers' GPU infrastructure capacity and for other general corporate purposes."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Interest",
+        "text": "Term SOFR plus a margin that starts at 2.75% a year and can rise to 3.50% a year.",
+        "sourceId": "src_nebius_6k_2026_10_22",
+        "quote": "Loans under the Facility Agreement bear interest at Term SOFR plus an applicable margin commencing at 2.75% per annum and increasing by 0.25% for each 90-day period after October 17, 2026 up to 3.50% per annum (subject to other adjustments)."
+      },
+      {
+        "label": "Security",
+        "text": "Substantially all assets of each borrower, subject to exceptions.",
+        "sourceId": "src_nebius_6k_2026_10_22",
+        "quote": "The obligations under the Facility Agreement are secured by a security interest on substantially all of each Borrower's assets"
+      }
+    ],
+    "sourceIds": [
+      "src_nebius_6k_2026_10_22"
+    ]
+  }
+}

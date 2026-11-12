@@ -1,0 +1,96 @@
+{
+  "sources": [
+    {
+      "id": "src_anthropic_s1a_2026_11_10",
+      "url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm",
+      "publisher": "SEC EDGAR (Anthropic, PBC)",
+      "type": "sec_filing",
+      "title": "Anthropic, PBC Amendment No. 2 to Form S-1, November 10, 2026",
+      "publishedAt": "2026-11-10",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "S-1/A",
+        "accession": "0001628280-26-072484",
+        "cik": "0002130357",
+        "filedAt": "2026-11-10"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_anthropic_google_cloud_2026",
+    "slug": "anthropic-google-cloud-2026",
+    "kind": "deal",
+    "types": [
+      "compute_contract"
+    ],
+    "title": "Anthropic discloses amended Google Cloud compute commitment",
+    "summary": "Anthropic disclosed that its Google Cloud hosting agreement, amended through October 2026, commits Anthropic to spend at least about $121.3 billion through July 2033 regardless of usage.",
+    "date": "2026-11-10",
+    "dates": {
+      "filed": "2026-11-10"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "buyer"
+        ]
+      },
+      {
+        "org": "org_alphabet",
+        "roles": [
+          "provider"
+        ],
+        "note": "Google LLC"
+      }
+    ],
+    "amounts": [
+      {
+        "id": "commitment",
+        "label": "Minimum Google Cloud hosting commitment",
+        "measure": "compute_commitment",
+        "value": 121300000000,
+        "currency": "USD",
+        "basis": "at_least",
+        "status": "signed",
+        "asOf": "2026-11-10",
+        "from": "org_anthropic",
+        "to": "org_alphabet",
+        "term": {
+          "starts": "April 2026 through July 2033"
+        },
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "In March 2026, we entered into a CSP hosting agreement with Google, which was subsequently amended between May and October 2026, pursuant to which we committed to spend at least approximately $121.3 billion between April 2026 and July 2033, regardless of actual usage."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "True-up",
+        "text": "If Anthropic spends less than the commitment, it must pay Google the difference, subject to adjustments and exceptions.",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "If our actual spend falls short, we must pay Google the difference as a true-up subject to certain adjustments and exceptions if available."
+      },
+      {
+        "label": "Cancellation",
+        "text": "The commitment is non-cancelable except for Google’s uncured material breach.",
+        "sourceId": "src_anthropic_s1a_2026_11_10",
+        "quote": "Our commitments under such agreement are non-cancelable except in the event of Google's uncured material breach."
+      }
+    ],
+    "relations": [
+      {
+        "type": "related",
+        "event": "evt_broadcom_google_anthropic_2026",
+        "note": "Separate TPU-based capacity collaboration involving Google and Broadcom."
+      }
+    ],
+    "sourceIds": [
+      "src_anthropic_s1a_2026_11_10"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

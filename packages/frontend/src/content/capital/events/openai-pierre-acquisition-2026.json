@@ -1,0 +1,65 @@
+{
+  "sources": [
+    {
+      "id": "src_openai_pierre_2026_11_04",
+      "url": "https://openai.com/index/openai-to-acquire-pierre/",
+      "publisher": "OpenAI",
+      "type": "company_announcement",
+      "title": "OpenAI to acquire Pierre Computer Company, Inc.",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "license": "publisher"
+    }
+  ],
+  "event": {
+    "id": "evt_openai_pierre_acquisition_2026",
+    "slug": "openai-pierre-acquisition-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "OpenAI to acquire Pierre Computer",
+    "summary": "OpenAI agreed to acquire Pierre Computer, the developer-tools company behind Code Storage and open-source tools used in Codex. The companies will remain separate until the acquisition closes.",
+    "date": "2026-11-04",
+    "dates": {
+      "announced": "2026-11-04"
+    },
+    "status": "announced",
+    "participants": [
+      {
+        "org": "org_openai",
+        "roles": [
+          "acquirer"
+        ]
+      },
+      {
+        "org": "org_pierre_computer",
+        "roles": [
+          "target"
+        ]
+      }
+    ],
+    "amounts": [],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Agreement",
+        "text": "OpenAI announced that it will acquire Pierre Computer Company.",
+        "sourceId": "src_openai_pierre_2026_11_04",
+        "quote": "Today we're announcing that OpenAI will acquire Pierre Computer Company, Inc"
+      },
+      {
+        "label": "Closing conditions",
+        "text": "The acquisition is subject to customary closing conditions and regulatory approvals.",
+        "sourceId": "src_openai_pierre_2026_11_04",
+        "quote": "The closing of the acquisition is subject to customary closing conditions, including receipt of regulatory approvals. Until closing, OpenAI and Pierre will remain separate and independent companies."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_openai_pierre_2026_11_04"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "sources": [
+    {
+      "id": "src_broadcom_8k_2026_10_27",
+      "url": "https://www.sec.gov/Archives/edgar/data/1730168/000119312526434271/d148323d8k.htm",
+      "publisher": "SEC EDGAR (Broadcom Inc.)",
+      "type": "sec_filing",
+      "title": "Broadcom Form 8-K, October 27, 2026 (AI rack lease backstop)",
+      "publishedAt": "2026-10-27",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-434271",
+        "cik": "0001730168",
+        "filedAt": "2026-10-27",
+        "periodOfReport": "2026-10-26"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_broadcom_ai_rack_backstop_2026",
+    "slug": "broadcom-ai-rack-backstop-2026",
+    "kind": "deal",
+    "types": [
+      "chip_supply",
+      "datacenter_lease"
+    ],
+    "title": "Broadcom arranges AI rack purchase and lease financing",
+    "summary": "Broadcom arranged for financial partners to take on part of AI-rack purchase agreements and related customer lease agreements, with Broadcom providing residual-value support.",
+    "date": "2026-10-26",
+    "dates": {
+      "announced": "2026-10-26",
+      "filed": "2026-10-27"
+    },
+    "status": "announced",
+    "participants": [
+      {
+        "org": "org_broadcom",
+        "roles": [
+          "provider",
+          "partner"
+        ],
+        "note": "The filing does not name the customer or financial partners."
+      }
+    ],
+    "amounts": [],
+    "facts": [
+      {
+        "label": "Arrangement",
+        "text": "Financial partners take on part of the AI-rack purchase and related customer lease agreements.",
+        "sourceId": "src_broadcom_8k_2026_10_27",
+        "quote": "On October 26, 2026, Broadcom Inc. (the \"Company\") arranged for financial partners to take on a portion of certain agreements to purchase AI racks based on custom AI accelerators designed by the Company and the related lease agreements with the Company's customer that enable the deployment of compute capacity."
+      },
+      {
+        "label": "Maximum potential liability",
+        "text": "Approximately $43 billion on an undiscounted basis once the AI racks are deployed.",
+        "sourceId": "src_broadcom_8k_2026_10_27",
+        "quote": "The Company's maximum potential liability under the Backstop upon the deployment of the AI racks, on an undiscounted basis, is approximately $43 billion."
+      },
+      {
+        "label": "Liability formula",
+        "text": "The difference between 72.5% of lease amounts outstanding and the value recovered from AI-rack sales.",
+        "sourceId": "src_broadcom_8k_2026_10_27",
+        "quote": "The Company's potential liability under the Backstop will be equal to any difference between 72.5% of the outstanding amounts owed on the lease and the value of the AI racks received upon the sale of the assets at that time."
+      }
+    ],
+    "sourceIds": [
+      "src_broadcom_8k_2026_10_27"
+    ]
+  }
+}

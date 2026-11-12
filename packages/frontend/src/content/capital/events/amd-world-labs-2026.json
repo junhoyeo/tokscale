@@ -1,0 +1,102 @@
+{
+  "sources": [
+    {
+      "id": "src_amd_8k_2026_09_28",
+      "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000182/amd-20260926.htm",
+      "publisher": "SEC EDGAR (Advanced Micro Devices, Inc.)",
+      "type": "sec_filing",
+      "title": "AMD Form 8-K, September 28, 2026 (World Labs acquisition agreement)",
+      "publishedAt": "2026-09-28",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0000002488-26-000182",
+        "cik": "0000002488",
+        "filedAt": "2026-09-28",
+        "periodOfReport": "2026-09-26"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_amd_10q_2026_11_04",
+      "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000191/amd-20260926.htm",
+      "publisher": "SEC EDGAR (Advanced Micro Devices, Inc.)",
+      "type": "sec_filing",
+      "title": "AMD Form 10-Q for the quarter ended September 26, 2026",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0000002488-26-000191",
+        "cik": "0000002488",
+        "filedAt": "2026-11-04",
+        "periodOfReport": "2026-09-26"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_amd_world_labs_2026",
+    "slug": "amd-world-labs-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "AMD agrees to acquire World Labs for approximately $8.2 billion",
+    "summary": "AMD signed an all-stock merger agreement to acquire World Labs, a model research lab focused on spatial intelligence. The transaction remained pending in AMD’s latest filing.",
+    "date": "2026-09-26",
+    "dates": {
+      "signed": "2026-09-26",
+      "filed": "2026-09-28"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_amd",
+        "roles": [
+          "acquirer",
+          "buyer"
+        ]
+      },
+      {
+        "org": "org_world_labs",
+        "roles": [
+          "target",
+          "seller"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "purchase_price",
+        "label": "All-stock purchase price",
+        "measure": "purchase_price",
+        "value": 8200000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "signed",
+        "asOf": "2026-09-26",
+        "from": "org_amd",
+        "to": "org_world_labs",
+        "sourceId": "src_amd_8k_2026_09_28",
+        "quote": "On September 26, 2026, Advanced Micro Devices, Inc. (the \"Company\") entered into an Agreement and Plan of Merger (the \"Merger Agreement\") to acquire all of the equity interests in World Labs Technologies, Inc. (\"World Labs\") (the \"Acquisition\") for a total purchase price of approximately $8.2 billion to be paid in shares of the Company's common stock, par value $0.01 per share (\"Common Stock\"), to stockholders of World Labs, subject to customary adjustments."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Latest status",
+        "text": "Expected to close by the end of 2026, subject to approvals and closing conditions.",
+        "sourceId": "src_amd_10q_2026_11_04",
+        "quote": "The acquisitions are expected to close by the end of 2026, subject to regulatory approvals and customary closing conditions."
+      }
+    ],
+    "sourceIds": [
+      "src_amd_8k_2026_09_28",
+      "src_amd_10q_2026_11_04"
+    ]
+  }
+}

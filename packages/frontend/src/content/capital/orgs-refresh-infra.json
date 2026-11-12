@@ -1,0 +1,89 @@
+{
+  "sources": [
+    {
+      "id": "src_amd_10q_2026_11_04",
+      "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000191/amd-20260926.htm",
+      "publisher": "SEC EDGAR (Advanced Micro Devices, Inc.)",
+      "type": "sec_filing",
+      "title": "AMD Form 10-Q for the quarter ended September 26, 2026",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0000002488-26-000191",
+        "cik": "0000002488",
+        "filedAt": "2026-11-04",
+        "periodOfReport": "2026-09-26"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_nebius_ex99_2026_10_01",
+      "url": "https://www.sec.gov/Archives/edgar/data/1513845/000110465926112824/tm2626792d1_ex99-1.htm",
+      "publisher": "SEC EDGAR (Nebius Group N.V.)",
+      "type": "sec_filing",
+      "title": "Nebius press release, October 1, 2026 (Exhibit 99.1): acquisition of Inferize",
+      "publishedAt": "2026-10-01",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "6-K",
+        "accession": "0001104659-26-112824",
+        "cik": "0001513845",
+        "filedAt": "2026-10-01"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "orgs": [
+    {
+      "id": "org_world_labs",
+      "slug": "world-labs",
+      "name": "World Labs",
+      "legalNames": [
+        "World Labs Technologies, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-lab"
+      ],
+      "investorTypes": [],
+      "status": "private",
+      "description": "A model research lab focused on spatial intelligence.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    },
+    {
+      "id": "org_inferize",
+      "slug": "inferize",
+      "name": "Inferize",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "ai-app"
+      ],
+      "investorTypes": [],
+      "status": "acquired",
+      "description": "An inference optimization company whose technology shortens the time needed to launch and scale large AI models.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    }
+  ]
+}

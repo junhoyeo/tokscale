@@ -1,0 +1,94 @@
+{
+  "sources": [
+    {
+      "id": "src_terawulf_8k_2026_11_04",
+      "url": "https://www.sec.gov/Archives/edgar/data/1083301/000162828026069810/wulf-20261104.htm",
+      "publisher": "SEC EDGAR (TeraWulf Inc.)",
+      "type": "sec_filing",
+      "title": "TeraWulf Form 8-K, November 4, 2026 (Google credit support for Anthropic leases)",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001628280-26-069810",
+        "cik": "0001083301",
+        "filedAt": "2026-11-04",
+        "periodOfReport": "2026-11-04"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "quantities": [],
+    "relations": [
+      {
+        "type": "amends",
+        "event": "evt_terawulf_anthropic_lease_2026",
+        "note": "The credit support agreements accompanied amendments to the existing Anthropic leases."
+      }
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": [],
+    "id": "evt_terawulf_google_anthropic_backstop_2026",
+    "slug": "terawulf-google-anthropic-backstop-2026",
+    "kind": "deal",
+    "types": [
+      "datacenter_lease"
+    ],
+    "title": "Google backstops Anthropic’s TeraWulf data-center leases",
+    "summary": "Google signed credit-support agreements for certain Anthropic obligations under its TeraWulf leases, and the lease parties amended the underlying leases.",
+    "date": "2026-11-04",
+    "dates": {
+      "signed": "2026-11-04",
+      "filed": "2026-11-04"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_terawulf",
+        "roles": [
+          "lessor",
+          "provider"
+        ]
+      },
+      {
+        "org": "org_anthropic",
+        "roles": [
+          "lessee",
+          "buyer"
+        ]
+      },
+      {
+        "org": "org_alphabet",
+        "roles": [
+          "partner"
+        ],
+        "note": "The agreement names Google LLC."
+      }
+    ],
+    "amounts": [],
+    "facts": [
+      {
+        "label": "Credit support",
+        "text": "Google backstops certain Anthropic obligations under three leases.",
+        "sourceId": "src_terawulf_8k_2026_11_04",
+        "quote": "In connection with the Justified Leases, on November 4, 2026, the Company entered into three Credit Support Agreements for CB-1, CB-2 and CB-3, respectively (each a \"Google Credit Support Agreement\" and collectively, the \"Google Credit Support Agreements\"), with Raylan, Justified DataPower LLC, a wholly owned subsidiary of the Company, Anthropic and Google LLC (\"Google\"), pursuant to which Google agreed to backstop (the \"Justified Google Backstop\") certain obligations of Anthropic under the Justified Leases."
+      },
+      {
+        "label": "Default options",
+        "text": "Google can assume a lease after paying due rent or, in some cases, pay a termination fee and receive an equity interest in Raylan.",
+        "sourceId": "src_terawulf_8k_2026_11_04",
+        "quote": "The Justified Google Backstop provides that in the event of a payment default under a Justified Lease, or if Anthropic becomes subject to an insolvency event, following notice from Raylan, Google will have the option to (i) pay all rent currently due under the applicable Justified Lease and assume the Justified Lease as the tenant thereunder, or (ii) under certain circumstances, pay a certain termination fee pursuant to the applicable Google Credit Support Agreement; provided that upon payment of such termination fee, Google would be entitled to acquire an equity interest in Raylan."
+      },
+      {
+        "label": "Lease amendments",
+        "text": "Raylan and Anthropic amended the underlying leases on the same date.",
+        "sourceId": "src_terawulf_8k_2026_11_04",
+        "quote": "On November 4, 2026, in connection with the Justified Google Backstop, Raylan and Anthropic entered into amendments to the Justified Leases."
+      }
+    ],
+    "sourceIds": [
+      "src_terawulf_8k_2026_11_04"
+    ]
+  }
+}

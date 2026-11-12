@@ -1,0 +1,93 @@
+{
+  "sources": [
+    {
+      "id": "src_spacex_8k_gpu_lease_2026_10_26",
+      "url": "https://www.sec.gov/Archives/edgar/data/1181412/000110465926118614/tm2628247d1_8k.htm",
+      "publisher": "SEC EDGAR (Space Exploration Technologies Corp.)",
+      "type": "sec_filing",
+      "title": "SpaceX Form 8-K, October 26, 2026 (GPU equipment finance lease commitment)",
+      "publishedAt": "2026-10-26",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001104659-26-118614",
+        "cik": "0001181412",
+        "filedAt": "2026-10-26",
+        "periodOfReport": "2026-10-24"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_spacex_gpu_finance_lease_2026",
+    "slug": "spacex-gpu-finance-lease-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "SpaceX signs commitment for a $40 billion GPU finance lease",
+    "summary": "SpaceX signed a binding commitment letter for an Apollo-managed entity to acquire and lease GPU pods and related equipment to SpaceX. Entry into the master finance lease remains subject to closing conditions.",
+    "date": "2026-10-24",
+    "dates": {
+      "signed": "2026-10-24",
+      "filed": "2026-10-26"
+    },
+    "status": "signed",
+    "participants": [
+      {
+        "org": "org_spacex",
+        "roles": [
+          "borrower",
+          "lessee"
+        ],
+        "note": "The Apollo-managed lessor was not named in the filing."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "principal_payments",
+        "label": "Expected aggregate principal payments",
+        "measure": "debt_raised",
+        "value": 40000000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "announced",
+        "asOf": "2026-10-24",
+        "term": {
+          "starts": "Expected to commence during the first half of 2027 as GPU tranches are delivered"
+        },
+        "condition": "Entry into the master finance lease is subject to specified closing conditions",
+        "sourceId": "src_spacex_8k_gpu_lease_2026_10_26",
+        "quote": "The Company expects aggregate principal payments under the lease schedules over their respective terms to total approximately $40 billion.",
+        "to": "org_spacex"
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Equipment",
+        "text": "The lessor would acquire and lease GPU pods and related equipment to SpaceX for use at data centers chosen by SpaceX.",
+        "sourceId": "src_spacex_8k_gpu_lease_2026_10_26",
+        "quote": "the Lessor will acquire and lease to the Company certain graphics processing unit pods and related equipment (the \"Equipment\") for use at data centers selected by the Company."
+      },
+      {
+        "label": "Lease term",
+        "text": "Each equipment tranche would have a lease term of about five to five and one-quarter years.",
+        "sourceId": "src_spacex_8k_gpu_lease_2026_10_26",
+        "quote": "the Equipment will be delivered in tranches, each of which will be subject to a separate lease schedule with a term of approximately five to five and one-quarter years from the applicable commencement date."
+      },
+      {
+        "label": "Expected closing and delivery",
+        "text": "SpaceX expected the master lease to close before year-end and GPU lease schedules to start in the first half of 2027.",
+        "sourceId": "src_spacex_8k_gpu_lease_2026_10_26",
+        "quote": "The Company's entry into the master finance lease with the Lessor is subject to certain specified closing conditions and is expected to close prior to year end. The lease schedules are expected to commence during the first half of 2027 upon delivery of the GPUs."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_spacex_8k_gpu_lease_2026_10_26"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}
