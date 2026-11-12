@@ -104,21 +104,25 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+function chartCoordinate(value: number): string {
+  return String(Math.round(value * 100) / 100);
+}
+
 function curvePath(boundary: CubicValueBoundary, maximum: number): string {
   const pointCount = boundary.values.length;
   if (pointCount === 0) return "";
   if (pointCount === 1) {
     const x = xForIndex(0, 1);
     const y = yForValue(boundary.values[0] ?? 0, maximum);
-    return `M ${x - 4} ${y} L ${x + 4} ${y}`;
+    return `M ${chartCoordinate(x - 4)} ${chartCoordinate(y)} L ${chartCoordinate(x + 4)} ${chartCoordinate(y)}`;
   }
   return [
-    `M ${xForIndex(0, pointCount)} ${yForValue(boundary.values[0] ?? 0, maximum)}`,
+    `M ${chartCoordinate(xForIndex(0, pointCount))} ${chartCoordinate(yForValue(boundary.values[0] ?? 0, maximum))}`,
     ...boundary.segments.map((segment) => {
       const fromX = xForIndex(segment.index, pointCount);
       const toX = xForIndex(segment.index + 1, pointCount);
       const third = (toX - fromX) / 3;
-      return `C ${fromX + third} ${yForValue(segment.control1, maximum)} ${toX - third} ${yForValue(segment.control2, maximum)} ${toX} ${yForValue(segment.to, maximum)}`;
+      return `C ${chartCoordinate(fromX + third)} ${chartCoordinate(yForValue(segment.control1, maximum))} ${chartCoordinate(toX - third)} ${chartCoordinate(yForValue(segment.control2, maximum))} ${chartCoordinate(toX)} ${chartCoordinate(yForValue(segment.to, maximum))}`;
     }),
   ].join(" ");
 }
@@ -133,28 +137,28 @@ function stackedAreaPath(
   if (pointCount === 1) {
     const x = xForIndex(0, 1);
     return [
-      `M ${x - 4} ${yForValue(lower.values[0] ?? 0, maximum)}`,
-      `L ${x - 4} ${yForValue(upper.values[0] ?? 0, maximum)}`,
-      `L ${x + 4} ${yForValue(upper.values[0] ?? 0, maximum)}`,
-      `L ${x + 4} ${yForValue(lower.values[0] ?? 0, maximum)}`,
+      `M ${chartCoordinate(x - 4)} ${chartCoordinate(yForValue(lower.values[0] ?? 0, maximum))}`,
+      `L ${chartCoordinate(x - 4)} ${chartCoordinate(yForValue(upper.values[0] ?? 0, maximum))}`,
+      `L ${chartCoordinate(x + 4)} ${chartCoordinate(yForValue(upper.values[0] ?? 0, maximum))}`,
+      `L ${chartCoordinate(x + 4)} ${chartCoordinate(yForValue(lower.values[0] ?? 0, maximum))}`,
       "Z",
     ].join(" ");
   }
 
   return [
-    `M ${xForIndex(0, pointCount)} ${yForValue(upper.values[0] ?? 0, maximum)}`,
+    `M ${chartCoordinate(xForIndex(0, pointCount))} ${chartCoordinate(yForValue(upper.values[0] ?? 0, maximum))}`,
     ...upper.segments.map((segment) => {
       const fromX = xForIndex(segment.index, pointCount);
       const toX = xForIndex(segment.index + 1, pointCount);
       const third = (toX - fromX) / 3;
-      return `C ${fromX + third} ${yForValue(segment.control1, maximum)} ${toX - third} ${yForValue(segment.control2, maximum)} ${toX} ${yForValue(segment.to, maximum)}`;
+      return `C ${chartCoordinate(fromX + third)} ${chartCoordinate(yForValue(segment.control1, maximum))} ${chartCoordinate(toX - third)} ${chartCoordinate(yForValue(segment.control2, maximum))} ${chartCoordinate(toX)} ${chartCoordinate(yForValue(segment.to, maximum))}`;
     }),
-    `L ${xForIndex(pointCount - 1, pointCount)} ${yForValue(lower.values.at(-1) ?? 0, maximum)}`,
+    `L ${chartCoordinate(xForIndex(pointCount - 1, pointCount))} ${chartCoordinate(yForValue(lower.values.at(-1) ?? 0, maximum))}`,
     ...[...lower.segments].reverse().map((segment) => {
       const fromX = xForIndex(segment.index, pointCount);
       const toX = xForIndex(segment.index + 1, pointCount);
       const third = (toX - fromX) / 3;
-      return `C ${toX - third} ${yForValue(segment.control2, maximum)} ${fromX + third} ${yForValue(segment.control1, maximum)} ${fromX} ${yForValue(segment.from, maximum)}`;
+      return `C ${chartCoordinate(toX - third)} ${chartCoordinate(yForValue(segment.control2, maximum))} ${chartCoordinate(fromX + third)} ${chartCoordinate(yForValue(segment.control1, maximum))} ${chartCoordinate(fromX)} ${chartCoordinate(yForValue(segment.from, maximum))}`;
     }),
     "Z",
   ].join(" ");
@@ -957,14 +961,19 @@ export function ProfileUsageChart({
         : chronologicalChartData,
     [chronologicalChartData, newestFirst],
   );
+  // The paths of a long history are megabytes of text: they were 93% of a
+  // 10 MB profile page. Keep them out of the server HTML; the browser draws
+  // them from the same contributions as soon as the chart mounts.
   const chartStack = useMemo(
     () =>
-      createChartStack(
-        chartData.series,
-        chartData.dates.length,
-        chartData.maxDailyTotal,
-      ),
-    [chartData],
+      isMounted
+        ? createChartStack(
+            chartData.series,
+            chartData.dates.length,
+            chartData.maxDailyTotal,
+          )
+        : { layers: [], maximum: chartData.maxDailyTotal },
+    [chartData, isMounted],
   );
   const { layers } = chartStack;
   const chartMaximum = chartStack.maximum;
