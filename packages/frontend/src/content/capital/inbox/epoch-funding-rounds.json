@@ -5,11 +5,11 @@
   "license": "CC BY 4.0",
   "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
   "licenseText": "Epoch AI’s data is free to use, distribute, and reproduce provided the source and authors are credited under the Creative Commons Attribution license.",
-  "attribution": "Josh You, John Croxton, Venkat Somala, Yafah Edelman, 'Data on AI companies'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/data/ai-companies' [online resource]. Accessed 21 Oct 2026.",
-  "retrievedAt": "2026-10-21",
-  "epochUpdated": "2026-10-08",
-  "epochUpdatedText": "Updated Oct. 8, 2026",
-  "sha256": "fd912cf2bb692316c3462e793095c35bccc12d59d160b2d717e4171591d6add2",
+  "attribution": "Josh You, John Croxton, Venkat Somala, Yafah Edelman, 'Data on AI companies'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/data/ai-companies' [online resource]. Accessed 12 Nov 2026.",
+  "retrievedAt": "2026-11-12",
+  "epochUpdated": "2026-11-10",
+  "epochUpdatedText": "Updated Nov. 10, 2026",
+  "sha256": "3aa1e0d1b0dfab69f3ad319f6eb82c40be7da1eb851ea895a6e6604c641d28b3",
   "note": "Review inbox. Not shown on Tokscale pages. A row is published only after an editor re-checks it against a primary source.",
   "rows": [
     {
@@ -1737,6 +1737,46 @@
         {
           "measure": "valuation_post",
           "value": 24000000000,
+          "currency": "USD",
+          "basis": "exact"
+        }
+      ],
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "epochId": "Deepseek $15.9B Series B",
+      "company": "DeepSeek",
+      "org": "org_deepseek",
+      "closeDate": "2026-10-22",
+      "reportDate": "2026-10-22",
+      "status": "Closed",
+      "type": "Primary",
+      "confidence": "Likely",
+      "equityUsd": 15900000000,
+      "debtUsd": null,
+      "postMoneyUsd": 90000000000,
+      "epochCells": {
+        "Funding (equity)": "15900000000.0",
+        "Funding (debt)": "",
+        "Valuation (post-money)": "90000000000.0"
+      },
+      "sources": [
+        "https://www.wsj.com/tech/ai/chinese-ai-startup-deekseek-raises-15-billion-ahead-of-potential-ipo-f7fe3a49",
+        "https://www.theinformation.com/briefings/deepseek-raises-nearly-16-billion-second-funding-round?rc=9mzoog"
+      ],
+      "proposed": [
+        {
+          "measure": "equity_raised",
+          "value": 15900000000,
+          "currency": "USD",
+          "basis": "exact"
+        },
+        {
+          "measure": "valuation_post",
+          "value": 90000000000,
           "currency": "USD",
           "basis": "exact"
         }

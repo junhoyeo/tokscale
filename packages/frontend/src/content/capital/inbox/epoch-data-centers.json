@@ -5,11 +5,11 @@
   "license": "CC BY 4.0",
   "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
   "licenseText": "Epoch AI’s data is free to use, distribute, and reproduce provided the source and authors are credited under the Creative Commons Attribution license.",
-  "attribution": "Epoch AI, 'AI data centers'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/data/ai-data-centers' [online resource]. Accessed 21 Oct 2026.",
-  "retrievedAt": "2026-10-21",
-  "epochUpdated": "2026-10-20",
-  "epochUpdatedText": "Updated Oct. 20, 2026",
-  "sha256": "3b74f90fe69e1cb223ccadf1e19caadec129359a2598d655787d903da6d2a82d",
+  "attribution": "Epoch AI, 'AI data centers'. Published online at epoch.ai. Retrieved from 'https://epoch.ai/data/ai-data-centers' [online resource]. Accessed 12 Nov 2026.",
+  "retrievedAt": "2026-11-12",
+  "epochUpdated": "2026-11-06",
+  "epochUpdatedText": "Updated Nov. 6, 2026",
+  "sha256": "b25a79baa9cddb85bc92b8d156d348c3ba6cfa53351ed56db2bbbe7af7f5b6d1",
   "note": "Review inbox. Not shown on Tokscale pages. A row is published only after an editor re-checks it against a primary source.",
   "rows": [
     {
@@ -36,6 +36,32 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1oZpZ9nTTV6wW0xjc1pPOQmKS7NCyDzuG2HiycC1GqFs/edit?usp=sharing",
       "org": null,
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "name": "OpenAI Stargate Abilene",
+      "owner": "Oracle #confident",
+      "users": "OpenAI #confident",
+      "project": "Stargate #confident",
+      "country": "United States",
+      "currentPowerMw": 824,
+      "h100Equivalents": 1018696.3112683173,
+      "estimatedCapitalCost2025Usd": 31214768000,
+      "epochCells": {
+        "Current power (MW)": "824",
+        "Current H100 equivalents": "1018696.3112683173",
+        "Current total capital cost (2025 USD billions)": "31.214768"
+      },
+      "sources": [
+        "https://drive.google.com/file/d/1oHWA9vmpvFOh-LvDy5fgq_wq5ITuxd1r/view?usp=sharing",
+        "https://drive.google.com/file/d/1FgfX6hqojlBtqNXJHjzJmnwWAMx4_M0b/view?usp=sharing",
+        "https://www.mortenson.com/projects/abilene-data-center-development"
+      ],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1M5VPpNDGTPgssU1x3xQJKv33EIa7-wgpDIFM8uzpodQ/edit?usp=sharing",
+      "org": "org_oracle",
       "review": {
         "state": "unreviewed",
         "event": null
@@ -175,32 +201,6 @@
       }
     },
     {
-      "name": "OpenAI Stargate Abilene",
-      "owner": "Oracle #confident",
-      "users": "OpenAI #confident",
-      "project": "Stargate #confident",
-      "country": "United States",
-      "currentPowerMw": 421,
-      "h100Equivalents": 509348.15563415864,
-      "estimatedCapitalCost2025Usd": 15948322000,
-      "epochCells": {
-        "Current power (MW)": "421",
-        "Current H100 equivalents": "509348.15563415864",
-        "Current total capital cost (2025 USD billions)": "15.948322"
-      },
-      "sources": [
-        "https://drive.google.com/file/d/1oHWA9vmpvFOh-LvDy5fgq_wq5ITuxd1r/view?usp=sharing",
-        "https://drive.google.com/file/d/1FgfX6hqojlBtqNXJHjzJmnwWAMx4_M0b/view?usp=sharing",
-        "https://www.mortenson.com/projects/abilene-data-center-development"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/197BW-5tHutOzJ_LTv990eCO_M8nUXT2t1nl--UfMIUk/edit?usp=sharing",
-      "org": "org_oracle",
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
       "name": "DayOne Kempas",
       "owner": null,
       "users": null,
@@ -300,6 +300,32 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1b9T05Ze9Kv3Um4C6wv2uVYB0q7KgZ4AQaDPnaoh-ro0/edit?usp=sharing",
       "org": "org_alphabet",
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "name": "Anthropic Lake Mariner",
+      "owner": "AI XPV Platform #confident",
+      "users": "Anthropic #likely",
+      "project": null,
+      "country": "United States",
+      "currentPowerMw": 210,
+      "h100Equivalents": 292829.71197574533,
+      "estimatedCapitalCost2025Usd": 7955220000,
+      "epochCells": {
+        "Current power (MW)": "210",
+        "Current H100 equivalents": "292829.71197574533",
+        "Current total capital cost (2025 USD billions)": "7.955219999999999"
+      },
+      "sources": [
+        "https://investors.terawulf.com/news-events/press-releases/detail/132/terawulf-reports-fourth-quarter-and-full-year-2025-results",
+        "https://www.datacenterdynamics.com/en/news/google-offers-its-tpus-to-ai-cloud-providers-report/",
+        "https://www.anthropic.com/news/anthropic-invests-50-billion-in-american-ai-infrastructure"
+      ],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1MrE3TlzhV8IPcb0uPixkfec3txcHt0iLTXhKjeFPsSU/edit?usp=sharing",
+      "org": null,
       "review": {
         "state": "unreviewed",
         "event": null
@@ -984,6 +1010,32 @@
       }
     },
     {
+      "name": "YTL Johor",
+      "owner": null,
+      "users": null,
+      "project": null,
+      "country": "Malaysia",
+      "currentPowerMw": 113,
+      "h100Equivalents": 153532.0869125821,
+      "estimatedCapitalCost2025Usd": 4280666000,
+      "epochCells": {
+        "Current power (MW)": "113",
+        "Current H100 equivalents": "153532.0869125821",
+        "Current total capital cost (2025 USD billions)": "4.280666"
+      },
+      "sources": [
+        "https://ytldatacenters.com/locations/malaysia/",
+        "https://www.ytlpowerinternational.com/press-releases/ytl-creates-one-of-the-worlds-most-advanced-supercomputers-powered-by-nvidia-grace-blackwell-based-dgx-cloud/",
+        "https://www.youtube.com/watch?v=HODHjDbFt10"
+      ],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/18PuiVirfUfF5O0syOPNGkf-qtNg2viKbaW3v9r5cBBY/edit?gid=2010365208#gid=2010365208",
+      "org": null,
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
       "name": "Meta Eagle Mountain",
       "owner": "Meta #confident",
       "users": "Meta #confident",
@@ -1002,6 +1054,31 @@
         "https://ukozvhzgrcnkcatjqfoo.supabase.co/storage/v1/object/public/03-00-air-construction/2026.02.05_Eagle%20Mountain%20Power%20Plant_Application_32a5238b.pdf"
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1mVv_XB56SrZcy2jAwoG6lzgeXQHp0G3adhIaChbNh4E/edit?usp=sharing",
+      "org": "org_meta",
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "name": "Meta Aiken",
+      "owner": "Meta #confident",
+      "users": "Meta #confident",
+      "project": null,
+      "country": "United States",
+      "currentPowerMw": 129,
+      "h100Equivalents": 147043.96159676605,
+      "estimatedCapitalCost2025Usd": 4886778000,
+      "epochCells": {
+        "Current power (MW)": "129",
+        "Current H100 equivalents": "147043.96159676605",
+        "Current total capital cost (2025 USD billions)": "4.8867780000000005"
+      },
+      "sources": [
+        "https://datacenters.atmeta.com/2024/08/hello-south-carolina/",
+        "https://www.dpr.com/projects/meta-aiken-data-center-aiken-sc"
+      ],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1AoK8Ky5mZJ_hhsFx16S1ugapGMrlIIcMVWYSWqkJmkU/edit?gid=2010365208#gid=2010365208",
       "org": "org_meta",
       "review": {
         "state": "unreviewed",
@@ -1054,6 +1131,32 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1LrjkAu7XNz9VjMLjKm9rZyhaFAwDQfJUpeC1XKE2JR8/edit?usp=sharing",
       "org": "org_alphabet",
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "name": "Meta Los Lunas",
+      "owner": "Meta #confident",
+      "users": "Meta #confident",
+      "project": null,
+      "country": "United States",
+      "currentPowerMw": 118,
+      "h100Equivalents": 133906.01313794847,
+      "estimatedCapitalCost2025Usd": 4470076000,
+      "epochCells": {
+        "Current power (MW)": "118",
+        "Current H100 equivalents": "133906.01313794847",
+        "Current total capital cost (2025 USD billions)": "4.470076"
+      },
+      "sources": [
+        "https://datacenters.atmeta.com/wp-content/uploads/2025/02/Meta_s-Los-Lunas-Data-Center.pdf",
+        "https://drive.google.com/file/d/1TxuazhSkiaHCd5FGKh_Syc_RsrzfV7Wd/view?usp=drive_link",
+        "https://fortisconstruction.com/project/meta-los-lunas-campus/"
+      ],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1mhkRkn27J1JmPrRvXejn_eSQr33e1_yfQ1fsKMa4Bis/edit?usp=drive_link",
+      "org": "org_meta",
       "review": {
         "state": "unreviewed",
         "event": null
@@ -1137,7 +1240,7 @@
     },
     {
       "name": "VNET Bayin Ulanqab",
-      "owner": "VNET #confident",
+      "owner": "ByteDance #speculative",
       "users": "ByteDance #speculative",
       "project": "10 GW Hyperscale 2.0 #confident",
       "country": "China",
@@ -1149,12 +1252,7 @@
         "Current H100 equivalents": "122789.28751894896",
         "Current total capital cost (2025 USD billions)": "8.371922"
       },
-      "sources": [
-        "https://web.archive.org/web/20260619185141/https://www.vnet.com/resource.html",
-        "https://web.archive.org/web/20260619185224/https://stcn.com/article/detail/2241162.html",
-        "https://web.archive.org/web/2/https://www.insidermonkey.com/blog/vnet-group-inc-nasdaqvnet-q3-2024-earnings-call-transcript-1395031/",
-        "https://www.datacenterdynamics.com/en/news/tiktok-owner-bytedance-signs-500mw-vnet-china-data-center-deal/"
-      ],
+      "sources": [],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1zHNmd-avKvWoJc_ivOj6u54g9OyIDjM2-ybubuxj2yc/edit?usp=drive_link",
       "org": null,
       "review": {
@@ -1262,32 +1360,6 @@
       }
     },
     {
-      "name": "Meta Los Lunas",
-      "owner": "Meta #confident",
-      "users": "Meta #confident",
-      "project": null,
-      "country": "United States",
-      "currentPowerMw": 87,
-      "h100Equivalents": 99545.22486104093,
-      "estimatedCapitalCost2025Usd": 3295734000,
-      "epochCells": {
-        "Current power (MW)": "87",
-        "Current H100 equivalents": "99545.22486104093",
-        "Current total capital cost (2025 USD billions)": "3.2957339999999995"
-      },
-      "sources": [
-        "https://datacenters.atmeta.com/wp-content/uploads/2025/02/Meta_s-Los-Lunas-Data-Center.pdf",
-        "https://drive.google.com/file/d/1TxuazhSkiaHCd5FGKh_Syc_RsrzfV7Wd/view?usp=drive_link",
-        "https://fortisconstruction.com/project/meta-los-lunas-campus/"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1mhkRkn27J1JmPrRvXejn_eSQr33e1_yfQ1fsKMa4Bis/edit?usp=drive_link",
-      "org": "org_meta",
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
       "name": "CoreWeave Ellendale ND",
       "owner": "CoreWeave #confident",
       "users": "OpenAI #speculative",
@@ -1332,31 +1404,6 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1iFwArbo-x0WDxO3mfvZBopGZsd4EvA9HDfjxXKyfy5g/edit?gid=2010365208#gid=2010365208",
       "org": "org_meta",
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
-      "name": "Huawei Horinger",
-      "owner": "Huawei #confident",
-      "users": null,
-      "project": null,
-      "country": "China",
-      "currentPowerMw": 184.3,
-      "h100Equivalents": 89439.11066195049,
-      "estimatedCapitalCost2025Usd": 6981652600,
-      "epochCells": {
-        "Current power (MW)": "184.3",
-        "Current H100 equivalents": "89439.11066195049",
-        "Current total capital cost (2025 USD billions)": "6.9816526"
-      },
-      "sources": [
-        "https://web.archive.org/web/20260623185431/https://finance.sina.com.cn/tech/roll/2025-07-14/doc-inffmier6612415.shtml",
-        "https://web.archive.org/web/20260624112951/http://nmg.news.cn/20231008/57bb95be6791497db95bc7d2f229a68e/c.html"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/101jEwxBg5tstkmiGAx3fJt2ruTRtT-9Tqs484oKJBoU/edit?usp=sharing",
-      "org": null,
       "review": {
         "state": "unreviewed",
         "event": null
@@ -1444,6 +1491,28 @@
       }
     },
     {
+      "name": "Huawei Horinger",
+      "owner": "Huawei #confident",
+      "users": null,
+      "project": null,
+      "country": "China",
+      "currentPowerMw": 169.9,
+      "h100Equivalents": 81043.96159676605,
+      "estimatedCapitalCost2025Usd": 6436151800,
+      "epochCells": {
+        "Current power (MW)": "169.9",
+        "Current H100 equivalents": "81043.96159676605",
+        "Current total capital cost (2025 USD billions)": "6.4361518"
+      },
+      "sources": [],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/11S_jSnybxJ1BR8ap9atjig9ugc3P1TkQaB8Qn5t_PsY/edit?usp=sharing",
+      "org": null,
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
       "name": "CoreWeave Marble NC",
       "owner": "CoreWeave #confident",
       "users": "OpenAI #speculative",
@@ -1465,57 +1534,6 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1_8yOR7DUXGIDghGwUSlVuqiFhbfA40iaxr9HyvslST8/edit?usp=sharing",
       "org": "org_coreweave",
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
-      "name": "Meta Aiken",
-      "owner": "Meta #confident",
-      "users": "Meta #confident",
-      "project": null,
-      "country": "United States",
-      "currentPowerMw": 69,
-      "h100Equivalents": 78322.38504295099,
-      "estimatedCapitalCost2025Usd": 2613858000,
-      "epochCells": {
-        "Current power (MW)": "69",
-        "Current H100 equivalents": "78322.38504295099",
-        "Current total capital cost (2025 USD billions)": "2.613858"
-      },
-      "sources": [
-        "https://datacenters.atmeta.com/2024/08/hello-south-carolina/",
-        "https://www.dpr.com/projects/meta-aiken-data-center-aiken-sc"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1AoK8Ky5mZJ_hhsFx16S1ugapGMrlIIcMVWYSWqkJmkU/edit?gid=2010365208#gid=2010365208",
-      "org": "org_meta",
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
-      "name": "Huawei Wuhu",
-      "owner": "Huawei #confident",
-      "users": null,
-      "project": null,
-      "country": "China",
-      "currentPowerMw": 157,
-      "h100Equivalents": 76326.42748863062,
-      "estimatedCapitalCost2025Usd": 5947474000,
-      "epochCells": {
-        "Current power (MW)": "157",
-        "Current H100 equivalents": "76326.42748863062",
-        "Current total capital cost (2025 USD billions)": "5.947474"
-      },
-      "sources": [
-        "https://activity.huaweicloud.com/events/east-china1.html",
-        "https://www.bilibili.com/video/BV1ca4y127pB/",
-        "https://web.archive.org/web/20260729204259/https://sthjj.wuhu.gov.cn/hbyw/hjsp/jsxmhpsp/8404947.html"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1LtTROd6CTTzqjI0x9EqOby-EcYytmXsaG35z93W1bDk/edit?usp=drive_link",
-      "org": null,
       "review": {
         "state": "unreviewed",
         "event": null
@@ -1600,32 +1618,6 @@
       }
     },
     {
-      "name": "Anthropic Lake Mariner",
-      "owner": "AI XPV Platform #confident",
-      "users": "Anthropic #likely",
-      "project": null,
-      "country": "United States",
-      "currentPowerMw": 42,
-      "h100Equivalents": 58564.93178372915,
-      "estimatedCapitalCost2025Usd": 1591044000,
-      "epochCells": {
-        "Current power (MW)": "42",
-        "Current H100 equivalents": "58564.93178372915",
-        "Current total capital cost (2025 USD billions)": "1.5910440000000001"
-      },
-      "sources": [
-        "https://investors.terawulf.com/news-events/press-releases/detail/132/terawulf-reports-fourth-quarter-and-full-year-2025-results",
-        "https://www.datacenterdynamics.com/en/news/google-offers-its-tpus-to-ai-cloud-providers-report/",
-        "https://www.anthropic.com/news/anthropic-invests-50-billion-in-american-ai-infrastructure"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1MrE3TlzhV8IPcb0uPixkfec3txcHt0iLTXhKjeFPsSU/edit?usp=sharing",
-      "org": null,
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
       "name": "Microsoft-Nebius New Jersey",
       "owner": "Nebius #confident",
       "users": "Microsoft #likely",
@@ -1649,6 +1641,28 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1-x8TTkzOemQ4hI61I5tuHgatFUSI0e5F3RAw8uufooI/edit",
       "org": "org_nebius",
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "name": "Huawei Wuhu",
+      "owner": "Huawei #confident",
+      "users": null,
+      "project": null,
+      "country": "China",
+      "currentPowerMw": 197,
+      "h100Equivalents": 52830.72258716523,
+      "estimatedCapitalCost2025Usd": 7462754000,
+      "epochCells": {
+        "Current power (MW)": "197",
+        "Current H100 equivalents": "52830.72258716523",
+        "Current total capital cost (2025 USD billions)": "7.462754"
+      },
+      "sources": [],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/1GohrrKILkJUa7hxI_Fm6BtGDbe0Xm-7SXF8iepLth6I/edit?usp=sharing",
+      "org": null,
       "review": {
         "state": "unreviewed",
         "event": null
@@ -1700,6 +1714,28 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1DcKmWfHZdahF2yfzmUprURMkEiCiluypSrobnkxz-wQ/edit?usp=sharing",
       "org": "org_nebius",
+      "review": {
+        "state": "unreviewed",
+        "event": null
+      }
+    },
+    {
+      "name": "Envision Galaxy Ulanqab",
+      "owner": null,
+      "users": null,
+      "project": null,
+      "country": "China",
+      "currentPowerMw": 118,
+      "h100Equivalents": 47931.27842344619,
+      "estimatedCapitalCost2025Usd": 4470076000,
+      "epochCells": {
+        "Current power (MW)": "118",
+        "Current H100 equivalents": "47931.27842344619",
+        "Current total capital cost (2025 USD billions)": "4.470076"
+      },
+      "sources": [],
+      "calculationsSheet": "https://docs.google.com/spreadsheets/d/18eP6s8BK-Lzqy7zEEzt7ofxYK3IMmpeNwUP48OmhLHk/edit?usp=sharing",
+      "org": null,
       "review": {
         "state": "unreviewed",
         "event": null
@@ -1850,12 +1886,7 @@
         "Current H100 equivalents": "31884.79029813037",
         "Current total capital cost (2025 USD billions)": "6.402058"
       },
-      "sources": [
-        "https://sinocities.substack.com/p/how-is-chinas-eastern-data-western",
-        "https://web.archive.org/web/20250712063836/https://www.cscec.com/xwzx_new/zqydt_new/202504/3867074.html",
-        "https://web.archive.org/web/20251205164722/https://gxt.hebei.gov.cn/main/portal/cylzsDetail?id=9c133225-aa96-4eb7-9906-00acc34ddbff",
-        "https://web.archive.org/web/20241217034700/https://zhidx.com/p/343866.html"
-      ],
+      "sources": [],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/12-Dec7BqasGfgwzw4LBy4B45M9B2gO3dkEV6YThuxEk/edit?usp=sharing",
       "org": "org_alibaba",
       "review": {
@@ -2072,31 +2103,6 @@
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1JqKpYvy0REqpg30GweXlCKhUQ1D0mHLH_yI9erMoeEM/edit?usp=sharing",
       "org": "org_mistral_ai",
-      "review": {
-        "state": "unreviewed",
-        "event": null
-      }
-    },
-    {
-      "name": "Envision Galaxy Ulanqab",
-      "owner": null,
-      "users": null,
-      "project": null,
-      "country": "China",
-      "currentPowerMw": 0,
-      "h100Equivalents": 0,
-      "estimatedCapitalCost2025Usd": 0,
-      "epochCells": {
-        "Current power (MW)": "0",
-        "Current H100 equivalents": "0",
-        "Current total capital cost (2025 USD billions)": "0"
-      },
-      "sources": [
-        "https://web.archive.org/web/20261020151735/https://www.envision-group.com/envision-galaxy-campus-ulanqab",
-        "https://web.archive.org/web/20261020151337/https://m.21jingji.com/article/20260820/herald/b332589beede6b5fbfb4079dab9a6a03.html"
-      ],
-      "calculationsSheet": "https://docs.google.com/spreadsheets/d/18eP6s8BK-Lzqy7zEEzt7ofxYK3IMmpeNwUP48OmhLHk/edit?usp=sharing",
-      "org": null,
       "review": {
         "state": "unreviewed",
         "event": null
@@ -2448,8 +2454,8 @@
     },
     {
       "name": "QTS Cedar Rapids",
-      "owner": null,
-      "users": null,
+      "owner": "Meta #speculative",
+      "users": "Meta #speculative",
       "project": null,
       "country": "United States",
       "currentPowerMw": 0,
@@ -2464,10 +2470,11 @@
         "https://cdn.misoenergy.org/NEW%20LOAD%20ANNOUNCEMENTS%20IN%20MISO%20REGIONS%2012062024684954.pdf",
         "https://www.thegazette.com/business/fast-start-to-cedar-rapids-data-center-projects/",
         "https://corridorbusiness.com/scope-of-qts-data-project-in-cedar-rapids-continuing-to-grow/",
-        "https://www.gldcommercial.com/google-and-qts-data/"
+        "https://www.gldcommercial.com/google-and-qts-data/",
+        "https://newsletter.semianalysis.com/p/meta-compute-everyone-wants-to-be"
       ],
       "calculationsSheet": "https://docs.google.com/spreadsheets/d/1zXqoogyqGbmgvdu4vSTepZG3Cy8kMoJjp0n3KaZPkd4/edit?usp=sharing",
-      "org": null,
+      "org": "org_meta",
       "review": {
         "state": "unreviewed",
         "event": null
