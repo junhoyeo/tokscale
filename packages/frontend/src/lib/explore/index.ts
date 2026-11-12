@@ -66,8 +66,9 @@ export async function getHumansLeaderboard(q: LeaderboardQuery = {}): Promise<Ra
 
 /**
  * The profile the home page features: `username`'s row, with their real rank in
- * `period`. When that account has no public usage in the period, the first-ranked
- * human takes its place so the section is not empty.
+ * `period`. The period rollup keeps the top 1,000 humans by tokens. When the
+ * account is not among them, which includes having no public usage in the period,
+ * the first-ranked human takes its place so the section is not empty.
  */
 export async function getFeaturedHuman(
   username: string,
