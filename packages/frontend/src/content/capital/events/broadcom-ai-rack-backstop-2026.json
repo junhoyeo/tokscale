@@ -19,10 +19,6 @@
     }
   ],
   "event": {
-    "quantities": [],
-    "relations": [],
-    "reviewedAt": "2026-11-12",
-    "corrections": [],
     "id": "evt_broadcom_ai_rack_backstop_2026",
     "slug": "broadcom-ai-rack-backstop-2026",
     "kind": "deal",
@@ -49,6 +45,7 @@
       }
     ],
     "amounts": [],
+    "quantities": [],
     "facts": [
       {
         "label": "Arrangement",
@@ -69,8 +66,11 @@
         "quote": "The Company's potential liability under the Backstop will be equal to any difference between 72.5% of the outstanding amounts owed on the lease and the value of the AI racks received upon the sale of the assets at that time."
       }
     ],
+    "relations": [],
     "sourceIds": [
       "src_broadcom_8k_2026_10_27"
-    ]
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
   }
 }

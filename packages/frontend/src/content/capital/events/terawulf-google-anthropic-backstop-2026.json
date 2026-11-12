@@ -19,16 +19,6 @@
     }
   ],
   "event": {
-    "quantities": [],
-    "relations": [
-      {
-        "type": "amends",
-        "event": "evt_terawulf_anthropic_lease_2026",
-        "note": "The credit support agreements accompanied amendments to the existing Anthropic leases."
-      }
-    ],
-    "reviewedAt": "2026-11-12",
-    "corrections": [],
     "id": "evt_terawulf_google_anthropic_backstop_2026",
     "slug": "terawulf-google-anthropic-backstop-2026",
     "kind": "deal",
@@ -65,6 +55,7 @@
       }
     ],
     "amounts": [],
+    "quantities": [],
     "facts": [
       {
         "label": "Credit support",
@@ -85,8 +76,17 @@
         "quote": "On November 4, 2026, in connection with the Justified Google Backstop, Raylan and Anthropic entered into amendments to the Justified Leases."
       }
     ],
+    "relations": [
+      {
+        "type": "amends",
+        "event": "evt_terawulf_anthropic_lease_2026",
+        "note": "The credit support agreements accompanied amendments to the existing Anthropic leases."
+      }
+    ],
     "sourceIds": [
       "src_terawulf_8k_2026_11_04"
-    ]
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
   }
 }

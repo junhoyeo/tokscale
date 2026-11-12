@@ -219,6 +219,16 @@ describe("Tokscale usage on lab profiles", () => {
 });
 
 describe("event and profile display", () => {
+  it("does not treat a listed company's public stock offering as a funding round", () => {
+    const offering = ledger.getEvent("oracle-stock-and-notes-2026")!;
+    expect(offering.tag).toBe("Offering");
+    expect(offering.typeLabels).toEqual(["Public offering", "Debt financing"]);
+    const oracle = ledger.getDirectoryRows().find((row) => row.org.id === "org_oracle")!;
+    expect(oracle.lastFinancing?.id).toBe("evt_oracle_stock_and_notes_2026");
+    expect(oracle.roundsCount).toBe(0);
+    expect(oracle.lastRound).toBeNull();
+  });
+
   it("leads a Form D with the amount sold, not the total offering size", () => {
     const crusoe = ledger.getEvent("crusoe-form-d-2026")!;
     expect(crusoe.headline?.amount?.amount.measure).toBe("form_d_amount_sold");

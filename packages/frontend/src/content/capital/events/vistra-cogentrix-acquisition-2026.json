@@ -1,0 +1,142 @@
+{
+  "sources": [
+    {
+      "id": "src_vistra_8k_2026_11_05",
+      "url": "https://www.sec.gov/Archives/edgar/data/1692819/000114036126042013/ef20084950_8k.htm",
+      "publisher": "SEC EDGAR (Vistra Corp.)",
+      "type": "sec_filing",
+      "title": "Vistra Form 8-K, November 5, 2026 (Q-Generation acquisition completion)",
+      "publishedAt": "2026-11-05",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001140361-26-042013",
+        "cik": "0001692819",
+        "filedAt": "2026-11-05",
+        "periodOfReport": "2026-10-30"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_vistra_10q_2026_11_09",
+      "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000025/vistra-20260930.htm",
+      "publisher": "SEC EDGAR (Vistra Corp.)",
+      "type": "sec_filing",
+      "title": "Vistra Form 10-Q for the quarter ended September 30, 2026",
+      "publishedAt": "2026-11-09",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001692819-26-000025",
+        "cik": "0001692819",
+        "filedAt": "2026-11-09",
+        "periodOfReport": "2026-09-30"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_vistra_cogentrix_acquisition_2026",
+    "slug": "vistra-cogentrix-acquisition-2026",
+    "kind": "acquisition",
+    "types": [
+      "acquisition"
+    ],
+    "title": "Vistra completes its acquisition of Cogentrix Energy",
+    "summary": "Vistra acquired Cogentrix Energy, an owner of natural gas power plants, paying cash and Vistra shares and assuming its debt.",
+    "date": "2026-10-30",
+    "dates": {
+      "completed": "2026-10-30",
+      "filed": "2026-11-05"
+    },
+    "status": "completed",
+    "participants": [
+      {
+        "org": "org_vistra",
+        "roles": [
+          "acquirer"
+        ]
+      },
+      {
+        "org": "org_cogentrix_energy",
+        "roles": [
+          "target"
+        ],
+        "note": "The acquired company is Q-Generation, LLC."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "consideration",
+        "label": "Cash and stock consideration (computed by Tokscale: about $2.2B cash + 5,000,000 shares × $185)",
+        "measure": "purchase_price",
+        "value": 3125000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "closed",
+        "asOf": "2026-10-30",
+        "from": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_11_05",
+        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\")."
+      },
+      {
+        "id": "cash",
+        "label": "Cash consideration",
+        "measure": "purchase_price",
+        "value": 2200000000,
+        "currency": "USD",
+        "basis": "approximately",
+        "status": "closed",
+        "asOf": "2026-10-30",
+        "from": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_11_05",
+        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\").",
+        "partOf": "consideration"
+      },
+      {
+        "id": "share_value",
+        "label": "Agreed value per Vistra share",
+        "measure": "price_per_share",
+        "value": 185,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-10-30",
+        "sourceId": "src_vistra_8k_2026_11_05",
+        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\")."
+      }
+    ],
+    "quantities": [
+      {
+        "id": "shares",
+        "label": "Vistra shares issued as consideration",
+        "measure": "shares",
+        "value": 5000000,
+        "basis": "exact",
+        "sourceId": "src_vistra_8k_2026_11_05",
+        "quote": "Pursuant to the Transaction Agreements, and in consideration for the limited liability company interests of the Acquired Company, consideration for the Merger, and other consideration received thereunder, Buyer and Vistra paid consideration consisting of (i) approximately $2.2 billion in cash (the \"Cash Consideration\") (net of adjustments for working capital, acquired cash, the assumption of approximately $1.7 billion of outstanding indebtedness of the Acquired Company and its subsidiaries as of closing), and certain other adjustments and (ii) 5,000,000 shares of Vistra common stock, par value $0.01 per share, issued to Seller on the Closing Date at a mutually agreed-upon value of $185 per share (the \"Stock Consideration\")."
+      }
+    ],
+    "facts": [
+      {
+        "label": "Debt assumed",
+        "text": "Approximately $1.7 billion of target-company debt was assumed at closing.",
+        "sourceId": "src_vistra_8k_2026_11_05",
+        "quote": "In connection with the Transactions, approximately $1.7 billion of indebtedness of the Acquired Company and its subsidiaries was assumed."
+      },
+      {
+        "label": "Assets",
+        "text": "Ten natural gas generation facilities with about 5,500 MW of capacity.",
+        "sourceId": "src_vistra_10q_2026_11_09",
+        "quote": "The Cogentrix Acquisition resulted in the addition of 10 modern natural gas generation facilities totaling approximately 5,500 MW of capacity."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_vistra_8k_2026_11_05",
+      "src_vistra_10q_2026_11_09"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

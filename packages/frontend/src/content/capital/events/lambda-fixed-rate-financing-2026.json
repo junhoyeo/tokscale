@@ -12,10 +12,6 @@
     }
   ],
   "event": {
-    "quantities": [],
-    "relations": [],
-    "reviewedAt": "2026-11-12",
-    "corrections": [],
     "id": "evt_lambda_fixed_rate_financing_2026",
     "slug": "lambda-fixed-rate-financing-2026",
     "kind": "financing",
@@ -56,6 +52,7 @@
         "quote": "$1.008 billion delayed draw term loan"
       }
     ],
+    "quantities": [],
     "facts": [
       {
         "label": "Use of proceeds",
@@ -76,8 +73,11 @@
         "quote": "Facility final maturity of May 30, 2033, with a fully amortizing repayment profile"
       }
     ],
+    "relations": [],
     "sourceIds": [
       "src_lambda_financing_2026_10_01"
-    ]
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
   }
 }

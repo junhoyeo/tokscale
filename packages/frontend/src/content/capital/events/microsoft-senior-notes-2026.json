@@ -1,0 +1,93 @@
+{
+  "sources": [
+    {
+      "id": "src_microsoft_424b2_2026_11_02",
+      "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526442618/d150456d424b2.htm",
+      "publisher": "SEC EDGAR (Microsoft Corporation)",
+      "type": "sec_filing",
+      "title": "Microsoft prospectus supplement for $25 billion senior notes",
+      "publishedAt": "2026-11-02",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "424B2",
+        "accession": "0001193125-26-442618",
+        "cik": "0000789019",
+        "filedAt": "2026-11-02"
+      },
+      "license": "public-domain-sec"
+    },
+    {
+      "id": "src_microsoft_8k_2026_11_04",
+      "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526447173/d178557d8k.htm",
+      "publisher": "SEC EDGAR (Microsoft Corporation)",
+      "type": "sec_filing",
+      "title": "Microsoft Form 8-K, November 4, 2026 (senior notes issuance)",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-447173",
+        "cik": "0000789019",
+        "filedAt": "2026-11-04",
+        "periodOfReport": "2026-10-29"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_microsoft_senior_notes_2026",
+    "slug": "microsoft-senior-notes-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "Microsoft issues $25 billion of senior notes",
+    "summary": "Microsoft issued ten series of senior unsecured notes with maturities from 2028 through 2066.",
+    "date": "2026-11-04",
+    "dates": {
+      "signed": "2026-10-29",
+      "closed": "2026-11-04"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_microsoft",
+        "roles": [
+          "issuer",
+          "borrower"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "notes",
+        "label": "Ten series of senior notes",
+        "measure": "debt_raised",
+        "value": 25000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-11-04",
+        "to": "org_microsoft",
+        "sourceId": "src_microsoft_424b2_2026_11_02",
+        "quote": "$25,000,000,000 Microsoft Corporation $1,000,000,000 Floating Rate Notes due 2028 $2,000,000,000 4.850% Notes due 2028 $1,000,000,000 Floating Rate Notes due 2029 $3,250,000,000 5.000% Notes due 2029 $3,250,000,000 5.200% Notes due 2031 $2,500,000,000 5.350% Notes due 2033 $4,000,000,000 5.550% Notes due 2036 $2,000,000,000 6.150% Notes due 2046 $4,000,000,000 6.250% Notes due 2056 $2,000,000,000 6.350% Notes due 2066"
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Issuance",
+        "text": "The notes were issued under the supplemental indenture dated November 4, 2026.",
+        "sourceId": "src_microsoft_8k_2026_11_04",
+        "quote": "The Notes have been issued pursuant to an indenture, dated as of May 18, 2009 (the \"Base Indenture\"), between the Company and The Bank of New York Mellon Trust Company, N.A., as trustee (the \"Trustee\"), as supplemented by the Sixteenth Supplemental Indenture thereto, dated as of November 4, 2026 (the \"Supplemental Indenture\"), between the Company and the Trustee."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_microsoft_424b2_2026_11_02",
+      "src_microsoft_8k_2026_11_04"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

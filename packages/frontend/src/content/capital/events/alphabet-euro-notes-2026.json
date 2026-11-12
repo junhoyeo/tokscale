@@ -1,0 +1,75 @@
+{
+  "sources": [
+    {
+      "id": "src_alphabet_8k_2026_11_05",
+      "url": "https://www.sec.gov/Archives/edgar/data/1652044/000119312526449835/d174184d8k.htm",
+      "publisher": "SEC EDGAR (Alphabet Inc.)",
+      "type": "sec_filing",
+      "title": "Alphabet Form 8-K, November 5, 2026 (euro-denominated senior notes)",
+      "publishedAt": "2026-11-05",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-449835",
+        "cik": "0001652044",
+        "filedAt": "2026-11-05",
+        "periodOfReport": "2026-11-05"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_alphabet_euro_notes_2026",
+    "slug": "alphabet-euro-notes-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "Alphabet closes €6 billion euro-denominated senior notes",
+    "summary": "Alphabet closed an underwritten offering of seven series of euro-denominated senior notes.",
+    "date": "2026-11-05",
+    "dates": {
+      "closed": "2026-11-05"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_alphabet",
+        "roles": [
+          "issuer",
+          "borrower"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "notes",
+        "label": "Euro-denominated senior notes",
+        "measure": "debt_raised",
+        "value": 6000000000,
+        "currency": "EUR",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-11-05",
+        "to": "org_alphabet",
+        "sourceId": "src_alphabet_8k_2026_11_05",
+        "quote": "On November 5, 2026, Alphabet Inc. (\"Alphabet\") closed its underwritten public offering of €6 billion aggregate principal amount of euro-denominated senior notes (the \"Notes\") pursuant to Alphabet's registration statement on Form S-3 (File No. 333-296395)."
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Series",
+        "text": "Seven series mature from 2028 through 2045.",
+        "sourceId": "src_alphabet_8k_2026_11_05",
+        "quote": "The Notes consist of €750,000,000 aggregate principal amount of floating rate notes due 2028, €750,000,000 aggregate principal amount of 3.700% notes due 2028, €1,250,000,000 aggregate principal amount of 4.050% notes due 2030, €750,000,000 aggregate principal amount of 4.250% notes due 2032, €750,000,000 aggregate principal amount of 4.500% notes due 2035, €750,000,000 aggregate principal amount of 4.875% notes due 2039 and €1,000,000,000 aggregate principal amount of 5.250% notes due 2045."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_alphabet_8k_2026_11_05"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "sources": [
+    {
+      "id": "src_oracle_8k_2026_11_04",
+      "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526447507/d131790d8k.htm",
+      "publisher": "SEC EDGAR (Oracle Corporation)",
+      "type": "sec_filing",
+      "title": "Oracle Form 8-K, November 4, 2026 (common stock and senior notes offerings)",
+      "publishedAt": "2026-11-04",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001193125-26-447507",
+        "cik": "0001341439",
+        "filedAt": "2026-11-04",
+        "periodOfReport": "2026-11-02"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_oracle_stock_and_notes_2026",
+    "slug": "oracle-stock-and-notes-2026",
+    "kind": "financing",
+    "types": [
+      "public_offering",
+      "debt_facility"
+    ],
+    "title": "Oracle closes concurrent common-stock and senior-notes offerings",
+    "summary": "Oracle closed concurrent underwritten offerings of common stock and five series of senior notes.",
+    "date": "2026-11-04",
+    "dates": {
+      "announced": "2026-11-02",
+      "closed": "2026-11-04"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_oracle",
+        "roles": [
+          "issuer",
+          "borrower"
+        ]
+      }
+    ],
+    "amounts": [
+      {
+        "id": "common_stock",
+        "label": "Common stock offering",
+        "measure": "equity_raised",
+        "value": 10000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-11-04",
+        "to": "org_oracle",
+        "sourceId": "src_oracle_8k_2026_11_04",
+        "quote": "Issuance of $10 Billion of Common Stock On November 2, 2026, Oracle Corporation, a Delaware corporation (\"Oracle\"), entered into an underwriting agreement (the \"Common Stock Underwriting Agreement\") with BofA Securities, Inc., as representative of the several underwriters named therein, pursuant to which Oracle agreed to issue and sell 86,206,897 shares of its common stock, par value $0.01 per share (the \"Common Stock\" and such offering, the \"Common Stock Offering\"). The Common Stock Offering closed on November 4, 2026."
+      },
+      {
+        "id": "notes",
+        "label": "Senior notes offering",
+        "measure": "debt_raised",
+        "value": 10000000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-11-04",
+        "to": "org_oracle",
+        "sourceId": "src_oracle_8k_2026_11_04",
+        "quote": "Issuance of $10 Billion Aggregate Principal Amount of Notes On November 4, 2026, Oracle consummated the issuance and sale of $2,000,000,000 principal amount of its 7.000% Notes due 2029, $1,750,000,000 principal amount of its 7.450% Notes due 2031, $2,250,000,000 principal amount of its 7.850% Notes due 2033, $2,500,000,000 principal amount of its 8.000% Notes due 2037 and $1,500,000,000 principal amount of its 8.650% Notes due 2046 (collectively, the \"Notes\")"
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Use of proceeds",
+        "text": "General corporate purposes, potentially including capital expenditures and debt repayment.",
+        "sourceId": "src_oracle_8k_2026_11_04",
+        "quote": "The net proceeds of the Offerings will be used for general corporate purposes, which may include capital expenditures, repayment of indebtedness, future investments or acquisitions and payment of cash dividends on or repurchases of Common Stock."
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_oracle_8k_2026_11_04"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

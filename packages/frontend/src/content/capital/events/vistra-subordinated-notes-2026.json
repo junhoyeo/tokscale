@@ -1,0 +1,104 @@
+{
+  "sources": [
+    {
+      "id": "src_vistra_8k_2026_09_24",
+      "url": "https://www.sec.gov/Archives/edgar/data/1692819/000114036126037577/ef20082680_8k.htm",
+      "publisher": "SEC EDGAR (Vistra Corp.)",
+      "type": "sec_filing",
+      "title": "Vistra Form 8-K, September 24, 2026 (junior subordinated notes)",
+      "publishedAt": "2026-09-24",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "8-K",
+        "accession": "0001140361-26-037577",
+        "cik": "0001692819",
+        "filedAt": "2026-09-24",
+        "periodOfReport": "2026-09-24"
+      },
+      "license": "public-domain-sec"
+    }
+  ],
+  "event": {
+    "id": "evt_vistra_subordinated_notes_2026",
+    "slug": "vistra-subordinated-notes-2026",
+    "kind": "financing",
+    "types": [
+      "debt_facility"
+    ],
+    "title": "Vistra closes two junior subordinated-note series",
+    "summary": "A Vistra subsidiary completed an underwritten offering of two series of junior subordinated notes due 2057, guaranteed by Vistra.",
+    "date": "2026-09-24",
+    "dates": {
+      "closed": "2026-09-24"
+    },
+    "status": "closed",
+    "participants": [
+      {
+        "org": "org_vistra",
+        "roles": [
+          "issuer",
+          "borrower"
+        ],
+        "note": "The notes were issued by wholly owned subsidiary Vistra Operations Company LLC and guaranteed by Vistra."
+      }
+    ],
+    "amounts": [
+      {
+        "id": "notes",
+        "label": "Both series (computed by Tokscale: $850M + $650M)",
+        "measure": "debt_raised",
+        "value": 1500000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-24",
+        "to": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_09_24",
+        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")"
+      },
+      {
+        "id": "series_a",
+        "label": "Series A Junior Subordinated Notes due 2057",
+        "measure": "debt_raised",
+        "value": 850000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-24",
+        "to": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_09_24",
+        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")",
+        "partOf": "notes"
+      },
+      {
+        "id": "series_b",
+        "label": "Series B Junior Subordinated Notes due 2057",
+        "measure": "debt_raised",
+        "value": 650000000,
+        "currency": "USD",
+        "basis": "exact",
+        "status": "closed",
+        "asOf": "2026-09-24",
+        "to": "org_vistra",
+        "sourceId": "src_vistra_8k_2026_09_24",
+        "quote": "On September 24, 2026, Vistra Operations Company LLC (\"Vistra Operations\"), an indirect, wholly owned subsidiary of Vistra Corp. (\"Vistra\"), completed its underwritten public offering of $850,000,000 aggregate principal amount of its 7.000% Series A Junior Subordinated Notes due 2057 (the \"Series A Notes\") and $650,000,000 aggregate principal amount of its 7.250% Series B Junior Subordinated Notes due 2057 (the \"Series B Notes\" and, together with the Series A Notes, the \"Notes\")",
+        "partOf": "notes"
+      }
+    ],
+    "quantities": [],
+    "facts": [
+      {
+        "label": "Guarantee",
+        "text": "Vistra irrevocably and unconditionally guaranteed both series.",
+        "sourceId": "src_vistra_8k_2026_09_24",
+        "quote": "in each case irrevocably and unconditionally guaranteed by Vistra (the \"Guarantee\" and, together with the Notes, the \"Securities\")"
+      }
+    ],
+    "relations": [],
+    "sourceIds": [
+      "src_vistra_8k_2026_09_24"
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
+  }
+}

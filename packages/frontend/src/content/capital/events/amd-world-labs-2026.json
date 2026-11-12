@@ -36,10 +36,6 @@
     }
   ],
   "event": {
-    "quantities": [],
-    "relations": [],
-    "reviewedAt": "2026-11-12",
-    "corrections": [],
     "id": "evt_amd_world_labs_2026",
     "slug": "amd-world-labs-2026",
     "kind": "acquisition",
@@ -85,6 +81,7 @@
         "quote": "On September 26, 2026, Advanced Micro Devices, Inc. (the \"Company\") entered into an Agreement and Plan of Merger (the \"Merger Agreement\") to acquire all of the equity interests in World Labs Technologies, Inc. (\"World Labs\") (the \"Acquisition\") for a total purchase price of approximately $8.2 billion to be paid in shares of the Company's common stock, par value $0.01 per share (\"Common Stock\"), to stockholders of World Labs, subject to customary adjustments."
       }
     ],
+    "quantities": [],
     "facts": [
       {
         "label": "Latest status",
@@ -93,9 +90,12 @@
         "quote": "The acquisitions are expected to close by the end of 2026, subject to regulatory approvals and customary closing conditions."
       }
     ],
+    "relations": [],
     "sourceIds": [
       "src_amd_8k_2026_09_28",
       "src_amd_10q_2026_11_04"
-    ]
+    ],
+    "reviewedAt": "2026-11-12",
+    "corrections": []
   }
 }

@@ -32,6 +32,23 @@
         "filedAt": "2026-10-01"
       },
       "license": "public-domain-sec"
+    },
+    {
+      "id": "src_vistra_10q_2026_11_09",
+      "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000025/vistra-20260930.htm",
+      "publisher": "SEC EDGAR (Vistra Corp.)",
+      "type": "sec_filing",
+      "title": "Vistra Form 10-Q for the quarter ended September 30, 2026",
+      "publishedAt": "2026-11-09",
+      "retrievedAt": "2026-11-12",
+      "filing": {
+        "form": "10-Q",
+        "accession": "0001692819-26-000025",
+        "cik": "0001692819",
+        "filedAt": "2026-11-09",
+        "periodOfReport": "2026-09-30"
+      },
+      "license": "public-domain-sec"
     }
   ],
   "orgs": [
@@ -106,6 +123,40 @@
       ],
       "status": "private",
       "description": "Investment firm that invests in public and private companies.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    },
+    {
+      "id": "org_cogentrix_energy",
+      "slug": "cogentrix-energy",
+      "name": "Cogentrix Energy",
+      "legalNames": [
+        "Q-Generation, LLC"
+      ],
+      "aliases": [
+        "Cogentrix"
+      ],
+      "kinds": [
+        "company"
+      ],
+      "categories": [
+        "power"
+      ],
+      "investorTypes": [],
+      "status": "acquired",
+      "parent": {
+        "org": "org_vistra",
+        "since": "2026-10-30",
+        "sourceId": "src_vistra_10q_2026_11_09",
+        "quote": "On October 30, 2026, Vistra acquired Cogentrix Energy"
+      },
+      "description": "Owner of natural gas power plants, acquired by Vistra.",
       "ids": {
         "secCik": [],
         "tickers": []
