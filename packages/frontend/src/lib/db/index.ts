@@ -39,11 +39,15 @@ function createDb() {
       url: getConnectionString(),
       ssl: getDatabaseSslMode(),
 
-      // Serverless-optimized pool settings:
-      // Each Vercel function instance gets its own pool. With dozens of
-      // concurrent cold-starts, max:5 per instance quickly exceeds the
-      // database server's max_connections (error 53300).
-      max: 1,
+      // Each Vercel function instance gets its own pool, and one instance
+      // serves many requests at once. With a single connection every query
+      // on the instance waits behind the slowest one in flight, so a rollup
+      // scan or a submit transaction stalls unrelated page loads.
+      //
+      // Keep the pool small all the same: the total is instances x max, and
+      // exceeding the server's max_connections fails requests (error 53300).
+      // Connections open on demand, so an idle instance still holds none.
+      max: 3,
 
       // Close idle connections after 20 s so they don't linger between
       // infrequent invocations.
