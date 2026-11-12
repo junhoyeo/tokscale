@@ -7,64 +7,70 @@ import org3 from "@/content/capital/orgs-refresh-infra.json";
 import org4 from "@/content/capital/orgs-refresh-labs.json";
 import org5 from "@/content/capital/orgs.json";
 import event6 from "@/content/capital/events/akamai-anthropic-2026.json";
-import event7 from "@/content/capital/events/amd-world-labs-2026.json";
-import event8 from "@/content/capital/events/anthropic-amazon-2026-04.json";
-import event9 from "@/content/capital/events/anthropic-google-cloud-2026.json";
-import event10 from "@/content/capital/events/anthropic-ipo-2026.json";
-import event11 from "@/content/capital/events/anthropic-ipo-private-placement-2026.json";
-import event12 from "@/content/capital/events/anthropic-microsoft-nvidia-2025.json";
-import event13 from "@/content/capital/events/anthropic-series-e-2025.json";
-import event14 from "@/content/capital/events/anthropic-series-f-2025.json";
-import event15 from "@/content/capital/events/anthropic-series-g-2026.json";
-import event16 from "@/content/capital/events/anthropic-series-h-2026.json";
-import event17 from "@/content/capital/events/anthropic-spacexai-compute-2026.json";
-import event18 from "@/content/capital/events/broadcom-ai-rack-backstop-2026.json";
-import event19 from "@/content/capital/events/broadcom-google-anthropic-2026.json";
-import event20 from "@/content/capital/events/cerebras-ipo-2026.json";
-import event21 from "@/content/capital/events/cerebras-openai-2025.json";
-import event22 from "@/content/capital/events/coreweave-convertible-notes-2026.json";
-import event23 from "@/content/capital/events/coreweave-ddtl-4-2026.json";
-import event24 from "@/content/capital/events/coreweave-openai-2025.json";
-import event25 from "@/content/capital/events/crusoe-form-d-2026.json";
-import event26 from "@/content/capital/events/fluidstack-form-d-2026-01.json";
-import event27 from "@/content/capital/events/fluidstack-form-d-2026-06.json";
-import event28 from "@/content/capital/events/fluidstack-form-d-amendment-2026-05.json";
-import event29 from "@/content/capital/events/lambda-fixed-rate-financing-2026.json";
-import event30 from "@/content/capital/events/lambda-form-d-2022.json";
-import event31 from "@/content/capital/events/lambda-form-d-2024.json";
-import event32 from "@/content/capital/events/mistral-series-c-2025.json";
-import event33 from "@/content/capital/events/mistral-series-d-2026.json";
-import event34 from "@/content/capital/events/nebius-bridge-facility-2026.json";
-import event35 from "@/content/capital/events/nebius-inferize-2026.json";
-import event36 from "@/content/capital/events/nebius-microsoft-2025.json";
-import event37 from "@/content/capital/events/nscale-anthropic-2026.json";
-import event38 from "@/content/capital/events/nscale-convertible-financing-2026.json";
-import event39 from "@/content/capital/events/nscale-microsoft-2026.json";
-import event40 from "@/content/capital/events/nscale-s-1-2026.json";
-import event41 from "@/content/capital/events/openai-credit-facility-2024.json";
-import event42 from "@/content/capital/events/openai-funding-2024-10.json";
-import event43 from "@/content/capital/events/openai-funding-2025-03.json";
-import event44 from "@/content/capital/events/openai-funding-2026-02.json";
-import event45 from "@/content/capital/events/openai-funding-2026-03.json";
-import event46 from "@/content/capital/events/openai-nvidia-2025.json";
-import event47 from "@/content/capital/events/openai-orchestra-bio-acquisition-2026.json";
-import event48 from "@/content/capital/events/openai-pierre-acquisition-2026.json";
-import event49 from "@/content/capital/events/sb-energy-nvidia-investment-2026.json";
-import event50 from "@/content/capital/events/sb-energy-openai-lease-2026.json";
-import event51 from "@/content/capital/events/spacex-cursor-acquisition-2026.json";
-import event52 from "@/content/capital/events/spacex-gpu-finance-lease-2026.json";
-import event53 from "@/content/capital/events/spacex-ipo-2026.json";
-import event54 from "@/content/capital/events/spacex-senior-notes-2026.json";
-import event55 from "@/content/capital/events/terawulf-anthropic-lease-2026.json";
-import event56 from "@/content/capital/events/terawulf-fluidstack-sale-2026.json";
-import event57 from "@/content/capital/events/terawulf-google-anthropic-backstop-2026.json";
-import event58 from "@/content/capital/events/xai-series-b-2024.json";
-import event59 from "@/content/capital/events/xai-series-c-2024.json";
-import event60 from "@/content/capital/events/xai-series-e-2026.json";
-import event61 from "@/content/capital/events/xai-spacex-merger-2026.json";
-import statement62 from "@/content/capital/metrics/statements-filings.json";
-import statement63 from "@/content/capital/metrics/statements-labs.json";
-import statement64 from "@/content/capital/metrics/statements.json";
+import event7 from "@/content/capital/events/akamai-convertible-notes-2026.json";
+import event8 from "@/content/capital/events/alphabet-euro-notes-2026.json";
+import event9 from "@/content/capital/events/amd-world-labs-2026.json";
+import event10 from "@/content/capital/events/anthropic-amazon-2026-04.json";
+import event11 from "@/content/capital/events/anthropic-google-cloud-2026.json";
+import event12 from "@/content/capital/events/anthropic-ipo-2026.json";
+import event13 from "@/content/capital/events/anthropic-ipo-private-placement-2026.json";
+import event14 from "@/content/capital/events/anthropic-microsoft-nvidia-2025.json";
+import event15 from "@/content/capital/events/anthropic-series-e-2025.json";
+import event16 from "@/content/capital/events/anthropic-series-f-2025.json";
+import event17 from "@/content/capital/events/anthropic-series-g-2026.json";
+import event18 from "@/content/capital/events/anthropic-series-h-2026.json";
+import event19 from "@/content/capital/events/anthropic-spacexai-compute-2026.json";
+import event20 from "@/content/capital/events/broadcom-ai-rack-backstop-2026.json";
+import event21 from "@/content/capital/events/broadcom-google-anthropic-2026.json";
+import event22 from "@/content/capital/events/cerebras-ipo-2026.json";
+import event23 from "@/content/capital/events/cerebras-openai-2025.json";
+import event24 from "@/content/capital/events/coreweave-convertible-notes-2026.json";
+import event25 from "@/content/capital/events/coreweave-ddtl-4-2026.json";
+import event26 from "@/content/capital/events/coreweave-openai-2025.json";
+import event27 from "@/content/capital/events/crusoe-form-d-2026.json";
+import event28 from "@/content/capital/events/fluidstack-form-d-2026-01.json";
+import event29 from "@/content/capital/events/fluidstack-form-d-2026-06.json";
+import event30 from "@/content/capital/events/fluidstack-form-d-amendment-2026-05.json";
+import event31 from "@/content/capital/events/lambda-fixed-rate-financing-2026.json";
+import event32 from "@/content/capital/events/lambda-form-d-2022.json";
+import event33 from "@/content/capital/events/lambda-form-d-2024.json";
+import event34 from "@/content/capital/events/microsoft-senior-notes-2026.json";
+import event35 from "@/content/capital/events/mistral-series-c-2025.json";
+import event36 from "@/content/capital/events/mistral-series-d-2026.json";
+import event37 from "@/content/capital/events/nebius-bridge-facility-2026.json";
+import event38 from "@/content/capital/events/nebius-inferize-2026.json";
+import event39 from "@/content/capital/events/nebius-microsoft-2025.json";
+import event40 from "@/content/capital/events/nscale-anthropic-2026.json";
+import event41 from "@/content/capital/events/nscale-convertible-financing-2026.json";
+import event42 from "@/content/capital/events/nscale-microsoft-2026.json";
+import event43 from "@/content/capital/events/nscale-s-1-2026.json";
+import event44 from "@/content/capital/events/openai-credit-facility-2024.json";
+import event45 from "@/content/capital/events/openai-funding-2024-10.json";
+import event46 from "@/content/capital/events/openai-funding-2025-03.json";
+import event47 from "@/content/capital/events/openai-funding-2026-02.json";
+import event48 from "@/content/capital/events/openai-funding-2026-03.json";
+import event49 from "@/content/capital/events/openai-nvidia-2025.json";
+import event50 from "@/content/capital/events/openai-orchestra-bio-acquisition-2026.json";
+import event51 from "@/content/capital/events/openai-pierre-acquisition-2026.json";
+import event52 from "@/content/capital/events/oracle-stock-and-notes-2026.json";
+import event53 from "@/content/capital/events/sb-energy-nvidia-investment-2026.json";
+import event54 from "@/content/capital/events/sb-energy-openai-lease-2026.json";
+import event55 from "@/content/capital/events/spacex-cursor-acquisition-2026.json";
+import event56 from "@/content/capital/events/spacex-gpu-finance-lease-2026.json";
+import event57 from "@/content/capital/events/spacex-ipo-2026.json";
+import event58 from "@/content/capital/events/spacex-senior-notes-2026.json";
+import event59 from "@/content/capital/events/terawulf-anthropic-lease-2026.json";
+import event60 from "@/content/capital/events/terawulf-fluidstack-sale-2026.json";
+import event61 from "@/content/capital/events/terawulf-google-anthropic-backstop-2026.json";
+import event62 from "@/content/capital/events/vistra-cogentrix-acquisition-2026.json";
+import event63 from "@/content/capital/events/vistra-subordinated-notes-2026.json";
+import event64 from "@/content/capital/events/xai-series-b-2024.json";
+import event65 from "@/content/capital/events/xai-series-c-2024.json";
+import event66 from "@/content/capital/events/xai-series-e-2026.json";
+import event67 from "@/content/capital/events/xai-spacex-merger-2026.json";
+import statement68 from "@/content/capital/metrics/statements-filings.json";
+import statement69 from "@/content/capital/metrics/statements-labs.json";
+import statement70 from "@/content/capital/metrics/statements.json";
 
 export const ORG_FILES: ReadonlyArray<{ file: string; data: unknown }> = [
   { file: "orgs-participants-filings.json", data: org0 },
@@ -76,64 +82,70 @@ export const ORG_FILES: ReadonlyArray<{ file: string; data: unknown }> = [
 ];
 export const EVENT_FILES: ReadonlyArray<{ file: string; data: unknown }> = [
   { file: "akamai-anthropic-2026.json", data: event6 },
-  { file: "amd-world-labs-2026.json", data: event7 },
-  { file: "anthropic-amazon-2026-04.json", data: event8 },
-  { file: "anthropic-google-cloud-2026.json", data: event9 },
-  { file: "anthropic-ipo-2026.json", data: event10 },
-  { file: "anthropic-ipo-private-placement-2026.json", data: event11 },
-  { file: "anthropic-microsoft-nvidia-2025.json", data: event12 },
-  { file: "anthropic-series-e-2025.json", data: event13 },
-  { file: "anthropic-series-f-2025.json", data: event14 },
-  { file: "anthropic-series-g-2026.json", data: event15 },
-  { file: "anthropic-series-h-2026.json", data: event16 },
-  { file: "anthropic-spacexai-compute-2026.json", data: event17 },
-  { file: "broadcom-ai-rack-backstop-2026.json", data: event18 },
-  { file: "broadcom-google-anthropic-2026.json", data: event19 },
-  { file: "cerebras-ipo-2026.json", data: event20 },
-  { file: "cerebras-openai-2025.json", data: event21 },
-  { file: "coreweave-convertible-notes-2026.json", data: event22 },
-  { file: "coreweave-ddtl-4-2026.json", data: event23 },
-  { file: "coreweave-openai-2025.json", data: event24 },
-  { file: "crusoe-form-d-2026.json", data: event25 },
-  { file: "fluidstack-form-d-2026-01.json", data: event26 },
-  { file: "fluidstack-form-d-2026-06.json", data: event27 },
-  { file: "fluidstack-form-d-amendment-2026-05.json", data: event28 },
-  { file: "lambda-fixed-rate-financing-2026.json", data: event29 },
-  { file: "lambda-form-d-2022.json", data: event30 },
-  { file: "lambda-form-d-2024.json", data: event31 },
-  { file: "mistral-series-c-2025.json", data: event32 },
-  { file: "mistral-series-d-2026.json", data: event33 },
-  { file: "nebius-bridge-facility-2026.json", data: event34 },
-  { file: "nebius-inferize-2026.json", data: event35 },
-  { file: "nebius-microsoft-2025.json", data: event36 },
-  { file: "nscale-anthropic-2026.json", data: event37 },
-  { file: "nscale-convertible-financing-2026.json", data: event38 },
-  { file: "nscale-microsoft-2026.json", data: event39 },
-  { file: "nscale-s-1-2026.json", data: event40 },
-  { file: "openai-credit-facility-2024.json", data: event41 },
-  { file: "openai-funding-2024-10.json", data: event42 },
-  { file: "openai-funding-2025-03.json", data: event43 },
-  { file: "openai-funding-2026-02.json", data: event44 },
-  { file: "openai-funding-2026-03.json", data: event45 },
-  { file: "openai-nvidia-2025.json", data: event46 },
-  { file: "openai-orchestra-bio-acquisition-2026.json", data: event47 },
-  { file: "openai-pierre-acquisition-2026.json", data: event48 },
-  { file: "sb-energy-nvidia-investment-2026.json", data: event49 },
-  { file: "sb-energy-openai-lease-2026.json", data: event50 },
-  { file: "spacex-cursor-acquisition-2026.json", data: event51 },
-  { file: "spacex-gpu-finance-lease-2026.json", data: event52 },
-  { file: "spacex-ipo-2026.json", data: event53 },
-  { file: "spacex-senior-notes-2026.json", data: event54 },
-  { file: "terawulf-anthropic-lease-2026.json", data: event55 },
-  { file: "terawulf-fluidstack-sale-2026.json", data: event56 },
-  { file: "terawulf-google-anthropic-backstop-2026.json", data: event57 },
-  { file: "xai-series-b-2024.json", data: event58 },
-  { file: "xai-series-c-2024.json", data: event59 },
-  { file: "xai-series-e-2026.json", data: event60 },
-  { file: "xai-spacex-merger-2026.json", data: event61 },
+  { file: "akamai-convertible-notes-2026.json", data: event7 },
+  { file: "alphabet-euro-notes-2026.json", data: event8 },
+  { file: "amd-world-labs-2026.json", data: event9 },
+  { file: "anthropic-amazon-2026-04.json", data: event10 },
+  { file: "anthropic-google-cloud-2026.json", data: event11 },
+  { file: "anthropic-ipo-2026.json", data: event12 },
+  { file: "anthropic-ipo-private-placement-2026.json", data: event13 },
+  { file: "anthropic-microsoft-nvidia-2025.json", data: event14 },
+  { file: "anthropic-series-e-2025.json", data: event15 },
+  { file: "anthropic-series-f-2025.json", data: event16 },
+  { file: "anthropic-series-g-2026.json", data: event17 },
+  { file: "anthropic-series-h-2026.json", data: event18 },
+  { file: "anthropic-spacexai-compute-2026.json", data: event19 },
+  { file: "broadcom-ai-rack-backstop-2026.json", data: event20 },
+  { file: "broadcom-google-anthropic-2026.json", data: event21 },
+  { file: "cerebras-ipo-2026.json", data: event22 },
+  { file: "cerebras-openai-2025.json", data: event23 },
+  { file: "coreweave-convertible-notes-2026.json", data: event24 },
+  { file: "coreweave-ddtl-4-2026.json", data: event25 },
+  { file: "coreweave-openai-2025.json", data: event26 },
+  { file: "crusoe-form-d-2026.json", data: event27 },
+  { file: "fluidstack-form-d-2026-01.json", data: event28 },
+  { file: "fluidstack-form-d-2026-06.json", data: event29 },
+  { file: "fluidstack-form-d-amendment-2026-05.json", data: event30 },
+  { file: "lambda-fixed-rate-financing-2026.json", data: event31 },
+  { file: "lambda-form-d-2022.json", data: event32 },
+  { file: "lambda-form-d-2024.json", data: event33 },
+  { file: "microsoft-senior-notes-2026.json", data: event34 },
+  { file: "mistral-series-c-2025.json", data: event35 },
+  { file: "mistral-series-d-2026.json", data: event36 },
+  { file: "nebius-bridge-facility-2026.json", data: event37 },
+  { file: "nebius-inferize-2026.json", data: event38 },
+  { file: "nebius-microsoft-2025.json", data: event39 },
+  { file: "nscale-anthropic-2026.json", data: event40 },
+  { file: "nscale-convertible-financing-2026.json", data: event41 },
+  { file: "nscale-microsoft-2026.json", data: event42 },
+  { file: "nscale-s-1-2026.json", data: event43 },
+  { file: "openai-credit-facility-2024.json", data: event44 },
+  { file: "openai-funding-2024-10.json", data: event45 },
+  { file: "openai-funding-2025-03.json", data: event46 },
+  { file: "openai-funding-2026-02.json", data: event47 },
+  { file: "openai-funding-2026-03.json", data: event48 },
+  { file: "openai-nvidia-2025.json", data: event49 },
+  { file: "openai-orchestra-bio-acquisition-2026.json", data: event50 },
+  { file: "openai-pierre-acquisition-2026.json", data: event51 },
+  { file: "oracle-stock-and-notes-2026.json", data: event52 },
+  { file: "sb-energy-nvidia-investment-2026.json", data: event53 },
+  { file: "sb-energy-openai-lease-2026.json", data: event54 },
+  { file: "spacex-cursor-acquisition-2026.json", data: event55 },
+  { file: "spacex-gpu-finance-lease-2026.json", data: event56 },
+  { file: "spacex-ipo-2026.json", data: event57 },
+  { file: "spacex-senior-notes-2026.json", data: event58 },
+  { file: "terawulf-anthropic-lease-2026.json", data: event59 },
+  { file: "terawulf-fluidstack-sale-2026.json", data: event60 },
+  { file: "terawulf-google-anthropic-backstop-2026.json", data: event61 },
+  { file: "vistra-cogentrix-acquisition-2026.json", data: event62 },
+  { file: "vistra-subordinated-notes-2026.json", data: event63 },
+  { file: "xai-series-b-2024.json", data: event64 },
+  { file: "xai-series-c-2024.json", data: event65 },
+  { file: "xai-series-e-2026.json", data: event66 },
+  { file: "xai-spacex-merger-2026.json", data: event67 },
 ];
 export const STATEMENT_FILES: ReadonlyArray<{ file: string; data: unknown }> = [
-  { file: "statements-filings.json", data: statement62 },
-  { file: "statements-labs.json", data: statement63 },
-  { file: "statements.json", data: statement64 },
+  { file: "statements-filings.json", data: statement68 },
+  { file: "statements-labs.json", data: statement69 },
+  { file: "statements.json", data: statement70 },
 ];
