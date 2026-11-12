@@ -55,12 +55,16 @@ describe("Terminal-Bench page parsing", () => {
     expect(decodeFlightPayload(flightHtml("hello world"))).toBe("hello world");
   });
 
-  it("finds the Terminal-Bench 4.0 leaderboard rows in the page", () => {
-    const payload = `0:{"other":1}\n5:{"title":"Terminal-Bench 4.0","updated_at":"2026-10-06T23:20:25Z","rows":${JSON.stringify(TBENCH_ROWS)}}`;
+  it("finds the leaderboard version that the benchmark definition names", () => {
+    const payload = `0:{"other":1}\n5:{"title":"Terminal-Bench 4.1","updated_at":"2026-11-11T02:51:25Z","rows":${JSON.stringify(TBENCH_ROWS)}}`;
     const board = extractTbenchLeaderboard(flightHtml(payload));
+    expect(board.title).toBe("Terminal-Bench 4.1");
     expect(board.rows).toHaveLength(3);
-    expect(board.updatedAt).toBe("2026-10-06T23:20:25Z");
-    expect(() => extractTbenchLeaderboard(flightHtml('{"title":"Other"}'))).toThrow(/not found/);
+    expect(board.updatedAt).toBe("2026-11-11T02:51:25Z");
+    // Another version of the board is never read under this version's name.
+    expect(() => extractTbenchLeaderboard(flightHtml('{"title":"Terminal-Bench 4.0","rows":[]}'))).toThrow(
+      /Terminal-Bench 4\.1 leaderboard not found/,
+    );
   });
 
   it("keeps result rows only, as fractions, with conditions, and never reports $0 as a cost", () => {

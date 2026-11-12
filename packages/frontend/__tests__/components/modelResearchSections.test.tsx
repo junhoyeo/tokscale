@@ -5,6 +5,7 @@ import { ModelNoUsageView } from "@/components/explore/ModelNoUsageView";
 import { ModelPricing } from "@/components/explore/ModelPricing";
 import { ModelSpecs } from "@/components/explore/ModelSpecs";
 import type { BenchmarkContent } from "@/lib/benchmarks/content";
+import { getBenchmarkDefinition } from "@/lib/benchmarks/definitions";
 import { createBenchmarkModel } from "@/lib/benchmarks/model";
 import {
   buildModelBenchmarks,
@@ -132,7 +133,7 @@ describe("ModelBenchmarks", () => {
       agents: [{ key: "claude", name: "Claude Code", logoUrl: null, share: 0.9, activeUsers: 146 }],
     });
     const markup = text(renderToStaticMarkup(<ModelBenchmarks benchmarks={view} modelName="Opus" period="30d" />));
-    expect(markup).toContain("Terminal-Bench 4.0");
+    expect(markup).toContain(getBenchmarkDefinition("terminal-bench-4")!.name);
     expect(markup).toContain("64.8%");
     expect(markup).toMatch(/#2 of 2/);
     expect(markup).toContain("Claude Code carried 90% of Opus tokens in the last 30 days (146 active users).");

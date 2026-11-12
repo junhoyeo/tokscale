@@ -18,7 +18,7 @@ export const COLUMN_GROUP_LABELS: Record<ColumnGroup, string> = {
 
 /**
  * No group selected means the overview: one headline column per group
- * (active users, ECI, Terminal-Bench 4.0, WebDev Arena, price at the
+ * (active users, ECI, Terminal-Bench, WebDev Arena, price at the
  * community token mix). Selecting groups shows their full column sets.
  */
 export const DEFAULT_COLUMN_GROUPS: readonly ColumnGroup[] = [];

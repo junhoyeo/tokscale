@@ -1,16 +1,28 @@
 /**
- * Terminal-Bench 4.0 official leaderboard (tbench.ai). The page embeds the
+ * Terminal-Bench official leaderboard (tbench.ai). The page embeds the
  * leaderboard as JSON inside the Next.js flight payload; we read only the
  * result rows (agent, model, effort, accuracy, cost, tokens), never task
  * content. The site's data terms are not stated, so every cell links back.
+ *
+ * The page shows one version of the board at a time. Which version is read is
+ * the `sourceName` of the benchmark definition, so the scores and the label
+ * shown with them cannot disagree: when the site moves to a new version, this
+ * import fails and keeps the last snapshot until the definition is updated.
  */
 import { agentClientKey, normalizeEffort } from "../conditions";
 import { roundDerived } from "../csv";
+import { getBenchmarkDefinition } from "../definitions";
 import type { BenchmarkResult, SourceSnapshot } from "../schema";
 import { mapExternalModel, type SyncContext } from "./context";
 
 export const TBENCH_URL = "https://www.tbench.ai/leaderboard";
-export const TBENCH_TITLE = "Terminal-Bench 4.0";
+const TBENCH_SLUG = "terminal-bench-4";
+
+function definedBoardTitle(): string {
+  const title = getBenchmarkDefinition(TBENCH_SLUG)?.sourceName;
+  if (!title) throw new Error(`definition for ${TBENCH_SLUG} has no source name`);
+  return title;
+}
 
 export interface TbenchRow {
   rank: number;
@@ -72,7 +84,7 @@ export function sliceBalancedJson(text: string, start: number): string | null {
 }
 
 /** Find the leaderboard titled `title` in the page and return its rows. */
-export function extractTbenchLeaderboard(html: string, title: string = TBENCH_TITLE): TbenchLeaderboard {
+export function extractTbenchLeaderboard(html: string, title: string = definedBoardTitle()): TbenchLeaderboard {
   const payload = decodeFlightPayload(html);
   const titleAt = payload.indexOf(`"title":${JSON.stringify(title)}`);
   if (titleAt < 0) throw new Error(`${title} leaderboard not found in the page`);
@@ -115,7 +127,7 @@ export function parseTbenchRows(rows: readonly TbenchRow[], ctx: SyncContext): B
       ctx,
       "tbench",
       { externalId: label, ids: slug ? [slug] : [], names: [label], org: row.metadata.model_org?.label ?? null },
-      { benchmark: "terminal-bench-4", name: label, date: published },
+      { benchmark: TBENCH_SLUG, name: label, date: published },
       "names",
     );
     const half = row.metrics.accuracy_ci95_half_width;
@@ -164,6 +176,6 @@ export function buildTbenchSnapshot(board: TbenchLeaderboard, ctx: SyncContext, 
     retrievedAt,
     fetchUrls: [TBENCH_URL],
     dataDate,
-    benchmarks: [{ slug: "terminal-bench-4", sourceName: board.title, meta: null, results }],
+    benchmarks: [{ slug: TBENCH_SLUG, sourceName: board.title, meta: null, results }],
   };
 }
