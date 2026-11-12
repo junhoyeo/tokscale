@@ -1,5 +1,5 @@
 {
-  "retrievedAt": "2026-10-21T00:48:20.826Z",
+  "retrievedAt": "2026-11-12T03:51:56.948Z",
   "source": "SEC XBRL companyfacts",
   "definition": "Cash paid for property and equipment (purchases of property, plant and equipment) as tagged in SEC XBRL filings. Excludes finance leases and assets acquired with debt. Not capex guidance.",
   "series": [
@@ -207,6 +207,17 @@
           "filed": "2026-08-07",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 761516000,
+          "form": "10-Q",
+          "accession": "0001086222-26-000100",
+          "filed": "2026-11-06",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": []
@@ -415,6 +426,17 @@
           "filed": "2026-07-23",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 131953000000,
+          "form": "10-Q",
+          "accession": "0001652044-26-000084",
+          "filed": "2026-10-29",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": [
@@ -716,6 +738,17 @@
         },
         {
           "concept": "us-gaap:PaymentsToAcquireProductiveAssets",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 175670000000,
+          "form": "10-Q",
+          "accession": "0001018724-26-000040",
+          "filed": "2026-10-30",
+          "fy": 2026,
+          "fp": "Q3"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquireProductiveAssets",
           "start": "2026-04-01",
           "end": "2026-06-30",
           "value": 54208000000,
@@ -724,6 +757,17 @@
           "filed": "2026-07-31",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquireProductiveAssets",
+          "start": "2026-07-01",
+          "end": "2026-09-30",
+          "value": 77259000000,
+          "form": "10-Q",
+          "accession": "0001018724-26-000040",
+          "filed": "2026-10-30",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": [
@@ -934,6 +978,17 @@
           "filed": "2026-08-05",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2025-12-28",
+          "end": "2026-09-26",
+          "value": 1845000000,
+          "form": "10-Q",
+          "accession": "0000002488-26-000191",
+          "filed": "2026-11-04",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": []
@@ -1417,7 +1472,9 @@
           "fp": "Q2"
         }
       ],
-      "notes": []
+      "notes": [
+        "The SEC XBRL data has no figure for this line from the latest 10-Q (filed 2026-11-09, period ending 2026-09-30)."
+      ]
     },
     {
       "org": "org_coreweave",
@@ -1756,6 +1813,17 @@
           "filed": "2026-07-30",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 83055000000,
+          "form": "10-Q",
+          "accession": "0001628280-26-066773",
+          "filed": "2026-10-22",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": [
@@ -1770,72 +1838,6 @@
       "fiscalYearEnd": "06-30",
       "lineItem": "Additions to property and equipment",
       "facts": [
-        {
-          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
-          "start": "2021-07-01",
-          "end": "2021-09-30",
-          "value": 5810000000,
-          "form": "10-Q",
-          "accession": "0001564590-21-051992",
-          "filed": "2021-10-26",
-          "fy": 2022,
-          "fp": "Q1"
-        },
-        {
-          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
-          "start": "2021-07-01",
-          "end": "2021-12-31",
-          "value": 11675000000,
-          "form": "10-Q",
-          "accession": "0001564590-22-002324",
-          "filed": "2022-01-25",
-          "fy": 2022,
-          "fp": "Q2"
-        },
-        {
-          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
-          "start": "2021-07-01",
-          "end": "2022-03-31",
-          "value": 17015000000,
-          "form": "10-Q",
-          "accession": "0001564590-22-015675",
-          "filed": "2022-04-26",
-          "fy": 2022,
-          "fp": "Q3"
-        },
-        {
-          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
-          "start": "2021-07-01",
-          "end": "2022-06-30",
-          "value": 23886000000,
-          "form": "10-K",
-          "accession": "0001564590-22-026876",
-          "filed": "2022-07-28",
-          "fy": 2022,
-          "fp": "FY"
-        },
-        {
-          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
-          "start": "2021-10-01",
-          "end": "2021-12-31",
-          "value": 5865000000,
-          "form": "10-Q",
-          "accession": "0001564590-22-002324",
-          "filed": "2022-01-25",
-          "fy": 2022,
-          "fp": "Q2"
-        },
-        {
-          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
-          "start": "2022-01-01",
-          "end": "2022-03-31",
-          "value": 5340000000,
-          "form": "10-Q",
-          "accession": "0001564590-22-015675",
-          "filed": "2022-04-26",
-          "fy": 2022,
-          "fp": "Q3"
-        },
         {
           "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
           "start": "2022-07-01",
@@ -2099,6 +2101,17 @@
           "filed": "2026-04-29",
           "fy": 2026,
           "fp": "Q3"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-07-01",
+          "end": "2026-09-30",
+          "value": 39367000000,
+          "form": "10-Q",
+          "accession": "0001193125-26-436133",
+          "filed": "2026-10-28",
+          "fy": 2027,
+          "fp": "Q1"
         }
       ],
       "notes": [
@@ -2571,6 +2584,17 @@
         },
         {
           "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2025-01-01",
+          "end": "2025-09-30",
+          "value": 13846000000,
+          "form": "10-Q",
+          "accession": "0001628280-26-066880",
+          "filed": "2026-10-22",
+          "fy": 2026,
+          "fp": "Q3"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
           "start": "2026-01-01",
           "end": "2026-06-30",
           "value": 28476000000,
@@ -2579,6 +2603,17 @@
           "filed": "2026-08-04",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 48069000000,
+          "form": "10-Q",
+          "accession": "0001628280-26-066880",
+          "filed": "2026-10-22",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": [
@@ -2712,6 +2747,17 @@
           "filed": "2026-08-05",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 348000000,
+          "form": "10-Q",
+          "accession": "0001622536-26-000086",
+          "filed": "2026-11-03",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": [
@@ -2922,6 +2968,17 @@
           "filed": "2026-08-05",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 2230788000,
+          "form": "10-Q",
+          "accession": "0001628280-26-071671",
+          "filed": "2026-11-06",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": [
@@ -3201,6 +3258,17 @@
           "filed": "2026-08-10",
           "fy": 2026,
           "fp": "Q2"
+        },
+        {
+          "concept": "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+          "start": "2026-01-01",
+          "end": "2026-09-30",
+          "value": 2319000000,
+          "form": "10-Q",
+          "accession": "0001692819-26-000025",
+          "filed": "2026-11-09",
+          "fy": 2026,
+          "fp": "Q3"
         }
       ],
       "notes": []
