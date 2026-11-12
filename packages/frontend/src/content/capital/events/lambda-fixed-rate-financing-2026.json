@@ -68,6 +68,12 @@
         "text": "6.78% fixed interest rate on a semi-annual coupon basis.",
         "sourceId": "src_lambda_financing_2026_10_01",
         "quote": "6.78% fixed interest rate on a semi-annual coupon basis"
+      },
+      {
+        "label": "Maturity",
+        "text": "Final maturity on May 30, 2033, with a fully amortizing repayment profile.",
+        "sourceId": "src_lambda_financing_2026_10_01",
+        "quote": "Facility final maturity of May 30, 2033, with a fully amortizing repayment profile"
       }
     ],
     "sourceIds": [

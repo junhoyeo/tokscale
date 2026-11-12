@@ -47,15 +47,13 @@
       {
         "org": "org_terawulf",
         "roles": [
-          "lessor",
-          "provider"
+          "lessor"
         ]
       },
       {
         "org": "org_anthropic",
         "roles": [
-          "lessee",
-          "buyer"
+          "lessee"
         ]
       },
       {

@@ -39,6 +39,12 @@
         ]
       },
       {
+        "org": "org_third_point",
+        "roles": [
+          "lead_investor"
+        ]
+      },
+      {
         "org": "org_nvidia",
         "roles": [
           "investor",

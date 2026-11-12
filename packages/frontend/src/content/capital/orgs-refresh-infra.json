@@ -75,7 +75,37 @@
       ],
       "investorTypes": [],
       "status": "acquired",
-      "description": "An inference optimization company whose technology shortens the time needed to launch and scale large AI models.",
+      "parent": {
+        "org": "org_nebius",
+        "since": "2026-10-01",
+        "sourceId": "src_nebius_ex99_2026_10_01",
+        "quote": "today announced it has acquired Inferize"
+      },
+      "description": "Inference optimization company acquired by Nebius.",
+      "ids": {
+        "secCik": [],
+        "tickers": []
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
+    },
+    {
+      "id": "org_third_point",
+      "slug": "third-point",
+      "name": "Third Point",
+      "legalNames": [],
+      "aliases": [],
+      "kinds": [
+        "investor"
+      ],
+      "categories": [],
+      "investorTypes": [
+        "asset-manager"
+      ],
+      "status": "private",
+      "description": "Investment firm that invests in public and private companies.",
       "ids": {
         "secCik": [],
         "tickers": []

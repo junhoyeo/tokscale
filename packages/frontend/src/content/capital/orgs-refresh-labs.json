@@ -81,6 +81,47 @@
       "nportIssuerNames": [],
       "seed": false,
       "reviewedAt": "2026-11-12"
+    },
+    {
+      "id": "org_micron",
+      "slug": "micron",
+      "name": "Micron",
+      "legalNames": [
+        "Micron Technology, Inc."
+      ],
+      "aliases": [],
+      "kinds": [
+        "company",
+        "investor"
+      ],
+      "categories": [
+        "semiconductors"
+      ],
+      "investorTypes": [
+        "corporate"
+      ],
+      "status": "public",
+      "hq": {
+        "city": "Boise",
+        "country": "US"
+      },
+      "website": "https://www.micron.com",
+      "description": "Chip company that makes memory and storage.",
+      "ids": {
+        "secCik": [
+          "0000723125"
+        ],
+        "tickers": [
+          {
+            "exchange": "NASDAQ",
+            "symbol": "MU"
+          }
+        ]
+      },
+      "labSlugs": [],
+      "nportIssuerNames": [],
+      "seed": false,
+      "reviewedAt": "2026-11-12"
     }
   ]
 }
