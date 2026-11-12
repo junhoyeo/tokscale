@@ -1933,7 +1933,8 @@ fn parser_version(client: ClientId) -> u32 {
         // v7->v8: mutable session-window routing remains attribution-only;
         // transcript events now carry billing identity only from time-bound
         // message/model-change evidence.
-        ClientId::OpenClaw => 8,
+        // v8->v9: include identity/zstd SQL transcript archives.
+        ClientId::OpenClaw => 9,
         // These clients accumulated parser-only invalidations under the old
         // global schema. Their independent counters start from those histories
         // so future changes have an obvious local version to increment.
@@ -6783,7 +6784,7 @@ mod tests {
     /// v7 retires SQLite scans that omitted compressed transcript rows.
     #[test]
     fn test_openclaw_parser_version_invalidates_v6_entries() {
-        assert_eq!(parser_version(ClientId::OpenClaw), 8);
+        assert_eq!(parser_version(ClientId::OpenClaw), 9);
     }
 
     #[test]
@@ -7986,13 +7987,13 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         let cached = warm.get(identity, &source).unwrap();
-        assert_eq!(cached.parser_version, 8);
+        assert_eq!(cached.parser_version, 9);
         assert_eq!(cached.messages, parsed);
     }
 
     #[test]
     #[serial_test::serial]
-    fn openclaw_v6_sqlite_shards_are_reparsed_with_compressed_rows() {
+    fn openclaw_v8_sqlite_shards_are_reparsed_with_archived_rows() {
         use crate::sessions::openclaw::{scan_openclaw_sqlite, test_fixtures::*};
         let temp_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(temp_home.path());
@@ -8014,14 +8015,22 @@ mod tests {
         );
         insert_event(&conn, "sess-a", 0, &plain, 1_756_548_001_000);
         insert_compressed_event(&conn, "sess-a", 1, &compressed, 1_756_548_002_000);
+        let archived = assistant_event(
+            "a3",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":500,"output":60}"#,
+            1_756_548_003_000,
+        );
+        insert_archive(&conn, "sess-a", "deleted", &archived, true);
         drop(conn);
         let parsed = scan_openclaw_sqlite(&source);
         assert!(parsed.complete);
-        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages.len(), 3);
 
         let identity = CacheIdentity::for_client(ClientId::OpenClaw);
         let stale_identity = CacheIdentity {
-            parser_version: 6,
+            parser_version: 8,
             ..identity
         };
         let fingerprint = SourceFingerprint::from_sqlite_path(&source).unwrap();
@@ -8029,7 +8038,7 @@ mod tests {
             stale_identity,
             &source,
             fingerprint.clone(),
-            parsed.messages[..1].to_vec(),
+            parsed.messages[..2].to_vec(),
             Vec::new(),
             None,
         );
@@ -8046,7 +8055,7 @@ mod tests {
         let mut cache = SourceMessageCache::load();
         assert!(
             cache.get(identity, &source).is_none(),
-            "v6's nonempty undercount must be discarded"
+            "v8's nonempty archive undercount must be discarded"
         );
         assert_eq!(
             SourceFingerprint::from_sqlite_path(&source).unwrap(),

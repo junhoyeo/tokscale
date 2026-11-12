@@ -8,6 +8,8 @@
 //!   SQLite database, `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`,
 //!   table `transcript_events`. Payloads are either `event_json` text or zstd
 //!   `event_zstd` blobs with their decoded length in `event_utf8_bytes`.
+//!   Deleted and reset sessions remain in `session_transcript_archives` as
+//!   identity or zstd JSONL blobs, including before their file is published.
 //! - Legacy installs wrote one JSONL file per session under
 //!   `~/.openclaw/agents/<agentId>/sessions/`, indexed by `sessions.json`.
 //!   Current OpenClaw still publishes `<id>.jsonl.deleted.<ts>` /
@@ -40,7 +42,9 @@ use super::utils::{
 };
 use super::UnifiedMessage;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -586,13 +590,13 @@ fn transcript_event_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
     })
 }
 
-/// Whether the store has a `transcript_events` table. `Err` when the probe
+/// Whether the store has the requested transcript table. `Err` when the probe
 /// itself failed — a store another process holds exclusively, an unreadable
 /// file — which says nothing about the schema.
-fn has_transcript_events_table(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+fn has_table(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
     match conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcript_events'",
-        [],
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
         |row| row.get::<_, i64>(0),
     ) {
         Ok(_) => Ok(true),
@@ -610,7 +614,7 @@ pub(crate) struct OpenClawSqliteScan {
     /// is then a subset of the store, worth reporting (a lower bound beats nothing)
     /// but not worth caching, or every later scan would replay the shortfall
     /// until the file happens to change. A store with no transcript table is
-    /// complete: there was nothing to read.
+    /// complete when neither transcript table exists: there was nothing to read.
     pub complete: bool,
 }
 
@@ -653,21 +657,24 @@ pub(crate) fn scan_openclaw_sqlite(db_path: &Path) -> OpenClawSqliteScan {
         );
     }
 
+    // Deletion/reset can move events into an archive while a scan is running.
+    // Read both stores from one snapshot so that transition cannot lose usage.
+    let conn = match conn.unchecked_transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            warn!(db_path = %db_path.display(), %error, "Failed to start OpenClaw transcript snapshot");
+            return OpenClawSqliteScan {
+                messages: Vec::new(),
+                complete: false,
+            };
+        }
+    };
+
     // A partial install or a pre-transcript schema has nothing to read; that
     // is expected, not a fault worth logging on every scan. A probe that
     // could not run at all is a store that was not read.
-    match has_transcript_events_table(&conn) {
-        Ok(true) => {}
-        Ok(false) => {
-            debug!(
-                db_path = %db_path.display(),
-                "OpenClaw agent database has no transcript_events table; skipping"
-            );
-            return OpenClawSqliteScan {
-                messages: Vec::new(),
-                complete: true,
-            };
-        }
+    let has_events = match has_table(&conn, "transcript_events") {
+        Ok(present) => present,
         Err(err) => {
             warn!(
                 db_path = %db_path.display(),
@@ -679,7 +686,7 @@ pub(crate) fn scan_openclaw_sqlite(db_path: &Path) -> OpenClawSqliteScan {
                 complete: false,
             };
         }
-    }
+    };
 
     let db_mtime_ms = file_modified_timestamp_ms(db_path);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
@@ -690,48 +697,51 @@ pub(crate) fn scan_openclaw_sqlite(db_path: &Path) -> OpenClawSqliteScan {
     let mut payload_failed = false;
 
     let query = transcript_events_query(&conn);
-    let scan = sqlite_for_each_row_on(
-        &conn,
-        db_path,
-        &query,
-        Some("OpenClaw transcript event"),
-        &mut |row| {
-            let session_id: String = row.get(0)?;
-            let event_json = transcript_event_json(row).inspect_err(|_| payload_failed = true)?;
-            // Read as f64 so an INTEGER or a REAL column both decode; a row
-            // that failed here would be skipped silently.
-            let created_at: Option<f64> = row.get(2)?;
-            let session_provider: Option<String> = row.get(3)?;
-            let session_model: Option<String> = row.get(4)?;
+    let scan = has_events.then(|| {
+        sqlite_for_each_row_on(
+            &conn,
+            db_path,
+            &query,
+            Some("OpenClaw transcript event"),
+            &mut |row| {
+                let session_id: String = row.get(0)?;
+                let event_json =
+                    transcript_event_json(row).inspect_err(|_| payload_failed = true)?;
+                // Read as f64 so an INTEGER or a REAL column both decode; a row
+                // that failed here would be skipped silently.
+                let created_at: Option<f64> = row.get(2)?;
+                let session_provider: Option<String> = row.get(3)?;
+                let session_model: Option<String> = row.get(4)?;
 
-            if current_session.as_deref() != Some(session_id.as_str()) {
-                current_session = Some(session_id.clone());
-                state = OpenClawSessionState::default();
-            }
+                if current_session.as_deref() != Some(session_id.as_str()) {
+                    current_session = Some(session_id.clone());
+                    state = OpenClawSessionState::default();
+                }
 
-            // A row that does not decode is skipped on its own; it must not
-            // end the scan, and it is not worth a warning per row.
-            let Some(entry) = parse_json_line::<OpenClawEntry>(&event_json, &mut buffer) else {
-                malformed_rows += 1;
-                return Ok(());
-            };
+                // A row that does not decode is skipped on its own; it must not
+                // end the scan, and it is not worth a warning per row.
+                let Some(entry) = parse_json_line::<OpenClawEntry>(&event_json, &mut buffer) else {
+                    malformed_rows += 1;
+                    return Ok(());
+                };
 
-            let fallback_timestamp = created_at
-                .filter(|value| *value > 0.0)
-                .map(timestamp_secs_to_ms)
-                .unwrap_or(db_mtime_ms);
-            let ctx = OpenClawEventContext {
-                session_id: &session_id,
-                fallback_timestamp,
-                session_provider: session_provider.as_deref(),
-                session_model: session_model.as_deref(),
-            };
-            if let Some(message) = ingest_openclaw_entry(entry, &mut state, &ctx) {
-                messages.push(message);
-            }
-            Ok(())
-        },
-    );
+                let fallback_timestamp = created_at
+                    .filter(|value| *value > 0.0)
+                    .map(timestamp_secs_to_ms)
+                    .unwrap_or(db_mtime_ms);
+                let ctx = OpenClawEventContext {
+                    session_id: &session_id,
+                    fallback_timestamp,
+                    session_provider: session_provider.as_deref(),
+                    session_model: session_model.as_deref(),
+                };
+                if let Some(message) = ingest_openclaw_entry(entry, &mut state, &ctx) {
+                    messages.push(message);
+                }
+                Ok(())
+            },
+        )
+    });
 
     if malformed_rows > 0 {
         debug!(
@@ -743,8 +753,115 @@ pub(crate) fn scan_openclaw_sqlite(db_path: &Path) -> OpenClawSqliteScan {
 
     // The driver has already logged what went wrong under the label above;
     // do not cache a lower bound after iteration or payload decoding failed.
-    let complete = scan.completed() && !payload_failed;
+    let live_complete = scan.is_none_or(|scan| scan.completed()) && !payload_failed;
+    let archives_complete = scan_sqlite_archives(&conn, db_path, &mut messages);
+    let complete = live_complete && archives_complete;
     OpenClawSqliteScan { messages, complete }
+}
+
+fn parse_sqlite_archive(
+    payload: &[u8],
+    encoding: &str,
+    digest: &str,
+    session_id: &str,
+    fallback_timestamp: i64,
+) -> std::io::Result<Vec<UnifiedMessage>> {
+    if payload.len() as u64 > MAX_ARCHIVE_BYTES
+        || !format!("{:x}", Sha256::digest(payload)).eq_ignore_ascii_case(digest)
+    {
+        return Err(std::io::Error::other(
+            "invalid transcript archive size or digest",
+        ));
+    }
+    let source: Box<dyn Read + '_> = match encoding {
+        "identity" => Box::new(payload),
+        "zstd" => {
+            let mut decoder = zstd::stream::read::Decoder::new(payload)?;
+            decoder.window_log_max(26)?;
+            Box::new(decoder)
+        }
+        _ => {
+            return Err(std::io::Error::other(
+                "unsupported transcript archive encoding",
+            ))
+        }
+    };
+    let mut reader = std::io::BufReader::new(source.take(MAX_ARCHIVE_BYTES + 1));
+    let ctx = OpenClawEventContext {
+        session_id,
+        fallback_timestamp,
+        session_provider: None,
+        session_model: None,
+    };
+    let mut state = OpenClawSessionState::default();
+    let mut messages = Vec::new();
+    // Stream JSON values, not physical lines: archives may retain multiline records.
+    for entry in serde_json::Deserializer::from_reader(&mut reader).into_iter::<OpenClawEntry>() {
+        let entry = entry.map_err(std::io::Error::other)?;
+        if let Some(message) = ingest_openclaw_entry(entry, &mut state, &ctx) {
+            messages.push(message);
+        }
+    }
+    if reader.get_ref().limit() == 0 {
+        return Err(std::io::Error::other(
+            "decoded transcript exceeds archive limit",
+        ));
+    }
+    Ok(messages)
+}
+
+fn scan_sqlite_archives(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    messages: &mut Vec<UnifiedMessage>,
+) -> bool {
+    match has_table(conn, "session_transcript_archives") {
+        Ok(false) => return true,
+        Ok(true) => {}
+        Err(error) => {
+            warn!(db_path = %db_path.display(), %error, "Failed to probe OpenClaw transcript archives");
+            return false;
+        }
+    }
+    let mut payload_failed = false;
+    let scan = sqlite_for_each_row_on(
+        conn,
+        db_path,
+        "SELECT session_id, encoding, archive_blob, archive_sha256, created_at
+         FROM session_transcript_archives ORDER BY session_id, generation",
+        Some("OpenClaw transcript archive"),
+        &mut |row| {
+            let parsed = (|| {
+                let session_id: String = row.get(0)?;
+                let encoding: String = row.get(1)?;
+                let digest: String = row.get(3)?;
+                let created_at: f64 = row.get(4)?;
+                let value = row.get_ref(2)?;
+                let payload = value.as_blob().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(2, value.data_type(), Box::new(error))
+                })?;
+                parse_sqlite_archive(
+                    payload,
+                    &encoding,
+                    &digest,
+                    &session_id,
+                    timestamp_secs_to_ms(created_at),
+                )
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(2, value.data_type(), Box::new(error))
+                })
+            })();
+            match parsed {
+                Ok(archive_messages) => messages.extend(archive_messages),
+                Err(error) => {
+                    payload_failed = true;
+                    return Err(error);
+                }
+            }
+            Ok(())
+        },
+    );
+    scan.completed() && !payload_failed
 }
 
 /// The transcript query this store's schema supports.
@@ -807,6 +924,7 @@ fn transcript_events_query(conn: &rusqlite::Connection) -> String {
 #[cfg(test)]
 pub(crate) mod test_fixtures {
     use rusqlite::{params, Connection};
+    use sha2::Digest;
     use std::path::Path;
 
     pub(crate) const AGENT_DB_SCHEMA: &str = r#"
@@ -853,6 +971,37 @@ pub(crate) mod test_fixtures {
                 "event_json TEXT, event_zstd BLOB, event_utf8_bytes INTEGER, navigation_json TEXT,",
             ),
         )
+    }
+
+    pub(crate) fn insert_archive(
+        conn: &Connection,
+        session_id: &str,
+        generation: &str,
+        transcript: &str,
+        compressed: bool,
+    ) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_transcript_archives (
+              session_id TEXT NOT NULL, generation TEXT NOT NULL,
+              encoding TEXT NOT NULL, archive_blob BLOB NOT NULL,
+              archive_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,
+              published_at INTEGER, PRIMARY KEY (session_id, generation)
+            ) STRICT;",
+        )
+        .unwrap();
+        let (encoding, payload) = if compressed {
+            ("zstd", zstd::encode_all(transcript.as_bytes(), 0).unwrap())
+        } else {
+            ("identity", transcript.as_bytes().to_vec())
+        };
+        let digest = format!("{:x}", sha2::Sha256::digest(&payload));
+        conn.execute(
+            "INSERT INTO session_transcript_archives
+             (session_id, generation, encoding, archive_blob, archive_sha256, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1756548001000)",
+            params![session_id, generation, encoding, payload, digest],
+        )
+        .unwrap();
     }
 
     fn create_agent_db_with_schema(path: &Path, schema: &str) -> Connection {
@@ -971,6 +1120,105 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn sqlite_archives_read_identity_zstd_and_archive_only_stores() {
+        use test_fixtures::*;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("openclaw-agent.sqlite");
+        let conn = create_compressed_agent_db(&path);
+        let model = r#"{"type":"model_change","provider":"openai","modelId":"gpt-4.1"}"#;
+        let event = r#"{"type":"message","id":"archived","message":{"role":"assistant","usage":{"input":12,"output":3},"timestamp":1756548001000}}"#;
+        let archive = format!("{}\n{model}\n{event}\n", header_event("old-session"));
+        insert_archive(&conn, "old-session", "plain", &archive, false);
+        let multiline = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(event).unwrap(),
+        )
+        .unwrap();
+        insert_archive(
+            &conn,
+            "old-session",
+            "compressed",
+            &format!("{model}\n{multiline}"),
+            true,
+        );
+        // Routing for the live window must not relabel historical usage.
+        conn.execute("INSERT INTO session_windows (session_id, session_key, created_at, updated_at, model_provider, model) VALUES ('old-session', 'key', 1, 1, 'other', 'wrong-model')", []).unwrap();
+        conn.execute_batch("DROP TABLE transcript_events;").unwrap();
+        let scan = scan_openclaw_sqlite(&path);
+        assert!(scan.complete);
+        assert_eq!(scan.messages.len(), 2);
+        assert_eq!(scan.messages[0].session_id, "old-session");
+        assert_eq!(scan.messages[0].model_id, "gpt-4.1");
+        assert_eq!(scan.messages[0].tokens.input, 12);
+        assert_eq!(scan.messages[0].dedup_key, scan.messages[1].dedup_key);
+    }
+
+    #[test]
+    fn sqlite_bad_archives_preserve_good_rows_but_are_not_cacheable() {
+        use test_fixtures::*;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("openclaw-agent.sqlite");
+        let conn = create_agent_db(&path);
+        let good = assistant_event(
+            "good",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":5,"output":2}"#,
+            1756548001000,
+        );
+        insert_event(&conn, "live", 0, &good, 1756548001000);
+        insert_archive(&conn, "archive", "bad-hash", &good, false);
+        insert_archive(&conn, "archive", "bad-json", "not JSON", true);
+        insert_archive(&conn, "archive", "bad-zstd", "not zstd", false);
+        insert_archive(&conn, "archive", "good", &good, true);
+        conn.execute("UPDATE session_transcript_archives SET archive_sha256 = ?1 WHERE generation = 'bad-hash'", ["0".repeat(64)]).unwrap();
+        conn.execute("UPDATE session_transcript_archives SET encoding = 'zstd' WHERE generation = 'bad-zstd'", []).unwrap();
+        let scan = scan_openclaw_sqlite(&path);
+        assert!(!scan.complete);
+        assert_eq!(scan.messages.len(), 2);
+        assert!(scan
+            .messages
+            .iter()
+            .all(|message| message.tokens.input == 5));
+    }
+
+    #[test]
+    fn sqlite_archive_row_conversion_failures_are_not_cacheable() {
+        use test_fixtures::*;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("openclaw-agent.sqlite");
+        let conn = create_agent_db(&path);
+        // Older or damaged stores need not enforce the current STRICT schema.
+        conn.execute_batch(
+            "CREATE TABLE session_transcript_archives (
+            session_id, generation, encoding, archive_blob, archive_sha256, created_at
+        );
+        INSERT INTO session_transcript_archives VALUES (NULL, 'bad', 'identity', X'7B7D', '', 0);",
+        )
+        .unwrap();
+        let good = assistant_event(
+            "good",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":5,"output":2}"#,
+            1756548001000,
+        );
+        insert_archive(&conn, "archive", "good", &good, false);
+        let scan = scan_openclaw_sqlite(&path);
+        assert!(!scan.complete);
+        assert_eq!(scan.messages.len(), 1);
+    }
+
+    #[test]
+    fn sqlite_archive_decoder_rejects_unbounded_or_unknown_payloads() {
+        let payload = b"{}\n";
+        let digest = format!("{:x}", Sha256::digest(payload));
+        assert!(parse_sqlite_archive(payload, "gzip", &digest, "s", 0).is_err());
+        // Reject oversized stored payloads before hashing or decoding them.
+        let oversized = vec![b' '; MAX_ARCHIVE_BYTES as usize + 1];
+        assert!(parse_sqlite_archive(&oversized, "identity", "", "s", 0).is_err());
+    }
 
     fn create_test_session(dir: &TempDir, filename: &str, content: &str) -> String {
         let path = dir.path().join(filename);
