@@ -19038,6 +19038,76 @@ mod tests {
         assert_eq!(parsed.counts.get(ClientId::OpenClaw), 1);
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn test_openclaw_sql_archives_dedup_live_rows_and_published_files() {
+        use sessions::openclaw::test_fixtures::*;
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _cache_env = redirect_cache_home(cache_home.path());
+        let root = client_scan_root(source_home.path(), ClientId::OpenClaw).join("main");
+        let conn = create_agent_db(&root.join("agent/openclaw-agent.sqlite"));
+        let shared = assistant_event(
+            "shared",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":100,"output":10}"#,
+            1756548001000,
+        );
+        let archived = assistant_event(
+            "archive-only",
+            "openai",
+            "gpt-4.1",
+            r#"{"input":40,"output":4}"#,
+            1756548002000,
+        );
+        insert_event(&conn, "session", 0, &shared, 1756548001000);
+        let transcript = format!("{}\n{shared}\n{archived}\n", header_event("session"));
+        insert_archive(&conn, "session", "reset", &transcript, true);
+        conn.execute(
+            "UPDATE session_transcript_archives SET published_at = 1756548003000",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        // Keep the second event SQL-only so ignoring archives cannot pass.
+        std::fs::write(
+            root.join("sessions/session.jsonl.reset.2026-08-30"),
+            format!("{}\n{shared}\n", header_event("session")),
+        )
+        .unwrap();
+        let clients = vec!["openclaw".to_string()];
+        let home = source_home.path().to_str().unwrap();
+        let cold = parse_all_messages_with_pricing(home, &clients, None);
+        let warm = parse_all_messages_with_pricing(home, &clients, None);
+        assert_eq!(cold.len(), 2);
+        assert_eq!(
+            cold.iter().map(|message| message.tokens.input).sum::<i64>(),
+            140
+        );
+        assert_eq!(warm, cold);
+        let direct = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_string()),
+            use_env_roots: false,
+            clients: Some(clients),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(direct.messages.len(), 2);
+        assert_eq!(
+            direct
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            140
+        );
+    }
+
     /// Carried over from #1291, which #1285 made necessary and this branch
     /// makes redundant: a plain transcript and its zstd archive in one
     /// sessions directory count each event once through the cached cold
