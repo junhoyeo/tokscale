@@ -91,7 +91,9 @@ impl TokscaleConfig {
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
     let hex = hex.trim().trim_start_matches('#');
-    if hex.len() != 6 {
+    // Byte slicing below needs six ASCII hex digits: a multi-byte character
+    // would panic at a char boundary, and `from_str_radix` accepts a `+` sign.
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -126,6 +128,15 @@ claude = "My Claude"
             Some(Color::Rgb(18, 52, 86))
         );
         assert_eq!(config.get_client_display_name("CLAUDE"), Some("My Claude"));
+    }
+
+    #[test]
+    fn parse_hex_color_rejects_non_hex_input_without_panicking() {
+        assert_eq!(parse_hex_color("#123456"), Some(Color::Rgb(18, 52, 86)));
+        assert_eq!(parse_hex_color("a€bc"), None);
+        assert_eq!(parse_hex_color("#ab€cd"), None);
+        assert_eq!(parse_hex_color("+f+f+f"), None);
+        assert_eq!(parse_hex_color("12345g"), None);
     }
 
     #[test]
