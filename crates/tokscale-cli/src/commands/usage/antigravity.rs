@@ -816,13 +816,22 @@ fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathB
 /// port the same question again, which is a second round trip for an answer
 /// already in hand.
 async fn discover_quota() -> Option<QuotaSummary> {
-    discover_quota_from(&[
-        &targets_from_env,
+    discover_quota_with_fallback_sources(&[
         &targets_from_session,
         &targets_from_cli_log,
         &detected_targets,
     ])
     .await
+}
+
+async fn discover_quota_with_fallback_sources(
+    fallback_sources: &[&dyn Fn() -> Vec<CandidateTarget>],
+) -> Option<QuotaSummary> {
+    if let Some((target, summary)) = race_for_quota_target(targets_from_env()).await {
+        sync_successful_env_target(&target);
+        return Some(summary);
+    }
+    discover_quota_from(fallback_sources).await
 }
 
 /// Ask each source in turn and stop at the first that answers.
@@ -848,7 +857,6 @@ fn targets_from_env() -> Vec<CandidateTarget> {
         .ok()
         .filter(|t| !t.trim().is_empty());
     let mut targets = Vec::new();
-    let mut synced = false;
 
     if let Ok(addr) = std::env::var("ANTIGRAVITY_LS_ADDRESS") {
         if let Some(port) = parse_port_from_address(&addr) {
@@ -856,10 +864,6 @@ fn targets_from_env() -> Vec<CandidateTarget> {
                 port,
                 csrf_token: token.clone().into(),
             });
-            if let Some(ref tok) = token {
-                sync_active_session_file(tok, &addr);
-                synced = true;
-            }
         }
     }
 
@@ -870,16 +874,25 @@ fn targets_from_env() -> Vec<CandidateTarget> {
                     port,
                     csrf_token: token.clone().into(),
                 });
-                if !synced {
-                    if let Some(ref tok) = token {
-                        sync_active_session_file(tok, &format!("localhost:{port}"));
-                    }
-                }
             }
         }
     }
 
     targets
+}
+
+fn sync_successful_env_target(target: &CandidateTarget) {
+    let TargetCsrfToken::Token(token) = &target.csrf_token else {
+        return;
+    };
+    if token.trim().is_empty() {
+        return;
+    }
+    let address = std::env::var("ANTIGRAVITY_LS_ADDRESS")
+        .ok()
+        .filter(|address| parse_port_from_address(address) == Some(target.port))
+        .unwrap_or_else(|| format!("localhost:{}", target.port));
+    sync_active_session_file(token, &address);
 }
 
 /// Candidate targets from a recorded session environment file (`active_session.env`).
@@ -975,7 +988,15 @@ fn detected_ports() -> Vec<u16> {
 /// machine with no Antigravity from paying for a client it has nothing to
 /// send to.
 async fn race_for_quota(targets: Vec<CandidateTarget>) -> Option<QuotaSummary> {
-    race_for_quota_with(targets, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
+    race_for_quota_target(targets)
+        .await
+        .map(|(_, summary)| summary)
+}
+
+async fn race_for_quota_target(
+    targets: Vec<CandidateTarget>,
+) -> Option<(CandidateTarget, QuotaSummary)> {
+    race_for_quota_target_with(targets, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
 }
 
 /// [`race_for_quota`] with the round budget and the client build handed in.
@@ -998,11 +1019,22 @@ async fn race_for_quota(targets: Vec<CandidateTarget>) -> Option<QuotaSummary> {
 ///
 /// `build_client` is given `round` so the client's per-request timeout -- the
 /// backstop for a `call_rpc` awaited outside a round -- cannot undercut it.
+#[cfg(test)]
 async fn race_for_quota_with(
     targets: Vec<CandidateTarget>,
     round: Duration,
     build_client: &dyn Fn(Duration) -> Result<reqwest::Client>,
 ) -> Option<QuotaSummary> {
+    race_for_quota_target_with(targets, round, build_client)
+        .await
+        .map(|(_, summary)| summary)
+}
+
+async fn race_for_quota_target_with(
+    targets: Vec<CandidateTarget>,
+    round: Duration,
+    build_client: &dyn Fn(Duration) -> Result<reqwest::Client>,
+) -> Option<(CandidateTarget, QuotaSummary)> {
     if targets.is_empty() {
         return None;
     }
@@ -1014,14 +1046,14 @@ async fn race_for_quota_with(
     for (rank, target) in targets.into_iter().enumerate() {
         let client = client.clone();
         requests.spawn(async move {
-            (
-                rank,
-                call_rpc(client, target.port, target.csrf_token).await.ok(),
-            )
+            let answer = call_rpc(client, target.port, target.csrf_token.clone())
+                .await
+                .ok();
+            (rank, target, answer)
         });
     }
 
-    let mut best: Option<(usize, QuotaSummary)> = None;
+    let mut best: Option<(usize, CandidateTarget, QuotaSummary)> = None;
 
     while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, requests.join_next()).await {
         // A `JoinError` carries no rank, so a panicked request is never
@@ -1033,14 +1065,16 @@ async fn race_for_quota_with(
         // has accepted the connection and gone quiet. `call_rpc` reports
         // every failure it has as `Err`, so this is the unreachable arm
         // rather than the failure path.
-        let Ok((rank, answer)) = joined else { continue };
+        let Ok((rank, target, answer)) = joined else {
+            continue;
+        };
         settled[rank] = true;
         if let Some(summary) = answer {
-            if best.as_ref().is_none_or(|(kept, _)| rank < *kept) {
-                best = Some((rank, summary));
+            if best.as_ref().is_none_or(|(kept, _, _)| rank < *kept) {
+                best = Some((rank, target, summary));
             }
         }
-        let Some((kept, _)) = best.as_ref() else {
+        let Some((kept, _, _)) = best.as_ref() else {
             continue;
         };
         if settled[..*kept].iter().all(|done| *done) {
@@ -1048,7 +1082,7 @@ async fn race_for_quota_with(
         }
     }
 
-    best.map(|(_, summary)| summary)
+    best.map(|(_, target, summary)| (target, summary))
 }
 
 fn cli_log_path() -> Option<PathBuf> {
@@ -2266,28 +2300,141 @@ mod tests {
 
     #[test]
     #[serial]
-    fn targets_from_env_prioritizes_address_over_port_for_sync() {
+    fn failed_env_target_preserves_live_saved_session() {
+        let (failed_base, _failed_seen) =
+            spawn_server(|_path, _calls| (401, "unauthorized".to_string()));
+        let (live_base, live_seen) = spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
         let tmp = tempfile::tempdir().unwrap();
         let session_file = tmp.path().join("active_session.env");
+        let expected = format!(
+            "ANTIGRAVITY_CSRF_TOKEN=live-token\nANTIGRAVITY_LS_ADDRESS=127.0.0.1:{}\n",
+            port_of(&live_base)
+        );
+        std::fs::write(&session_file, &expected).unwrap();
 
-        let mut env = EnvGuard::capture(&[
-            "ANTIGRAVITY_SESSION_FILE",
-            "ANTIGRAVITY_CSRF_TOKEN",
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        env.set("HOME", tmp.path());
+        env.set("USERPROFILE", tmp.path());
+        env.set("ANTIGRAVITY_SESSION_FILE", &session_file);
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "stale-token");
+        env.set("ANTIGRAVITY_LS_ADDRESS", &failed_base);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let summary = runtime.block_on(discover_quota_with_fallback_sources(&[
+            &targets_from_session,
+        ]));
+
+        assert_eq!(std::fs::read_to_string(&session_file).unwrap(), expected);
+        assert_eq!(
+            summary.unwrap().groups[0].display_name,
+            "Fixture Models",
+            "a rejected environment target must leave the recorded live session available"
+        );
+        assert_eq!(live_seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn successful_alternate_env_port_syncs_winning_target() {
+        let (failed_base, _failed_seen) =
+            spawn_server(|_path, _calls| (401, "unauthorized".to_string()));
+        let (successful_port, verified) = spawn_csrf_verifying_server("winning-token");
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("active_session.env");
+        let original = "ANTIGRAVITY_CSRF_TOKEN=old-token\nANTIGRAVITY_LS_ADDRESS=127.0.0.1:1\n";
+        std::fs::write(&session_file, original).unwrap();
+
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        env.set("HOME", tmp.path());
+        env.set("USERPROFILE", tmp.path());
+        env.set("ANTIGRAVITY_SESSION_FILE", &session_file);
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "winning-token");
+        env.set("ANTIGRAVITY_LS_ADDRESS", &failed_base);
+        env.set("ANTIGRAVITY_LS_PORT", successful_port.to_string());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let summary = runtime.block_on(discover_quota_with_fallback_sources(&[]));
+
+        assert!(summary.is_some());
+        assert!(*verified.lock().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&session_file).unwrap(),
+            format!(
+                "ANTIGRAVITY_CSRF_TOKEN=winning-token\nANTIGRAVITY_LS_ADDRESS=localhost:{successful_port}\n"
+            )
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn successful_primary_env_address_syncs_its_exact_record() {
+        let (successful_port, verified) = spawn_csrf_verifying_server("primary-token");
+        let (alternate_base, _alternate_seen) =
+            spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("active_session.env");
+        std::fs::write(
+            &session_file,
+            "ANTIGRAVITY_CSRF_TOKEN=old-token\nANTIGRAVITY_LS_ADDRESS=127.0.0.1:1\n",
+        )
+        .unwrap();
+        let address = format!("127.0.0.1:{successful_port}");
+
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        env.set("HOME", tmp.path());
+        env.set("USERPROFILE", tmp.path());
+        env.set("ANTIGRAVITY_SESSION_FILE", &session_file);
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "primary-token");
+        env.set("ANTIGRAVITY_LS_ADDRESS", &address);
+        env.set("ANTIGRAVITY_LS_PORT", port_of(&alternate_base).to_string());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let summary = runtime.block_on(discover_quota_with_fallback_sources(&[]));
+
+        assert!(summary.is_some());
+        assert!(*verified.lock().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&session_file).unwrap(),
+            format!("ANTIGRAVITY_CSRF_TOKEN=primary-token\nANTIGRAVITY_LS_ADDRESS={address}\n")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn successful_fallback_env_target_does_not_replace_saved_record() {
+        let (successful_port, verified) = spawn_csrf_verifying_server("saved-token");
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("active_session.env");
+        let original = "ANTIGRAVITY_CSRF_TOKEN=saved-token\nANTIGRAVITY_LS_ADDRESS=127.0.0.1:1\n";
+        std::fs::write(&session_file, original).unwrap();
+
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        env.set("HOME", tmp.path());
+        env.set("USERPROFILE", tmp.path());
+        env.set("ANTIGRAVITY_SESSION_FILE", &session_file);
+        env.set(
             "ANTIGRAVITY_LS_ADDRESS",
-            "ANTIGRAVITY_LS_PORT",
-        ]);
-        env.set("ANTIGRAVITY_SESSION_FILE", session_file.to_str().unwrap());
-        env.set("ANTIGRAVITY_CSRF_TOKEN", "sync-priority-token");
-        env.set("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:45015");
-        env.set("ANTIGRAVITY_LS_PORT", "45016");
+            format!("127.0.0.1:{successful_port}"),
+        );
 
-        let targets = targets_from_env();
-        assert_eq!(targets.len(), 2);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let summary = runtime.block_on(discover_quota_with_fallback_sources(&[]));
 
-        assert!(session_file.is_file());
-        let content = std::fs::read_to_string(&session_file).unwrap();
-        assert!(content.contains("ANTIGRAVITY_LS_ADDRESS=127.0.0.1:45015"));
-        assert!(!content.contains("45016"));
+        assert!(summary.is_some());
+        assert!(*verified.lock().unwrap());
+        assert_eq!(std::fs::read_to_string(session_file).unwrap(), original);
     }
 
     #[test]
@@ -2398,17 +2545,20 @@ mod tests {
 
     #[test]
     #[serial]
-    fn targets_from_env_syncs_session_file() {
+    fn targets_from_env_does_not_change_session_file() {
         let tmp = tempfile::tempdir().unwrap();
         let session_file = tmp.path().join("active_session.env");
+        let original =
+            "ANTIGRAVITY_CSRF_TOKEN=saved-token\nANTIGRAVITY_LS_ADDRESS=127.0.0.1:44436\n";
+        std::fs::write(&session_file, original).unwrap();
 
         let mut env = EnvGuard::capture(&[
             "ANTIGRAVITY_SESSION_FILE",
             "ANTIGRAVITY_CSRF_TOKEN",
             "ANTIGRAVITY_LS_ADDRESS",
         ]);
-        env.set("ANTIGRAVITY_SESSION_FILE", session_file.to_str().unwrap());
-        env.set("ANTIGRAVITY_CSRF_TOKEN", "auto-sync-token-123");
+        env.set("ANTIGRAVITY_SESSION_FILE", &session_file);
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "candidate-token");
         env.set("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:44437");
 
         let targets = targets_from_env();
@@ -2417,14 +2567,10 @@ mod tests {
             targets[0],
             CandidateTarget {
                 port: 44437,
-                csrf_token: TargetCsrfToken::Token("auto-sync-token-123".to_string()),
+                csrf_token: TargetCsrfToken::Token("candidate-token".to_string()),
             }
         );
-
-        assert!(session_file.is_file());
-        let content = std::fs::read_to_string(&session_file).unwrap();
-        assert!(content.contains("ANTIGRAVITY_CSRF_TOKEN=auto-sync-token-123"));
-        assert!(content.contains("ANTIGRAVITY_LS_ADDRESS=127.0.0.1:44437"));
+        assert_eq!(std::fs::read_to_string(session_file).unwrap(), original);
     }
 
     #[cfg(not(unix))]
