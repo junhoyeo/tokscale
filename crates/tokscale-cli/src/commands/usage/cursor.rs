@@ -548,6 +548,23 @@ fn auth_record_matches_access(access_token: &str, other: &LocalCursorAuth) -> bo
         .any(|candidate| same_cursor_principal(access_token, &candidate))
 }
 
+fn refresh_token_is_foreign(access_token: &str, refresh_token: &str) -> bool {
+    matches!(
+        (jwt_subject(access_token), jwt_subject(refresh_token)),
+        (Some(access), Some(refresh)) if access != refresh
+    )
+}
+
+/// The refresh token `other` can lend to the record holding `access_token`:
+/// the records must share a principal, and the token itself must not carry
+/// another subject.
+fn transferable_refresh_token(access_token: &str, other: &LocalCursorAuth) -> Option<String> {
+    let refresh_token = other.refresh_token.as_deref()?;
+    (auth_record_matches_access(access_token, other)
+        && !refresh_token_is_foreign(access_token, refresh_token))
+    .then(|| refresh_token.to_string())
+}
+
 fn select_local_auth(
     mut db: LocalCursorAuth,
     mut keychain: LocalCursorAuth,
@@ -558,12 +575,18 @@ fn select_local_auth(
     // state.vscdb and Keychain. Transfer a missing refresh token only when an
     // access/refresh subject proves both records belong to the same account.
     // An unprovable or different principal must stay isolated.
-    if db.refresh_token.is_none() && auth_record_matches_access(&db.access_token, &keychain) {
-        db.refresh_token = keychain.refresh_token.clone();
+    if db.refresh_token.is_none() {
+        db.refresh_token = transferable_refresh_token(&db.access_token, &keychain);
     }
-    if keychain.refresh_token.is_none() && auth_record_matches_access(&keychain.access_token, &db) {
-        keychain.refresh_token = db.refresh_token.clone();
+    if keychain.refresh_token.is_none() {
+        keychain.refresh_token = transferable_refresh_token(&keychain.access_token, &db);
     }
+    // Keychain stores the access and refresh tokens as separate items, so a
+    // half-updated entry can pair one account's access JWT with another
+    // account's refresh JWT. Never refresh the Keychain record with it.
+    keychain
+        .refresh_token
+        .take_if(|refresh_token| refresh_token_is_foreign(&keychain.access_token, refresh_token));
     if !db.access_token.trim().is_empty()
         && !keychain.access_token.trim().is_empty()
         && !same_cursor_principal(db.access_token.trim(), keychain.access_token.trim())
@@ -1302,6 +1325,44 @@ mod tests {
         let selected = select_local_auth(db.clone(), keychain, None, 1000).unwrap();
         assert_eq!(selected.access_token, db.access_token);
         assert!(selected.refresh_token.is_none());
+    }
+
+    #[test]
+    fn keychain_refresh_token_must_match_its_own_principal() {
+        let db = auth_with_subject(Some(2000), "auth0|account-a", None, None);
+        let keychain = LocalCursorAuth {
+            access_token: db.access_token.clone(),
+            refresh_token: Some(
+                auth_with_subject(Some(2000), "auth0|account-b", None, None).access_token,
+            ),
+            email: None,
+        };
+        let selected = select_local_auth(db.clone(), keychain, None, 1000).unwrap();
+        assert_eq!(selected.access_token, db.access_token);
+        assert!(selected.refresh_token.is_none());
+    }
+
+    #[test]
+    fn expired_access_is_not_refreshed_with_a_foreign_keychain_token() {
+        let db = auth_with_subject(Some(900), "auth0|account-a", None, None);
+        let keychain = LocalCursorAuth {
+            access_token: db.access_token.clone(),
+            refresh_token: Some(
+                auth_with_subject(Some(2000), "auth0|account-b", None, None).access_token,
+            ),
+            email: None,
+        };
+        assert!(select_local_auth(db, keychain, None, 1000).is_none());
+    }
+
+    #[test]
+    fn keychain_refresh_token_still_moves_to_its_own_account() {
+        let db = auth_with_subject(Some(900), "auth0|account-a", None, None);
+        let refresh_a = auth_with_subject(Some(2000), "auth0|account-a", None, None).access_token;
+        let keychain = auth_with_subject(Some(2000), "auth0|account-b", Some(&refresh_a), None);
+        let selected = select_local_auth(db.clone(), keychain, None, 1000).unwrap();
+        assert_eq!(selected.access_token, db.access_token);
+        assert_eq!(selected.refresh_token.as_deref(), Some(refresh_a.as_str()));
     }
 
     #[test]
