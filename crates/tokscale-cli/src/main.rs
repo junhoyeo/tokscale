@@ -1943,14 +1943,9 @@ fn auto_sync_capy_for_local_report(home_dir: &Option<String>, clients: &Option<V
     if home_dir.is_some() || !client_filter_includes_capy(clients) {
         return;
     }
-    if let Some(result) = capy::auto_sync_for_local_report() {
-        if let Some(error) = result.error {
-            use colored::Colorize;
-            eprintln!(
-                "{}",
-                format!("  Capy sync failed; using cached data: {error}").yellow()
-            );
-        }
+    if let Some(warning) = capy::auto_sync_for_local_report() {
+        use colored::Colorize;
+        eprintln!("{}", warning.yellow());
     }
 }
 
@@ -7373,6 +7368,7 @@ fn run_submit_command(
         .is_none_or(|s| s.iter().any(|src| src == "capy"));
     if include_capy && capy::has_credentials() {
         println!("{}", "  Syncing Capy usage data...".bright_black());
+        let had_capy_cache = capy::has_usage_cache();
         let rt_sync = Runtime::new()?;
         let sync_result = rt_sync.block_on(capy::sync_capy_cache());
         if sync_result.synced {
@@ -7383,7 +7379,7 @@ fn run_submit_command(
         } else if let Some(err) = sync_result.error {
             println!(
                 "{}",
-                format!("  Capy sync failed; using cached data: {}", err).yellow()
+                capy::sync_failure_warning(&err, had_capy_cache).yellow()
             );
         }
     }

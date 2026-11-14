@@ -48,6 +48,10 @@ struct CapyUsageCache {
     synced_at: String,
     #[serde(default)]
     user_ids: Vec<String>,
+    /// Fingerprint of the API key and user filter that produced `items`, so a
+    /// cache written under other credentials is never treated as current.
+    #[serde(default)]
+    identity: Option<String>,
     items: Vec<Value>,
 }
 
@@ -151,17 +155,51 @@ pub fn has_credentials() -> bool {
     load_credentials().is_some()
 }
 
+/// Identifies the usage a sync selects: the key (hashed, never stored in the
+/// clear here) and the sorted user filter.
+fn credentials_identity(credentials: &CapyCredentials) -> String {
+    use sha2::{Digest, Sha256};
+    let mut user_ids = credentials.user_ids.clone();
+    user_ids.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(credentials.api_key.trim().as_bytes());
+    hasher.update([0]);
+    hasher.update(user_ids.join(",").as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn has_usage_cache() -> bool {
+    usage_path().is_file()
+}
+
 fn load_usage_cache() -> Option<CapyUsageCache> {
     let content = fs::read_to_string(usage_path()).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-pub fn capy_usage_cache_is_fresh(max_age: Duration) -> bool {
+fn usage_cache_age() -> Option<Duration> {
     fs::metadata(usage_path())
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age < max_age)
+}
+
+/// A cache is current only when it is younger than `max_age` and was written
+/// for the credentials in use now. A login with another key or `--user`, or a
+/// different `CAPY_API_KEY`, makes it due immediately.
+fn cache_is_current(
+    cache_identity: Option<&str>,
+    age: Option<Duration>,
+    credentials: &CapyCredentials,
+    max_age: Duration,
+) -> bool {
+    cache_identity == Some(credentials_identity(credentials).as_str())
+        && age.is_some_and(|age| age < max_age)
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -309,6 +347,113 @@ fn is_llm_row(item: &Value) -> bool {
     item.pointer("/dimensions/itemType").and_then(Value::as_str) == Some("llm")
 }
 
+const TOKEN_FIELDS: [&str; 4] = [
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+];
+
+fn row_start(item: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    let start = item.get("start")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(start)
+        .ok()
+        .map(|start| start.with_timezone(&chrono::Utc))
+}
+
+fn is_hour_row(item: &Value) -> bool {
+    let end = item
+        .get("end")
+        .and_then(Value::as_str)
+        .and_then(|end| chrono::DateTime::parse_from_rfc3339(end).ok());
+    match (row_start(item), end) {
+        (Some(start), Some(end)) => {
+            end.with_timezone(&chrono::Utc) - start <= chrono::Duration::hours(1)
+        }
+        _ => false,
+    }
+}
+
+/// The UTC day and dimensions a row belongs to, so hour rows can be matched
+/// with the day row that later replaces them.
+fn day_key(item: &Value) -> Option<String> {
+    let day = row_start(item)?.date_naive();
+    let dim = |name: &str| {
+        item.pointer(&format!("/dimensions/{name}"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    Some(format!(
+        "{day}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        dim("userId"),
+        dim("threadId"),
+        dim("itemType"),
+        dim("itemId"),
+        dim("model")
+    ))
+}
+
+fn token_count(item: &Value, field: &str) -> f64 {
+    item.pointer(&format!("/tokens/{field}"))
+        .and_then(Value::as_f64)
+        .filter(|count| count.is_finite() && *count > 0.0)
+        .unwrap_or(0.0)
+}
+
+/// Capy only serves hour buckets for the last month, so usage that ages out
+/// comes back as a UTC day row. Stamped at the day's midpoint, that row can
+/// fall on another local date than the hours it replaces, and a resubmission
+/// would then count the moved usage on both dates. Hour rows cached by an
+/// earlier sync are therefore kept, and each day row is cut down to the usage
+/// those hours do not already cover; a day row with nothing left is dropped.
+fn carry_hourly_attribution(
+    previous: &[Value],
+    daily: Vec<Value>,
+    daily_from: chrono::DateTime<chrono::Utc>,
+    hourly_from: chrono::DateTime<chrono::Utc>,
+) -> Vec<Value> {
+    let carried: Vec<Value> = previous
+        .iter()
+        .filter(|item| is_llm_row(item) && is_hour_row(item))
+        .filter(|item| {
+            row_start(item).is_some_and(|start| start >= daily_from && start < hourly_from)
+        })
+        .cloned()
+        .collect();
+    let mut covered: std::collections::HashMap<String, [f64; 4]> = std::collections::HashMap::new();
+    for item in &carried {
+        let Some(key) = day_key(item) else { continue };
+        let sums = covered.entry(key).or_default();
+        for (sum, field) in sums.iter_mut().zip(TOKEN_FIELDS) {
+            *sum += token_count(item, field);
+        }
+    }
+
+    let mut items = carried;
+    for mut item in daily {
+        let Some(sums) = day_key(&item).and_then(|key| covered.get(&key).copied()) else {
+            items.push(item);
+            continue;
+        };
+        let remaining: Vec<f64> = TOKEN_FIELDS
+            .iter()
+            .zip(sums)
+            .map(|(field, sum)| (token_count(&item, field) - sum).max(0.0))
+            .collect();
+        if remaining.iter().all(|count| *count == 0.0) {
+            continue;
+        }
+        if let Some(tokens) = item.get_mut("tokens").and_then(Value::as_object_mut) {
+            for (field, count) in TOKEN_FIELDS.iter().zip(remaining) {
+                tokens.insert((*field).to_string(), serde_json::json!(count as i64));
+            }
+        }
+        items.push(item);
+    }
+    items
+}
+
 async fn fetch_usage(credentials: &CapyCredentials) -> Result<CapyUsageCache> {
     let client = http_client()?;
     let now = chrono::Utc::now();
@@ -316,17 +461,35 @@ async fn fetch_usage(credentials: &CapyCredentials) -> Result<CapyUsageCache> {
     let key = credentials.api_key.as_str();
     let users = credentials.user_ids.as_slice();
 
-    let mut items =
+    let mut daily =
         fetch_series_window(&client, key, "day", &daily_from, &hourly_from, users).await?;
-    items.extend(fetch_series_window(&client, key, "hour", &hourly_from, &to, users).await?);
+    let mut hourly = fetch_series_window(&client, key, "hour", &hourly_from, &to, users).await?;
     // Only model usage carries tokens; machine time, reviews and images are
     // not something Tokscale reports.
-    items.retain(is_llm_row);
+    daily.retain(is_llm_row);
+    hourly.retain(is_llm_row);
+
+    // Hour rows from a cache written under other credentials describe other
+    // usage and are not carried.
+    let identity = credentials_identity(credentials);
+    let previous = load_usage_cache()
+        .filter(|cache| cache.identity.as_deref() == Some(identity.as_str()))
+        .map(|cache| cache.items)
+        .unwrap_or_default();
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .context("Capy sync window is not RFC 3339")
+    };
+    let mut items =
+        carry_hourly_attribution(&previous, daily, parse(&daily_from)?, parse(&hourly_from)?);
+    items.extend(hourly);
 
     Ok(CapyUsageCache {
         version: 1,
         synced_at: now.to_rfc3339(),
         user_ids: credentials.user_ids.clone(),
+        identity: Some(identity),
         items,
     })
 }
@@ -366,26 +529,47 @@ pub async fn sync_capy_cache() -> SyncCapyResult {
     }
 }
 
-/// Best-effort refresh before a local report. `None` means no sync was
-/// attempted (no credentials, offline, or the cache is fresh).
-pub fn auto_sync_for_local_report() -> Option<SyncCapyResult> {
-    if tokscale_core::network::is_offline()
-        || !has_credentials()
-        || capy_usage_cache_is_fresh(CAPY_AUTO_SYNC_FRESHNESS)
-    {
+/// The warning for a failed sync. It only claims a fallback when there is a
+/// cache to fall back to; otherwise Capy usage is simply missing.
+pub fn sync_failure_warning(error: &str, had_cache: bool) -> String {
+    if had_cache {
+        format!("  Capy sync failed; using cached data: {error}")
+    } else {
+        format!("  Capy sync failed; Capy usage is not included: {error}")
+    }
+}
+
+/// Best-effort refresh before a local report. Returns a warning when a sync
+/// was attempted and failed; `None` when it succeeded or was not attempted
+/// (no credentials, offline, or the cache is current).
+pub fn auto_sync_for_local_report() -> Option<String> {
+    if tokscale_core::network::is_offline() {
         return None;
     }
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return Some(SyncCapyResult {
-                synced: false,
-                rows: 0,
-                error: Some(format!("Failed to initialize Capy sync runtime: {error}")),
-            })
-        }
+    let (credentials, _) = load_credentials()?;
+    let cache_identity = load_usage_cache().and_then(|cache| cache.identity);
+    if cache_is_current(
+        cache_identity.as_deref(),
+        usage_cache_age(),
+        &credentials,
+        CAPY_AUTO_SYNC_FRESHNESS,
+    ) {
+        return None;
+    }
+    let had_cache = has_usage_cache();
+    let result = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime.block_on(sync_capy_cache()),
+        Err(error) => SyncCapyResult {
+            synced: false,
+            rows: 0,
+            error: Some(format!("Failed to initialize Capy sync runtime: {error}")),
+        },
     };
-    Some(runtime.block_on(sync_capy_cache()))
+    if result.synced {
+        return None;
+    }
+    let error = result.error.as_deref().unwrap_or("unknown error");
+    Some(sync_failure_warning(error, had_cache))
 }
 
 fn resolve_user_filters(users: &[CapyUser], wanted: &[String]) -> Result<Vec<String>> {
@@ -463,15 +647,28 @@ pub fn run_capy_login(key: Option<String>, users: Vec<String>) -> Result<()> {
         }
     };
 
-    write_secret_json(
-        &credentials_path(),
-        &CapyCredentials {
-            api_key,
-            user_ids,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        },
-    )?;
+    let credentials = CapyCredentials {
+        api_key,
+        user_ids,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    write_secret_json(&credentials_path(), &credentials)?;
     println!("{}", "  Capy API key saved.".green());
+    // Usage cached under another key or user filter must not be reported as
+    // this login's usage, even until the next sync.
+    let new_identity = credentials_identity(&credentials);
+    if has_usage_cache()
+        && load_usage_cache()
+            .and_then(|cache| cache.identity)
+            .as_deref()
+            != Some(new_identity.as_str())
+    {
+        fs::remove_file(usage_path()).context("Failed to clear the previous Capy usage cache")?;
+        println!(
+            "{}",
+            "  Cleared usage cached under the previous key or user filter.".bright_black()
+        );
+    }
     println!(
         "{}",
         "  Run `tokscale capy sync` to cache usage (reports also refresh it automatically)."
@@ -566,23 +763,170 @@ pub fn run_capy_sync(json: bool) -> Result<()> {
     let result = runtime.block_on(sync_capy_cache());
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
-    }
-    if result.synced {
+    } else if result.synced {
         println!(
             "{}",
             format!("  Capy: synced {} model usage rows", result.rows).green()
         );
-    } else if let Some(error) = &result.error {
-        eprintln!("{}", format!("  Capy sync failed: {error}").yellow());
     }
-    Ok(())
+    manual_sync_completion(&result)
+}
+
+/// Scripts rely on the exit status, so a failed sync is an error even though
+/// the JSON result is printed first.
+fn manual_sync_completion(result: &SyncCapyResult) -> Result<()> {
+    if result.synced {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Capy sync failed: {}",
+        result.error.as_deref().unwrap_or("unknown error")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn creds(key: &str, users: &[&str]) -> CapyCredentials {
+        CapyCredentials {
+            api_key: key.to_string(),
+            user_ids: users.iter().map(ToString::to_string).collect(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn identity_tracks_key_and_user_filter_but_not_filter_order() {
+        let base = credentials_identity(&creds("capy_a", &["u1", "u2"]));
+        assert_eq!(base, credentials_identity(&creds("capy_a", &["u2", "u1"])));
+        assert_ne!(base, credentials_identity(&creds("capy_b", &["u1", "u2"])));
+        assert_ne!(base, credentials_identity(&creds("capy_a", &["u1"])));
+        assert_ne!(base, credentials_identity(&creds("capy_a", &[])));
+        assert!(!base.contains("capy_a"));
+    }
+
+    #[test]
+    fn cache_is_current_only_for_matching_identity_and_age() {
+        let credentials = creds("capy_a", &[]);
+        let identity = credentials_identity(&credentials);
+        let young = Some(Duration::from_secs(60));
+        let old = Some(Duration::from_secs(3600));
+        let max = CAPY_AUTO_SYNC_FRESHNESS;
+        assert!(cache_is_current(Some(&identity), young, &credentials, max));
+        assert!(!cache_is_current(Some(&identity), old, &credentials, max));
+        assert!(!cache_is_current(Some(&identity), None, &credentials, max));
+        // A cache from another key, or from before identities were recorded,
+        // is due even when young.
+        assert!(!cache_is_current(Some("0000"), young, &credentials, max));
+        assert!(!cache_is_current(None, young, &credentials, max));
+    }
+
+    #[test]
+    fn failure_warning_only_claims_a_fallback_when_a_cache_exists() {
+        assert!(sync_failure_warning("boom", true).contains("using cached data"));
+        let missing = sync_failure_warning("boom", false);
+        assert!(!missing.contains("cached data"));
+        assert!(missing.contains("not included"));
+    }
+
+    #[test]
+    fn manual_sync_failure_is_an_error() {
+        let failed = SyncCapyResult {
+            synced: false,
+            rows: 0,
+            error: Some("Not authenticated".to_string()),
+        };
+        assert!(manual_sync_completion(&failed).is_err());
+        let ok = SyncCapyResult {
+            synced: true,
+            rows: 3,
+            error: None,
+        };
+        assert!(manual_sync_completion(&ok).is_ok());
+    }
+
+    fn row(start: &str, end: &str, input: i64, output: i64) -> Value {
+        serde_json::json!({
+            "start": start, "end": end,
+            "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+            "tokens": {"inputTokens": input, "outputTokens": output,
+                "cacheReadTokens": 0, "cacheWriteTokens": 0}
+        })
+    }
+
+    fn utc(value: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn aged_out_hours_keep_their_buckets_and_day_rows_keep_only_the_rest() {
+        let daily_from = utc("2025-11-15T00:00:00Z");
+        let hourly_from = utc("2026-10-15T00:00:00Z");
+        let previous = vec![
+            // 01:00Z is the previous evening in America/New_York.
+            row(
+                "2026-10-14T01:00:00.000Z",
+                "2026-10-14T02:00:00.000Z",
+                1000,
+                10,
+            ),
+            // Still inside the hourly window: the new hour fetch covers it.
+            row("2026-10-20T01:00:00.000Z", "2026-10-20T02:00:00.000Z", 5, 5),
+            // Older than the daily window.
+            row("2025-11-01T01:00:00.000Z", "2025-11-01T02:00:00.000Z", 5, 5),
+        ];
+        let daily = vec![
+            row(
+                "2026-10-14T00:00:00.000Z",
+                "2026-10-15T00:00:00.000Z",
+                1200,
+                10,
+            ),
+            row("2026-10-13T00:00:00.000Z", "2026-10-14T00:00:00.000Z", 7, 7),
+        ];
+        let items = carry_hourly_attribution(&previous, daily, daily_from, hourly_from);
+        let starts: Vec<&str> = items.iter().map(|i| i["start"].as_str().unwrap()).collect();
+        assert_eq!(
+            starts,
+            [
+                "2026-10-14T01:00:00.000Z",
+                "2026-10-14T00:00:00.000Z",
+                "2026-10-13T00:00:00.000Z"
+            ]
+        );
+        assert_eq!(items[0]["tokens"]["inputTokens"], 1000);
+        assert_eq!(items[1]["tokens"]["inputTokens"], 200);
+        assert_eq!(items[1]["tokens"]["outputTokens"], 0);
+        assert_eq!(items[2]["tokens"]["inputTokens"], 7);
+    }
+
+    #[test]
+    fn a_day_row_fully_covered_by_cached_hours_is_dropped() {
+        let previous = vec![row(
+            "2026-10-14T01:00:00.000Z",
+            "2026-10-14T02:00:00.000Z",
+            1000,
+            10,
+        )];
+        let daily = vec![row(
+            "2026-10-14T00:00:00.000Z",
+            "2026-10-15T00:00:00.000Z",
+            1000,
+            10,
+        )];
+        let items = carry_hourly_attribution(
+            &previous,
+            daily,
+            utc("2025-11-15T00:00:00Z"),
+            utc("2026-10-15T00:00:00Z"),
+        );
+        assert_eq!(items, previous);
+    }
 
     #[test]
     fn sync_windows_meet_on_a_utc_midnight() {

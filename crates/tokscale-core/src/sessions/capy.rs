@@ -15,7 +15,7 @@
 //! routes.
 
 use super::UnifiedMessage;
-use crate::provider_identity::inferred_provider_from_model;
+use crate::provider_identity::inferred_provider_from_model_delimited;
 use crate::TokenBreakdown;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -119,7 +119,13 @@ fn row_to_message(row: &CapyUsageRow) -> Option<UnifiedMessage> {
     let cache_read = tokens.cache_read_tokens;
     let cache_write = tokens.cache_write_tokens;
     let breakdown = TokenBreakdown {
-        input: (tokens.input_tokens - cache_read - cache_write).max(0),
+        // Counts are clamped to `0..=i64::MAX` on read, so saturate rather
+        // than overflow when a corrupt row reports huge cache buckets.
+        input: tokens
+            .input_tokens
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_write)
+            .max(0),
         output: tokens.output_tokens,
         cache_read,
         cache_write,
@@ -168,7 +174,7 @@ fn split_model(raw: &str) -> (String, String) {
             return (provider, model.to_string());
         }
     }
-    let provider = inferred_provider_from_model(raw)
+    let provider = inferred_provider_from_model_delimited(raw)
         .unwrap_or(CLIENT_ID)
         .to_string();
     (provider, raw.to_string())
@@ -272,6 +278,30 @@ mod tests {
         let (provider, model) = split_model("gpt-5.5");
         assert_eq!(provider, "openai");
         assert_eq!(model, "gpt-5.5");
+    }
+
+    #[test]
+    fn huge_cache_counts_saturate_instead_of_overflowing() {
+        let messages = parse_json(
+            r#"{"items":[{"start":"2026-11-14T09:00:00Z",
+                "dimensions":{"threadId":"t","itemType":"llm","model":"openai/gpt-5.5"},
+                "tokens":{"inputTokens":0,"outputTokens":1,
+                    "cacheReadTokens":1e300,"cacheWriteTokens":1e300}}]}"#,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 0);
+    }
+
+    #[test]
+    fn unprefixed_provider_inference_respects_family_boundaries() {
+        // A family name inside a longer word is not that family: plain
+        // substring inference reads these as OpenAI and xAI.
+        for raw in ["megpt-1", "groker-1"] {
+            let (provider, model) = split_model(raw);
+            assert_eq!(provider, CLIENT_ID, "{raw}");
+            assert_eq!(model, raw);
+        }
+        assert_eq!(split_model("gpt-5.5").0, "openai");
     }
 
     #[test]
