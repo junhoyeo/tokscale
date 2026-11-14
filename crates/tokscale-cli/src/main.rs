@@ -1,6 +1,7 @@
 mod amp;
 mod antigravity;
 mod auth;
+mod capy;
 mod client_diagnostics;
 mod commands;
 mod cursor;
@@ -406,6 +407,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: WarpSubcommand,
     },
+    #[command(about = "Capy (capy.ai) usage integration commands")]
+    Capy {
+        #[command(subcommand)]
+        subcommand: CapySubcommand,
+    },
     #[command(about = "Hindsight memory backend integration commands")]
     Hindsight {
         #[command(subcommand)]
@@ -648,6 +654,35 @@ enum WarpSubcommand {
         json: bool,
     },
     #[command(about = "Sync Warp aggregate usage into local cache")]
+    Sync {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CapySubcommand {
+    #[command(about = "Save a Capy API key for usage sync (Settings → API in Capy)")]
+    Login {
+        #[arg(long, help = "Capy API key (defaults to CAPY_API_KEY, else prompts)")]
+        key: Option<String>,
+        #[arg(
+            long = "user",
+            help = "Only count this member's usage (Capy user id or email); repeatable"
+        )]
+        users: Vec<String>,
+    },
+    #[command(about = "Remove the saved Capy API key")]
+    Logout {
+        #[arg(long, help = "Also delete cached Capy usage")]
+        purge_cache: bool,
+    },
+    #[command(about = "Show Capy sync status")]
+    Status {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Sync Capy model usage into the local cache")]
     Sync {
         #[arg(long, help = "Output as JSON")]
         json: bool,
@@ -1030,6 +1065,10 @@ fn main() -> Result<()> {
             reject_unsupported_home_override(&cli.home, "warp")?;
             run_warp_command(subcommand)
         }
+        Some(Commands::Capy { subcommand }) => {
+            reject_unsupported_home_override(&cli.home, "capy")?;
+            run_capy_command(subcommand)
+        }
         Some(Commands::Hindsight { subcommand }) => {
             run_hindsight_command(subcommand, cli.home.as_deref())
         }
@@ -1240,6 +1279,7 @@ pub enum ClientFilter {
     Proma,
     Bb,
     Qoder,
+    Capy,
     Synthetic,
 }
 
@@ -1311,6 +1351,7 @@ impl ClientFilter {
             Self::Proma => "proma",
             Self::Bb => "bb",
             Self::Qoder => "qoder",
+            Self::Capy => "capy",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1385,6 +1426,7 @@ impl ClientFilter {
             Self::Proma => Some(ClientId::Proma),
             Self::Bb => Some(ClientId::Bb),
             Self::Qoder => Some(ClientId::Qoder),
+            Self::Capy => Some(ClientId::Capy),
             Self::Synthetic => None,
         }
     }
@@ -1455,6 +1497,7 @@ impl ClientFilter {
             ClientId::Proma => Self::Proma,
             ClientId::Bb => Self::Bb,
             ClientId::Qoder => Self::Qoder,
+            ClientId::Capy => Self::Capy,
         }
     }
 
@@ -1888,10 +1931,34 @@ where
     }
 }
 
+fn client_filter_includes_capy(clients: &Option<Vec<String>>) -> bool {
+    clients
+        .as_ref()
+        .is_none_or(|sources| sources.iter().any(|source| source == "capy"))
+}
+
+/// Refreshes the Capy usage cache before a local report when a key is saved.
+/// Capy keeps no local token record, so a stale cache silently undercounts.
+fn auto_sync_capy_for_local_report(home_dir: &Option<String>, clients: &Option<Vec<String>>) {
+    if home_dir.is_some() || !client_filter_includes_capy(clients) {
+        return;
+    }
+    if let Some(result) = capy::auto_sync_for_local_report() {
+        if let Some(error) = result.error {
+            use colored::Colorize;
+            eprintln!(
+                "{}",
+                format!("  Capy sync failed; using cached data: {error}").yellow()
+            );
+        }
+    }
+}
+
 fn auto_sync_cursor_before_tui(
     home_dir: &Option<String>,
     clients: &Option<Vec<String>>,
 ) -> Result<()> {
+    auto_sync_capy_for_local_report(home_dir, clients);
     let had_cursor_cache = has_cursor_usage_cache_for_report(home_dir);
     let explicit_cursor_filter = client_filter_explicitly_requests_cursor(clients);
     let cursor_sync_result = auto_sync_cursor_for_local_report(home_dir, clients);
@@ -2314,6 +2381,7 @@ impl LocalReportContext {
         let explicit_cursor_filter = client_filter_explicitly_requests_cursor(&clients);
         let spinner = spinner_message.map(LightSpinner::start);
         let cursor_sync_result = auto_sync_cursor_for_local_report(&home_dir, &clients);
+        auto_sync_capy_for_local_report(&home_dir, &clients);
         let cursor_setup_warnings = setup_warnings_for_report(&home_dir, &clients);
         let use_env_roots = use_env_roots(&home_dir);
 
@@ -7300,6 +7368,26 @@ fn run_submit_command(
         }
     }
 
+    let include_capy = clients
+        .as_ref()
+        .is_none_or(|s| s.iter().any(|src| src == "capy"));
+    if include_capy && capy::has_credentials() {
+        println!("{}", "  Syncing Capy usage data...".bright_black());
+        let rt_sync = Runtime::new()?;
+        let sync_result = rt_sync.block_on(capy::sync_capy_cache());
+        if sync_result.synced {
+            println!(
+                "{}",
+                format!("  Capy: {} model usage rows synced", sync_result.rows).bright_black()
+            );
+        } else if let Some(err) = sync_result.error {
+            println!(
+                "{}",
+                format!("  Capy sync failed; using cached data: {}", err).yellow()
+            );
+        }
+    }
+
     let include_antigravity = clients
         .as_ref()
         .is_none_or(|s| s.iter().any(|src| src == "antigravity"));
@@ -8049,6 +8137,15 @@ fn run_trae_command(subcommand: TraeSubcommand) -> Result<()> {
                 .collect();
             rt.block_on(trae::sync::run_trae_sync(&variants, days, include_aux))
         }
+    }
+}
+
+fn run_capy_command(subcommand: CapySubcommand) -> Result<()> {
+    match subcommand {
+        CapySubcommand::Login { key, users } => capy::run_capy_login(key, users),
+        CapySubcommand::Logout { purge_cache } => capy::run_capy_logout(purge_cache),
+        CapySubcommand::Status { json } => capy::run_capy_status(json),
+        CapySubcommand::Sync { json } => capy::run_capy_sync(json),
     }
 }
 
@@ -11483,6 +11580,28 @@ mod tests {
         assert!(Cli::try_parse_from(["tokscale", "warp", "status", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "warp", "sync"]).is_ok());
         assert!(Cli::try_parse_from(["tokscale", "warp", "sync", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn clap_accepts_capy_commands() {
+        assert!(Cli::try_parse_from(["tokscale", "capy", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "capy", "status", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "capy", "sync"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "capy", "sync", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["tokscale", "capy", "logout"]).is_ok());
+    }
+
+    #[test]
+    fn client_filter_round_trips_capy() {
+        assert_eq!(
+            ClientFilter::from_filter_str("capy"),
+            Some(ClientFilter::Capy)
+        );
+        assert_eq!(ClientFilter::Capy.as_filter_str(), "capy");
+        assert_eq!(
+            ClientFilter::Capy.to_client_id(),
+            Some(tokscale_core::ClientId::Capy)
+        );
     }
 
     #[test]

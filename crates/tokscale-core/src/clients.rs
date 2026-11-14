@@ -1169,6 +1169,20 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Capy (capy.ai) runs its agent loop on Capy's servers, including local
+    // threads and connected subscriptions such as Codex, so no token record is
+    // written locally. `tokscale capy sync` caches rows from Capy's usage API.
+    Capy = 61 => {
+        id: "capy",
+        display: "Capy",
+        logo: None,
+        root: PathRoot::Config,
+        relative: "capy-cache",
+        pattern: "usage*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1284,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 61);
+        assert_eq!(ClientId::COUNT, 62);
     }
 
     #[test]

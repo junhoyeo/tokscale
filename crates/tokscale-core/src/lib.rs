@@ -4064,6 +4064,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::warp::parse_warp_file,
     );
 
+    // Capy usage-series rows cached by `tokscale capy sync`.
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        &machine_labeler,
+        ClientId::Capy,
+        sessions::capy::parse_capy_file,
+    );
+
     let grok_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Grok)
         .par_iter()
@@ -8952,6 +8963,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let warp_count = summed_parsed_message_count(&warp_msgs);
     counts.set(ClientId::Warp, warp_count);
     messages.extend(warp_msgs);
+
+    let capy_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Capy)
+        .par_iter()
+        .flat_map(|path| sessions::capy::parse_capy_file(path))
+        .collect();
+    let mut capy_seen: HashSet<String> = HashSet::new();
+    let capy_msgs: Vec<ParsedMessage> = capy_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut capy_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let capy_count = summed_parsed_message_count(&capy_msgs);
+    counts.set(ClientId::Capy, capy_count);
+    messages.extend(capy_msgs);
 
     // Devin CLI SQLite usage plus Desktop NDJSON event streams. The CLI
     // database is authoritative only when the CLI client itself is selected;

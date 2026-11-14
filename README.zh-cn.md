@@ -123,6 +123,7 @@
 | <img width="48px" src="https://raw.githubusercontent.com/proma-ai/Proma/86d9dfb511db4c1e3ffded3b6c3e312996f50cbf/apps/electron/resources/icon.png" alt="Proma" /> | [Proma](https://github.com/proma-ai/Proma) | `~/.proma/agent-sessions/`, `~/.proma/sdk-config/{sessions,projects}/`; `~/.proma-dev/` |
 | <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
 | <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl`（可用 `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` 覆盖根目录） |
+| <img width="48px" src=".github/assets/client-capy.png" alt="Capy" /> | [Capy](https://capy.ai) | `~/.config/tokscale/capy-cache/usage.json` (API sync via `tokscale capy login` + `tokscale capy sync`) |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
 
@@ -463,7 +464,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`prime-agent`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`antigravity-extension`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`micode-desktop`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`、`cherrystudio`、`lmstudio`、`unsloth`、`hindsight`、`muse`、`aside`、`vibe`、`proma`、`bb` 和 `qoder`。
+可用值：`opencode`、`claude`、`codex`、`copilot`、`gemini`、`cursor`、`amp`、`codebuff`、`droid`、`openclaw`、`hermes`、`pi`、`prime-agent`、`kimchi`、`kimi`、`qwen`、`roocode`、`kilocode`、`kilo`、`mux`、`crush`、`goose`、`antigravity`、`antigravity-cli`、`antigravity-extension`、`zed`、`kiro`、`trae`、`warp`、`cline`、`gjc`、`grok`、`jcode`、`micode`、`micode-desktop`、`commandcode`、`junie`、`zcode`、`opencodereview`、`codebuddy`、`augment`、`synthetic`、`cherrystudio`、`lmstudio`、`unsloth`、`hindsight`、`muse`、`aside`、`vibe`、`proma`、`bb`、`qoder` 和 `capy`。
 
 > **破坏性变更（v4.0.0）**：单客户端布尔选项（`--opencode`、`--claude`、`--codex` 等）已被移除，现在会直接报错。请改用规范的 `--client`/`-c` 选项——例如 `tokscale --client opencode,claude`。
 
@@ -1166,7 +1167,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe、Proma、BB、Qoder）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe、Proma、BB、Qoder、Capy）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -1592,6 +1593,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | Proma | `~/.proma/`, `~/.proma-dev/` | `%USERPROFILE%\.proma\`, `%USERPROFILE%\.proma-dev\` | 优先使用 Pi SDK 用量，避免重复计算界面副本；同时支持旧版 Claude SDK 记录及独立界面日志。详见[统计规则与限制](docs/proma.md)。 |
 | BB | `$BB_DATA_DIR`（默认：`~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（默认：`%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | 解析 `bb.db` SQLite 数据库（`threads` 和 `events` 表）。准确提取编排代理 Harness 中的 Prompt 缓存和推理 Token 分解。BB 在常规主目录下运行 Claude Code 和 Codex，因此两边都记录的响应只在 `claude` 或 `codex` 下统计一次；仅指定 `--client bb` 时仍显示 BB 记录的全部内容。 |
 | Qoder | `$QODER_CONFIG_DIR/projects/`（默认：`~/.qoder/projects/`）、`$QODERCN_CONFIG_DIR/projects/`（默认：`~/.qoder-cn/projects/`） | `%QODER_CONFIG_DIR%\projects\`（默认：`%USERPROFILE%\.qoder\projects\`）、`%QODERCN_CONFIG_DIR%\projects\`（默认：`%USERPROFILE%\.qoder-cn\projects\`） | 解析 Qoder 和 Qoder CN 的 JSONL 会话及子代理日志；合并多分块助手片段，并在托管模型 Token 数被归零时从对话文本进行估算 |
+| Capy | `~/.config/tokscale/capy-cache/` | `%USERPROFILE%\.config\tokscale\capy-cache\` | API sync via `tokscale capy login` and `tokscale capy sync` (reports refresh it automatically). Capy runs its agent loop on its servers, including local threads and connected subscriptions such as Codex, so no session log is written locally; token totals come from Capy's usage API per hour (last 30 days) or UTC day (older), per thread and model. Use `tokscale capy login --user <email>` in a multi-member organization to count only your own usage |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 

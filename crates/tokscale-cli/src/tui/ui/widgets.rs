@@ -885,6 +885,7 @@ pub fn get_client_color(client: &str) -> Color {
         "vibe" => Color::Rgb(250, 82, 15),   // #FA520F Mistral orange
         "bb" => Color::Rgb(79, 70, 229),     // #4F46E5 Indigo
         "qoder" => Color::Rgb(255, 77, 0),   // #FF4D00 Alibaba Qoder orange
+        "capy" => Color::Rgb(176, 124, 79),  // #B07C4F capybara brown
         _ => Color::Rgb(136, 136, 136),      // #888888
     }
 }
