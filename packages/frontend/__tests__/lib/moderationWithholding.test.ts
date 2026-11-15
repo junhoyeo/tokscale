@@ -351,11 +351,14 @@ describe("ledger volume withholding", () => {
   );
 
   it.each([
-    ...NON_PER_INFERENCE_MESSAGE_CLIENTS,
-    "cc-mirror/custom",
-    "  CC-MIRROR/ANOTHER-VARIANT  ",
+    ...new Set([
+      ...NON_PER_INFERENCE_MESSAGE_CLIENTS,
+      "capy",
+      "cc-mirror/custom",
+      "  CC-MIRROR/ANOTHER-VARIANT  ",
+    ]),
   ])(
-    "skips non-per-inference client %s for per-message enforcement while preserving daily limits",
+    "skips non-per-inference client %s for per-message enforcement while preserving daily and lifetime limits",
     (clientName) => {
       expect(hasPerInferenceMessageCount(clientName)).toBe(false);
       expect(hasPerInferenceMessageCount(`  ${clientName.toUpperCase()}  `)).toBe(false);
