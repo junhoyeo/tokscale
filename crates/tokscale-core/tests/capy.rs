@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serial_test::serial;
 use tokscale_core::pricing::{litellm::ModelPricing, PricingService};
 use tokscale_core::scanner::ScannerSettings;
+use tokscale_core::sessions::capy::{credentials_identity, CapyCredentials};
 use tokscale_core::{
     parse_local_clients, parse_local_unified_messages_with_pricing,
     parse_local_unified_messages_with_pricing_uncached, ClientId, LocalParseOptions,
@@ -312,16 +313,49 @@ async fn saved_credentials_and_user_filter_outrank_env_scope() {
     let _guard = isolate_capy_environment();
     let home_dir = common::temp_home();
     let home = home_dir.path();
-    let usage_path = write_scoped_capy_cache(home, Some("7796c90396c3a765"));
-    fs::write(
-        usage_path.parent().unwrap().join("credentials.json"),
-        r#"{"apiKey":"saved_scope_synthetic","userIds":[],"createdAt":"synthetic"}"#,
-    )
-    .unwrap();
+    let credentials_path = config_dir(home).join("capy-cache/credentials.json");
+    let saved_scope = CapyCredentials {
+        api_key: "saved_scope_synthetic".to_string(),
+        user_ids: vec!["user_1".to_string()],
+        created_at: "synthetic".to_string(),
+    };
+    let usage_path = write_scoped_capy_cache(home, Some(&credentials_identity(&saved_scope)));
+    fs::write(&credentials_path, serde_json::to_vec(&saved_scope).unwrap()).unwrap();
+    let original_usage = fs::read(&usage_path).unwrap();
     std::env::set_var("CAPY_API_KEY", OsStr::new("env_scope_synthetic"));
 
-    let messages = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+    let cold_saved_scope = parse_local_unified_messages_with_pricing(capy_options(home), None)
         .await
         .unwrap();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(cold_saved_scope.len(), 2);
+    let warm_saved_scope = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(warm_saved_scope, cold_saved_scope);
+
+    let filtered_scope = CapyCredentials {
+        user_ids: vec!["user_2".to_string()],
+        ..saved_scope.clone()
+    };
+    fs::write(
+        &credentials_path,
+        serde_json::to_vec(&filtered_scope).unwrap(),
+    )
+    .unwrap();
+    let warm_filtered = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert!(warm_filtered.is_empty());
+    let cold_filtered =
+        parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+            .await
+            .unwrap();
+    assert!(cold_filtered.is_empty());
+    assert_eq!(fs::read(&usage_path).unwrap(), original_usage);
+
+    fs::write(&credentials_path, serde_json::to_vec(&saved_scope).unwrap()).unwrap();
+    let restored = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(restored, cold_saved_scope);
 }
