@@ -101,6 +101,10 @@ struct CachedTUIData {
     /// parser implementation stays the same. Zero makes pre-field caches miss.
     #[serde(default)]
     codex_max_decoded_bytes: u64,
+    /// Credential/cache scope used for Capy totals. `None` when Capy was not
+    /// enabled for this aggregate.
+    #[serde(default)]
+    capy_scope_identity: Option<String>,
     timestamp: u64,
     enabled_clients: Vec<String>,
     #[serde(default)]
@@ -790,6 +794,13 @@ enum ClientMatch {
 /// `(enabled_clients: Vec<String>, include_synthetic: bool)` shape so
 /// existing user caches keep working across upgrades — projection
 /// happens here.
+fn capy_scope_identity(enabled_clients: &HashSet<ClientFilter>) -> Option<String> {
+    enabled_clients.contains(&ClientFilter::Capy).then(|| {
+        let usage = crate::capy::get_capy_cache_dir().join("usage.json");
+        tokscale_core::sessions::capy::report_scope_identity(&usage)
+    })
+}
+
 pub fn load_cache(
     enabled_clients: &HashSet<ClientFilter>,
     group_by: &GroupBy,
@@ -824,6 +835,7 @@ fn classify_cached_payload(
     if cached.parser_generation != tokscale_core::parser_generation()
         || cached.codex_max_decoded_bytes
             != tokscale_core::sessions::codex::max_codex_archive_bytes()
+        || cached.capy_scope_identity != capy_scope_identity(enabled_clients)
     {
         return CacheResult::Miss;
     }
@@ -993,6 +1005,7 @@ pub fn save_cached_data(
         schema_version: CACHE_SCHEMA_VERSION,
         parser_generation: tokscale_core::parser_generation(),
         codex_max_decoded_bytes: tokscale_core::sessions::codex::max_codex_archive_bytes(),
+        capy_scope_identity: capy_scope_identity(enabled_clients),
         timestamp,
         enabled_clients: clients_vec,
         include_synthetic,
@@ -1077,6 +1090,7 @@ mod tests {
     struct CacheEnv {
         home: Option<OsString>,
         config_dir: Option<OsString>,
+        capy_api_key: Option<OsString>,
     }
 
     impl CacheEnv {
@@ -1084,6 +1098,7 @@ mod tests {
             Self {
                 home: env::var_os("HOME"),
                 config_dir: env::var_os("TOKSCALE_CONFIG_DIR"),
+                capy_api_key: env::var_os("CAPY_API_KEY"),
             }
         }
 
@@ -1092,6 +1107,7 @@ mod tests {
             unsafe {
                 env::set_var("HOME", root);
                 env::set_var("TOKSCALE_CONFIG_DIR", root.join("config"));
+                env::remove_var("CAPY_API_KEY");
             }
             saved
         }
@@ -1107,6 +1123,10 @@ mod tests {
                 match &self.config_dir {
                     Some(value) => env::set_var("TOKSCALE_CONFIG_DIR", value),
                     None => env::remove_var("TOKSCALE_CONFIG_DIR"),
+                }
+                match &self.capy_api_key {
+                    Some(value) => env::set_var("CAPY_API_KEY", value),
+                    None => env::remove_var("CAPY_API_KEY"),
                 }
             }
         }
@@ -1318,6 +1338,41 @@ mod tests {
             "a stale parser generation must Miss, not Stale -- Stale is painted just like Fresh; got {}",
             other_variant_name(&result)
         );
+    }
+
+    #[test]
+    #[serial]
+    fn a_cache_from_another_capy_scope_misses() {
+        let temp = TempDir::new().unwrap();
+        let _env = CacheEnv::redirect(temp.path());
+        let capy_dir = crate::capy::get_capy_cache_dir();
+        fs::create_dir_all(&capy_dir).unwrap();
+        fs::write(
+            capy_dir.join("usage.json"),
+            r#"{"identity":"6b04be6a8213d6b1","items":[]}"#,
+        )
+        .unwrap();
+        unsafe {
+            env::set_var("CAPY_API_KEY", "capy_scope_a_synthetic");
+        }
+
+        let clients = make_filters(&[ClientFilter::Capy], false);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&with_current_generation(LEGACY_FALLBACK_PAYLOAD)).unwrap();
+        value["enabledClients"] = serde_json::json!(["capy"]);
+        value["capyScopeIdentity"] = serde_json::json!(capy_scope_identity(&clients));
+        let payload: CachedTUIData = serde_json::from_value(value).unwrap();
+
+        unsafe {
+            env::set_var("CAPY_API_KEY", "capy_scope_b_synthetic");
+        }
+        let result = classify_cached_payload(
+            payload,
+            &clients,
+            &GroupBy::Model,
+            &CacheReportScope::default(),
+        );
+        assert!(matches!(result, CacheResult::Miss));
     }
 
     #[test]

@@ -18,7 +18,8 @@ use super::UnifiedMessage;
 use crate::provider_identity::inferred_provider_from_model_delimited;
 use crate::TokenBreakdown;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub const CLIENT_ID: &str = "capy";
@@ -28,10 +29,22 @@ pub const CLIENT_ID: &str = "capy";
 /// are placed at the bucket's midpoint instead. Hour rows keep their start.
 const DAY_BUCKET_MIDPOINT_MS: i64 = 12 * 60 * 60 * 1000;
 const HOUR_MS: i64 = 60 * 60 * 1000;
+const CAPY_API_KEY_ENV: &str = "CAPY_API_KEY";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapyCredentials {
+    pub api_key: String,
+    #[serde(default)]
+    pub user_ids: Vec<String>,
+    pub created_at: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CapyUsageCache {
+    #[serde(default)]
+    identity: Option<String>,
     #[serde(default)]
     items: Vec<CapyUsageRow>,
 }
@@ -93,7 +106,97 @@ where
     })
 }
 
+/// Load the credential scope that applies to a Capy cache directory. Saved
+/// credentials outrank the environment so a persisted `--user` filter cannot
+/// be dropped by an ambient API key.
+pub fn load_credentials(cache_dir: &Path) -> Option<(CapyCredentials, &'static str)> {
+    let saved = std::fs::read_to_string(cache_dir.join("credentials.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok());
+    if let Some(credentials) = saved {
+        return Some((credentials, "saved"));
+    }
+    std::env::var(CAPY_API_KEY_ENV)
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .map(|api_key| {
+            (
+                CapyCredentials {
+                    api_key,
+                    user_ids: Vec::new(),
+                    created_at: String::new(),
+                },
+                "env",
+            )
+        })
+}
+
+/// Identifies the API key and sorted user selection without persisting the key.
+pub fn credentials_identity(credentials: &CapyCredentials) -> String {
+    let mut user_ids = credentials.user_ids.clone();
+    user_ids.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(credentials.api_key.trim().as_bytes());
+    hasher.update([0]);
+    hasher.update(user_ids.join(",").as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn cache_identity(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<CapyUsageCache>(&content)
+        .ok()?
+        .identity
+}
+
+/// A cache is reportable when it belongs to the active credential scope. With
+/// no active credentials, the retained cache remains intentionally reportable.
+pub fn usage_cache_is_eligible(path: &Path) -> bool {
+    let Some(cache_dir) = path.parent() else {
+        return false;
+    };
+    let Some((credentials, _)) = load_credentials(cache_dir) else {
+        return true;
+    };
+    cache_identity(path).as_deref() == Some(credentials_identity(&credentials).as_str())
+}
+
+/// Capy-specific key for aggregate caches. It changes when the active scope
+/// changes or when a cache moves between eligible and ineligible states.
+pub fn report_scope_identity(path: &Path) -> String {
+    let active = path
+        .parent()
+        .and_then(load_credentials)
+        .map(|(credentials, _)| credentials_identity(&credentials));
+    let cached = cache_identity(path);
+    match active {
+        Some(active) if cached.as_deref() == Some(active.as_str()) => {
+            format!("active:{active}:eligible")
+        }
+        Some(active) => format!("active:{active}:ineligible"),
+        None => match cached {
+            Some(cached) => {
+                let digest = Sha256::digest(cached.as_bytes());
+                format!(
+                    "retained:{:02x}{:02x}{:02x}{:02x}",
+                    digest[0], digest[1], digest[2], digest[3]
+                )
+            }
+            None => "retained:unscoped".to_string(),
+        },
+    }
+}
+
 pub fn parse_capy_file(path: &Path) -> Vec<UnifiedMessage> {
+    if !usage_cache_is_eligible(path) {
+        return Vec::new();
+    }
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };

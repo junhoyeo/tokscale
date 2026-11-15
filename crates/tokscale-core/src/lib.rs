@@ -2667,6 +2667,48 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
+    /// Parse Capy only after its usage cache is admitted for the active
+    /// credential scope. This check intentionally precedes the source-message
+    /// cache lookup so a warm entry from another key cannot bypass it.
+    fn parse_cached_capy_lane(
+        scan_result: &scanner::ScanResult,
+        source_cache: &mut message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        all_messages: &mut Vec<UnifiedMessage>,
+        machine_labeler: &machine_label::MachineLabeler,
+    ) {
+        let identity = message_cache::CacheIdentity::for_client(ClientId::Capy);
+        let outcomes: Vec<CachedParseOutcome> = scan_result
+            .get(ClientId::Capy)
+            .par_iter()
+            .filter(|path| sessions::capy::usage_cache_is_eligible(path))
+            .map(|path| {
+                let mut outcome = load_or_parse_source_with_fingerprint(
+                    identity,
+                    path,
+                    source_cache,
+                    pricing,
+                    message_cache::SourceFingerprint::check_path_samples_only,
+                    sessions::capy::parse_capy_file,
+                );
+                machine_labeler.label_messages(path, &mut outcome.messages);
+                outcome
+            })
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        for outcome in outcomes {
+            all_messages.extend(
+                outcome
+                    .messages
+                    .into_iter()
+                    .filter(|message| should_keep_deduped_message(&mut seen, message)),
+            );
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
+        }
+    }
+
     fn uncached_prime_outcome(
         mut messages: Vec<UnifiedMessage>,
         accounting: sessions::prime_agent::PrimeFileAccounting,
@@ -4065,14 +4107,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
     );
 
     // Capy usage-series rows cached by `tokscale capy sync`.
-    parse_cached_lane_deduped(
+    parse_cached_capy_lane(
         &scan_result,
         &mut source_cache,
         pricing,
         &mut all_messages,
         &machine_labeler,
-        ClientId::Capy,
-        sessions::capy::parse_capy_file,
     );
 
     let grok_outcomes: Vec<CachedParseOutcome> = scan_result

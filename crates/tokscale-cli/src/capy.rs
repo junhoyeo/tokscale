@@ -14,6 +14,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokscale_core::sessions::capy::{credentials_identity, CapyCredentials};
 
 const CAPY_API_BASE: &str = "https://api.capy.ai/api/v1";
 const CAPY_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,17 +30,6 @@ const MAX_ATTEMPTS: u32 = 3;
 /// Implicit syncs before reports are skipped while the cache is younger than
 /// this, so scripted runs do not call Capy on every invocation.
 pub const CAPY_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(10 * 60);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CapyCredentials {
-    api_key: String,
-    /// Restrict sync to these Capy user ids. Empty means every user the key
-    /// can read, which for a personal organization is just its owner.
-    #[serde(default)]
-    user_ids: Vec<String>,
-    created_at: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,11 +111,6 @@ fn write_secret_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
-fn load_saved_credentials() -> Option<CapyCredentials> {
-    let content = fs::read_to_string(credentials_path()).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
 fn env_api_key() -> Option<String> {
     std::env::var(CAPY_API_KEY_ENV)
         .ok()
@@ -136,41 +121,11 @@ fn env_api_key() -> Option<String> {
 /// Saved credentials win over `CAPY_API_KEY` so a `--user` restriction chosen
 /// at login is not silently dropped when the variable is also set.
 fn load_credentials() -> Option<(CapyCredentials, &'static str)> {
-    if let Some(credentials) = load_saved_credentials() {
-        return Some((credentials, "saved"));
-    }
-    env_api_key().map(|api_key| {
-        (
-            CapyCredentials {
-                api_key,
-                user_ids: Vec::new(),
-                created_at: String::new(),
-            },
-            "env",
-        )
-    })
+    tokscale_core::sessions::capy::load_credentials(&get_capy_cache_dir())
 }
 
 pub fn has_credentials() -> bool {
     load_credentials().is_some()
-}
-
-/// Identifies the usage a sync selects: the key (hashed, never stored in the
-/// clear here) and the sorted user filter.
-fn credentials_identity(credentials: &CapyCredentials) -> String {
-    use sha2::{Digest, Sha256};
-    let mut user_ids = credentials.user_ids.clone();
-    user_ids.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(credentials.api_key.trim().as_bytes());
-    hasher.update([0]);
-    hasher.update(user_ids.join(",").as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 pub fn has_usage_cache() -> bool {
@@ -556,7 +511,8 @@ pub fn auto_sync_for_local_report() -> Option<String> {
     ) {
         return None;
     }
-    let had_cache = has_usage_cache();
+    let had_cache =
+        has_usage_cache() && tokscale_core::sessions::capy::usage_cache_is_eligible(&usage_path());
     let result = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(sync_capy_cache()),
         Err(error) => SyncCapyResult {
@@ -654,21 +610,8 @@ pub fn run_capy_login(key: Option<String>, users: Vec<String>) -> Result<()> {
     };
     write_secret_json(&credentials_path(), &credentials)?;
     println!("{}", "  Capy API key saved.".green());
-    // Usage cached under another key or user filter must not be reported as
-    // this login's usage, even until the next sync.
-    let new_identity = credentials_identity(&credentials);
-    if has_usage_cache()
-        && load_usage_cache()
-            .and_then(|cache| cache.identity)
-            .as_deref()
-            != Some(new_identity.as_str())
-    {
-        fs::remove_file(usage_path()).context("Failed to clear the previous Capy usage cache")?;
-        println!(
-            "{}",
-            "  Cleared usage cached under the previous key or user filter.".bright_black()
-        );
-    }
+    // A cache from another scope stays on disk but the shared scope gate keeps
+    // reports from consuming it until a successful sync replaces it.
     println!(
         "{}",
         "  Run `tokscale capy sync` to cache usage (reports also refresh it automatically)."

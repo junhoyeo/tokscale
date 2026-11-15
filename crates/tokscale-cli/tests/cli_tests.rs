@@ -8922,6 +8922,68 @@ fn offline_rejects_network_commands_before_mutating_configuration() {
 }
 
 #[test]
+fn capy_rotated_env_key_excludes_stale_cache_offline_and_after_failed_refresh() {
+    let tmp = TempDir::new().unwrap();
+    prime_override_pricing_cache(&sandbox_config_dir(tmp.path()));
+    let capy_dir = sandbox_config_dir(tmp.path()).join("capy-cache");
+    fs::create_dir_all(&capy_dir).unwrap();
+    let usage_path = capy_dir.join("usage.json");
+    let original = r#"{
+        "version":1,
+        "syncedAt":"2026-11-14T12:00:00Z",
+        "identity":"6b04be6a8213d6b1",
+        "items":[{
+            "start":"2026-11-14T09:00:00Z","end":"2026-11-14T10:00:00Z",
+            "dimensions":{"userId":"account-a","threadId":"account-a-thread","itemType":"llm","model":"openai/gpt-5.5"},
+            "tokens":{"inputTokens":1234,"outputTokens":56,"cacheReadTokens":0,"cacheWriteTokens":0}
+        }]
+    }"#;
+    fs::write(&usage_path, original).unwrap();
+    let report_args = [
+        "--no-spinner",
+        "report",
+        "--no-summarize",
+        "--client",
+        "capy",
+        "--since",
+        "2026-11-14",
+        "--until",
+        "2026-11-14",
+        "--json",
+    ];
+
+    let offline = cmd_with_home(tmp.path())
+        .env("CAPY_API_KEY", "capy_scope_b_synthetic")
+        .arg("--offline")
+        .args(report_args)
+        .output()
+        .unwrap();
+    assert!(
+        offline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offline.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&offline.stdout).contains("account-a-thread"));
+    assert_eq!(fs::read_to_string(&usage_path).unwrap(), original);
+
+    let failed_refresh = cmd_with_home(tmp.path())
+        .env("CAPY_API_KEY", "capy_scope_b_synthetic")
+        .args(report_args)
+        .output()
+        .unwrap();
+    assert!(
+        failed_refresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&failed_refresh.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&failed_refresh.stdout).contains("account-a-thread"));
+    let stderr = String::from_utf8_lossy(&failed_refresh.stderr);
+    assert!(stderr.contains("Capy usage is not included"), "{stderr}");
+    assert!(!stderr.contains("using cached data"), "{stderr}");
+    assert_eq!(fs::read_to_string(&usage_path).unwrap(), original);
+}
+
+#[test]
 fn offline_cold_cache_preserves_unpriced_usage() {
     let tmp = create_temp_fixture_dir_with_pricing_cache(false);
     write_codex_token_session(
