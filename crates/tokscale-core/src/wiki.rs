@@ -205,30 +205,24 @@ impl WikiDb {
         since: Option<i64>,
         until: Option<i64>,
     ) -> Result<usize, WikiError> {
-        let (sql, params_vec) = match (since, until) {
-            (Some(s), Some(u)) => (
-                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at >= ?1 AND created_at < ?2".to_string(),
-                vec![s, u],
-            ),
-            (Some(s), None) => (
-                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at >= ?1".to_string(),
-                vec![s],
-            ),
-            (None, Some(u)) => (
-                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE created_at < ?1".to_string(),
-                vec![u],
-            ),
-            (None, None) => (
-                "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL".to_string(),
-                vec![],
-            ),
-        };
+        self.reset_summaries_in_scope(since, until, None, None)
+    }
 
-        let count = self
-            .conn
-            .execute(&sql, rusqlite::params_from_iter(params_vec.iter()))
-            .map_err(|e| WikiError::Sqlite(e.to_string()))?;
-        Ok(count)
+    /// Reset summaries only in the same scope used to display a report.
+    pub fn reset_summaries_in_scope(
+        &self,
+        since: Option<i64>,
+        until: Option<i64>,
+        workspace: Option<&str>,
+        client: Option<&str>,
+    ) -> Result<usize, WikiError> {
+        let (filter, values) = entry_scope_filter(since, until, workspace, client);
+        let sql = format!(
+            "UPDATE wiki_entries SET title = NULL, task_category = NULL, description = NULL, complexity = NULL, task_group = NULL, summarized_at = NULL, fm_version = NULL WHERE 1=1{filter}"
+        );
+        self.conn
+            .execute(&sql, rusqlite::params_from_iter(values.iter()))
+            .map_err(|e| WikiError::Sqlite(e.to_string()))
     }
 
     pub fn get_unsummarized_session_ids_in_range(
@@ -236,32 +230,26 @@ impl WikiDb {
         since: Option<i64>,
         until: Option<i64>,
     ) -> Result<Vec<String>, WikiError> {
-        let (sql, params_vec) = match (since, until) {
-            (Some(s), Some(u)) => (
-                "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at >= ?1 AND created_at < ?2".to_string(),
-                vec![s, u],
-            ),
-            (Some(s), None) => (
-                "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at >= ?1".to_string(),
-                vec![s],
-            ),
-            (None, Some(u)) => (
-                "SELECT session_id FROM wiki_entries WHERE title IS NULL AND created_at < ?1".to_string(),
-                vec![u],
-            ),
-            (None, None) => (
-                "SELECT session_id FROM wiki_entries WHERE title IS NULL".to_string(),
-                vec![],
-            ),
-        };
+        self.get_unsummarized_session_ids_in_scope(since, until, None, None)
+    }
 
+    /// Select unsummarized sessions without including other workspaces or clients.
+    pub fn get_unsummarized_session_ids_in_scope(
+        &self,
+        since: Option<i64>,
+        until: Option<i64>,
+        workspace: Option<&str>,
+        client: Option<&str>,
+    ) -> Result<Vec<String>, WikiError> {
+        let (filter, values) = entry_scope_filter(since, until, workspace, client);
+        let sql = format!("SELECT session_id FROM wiki_entries WHERE title IS NULL{filter}");
         let mut stmt = self
             .conn
             .prepare(&sql)
             .map_err(|e| WikiError::Sqlite(e.to_string()))?;
 
         let ids = stmt
-            .query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+            .query_map(rusqlite::params_from_iter(values.iter()), |row| {
                 row.get::<_, String>(0)
             })
             .map_err(|e| WikiError::Sqlite(e.to_string()))?
@@ -389,38 +377,16 @@ impl WikiDb {
         workspace: Option<&str>,
         client: Option<&str>,
     ) -> Result<Vec<WikiEntry>, WikiError> {
-        let mut sql = String::from("SELECT * FROM wiki_entries WHERE 1=1");
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-        if let Some(s) = since {
-            sql.push_str(" AND created_at >= ?");
-            param_values.push(Box::new(s));
-        }
-        if let Some(u) = until {
-            sql.push_str(" AND created_at < ?");
-            param_values.push(Box::new(u));
-        }
-        if let Some(w) = workspace {
-            sql.push_str(" AND workspace = ?");
-            param_values.push(Box::new(w.to_string()));
-        }
-        if let Some(c) = client {
-            sql.push_str(" AND client = ?");
-            param_values.push(Box::new(c.to_string()));
-        }
-
-        sql.push_str(" ORDER BY created_at DESC");
+        let (filter, values) = entry_scope_filter(since, until, workspace, client);
+        let sql = format!("SELECT * FROM wiki_entries WHERE 1=1{filter} ORDER BY created_at DESC");
 
         let mut stmt = self
             .conn
             .prepare(&sql)
             .map_err(|e| WikiError::Sqlite(e.to_string()))?;
 
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
+            .query_map(rusqlite::params_from_iter(values.iter()), |row| {
                 let models_str: String = row.get(15)?;
                 let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
 
@@ -528,11 +494,138 @@ pub enum WikiError {
     Serde(String),
 }
 
+// Keep display, rebuild and summarization on the same scope. Date boundaries
+// retain the existing half-open [since, until) contract.
+fn entry_scope_filter(
+    since: Option<i64>,
+    until: Option<i64>,
+    workspace: Option<&str>,
+    client: Option<&str>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut filter = String::new();
+    let mut values = Vec::new();
+    if let Some(since) = since {
+        filter.push_str(" AND created_at >= ?");
+        values.push(since.into());
+    }
+    if let Some(until) = until {
+        filter.push_str(" AND created_at < ?");
+        values.push(until.into());
+    }
+    if let Some(workspace) = workspace {
+        filter.push_str(" AND workspace = ?");
+        values.push(workspace.to_string().into());
+    }
+    if let Some(client) = client {
+        filter.push_str(" AND client = ?");
+        values.push(client.to_string().into());
+    }
+    (filter, values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::paths::test_env::EnvGuard;
     use serial_test::serial;
+
+    fn scope_db() -> WikiDb {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(WikiDb::SCHEMA).unwrap();
+        for (id, client, workspace, time) in [
+            ("before", "opencode", "/wanted", 10),
+            ("boundary", "opencode", "/wanted", 20),
+            ("after", "opencode", "/wanted", 30),
+            ("quoted", "client' OR 1=1 --", "/wanted' OR 1=1 --", 20),
+        ] {
+            conn.execute(
+                "INSERT INTO wiki_entries (session_id, client, workspace, created_at, last_active) VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![id, client, workspace, time],
+            )
+            .unwrap();
+        }
+        WikiDb { conn }
+    }
+
+    #[test]
+    fn scoped_summaries_preserve_date_bounds_and_range_wrappers() {
+        for (since, until, mut expected) in [
+            (None, None, vec!["before", "boundary", "after", "quoted"]),
+            (Some(20), None, vec!["boundary", "after", "quoted"]),
+            (None, Some(20), vec!["before"]),
+            (Some(20), Some(30), vec!["boundary", "quoted"]),
+        ] {
+            expected.sort();
+            let db = scope_db();
+            let mut scoped = db
+                .get_unsummarized_session_ids_in_scope(since, until, None, None)
+                .unwrap();
+            scoped.sort();
+            let mut legacy = db
+                .get_unsummarized_session_ids_in_range(since, until)
+                .unwrap();
+            legacy.sort();
+            assert_eq!(scoped, expected);
+            assert_eq!(legacy, scoped);
+            let mut displayed: Vec<_> = db
+                .query_entries(since, until, None, None)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.session_id)
+                .collect();
+            displayed.sort();
+            assert_eq!(displayed, scoped);
+
+            db.conn
+                .execute("UPDATE wiki_entries SET title = 'cached'", [])
+                .unwrap();
+            assert_eq!(
+                db.reset_summaries_in_range(since, until).unwrap(),
+                expected.len()
+            );
+            let mut reset = db.get_unsummarized_session_ids().unwrap();
+            reset.sort();
+            assert_eq!(reset, expected);
+        }
+    }
+
+    #[test]
+    fn scoped_summaries_treat_quoted_workspace_and_client_values_as_literals() {
+        let db = scope_db();
+        let workspace = Some("/wanted' OR 1=1 --");
+        let client = Some("client' OR 1=1 --");
+        assert_eq!(
+            db.get_unsummarized_session_ids_in_scope(None, None, workspace, client)
+                .unwrap(),
+            ["quoted"]
+        );
+        let entries = db.query_entries(None, None, workspace, client).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id, "quoted");
+        assert!(db
+            .get_unsummarized_session_ids_in_scope(None, None, Some("/missing"), client)
+            .unwrap()
+            .is_empty());
+
+        db.conn
+            .execute("UPDATE wiki_entries SET title = 'cached'", [])
+            .unwrap();
+        assert_eq!(
+            db.reset_summaries_in_scope(None, None, Some("/missing"), None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.reset_summaries_in_scope(None, None, workspace, client)
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.get_unsummarized_session_ids().unwrap(), ["quoted"]);
+        assert_eq!(
+            db.get_entry("boundary").unwrap().unwrap().title.as_deref(),
+            Some("cached")
+        );
+    }
 
     fn guard() -> EnvGuard {
         EnvGuard::capture(&["TOKSCALE_CONFIG_DIR"])
