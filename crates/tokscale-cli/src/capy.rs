@@ -63,6 +63,7 @@ struct CapyStatus {
     credentials_source: Option<&'static str>,
     user_ids: Vec<String>,
     has_cache: bool,
+    cache_eligible: Option<bool>,
     synced_at: Option<String>,
     rows: usize,
     diagnostics: Vec<String>,
@@ -642,16 +643,38 @@ pub fn run_capy_logout(purge_cache: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_status() -> CapyStatus {
-    let credentials = load_credentials();
-    let cache = load_usage_cache();
+fn status_diagnostics(
+    credentials: Option<&CapyCredentials>,
+    cache: Option<&CapyUsageCache>,
+) -> (Option<bool>, Vec<String>) {
+    let cache_eligible = cache.map(|cache| {
+        tokscale_core::sessions::capy::cache_identity_is_eligible(
+            cache.identity.as_deref(),
+            credentials,
+        )
+    });
     let mut diagnostics = Vec::new();
     if credentials.is_none() {
         diagnostics.push("missing API key; run `tokscale capy login`".to_string());
     }
-    if cache.is_none() {
-        diagnostics.push("missing usage cache; run `tokscale capy sync`".to_string());
+    match cache_eligible {
+        None => diagnostics.push("missing usage cache; run `tokscale capy sync`".to_string()),
+        Some(false) => diagnostics.push(
+            "stored usage cache belongs to different credentials; run `tokscale capy sync` to replace it"
+                .to_string(),
+        ),
+        Some(true) => {}
     }
+    (cache_eligible, diagnostics)
+}
+
+fn build_status() -> CapyStatus {
+    let credentials = load_credentials();
+    let cache = load_usage_cache();
+    let (cache_eligible, diagnostics) = status_diagnostics(
+        credentials.as_ref().map(|(credentials, _)| credentials),
+        cache.as_ref(),
+    );
     CapyStatus {
         cache_dir: get_capy_cache_dir().to_string_lossy().to_string(),
         credentials_path: credentials_path().to_string_lossy().to_string(),
@@ -662,6 +685,7 @@ fn build_status() -> CapyStatus {
             .map(|(credentials, _)| credentials.user_ids)
             .unwrap_or_default(),
         has_cache: cache.is_some(),
+        cache_eligible,
         synced_at: cache.as_ref().map(|cache| cache.synced_at.clone()),
         rows: cache.map(|cache| cache.items.len()).unwrap_or(0),
         diagnostics,
@@ -691,15 +715,36 @@ pub fn run_capy_status(json: bool) -> Result<()> {
     println!(
         "  {} {}",
         "Cache:".bright_black(),
-        if status.has_cache {
-            status.usage_path.green()
-        } else {
-            status.usage_path.yellow()
+        match status.cache_eligible {
+            Some(true) => status.usage_path.green(),
+            Some(false) => format!(
+                "{} (stored, unavailable for current credentials)",
+                status.usage_path
+            )
+            .yellow(),
+            None => status.usage_path.yellow(),
         }
     );
     if let Some(synced_at) = &status.synced_at {
-        println!("  {} {}", "Last sync:".bright_black(), synced_at);
-        println!("  {} {}", "Model usage rows:".bright_black(), status.rows);
+        let stored = status.cache_eligible == Some(false);
+        println!(
+            "  {} {}",
+            if stored {
+                "Stored last sync:".bright_black()
+            } else {
+                "Last sync:".bright_black()
+            },
+            synced_at
+        );
+        println!(
+            "  {} {}",
+            if stored {
+                "Stored model usage rows:".bright_black()
+            } else {
+                "Model usage rows:".bright_black()
+            },
+            status.rows
+        );
     }
     for diagnostic in &status.diagnostics {
         println!("{}", format!("  Warning: {diagnostic}").yellow());
@@ -755,6 +800,34 @@ mod tests {
         assert_ne!(base, credentials_identity(&creds("capy_a", &["u1"])));
         assert_ne!(base, credentials_identity(&creds("capy_a", &[])));
         assert!(!base.contains("capy_a"));
+    }
+
+    fn status_cache(identity: Option<String>) -> CapyUsageCache {
+        CapyUsageCache {
+            version: 1,
+            synced_at: "synthetic".to_string(),
+            user_ids: Vec::new(),
+            identity,
+            items: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn status_distinguishes_eligible_and_foreign_scope_caches() {
+        let credentials = creds("capy_scope_a", &[]);
+        let matching = status_cache(Some(credentials_identity(&credentials)));
+        let (eligible, diagnostics) = status_diagnostics(Some(&credentials), Some(&matching));
+        assert_eq!(eligible, Some(true));
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.contains("different credentials")));
+
+        let foreign = status_cache(Some(credentials_identity(&creds("capy_scope_b", &[]))));
+        let (eligible, diagnostics) = status_diagnostics(Some(&credentials), Some(&foreign));
+        assert_eq!(eligible, Some(false));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("different credentials")));
     }
 
     #[cfg(unix)]
