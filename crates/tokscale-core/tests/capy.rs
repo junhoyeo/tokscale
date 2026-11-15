@@ -1,14 +1,17 @@
 mod common;
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serial_test::serial;
 use tokscale_core::pricing::{litellm::ModelPricing, PricingService};
 use tokscale_core::scanner::ScannerSettings;
+use tokscale_core::sessions::capy::{credentials_identity, CapyCredentials};
 use tokscale_core::{
-    parse_local_clients, parse_local_unified_messages_with_pricing_uncached, ClientId,
-    LocalParseOptions,
+    parse_local_clients, parse_local_unified_messages_with_pricing,
+    parse_local_unified_messages_with_pricing_uncached, ClientId, LocalParseOptions,
 };
 
 fn config_dir(home: &Path) -> PathBuf {
@@ -30,6 +33,31 @@ fn write_capy_cache(home: &Path, json: &str) -> PathBuf {
     // The key file shares the directory and must never be parsed as usage.
     fs::write(dir.join("credentials.json"), r#"{"apiKey":"capy_test"}"#).unwrap();
     path
+}
+
+fn write_scoped_capy_cache(home: &Path, identity: Option<&str>) -> PathBuf {
+    let mut cache: serde_json::Value = serde_json::from_str(CACHE).unwrap();
+    if let Some(identity) = identity {
+        cache["identity"] = serde_json::json!(identity);
+    }
+    let path = write_capy_cache(home, &serde_json::to_string(&cache).unwrap());
+    fs::remove_file(path.parent().unwrap().join("credentials.json")).unwrap();
+    path
+}
+
+fn isolate_capy_environment() -> common::EnvGuard {
+    const KEYS: [&str; 5] = [
+        "PRIME_AGENT_SESSION_DIR",
+        "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+        "PRIME_AGENT_CODING_AGENT_DIR",
+        "CAPY_API_KEY",
+        "CAPY_USER",
+    ];
+    let guard = common::EnvGuard::capture(&KEYS);
+    for key in KEYS {
+        std::env::remove_var(key);
+    }
+    guard
 }
 
 fn capy_options(home: &Path) -> LocalParseOptions {
@@ -99,7 +127,9 @@ const CACHE: &str = r#"{
 }"#;
 
 #[tokio::test]
+#[serial]
 async fn capy_cache_is_discovered_parsed_and_priced() {
+    let _guard = isolate_capy_environment();
     let home_dir = common::temp_home();
     let home = home_dir.path();
     write_capy_cache(home, CACHE);
@@ -135,7 +165,9 @@ async fn capy_cache_is_discovered_parsed_and_priced() {
 }
 
 #[tokio::test]
+#[serial]
 async fn missing_capy_cache_yields_no_messages() {
+    let _guard = isolate_capy_environment();
     let home_dir = common::temp_home();
     let home = home_dir.path();
 
@@ -143,4 +175,191 @@ async fn missing_capy_cache_yields_no_messages() {
         .await
         .unwrap();
     assert!(messages.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn midnight_hour_and_daily_residual_survive_cached_and_uncached_dedup() {
+    let _guard = isolate_capy_environment();
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+    write_capy_cache(
+        home,
+        r#"{
+            "version": 1,
+            "syncedAt": "2026-11-14T12:00:00.000Z",
+            "items": [
+                {
+                    "start": "2026-10-14T00:00:00Z",
+                    "end": "2026-10-14T01:00:00Z",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 100, "outputTokens": 10,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                },
+                {
+                    "start": "2026-10-14T00:00:00-00:00",
+                    "end": "2026-10-14T01:00:00+00:00",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 100, "outputTokens": 10,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                },
+                {
+                    "start": "2026-10-14T00:00:00.000Z",
+                    "end": "2026-10-15T00:00:00.000Z",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 200, "outputTokens": 20,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                },
+                {
+                    "start": "2026-10-14T00:00:00+00:00",
+                    "end": "2026-10-15T00:00:00Z",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 200, "outputTokens": 20,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                }
+            ]
+        }"#,
+    );
+
+    let assert_usage = |messages: &[tokscale_core::UnifiedMessage]| {
+        assert_eq!(messages.len(), 2);
+        let mut amounts: Vec<(i64, i64)> = messages
+            .iter()
+            .map(|message| (message.tokens.input, message.tokens.output))
+            .collect();
+        amounts.sort_unstable();
+        assert_eq!(amounts, [(100, 10), (200, 20)]);
+    };
+
+    let uncached = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_usage(&uncached);
+
+    let cold_cached = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_usage(&cold_cached);
+    let warm_cached = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_usage(&warm_cached);
+}
+
+#[tokio::test]
+#[serial]
+async fn active_env_scope_excludes_a_warm_cache_without_mutating_it() {
+    let _guard = isolate_capy_environment();
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+    let usage_path = write_scoped_capy_cache(home, Some("6b04be6a8213d6b1"));
+    let original = fs::read(&usage_path).unwrap();
+
+    std::env::set_var("CAPY_API_KEY", OsStr::new("capy_scope_a_synthetic"));
+    let scope_a = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(scope_a.len(), 2);
+
+    std::env::set_var("CAPY_API_KEY", OsStr::new("capy_scope_b_synthetic"));
+    let warm_scope_b = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert!(warm_scope_b.is_empty());
+    let cold_scope_b = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+        .await
+        .unwrap();
+    assert!(cold_scope_b.is_empty());
+    assert_eq!(fs::read(&usage_path).unwrap(), original);
+}
+
+#[tokio::test]
+#[serial]
+async fn active_scope_rejects_missing_or_opaque_identity_but_logout_retains_cache() {
+    let _guard = isolate_capy_environment();
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+    let usage_path = write_scoped_capy_cache(home, None);
+    std::env::set_var("CAPY_API_KEY", OsStr::new("capy_scope_a_synthetic"));
+
+    let missing = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+        .await
+        .unwrap();
+    assert!(missing.is_empty());
+
+    let mut cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(&usage_path).unwrap()).unwrap();
+    cache["identity"] = serde_json::json!("opaque-old-cache");
+    fs::write(&usage_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    let opaque = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+        .await
+        .unwrap();
+    assert!(opaque.is_empty());
+
+    std::env::remove_var("CAPY_API_KEY");
+    let retained = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn saved_credentials_and_user_filter_outrank_env_scope() {
+    let _guard = isolate_capy_environment();
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+    let credentials_path = config_dir(home).join("capy-cache/credentials.json");
+    let saved_scope = CapyCredentials {
+        api_key: "saved_scope_synthetic".to_string(),
+        user_ids: vec!["user_1".to_string()],
+        created_at: "synthetic".to_string(),
+    };
+    let usage_path = write_scoped_capy_cache(home, Some(&credentials_identity(&saved_scope)));
+    fs::write(
+        &credentials_path,
+        r#"{"apiKey":"saved_scope_synthetic","userIds":["user_1"],"createdAt":"synthetic"}"#,
+    )
+    .unwrap();
+    let original_usage = fs::read(&usage_path).unwrap();
+    std::env::set_var("CAPY_API_KEY", OsStr::new("env_scope_synthetic"));
+
+    let cold_saved_scope = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(cold_saved_scope.len(), 2);
+    let warm_saved_scope = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(warm_saved_scope, cold_saved_scope);
+
+    let filtered_scope = CapyCredentials {
+        user_ids: vec!["user_2".to_string()],
+        ..saved_scope.clone()
+    };
+    fs::write(
+        &credentials_path,
+        serde_json::to_vec(&filtered_scope).unwrap(),
+    )
+    .unwrap();
+    let warm_filtered = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert!(warm_filtered.is_empty());
+    let cold_filtered =
+        parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+            .await
+            .unwrap();
+    assert!(cold_filtered.is_empty());
+    assert_eq!(fs::read(&usage_path).unwrap(), original_usage);
+
+    fs::write(&credentials_path, serde_json::to_vec(&saved_scope).unwrap()).unwrap();
+    let restored = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_eq!(restored, cold_saved_scope);
 }

@@ -7368,7 +7368,7 @@ fn run_submit_command(
         .is_none_or(|s| s.iter().any(|src| src == "capy"));
     if include_capy && capy::has_credentials() {
         println!("{}", "  Syncing Capy usage data...".bright_black());
-        let had_capy_cache = capy::has_usage_cache();
+        let had_capy_cache = capy::has_reportable_usage_cache();
         let rt_sync = Runtime::new()?;
         let sync_result = rt_sync.block_on(capy::sync_capy_cache());
         if sync_result.synced {

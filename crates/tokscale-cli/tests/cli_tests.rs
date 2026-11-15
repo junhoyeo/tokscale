@@ -8922,6 +8922,140 @@ fn offline_rejects_network_commands_before_mutating_configuration() {
 }
 
 #[test]
+fn capy_rotated_env_key_excludes_stale_cache_offline_and_after_failed_refresh() {
+    let tmp = TempDir::new().unwrap();
+    prime_override_pricing_cache(&sandbox_config_dir(tmp.path()));
+    let capy_dir = sandbox_config_dir(tmp.path()).join("capy-cache");
+    fs::create_dir_all(&capy_dir).unwrap();
+    let usage_path = capy_dir.join("usage.json");
+    let original = r#"{
+        "version":1,
+        "syncedAt":"2026-11-14T12:00:00Z",
+        "identity":"6b04be6a8213d6b1",
+        "items":[{
+            "start":"2026-11-14T09:00:00Z","end":"2026-11-14T10:00:00Z",
+            "dimensions":{"userId":"account-a","threadId":"account-a-thread","itemType":"llm","model":"openai/gpt-5.5"},
+            "tokens":{"inputTokens":1234,"outputTokens":56,"cacheReadTokens":0,"cacheWriteTokens":0}
+        }]
+    }"#;
+    fs::write(&usage_path, original).unwrap();
+    let report_args = [
+        "--no-spinner",
+        "report",
+        "--no-summarize",
+        "--client",
+        "capy",
+        "--since",
+        "2026-11-14",
+        "--until",
+        "2026-11-14",
+        "--json",
+    ];
+
+    let matching_tmp = TempDir::new().unwrap();
+    prime_override_pricing_cache(&sandbox_config_dir(matching_tmp.path()));
+    let matching_capy_dir = sandbox_config_dir(matching_tmp.path()).join("capy-cache");
+    fs::create_dir_all(&matching_capy_dir).unwrap();
+    fs::write(matching_capy_dir.join("usage.json"), original).unwrap();
+    let matching = cmd_with_home(matching_tmp.path())
+        .env("CAPY_API_KEY", "capy_scope_a_synthetic")
+        .arg("--offline")
+        .args(report_args)
+        .output()
+        .unwrap();
+    assert!(
+        matching.status.success(),
+        "{}",
+        String::from_utf8_lossy(&matching.stderr)
+    );
+    let matching_json: serde_json::Value = serde_json::from_slice(&matching.stdout).unwrap();
+    let matching_rows = matching_json.as_array().unwrap();
+    assert_eq!(matching_rows.len(), 1);
+    assert_eq!(
+        matching_rows[0]["session_id"].as_str(),
+        Some("capy-account-a-thread")
+    );
+    assert_eq!(matching_rows[0]["total_input_tokens"].as_i64(), Some(1234));
+    assert_eq!(matching_rows[0]["total_output_tokens"].as_i64(), Some(56));
+
+    let offline = cmd_with_home(tmp.path())
+        .env("CAPY_API_KEY", "capy_scope_b_synthetic")
+        .arg("--offline")
+        .args(report_args)
+        .output()
+        .unwrap();
+    assert!(
+        offline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offline.stderr)
+    );
+    let offline_json: serde_json::Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(offline_json.as_array().unwrap().len(), 0);
+    assert_eq!(fs::read_to_string(&usage_path).unwrap(), original);
+
+    let failed_refresh = cmd_with_home(tmp.path())
+        .env("CAPY_API_KEY", "capy_scope_b_synthetic")
+        .args(report_args)
+        .output()
+        .unwrap();
+    assert!(
+        failed_refresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&failed_refresh.stderr)
+    );
+    let failed_json: serde_json::Value = serde_json::from_slice(&failed_refresh.stdout).unwrap();
+    assert_eq!(failed_json.as_array().unwrap().len(), 0);
+    let stderr = String::from_utf8_lossy(&failed_refresh.stderr);
+    assert!(stderr.contains("Capy usage is not included"), "{stderr}");
+    assert!(!stderr.contains("using cached data"), "{stderr}");
+    assert_eq!(fs::read_to_string(&usage_path).unwrap(), original);
+}
+
+#[test]
+fn capy_submit_failed_refresh_does_not_promise_foreign_cached_usage() {
+    let tmp = TempDir::new().unwrap();
+    prime_override_pricing_cache(&sandbox_config_dir(tmp.path()));
+    let capy_dir = sandbox_config_dir(tmp.path()).join("capy-cache");
+    fs::create_dir_all(&capy_dir).unwrap();
+    let usage_path = capy_dir.join("usage.json");
+    let original = r#"{
+        "version":1,
+        "syncedAt":"2026-11-14T12:00:00Z",
+        "identity":"6b04be6a8213d6b1",
+        "items":[{
+            "start":"2026-11-14T09:00:00Z","end":"2026-11-14T10:00:00Z",
+            "dimensions":{"userId":"account-a","threadId":"account-a-thread","itemType":"llm","model":"openai/gpt-5.5"},
+            "tokens":{"inputTokens":1234,"outputTokens":56,"cacheReadTokens":0,"cacheWriteTokens":0}
+        }]
+    }"#;
+    fs::write(&usage_path, original).unwrap();
+
+    let output = cmd_with_home(tmp.path())
+        .env("CAPY_API_KEY", "capy_scope_b_synthetic")
+        .env("TOKSCALE_API_TOKEN", "synthetic-token")
+        .args(["--no-spinner", "submit", "--client", "capy", "--dry-run"])
+        .output()
+        .unwrap();
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{rendered}");
+    assert!(
+        rendered.contains("Capy sync failed; Capy usage is not included:"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("No usage data found to submit."),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Total tokens: 0"), "{rendered}");
+    assert!(!rendered.contains("using cached data"), "{rendered}");
+    assert_eq!(fs::read_to_string(&usage_path).unwrap(), original);
+}
+
+#[test]
 fn offline_cold_cache_preserves_unpriced_usage() {
     let tmp = create_temp_fixture_dir_with_pricing_cache(false);
     write_codex_token_session(

@@ -14,6 +14,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokscale_core::sessions::capy::{credentials_identity, CapyCredentials};
 
 const CAPY_API_BASE: &str = "https://api.capy.ai/api/v1";
 const CAPY_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,28 +31,19 @@ const MAX_ATTEMPTS: u32 = 3;
 /// this, so scripted runs do not call Capy on every invocation.
 pub const CAPY_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CapyCredentials {
-    api_key: String,
-    /// Restrict sync to these Capy user ids. Empty means every user the key
-    /// can read, which for a personal organization is just its owner.
-    #[serde(default)]
-    user_ids: Vec<String>,
-    created_at: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CapyUsageCache {
     version: i32,
     synced_at: String,
-    #[serde(default)]
-    user_ids: Vec<String>,
     /// Fingerprint of the API key and user filter that produced `items`, so a
     /// cache written under other credentials is never treated as current.
+    /// Keep this before variable-size fields: core admits cache scope from a
+    /// bounded JSON prefix and stops before `userIds` and `items`.
     #[serde(default)]
     identity: Option<String>,
+    #[serde(default)]
+    user_ids: Vec<String>,
     items: Vec<Value>,
 }
 
@@ -73,6 +65,7 @@ struct CapyStatus {
     credentials_source: Option<&'static str>,
     user_ids: Vec<String>,
     has_cache: bool,
+    cache_eligible: Option<bool>,
     synced_at: Option<String>,
     rows: usize,
     diagnostics: Vec<String>,
@@ -121,11 +114,6 @@ fn write_secret_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
-fn load_saved_credentials() -> Option<CapyCredentials> {
-    let content = fs::read_to_string(credentials_path()).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
 fn env_api_key() -> Option<String> {
     std::env::var(CAPY_API_KEY_ENV)
         .ok()
@@ -136,45 +124,19 @@ fn env_api_key() -> Option<String> {
 /// Saved credentials win over `CAPY_API_KEY` so a `--user` restriction chosen
 /// at login is not silently dropped when the variable is also set.
 fn load_credentials() -> Option<(CapyCredentials, &'static str)> {
-    if let Some(credentials) = load_saved_credentials() {
-        return Some((credentials, "saved"));
-    }
-    env_api_key().map(|api_key| {
-        (
-            CapyCredentials {
-                api_key,
-                user_ids: Vec::new(),
-                created_at: String::new(),
-            },
-            "env",
-        )
-    })
+    tokscale_core::sessions::capy::load_credentials(&get_capy_cache_dir())
 }
 
 pub fn has_credentials() -> bool {
     load_credentials().is_some()
 }
 
-/// Identifies the usage a sync selects: the key (hashed, never stored in the
-/// clear here) and the sorted user filter.
-fn credentials_identity(credentials: &CapyCredentials) -> String {
-    use sha2::{Digest, Sha256};
-    let mut user_ids = credentials.user_ids.clone();
-    user_ids.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(credentials.api_key.trim().as_bytes());
-    hasher.update([0]);
-    hasher.update(user_ids.join(",").as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 pub fn has_usage_cache() -> bool {
     usage_path().is_file()
+}
+
+pub fn has_reportable_usage_cache() -> bool {
+    has_usage_cache() && tokscale_core::sessions::capy::usage_cache_is_eligible(&usage_path())
 }
 
 fn load_usage_cache() -> Option<CapyUsageCache> {
@@ -547,7 +509,7 @@ pub fn auto_sync_for_local_report() -> Option<String> {
         return None;
     }
     let (credentials, _) = load_credentials()?;
-    let cache_identity = load_usage_cache().and_then(|cache| cache.identity);
+    let cache_identity = tokscale_core::sessions::capy::usage_cache_identity(&usage_path());
     if cache_is_current(
         cache_identity.as_deref(),
         usage_cache_age(),
@@ -556,7 +518,11 @@ pub fn auto_sync_for_local_report() -> Option<String> {
     ) {
         return None;
     }
-    let had_cache = has_usage_cache();
+    let had_cache = has_usage_cache()
+        && tokscale_core::sessions::capy::cache_identity_is_eligible(
+            cache_identity.as_deref(),
+            Some(&credentials),
+        );
     let result = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(sync_capy_cache()),
         Err(error) => SyncCapyResult {
@@ -654,21 +620,8 @@ pub fn run_capy_login(key: Option<String>, users: Vec<String>) -> Result<()> {
     };
     write_secret_json(&credentials_path(), &credentials)?;
     println!("{}", "  Capy API key saved.".green());
-    // Usage cached under another key or user filter must not be reported as
-    // this login's usage, even until the next sync.
-    let new_identity = credentials_identity(&credentials);
-    if has_usage_cache()
-        && load_usage_cache()
-            .and_then(|cache| cache.identity)
-            .as_deref()
-            != Some(new_identity.as_str())
-    {
-        fs::remove_file(usage_path()).context("Failed to clear the previous Capy usage cache")?;
-        println!(
-            "{}",
-            "  Cleared usage cached under the previous key or user filter.".bright_black()
-        );
-    }
+    // A cache from another scope stays on disk but the shared scope gate keeps
+    // reports from consuming it until a successful sync replaces it.
     println!(
         "{}",
         "  Run `tokscale capy sync` to cache usage (reports also refresh it automatically)."
@@ -692,16 +645,38 @@ pub fn run_capy_logout(purge_cache: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_status() -> CapyStatus {
-    let credentials = load_credentials();
-    let cache = load_usage_cache();
+fn status_diagnostics(
+    credentials: Option<&CapyCredentials>,
+    cache: Option<&CapyUsageCache>,
+) -> (Option<bool>, Vec<String>) {
+    let cache_eligible = cache.map(|cache| {
+        tokscale_core::sessions::capy::cache_identity_is_eligible(
+            cache.identity.as_deref(),
+            credentials,
+        )
+    });
     let mut diagnostics = Vec::new();
     if credentials.is_none() {
         diagnostics.push("missing API key; run `tokscale capy login`".to_string());
     }
-    if cache.is_none() {
-        diagnostics.push("missing usage cache; run `tokscale capy sync`".to_string());
+    match cache_eligible {
+        None => diagnostics.push("missing usage cache; run `tokscale capy sync`".to_string()),
+        Some(false) => diagnostics.push(
+            "stored usage cache belongs to different credentials; run `tokscale capy sync` to replace it"
+                .to_string(),
+        ),
+        Some(true) => {}
     }
+    (cache_eligible, diagnostics)
+}
+
+fn build_status() -> CapyStatus {
+    let credentials = load_credentials();
+    let cache = load_usage_cache();
+    let (cache_eligible, diagnostics) = status_diagnostics(
+        credentials.as_ref().map(|(credentials, _)| credentials),
+        cache.as_ref(),
+    );
     CapyStatus {
         cache_dir: get_capy_cache_dir().to_string_lossy().to_string(),
         credentials_path: credentials_path().to_string_lossy().to_string(),
@@ -712,6 +687,7 @@ fn build_status() -> CapyStatus {
             .map(|(credentials, _)| credentials.user_ids)
             .unwrap_or_default(),
         has_cache: cache.is_some(),
+        cache_eligible,
         synced_at: cache.as_ref().map(|cache| cache.synced_at.clone()),
         rows: cache.map(|cache| cache.items.len()).unwrap_or(0),
         diagnostics,
@@ -741,15 +717,36 @@ pub fn run_capy_status(json: bool) -> Result<()> {
     println!(
         "  {} {}",
         "Cache:".bright_black(),
-        if status.has_cache {
-            status.usage_path.green()
-        } else {
-            status.usage_path.yellow()
+        match status.cache_eligible {
+            Some(true) => status.usage_path.green(),
+            Some(false) => format!(
+                "{} (stored, unavailable for current credentials)",
+                status.usage_path
+            )
+            .yellow(),
+            None => status.usage_path.yellow(),
         }
     );
     if let Some(synced_at) = &status.synced_at {
-        println!("  {} {}", "Last sync:".bright_black(), synced_at);
-        println!("  {} {}", "Model usage rows:".bright_black(), status.rows);
+        let stored = status.cache_eligible == Some(false);
+        println!(
+            "  {} {}",
+            if stored {
+                "Stored last sync:".bright_black()
+            } else {
+                "Last sync:".bright_black()
+            },
+            synced_at
+        );
+        println!(
+            "  {} {}",
+            if stored {
+                "Stored model usage rows:".bright_black()
+            } else {
+                "Model usage rows:".bright_black()
+            },
+            status.rows
+        );
     }
     for diagnostic in &status.diagnostics {
         println!("{}", format!("  Warning: {diagnostic}").yellow());
@@ -805,6 +802,71 @@ mod tests {
         assert_ne!(base, credentials_identity(&creds("capy_a", &["u1"])));
         assert_ne!(base, credentials_identity(&creds("capy_a", &[])));
         assert!(!base.contains("capy_a"));
+    }
+
+    #[test]
+    fn usage_cache_writer_places_identity_before_variable_fields() {
+        let cache = CapyUsageCache {
+            version: 1,
+            synced_at: "synthetic".to_string(),
+            user_ids: vec!["u".repeat(70 * 1024)],
+            identity: Some("scope-a".to_string()),
+            items: Vec::new(),
+        };
+        let serialized = serde_json::to_string(&cache).unwrap();
+        let identity = serialized.find(r#""identity""#).unwrap();
+        let user_ids = serialized.find(r#""userIds""#).unwrap();
+        let items = serialized.find(r#""items""#).unwrap();
+        assert!(identity < user_ids);
+        assert!(identity < items);
+    }
+
+    fn status_cache(identity: Option<String>) -> CapyUsageCache {
+        CapyUsageCache {
+            version: 1,
+            synced_at: "synthetic".to_string(),
+            user_ids: Vec::new(),
+            identity,
+            items: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn status_distinguishes_eligible_and_foreign_scope_caches() {
+        let credentials = creds("capy_scope_a", &[]);
+        let matching = status_cache(Some(credentials_identity(&credentials)));
+        let (eligible, diagnostics) = status_diagnostics(Some(&credentials), Some(&matching));
+        assert_eq!(eligible, Some(true));
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.contains("different credentials")));
+
+        let foreign = status_cache(Some(credentials_identity(&creds("capy_scope_b", &[]))));
+        let (eligible, diagnostics) = status_diagnostics(Some(&credentials), Some(&foreign));
+        assert_eq!(eligible, Some(false));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("different credentials")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credentials_serialization_remains_0600_file_compatible() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("credentials.json");
+        let credentials = creds("capy_synthetic_secret", &["user_1"]);
+        let json = serde_json::to_vec_pretty(&credentials).unwrap();
+        crate::commands::usage::helpers::atomic_write_secret(&path, &json).unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let restored: CapyCredentials = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.api_key, credentials.api_key);
+        assert_eq!(restored.user_ids, credentials.user_ids);
     }
 
     #[test]

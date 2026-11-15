@@ -18,7 +18,12 @@ use super::UnifiedMessage;
 use crate::provider_identity::inferred_provider_from_model_delimited;
 use crate::TokenBreakdown;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer as _, Serialize};
+use sha2::{Digest, Sha256};
+use std::fmt;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 pub const CLIENT_ID: &str = "capy";
@@ -28,6 +33,29 @@ pub const CLIENT_ID: &str = "capy";
 /// are placed at the bucket's midpoint instead. Hour rows keep their start.
 const DAY_BUCKET_MIDPOINT_MS: i64 = 12 * 60 * 60 * 1000;
 const HOUR_MS: i64 = 60 * 60 * 1000;
+const CAPY_API_KEY_ENV: &str = "CAPY_API_KEY";
+const IDENTITY_SCAN_LIMIT: u64 = 64 * 1024;
+const IDENTITY_READER_CAPACITY: usize = 4 * 1024;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapyCredentials {
+    pub api_key: String,
+    #[serde(default)]
+    pub user_ids: Vec<String>,
+    pub created_at: String,
+}
+
+impl std::fmt::Debug for CapyCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CapyCredentials")
+            .field("api_key", &"[REDACTED]")
+            .field("user_ids", &self.user_ids)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,7 +121,159 @@ where
     })
 }
 
+/// Load the credential scope that applies to a Capy cache directory. Saved
+/// credentials outrank the environment so a persisted `--user` filter cannot
+/// be dropped by an ambient API key.
+pub fn load_credentials(cache_dir: &Path) -> Option<(CapyCredentials, &'static str)> {
+    let saved = std::fs::read_to_string(cache_dir.join("credentials.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok());
+    if let Some(credentials) = saved {
+        return Some((credentials, "saved"));
+    }
+    std::env::var(CAPY_API_KEY_ENV)
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .map(|api_key| {
+            (
+                CapyCredentials {
+                    api_key,
+                    user_ids: Vec::new(),
+                    created_at: String::new(),
+                },
+                "env",
+            )
+        })
+}
+
+/// Identifies the API key and sorted user selection without persisting the key.
+pub fn credentials_identity(credentials: &CapyCredentials) -> String {
+    let mut user_ids = credentials.user_ids.clone();
+    user_ids.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(credentials.api_key.trim().as_bytes());
+    hasher.update([0]);
+    hasher.update(user_ids.join(",").as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+struct CapyUsageIdentityVisitor<'a> {
+    identity: &'a mut Option<String>,
+}
+
+impl<'de> Visitor<'de> for CapyUsageIdentityVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Capy usage cache object with identity before items")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "identity" => {
+                    *self.identity = map
+                        .next_value::<Option<String>>()?
+                        .filter(|identity| !identity.trim().is_empty());
+                    // Stop before `items`. The caller intentionally ignores this
+                    // controlled error and uses the captured identity.
+                    return Err(serde::de::Error::custom("Capy identity captured"));
+                }
+                "items" => {
+                    // The writer always puts identity before items. Do not scan
+                    // an unbounded array to recover a reordered/malformed cache.
+                    return Err(serde::de::Error::custom(
+                        "Capy items reached before identity",
+                    ));
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn usage_cache_identity_from_reader<R: Read>(reader: R) -> Option<String> {
+    let limited = reader.take(IDENTITY_SCAN_LIMIT);
+    let buffered = BufReader::with_capacity(IDENTITY_READER_CAPACITY, limited);
+    let mut deserializer = serde_json::Deserializer::from_reader(buffered);
+    let mut identity = None;
+    let _ = deserializer.deserialize_map(CapyUsageIdentityVisitor {
+        identity: &mut identity,
+    });
+    identity
+}
+
+/// Read only the bounded metadata prefix. The CLI writer keeps `identity`
+/// before both variable-size fields (`userIds` and `items`) so every cache it
+/// writes can be admitted without scanning either field.
+pub fn usage_cache_identity(path: &Path) -> Option<String> {
+    usage_cache_identity_from_reader(File::open(path).ok()?)
+}
+
+/// Evaluate already-read cache metadata against an optional active scope.
+pub fn cache_identity_is_eligible(
+    cache_identity: Option<&str>,
+    credentials: Option<&CapyCredentials>,
+) -> bool {
+    credentials.is_none_or(|credentials| {
+        cache_identity == Some(credentials_identity(credentials).as_str())
+    })
+}
+
+/// A cache is reportable when it belongs to the active credential scope. With
+/// no active credentials, the retained cache remains intentionally reportable.
+pub fn usage_cache_is_eligible(path: &Path) -> bool {
+    let Some(cache_dir) = path.parent() else {
+        return false;
+    };
+    let Some((credentials, _)) = load_credentials(cache_dir) else {
+        return true;
+    };
+    cache_identity_is_eligible(usage_cache_identity(path).as_deref(), Some(&credentials))
+}
+
+/// Capy-specific key for aggregate caches. It changes when the active scope
+/// changes or when a cache moves between eligible and ineligible states.
+pub fn report_scope_identity(path: &Path) -> String {
+    let active = path
+        .parent()
+        .and_then(load_credentials)
+        .map(|(credentials, _)| credentials_identity(&credentials));
+    let cached = usage_cache_identity(path);
+    match active {
+        Some(active) if cached.as_deref() == Some(active.as_str()) => {
+            format!("active:{active}:eligible")
+        }
+        Some(active) => format!("active:{active}:ineligible"),
+        None => match cached {
+            Some(cached) => {
+                let digest = Sha256::digest(cached.as_bytes());
+                format!(
+                    "retained:{:02x}{:02x}{:02x}{:02x}",
+                    digest[0], digest[1], digest[2], digest[3]
+                )
+            }
+            None => "retained:unscoped".to_string(),
+        },
+    }
+}
+
 pub fn parse_capy_file(path: &Path) -> Vec<UnifiedMessage> {
+    if !usage_cache_is_eligible(path) {
+        return Vec::new();
+    }
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -156,10 +336,18 @@ fn row_to_message(row: &CapyUsageRow) -> Option<UnifiedMessage> {
     let mut message = UnifiedMessage::new(
         CLIENT_ID, model, provider, session_id, timestamp, breakdown, 0.0,
     );
-    message.dedup_key = Some(format!(
-        "capy:{}:{}:{}:{}",
-        row.start, user, thread, raw_model
-    ));
+    let granularity = match end.map(|end| end - start) {
+        Some(duration) if duration <= HOUR_MS => "hour",
+        Some(_) => "day",
+        None => "unknown",
+    };
+    // Use normalized interval boundaries rather than the source strings so
+    // equivalent RFC 3339 offsets deduplicate, while a midnight hour and its
+    // residual day bucket remain distinct. JSON tuple encoding keeps arbitrary
+    // user/thread/model strings from creating delimiter collisions.
+    let interval_key = serde_json::to_string(&(start, end, granularity, user, thread, raw_model))
+        .expect("Capy dedup tuple is serializable");
+    message.dedup_key = Some(format!("capy:{interval_key}"));
     Some(message)
 }
 
@@ -189,7 +377,9 @@ fn parse_rfc3339_millis(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::cell::Cell;
+    use std::io::{Cursor, Read, Write};
+    use std::rc::Rc;
 
     fn parse_json(json: &str) -> Vec<UnifiedMessage> {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -302,6 +492,93 @@ mod tests {
             assert_eq!(model, raw);
         }
         assert_eq!(split_model("gpt-5.5").0, "openai");
+    }
+
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: Rc<Cell<usize>>,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.bytes_read.set(self.bytes_read.get() + read);
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn identity_reader_stops_before_large_items_array() {
+        let padding = "x".repeat(2 * 1024 * 1024);
+        let json = format!(
+            r#"{{"version":1,"syncedAt":"synthetic","userIds":[],"identity":"scope-a","items":[{{"padding":"{padding}"}}]}}"#
+        );
+        let bytes_read = Rc::new(Cell::new(0));
+        let reader = CountingReader {
+            inner: Cursor::new(json.as_bytes()),
+            bytes_read: Rc::clone(&bytes_read),
+        };
+
+        assert_eq!(
+            usage_cache_identity_from_reader(reader).as_deref(),
+            Some("scope-a")
+        );
+        assert!(json.len() > 2 * 1024 * 1024);
+        assert!(
+            bytes_read.get() <= IDENTITY_READER_CAPACITY,
+            "identity lookup read {} bytes from a {} byte cache",
+            bytes_read.get(),
+            json.len()
+        );
+    }
+
+    #[test]
+    fn scope_admission_reads_identity_without_deserializing_usage_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let credentials = CapyCredentials {
+            api_key: "capy_scope_metadata_synthetic".to_string(),
+            user_ids: vec!["user_1".to_string()],
+            created_at: "synthetic".to_string(),
+        };
+        std::fs::write(
+            directory.path().join("credentials.json"),
+            serde_json::to_vec(&credentials).unwrap(),
+        )
+        .unwrap();
+        let usage = directory.path().join("usage.json");
+        std::fs::write(
+            &usage,
+            serde_json::json!({
+                "identity": credentials_identity(&credentials),
+                "items": "not-an-array"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(usage_cache_is_eligible(&usage));
+        assert!(parse_capy_file(&usage).is_empty());
+    }
+
+    #[test]
+    fn credentials_debug_redacts_api_key_in_plain_and_pretty_formats() {
+        let credentials = CapyCredentials {
+            api_key: "capy_synthetic_secret_123".to_string(),
+            user_ids: vec!["user_1".to_string()],
+            created_at: "2026-11-15T00:00:00Z".to_string(),
+        };
+        for rendered in [format!("{credentials:?}"), format!("{credentials:#?}")] {
+            assert!(!rendered.contains("capy_synthetic_secret_123"));
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(rendered.contains("user_1"));
+        }
+
+        let serialized = serde_json::to_string(&credentials).unwrap();
+        assert!(serialized.contains("capy_synthetic_secret_123"));
+        let restored: CapyCredentials = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.api_key, credentials.api_key);
+        assert_eq!(restored.user_ids, credentials.user_ids);
+        assert_eq!(restored.created_at, credentials.created_at);
     }
 
     #[test]

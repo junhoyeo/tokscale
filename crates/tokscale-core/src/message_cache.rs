@@ -2297,7 +2297,9 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: extract workspace key from project ancestors avoiding
         // subagents and canonicalize BYOK/managed provider metadata.
         ClientId::Qoder => crate::sessions::qoder::QODER_PARSER_BASE_VERSION,
-        ClientId::Capy => 1,
+        // v2: dedup keys include canonical interval end/granularity so a
+        // carried midnight hour does not suppress its residual daily row.
+        ClientId::Capy => 2,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
@@ -6768,6 +6770,101 @@ mod tests {
             let entry = persisted.get(identity, &wire_path).unwrap();
             assert_eq!(entry.messages, cached_messages);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn capy_v2_rebuilds_persisted_v1_midnight_undercount() {
+        let home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(home.path());
+        let capy_dir = PathBuf::from(
+            ClientId::Capy
+                .data()
+                .resolve_path_with_env_strategy(home.path().to_str().unwrap(), false),
+        );
+        fs::create_dir_all(&capy_dir).unwrap();
+        let source = capy_dir.join("usage.json");
+        fs::write(
+            &source,
+            r#"{
+                "version": 1,
+                "items": [
+                    {
+                        "start": "2026-10-14T00:00:00Z",
+                        "end": "2026-10-14T01:00:00Z",
+                        "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                            "model": "openai/gpt-5.5"},
+                        "tokens": {"inputTokens": 100, "outputTokens": 10,
+                            "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                    },
+                    {
+                        "start": "2026-10-14T00:00:00Z",
+                        "end": "2026-10-15T00:00:00Z",
+                        "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                            "model": "openai/gpt-5.5"},
+                        "tokens": {"inputTokens": 200, "outputTokens": 20,
+                            "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let current = CacheIdentity::for_client(ClientId::Capy);
+        assert_eq!(current.parser_version, 2);
+        let predecessor = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 1,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let mut undercount = crate::sessions::capy::parse_capy_file(&source);
+        assert_eq!(undercount.len(), 2);
+        undercount.retain(|message| message.tokens.input == 100);
+        assert_eq!(undercount.len(), 1);
+        let legacy_entry = CachedSourceEntry::new(
+            predecessor,
+            &source,
+            fingerprint.clone(),
+            undercount,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(current, &source);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, predecessor, &[legacy_entry], MAX_CACHE_SHARD_BYTES)
+            .unwrap();
+        assert!(matches!(
+            read_shard(&shard, current),
+            ShardReadStatus::Stale
+        ));
+
+        let scan = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                home.path().to_str().unwrap(),
+                &["capy".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let rebuilt = scan();
+        assert_eq!(rebuilt.len(), 2);
+        let mut totals: Vec<_> = rebuilt
+            .iter()
+            .map(|message| (message.tokens.input, message.tokens.output))
+            .collect();
+        totals.sort_unstable();
+        assert_eq!(totals, [(100, 10), (200, 20)]);
+
+        let persisted = SourceMessageCache::load();
+        let entry = persisted.get(current, &source).unwrap();
+        assert_eq!(entry.parser_version, 2);
+        assert!(matches!(
+            SourceFingerprint::check_path_samples_only(&source, Some(&entry.fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+        assert_eq!(entry.messages.len(), 2);
+        assert_eq!(scan(), rebuilt, "the rebuilt v2 entry must be a warm hit");
     }
 
     /// Successive parser changes each need their own version. #1285 took v2
