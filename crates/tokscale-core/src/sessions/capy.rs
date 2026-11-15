@@ -55,9 +55,13 @@ impl std::fmt::Debug for CapyCredentials {
 #[serde(rename_all = "camelCase")]
 struct CapyUsageCache {
     #[serde(default)]
-    identity: Option<String>,
-    #[serde(default)]
     items: Vec<CapyUsageRow>,
+}
+
+#[derive(Deserialize)]
+struct CapyUsageCacheMetadata {
+    #[serde(default)]
+    identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,7 +165,7 @@ pub fn credentials_identity(credentials: &CapyCredentials) -> String {
 
 fn cache_identity(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<CapyUsageCache>(&content)
+    serde_json::from_str::<CapyUsageCacheMetadata>(&content)
         .ok()?
         .identity
 }
@@ -424,6 +428,34 @@ mod tests {
             assert_eq!(model, raw);
         }
         assert_eq!(split_model("gpt-5.5").0, "openai");
+    }
+
+    #[test]
+    fn scope_admission_reads_identity_without_deserializing_usage_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let credentials = CapyCredentials {
+            api_key: "capy_scope_metadata_synthetic".to_string(),
+            user_ids: vec!["user_1".to_string()],
+            created_at: "synthetic".to_string(),
+        };
+        std::fs::write(
+            directory.path().join("credentials.json"),
+            serde_json::to_vec(&credentials).unwrap(),
+        )
+        .unwrap();
+        let usage = directory.path().join("usage.json");
+        std::fs::write(
+            &usage,
+            serde_json::json!({
+                "identity": credentials_identity(&credentials),
+                "items": "not-an-array"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(usage_cache_is_eligible(&usage));
+        assert!(parse_capy_file(&usage).is_empty());
     }
 
     #[test]
