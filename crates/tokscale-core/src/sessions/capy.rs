@@ -31,13 +31,24 @@ const DAY_BUCKET_MIDPOINT_MS: i64 = 12 * 60 * 60 * 1000;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const CAPY_API_KEY_ENV: &str = "CAPY_API_KEY";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapyCredentials {
     pub api_key: String,
     #[serde(default)]
     pub user_ids: Vec<String>,
     pub created_at: String,
+}
+
+impl std::fmt::Debug for CapyCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CapyCredentials")
+            .field("api_key", &"[REDACTED]")
+            .field("user_ids", &self.user_ids)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -413,6 +424,27 @@ mod tests {
             assert_eq!(model, raw);
         }
         assert_eq!(split_model("gpt-5.5").0, "openai");
+    }
+
+    #[test]
+    fn credentials_debug_redacts_api_key_in_plain_and_pretty_formats() {
+        let credentials = CapyCredentials {
+            api_key: "capy_synthetic_secret_123".to_string(),
+            user_ids: vec!["user_1".to_string()],
+            created_at: "2026-11-15T00:00:00Z".to_string(),
+        };
+        for rendered in [format!("{credentials:?}"), format!("{credentials:#?}")] {
+            assert!(!rendered.contains("capy_synthetic_secret_123"));
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(rendered.contains("user_1"));
+        }
+
+        let serialized = serde_json::to_string(&credentials).unwrap();
+        assert!(serialized.contains("capy_synthetic_secret_123"));
+        let restored: CapyCredentials = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.api_key, credentials.api_key);
+        assert_eq!(restored.user_ids, credentials.user_ids);
+        assert_eq!(restored.created_at, credentials.created_at);
     }
 
     #[test]

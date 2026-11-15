@@ -750,6 +750,26 @@ mod tests {
         assert!(!base.contains("capy_a"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn credentials_serialization_remains_0600_file_compatible() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("credentials.json");
+        let credentials = creds("capy_synthetic_secret", &["user_1"]);
+        let json = serde_json::to_vec_pretty(&credentials).unwrap();
+        crate::commands::usage::helpers::atomic_write_secret(&path, &json).unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let restored: CapyCredentials = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.api_key, credentials.api_key);
+        assert_eq!(restored.user_ids, credentials.user_ids);
+    }
+
     #[test]
     fn cache_is_current_only_for_matching_identity_and_age() {
         let credentials = creds("capy_a", &[]);
