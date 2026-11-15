@@ -320,7 +320,11 @@ async fn saved_credentials_and_user_filter_outrank_env_scope() {
         created_at: "synthetic".to_string(),
     };
     let usage_path = write_scoped_capy_cache(home, Some(&credentials_identity(&saved_scope)));
-    fs::write(&credentials_path, serde_json::to_vec(&saved_scope).unwrap()).unwrap();
+    fs::write(
+        &credentials_path,
+        r#"{"apiKey":"saved_scope_synthetic","userIds":["user_1"],"createdAt":"synthetic"}"#,
+    )
+    .unwrap();
     let original_usage = fs::read(&usage_path).unwrap();
     std::env::set_var("CAPY_API_KEY", OsStr::new("env_scope_synthetic"));
 
