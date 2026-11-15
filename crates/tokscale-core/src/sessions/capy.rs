@@ -156,10 +156,18 @@ fn row_to_message(row: &CapyUsageRow) -> Option<UnifiedMessage> {
     let mut message = UnifiedMessage::new(
         CLIENT_ID, model, provider, session_id, timestamp, breakdown, 0.0,
     );
-    message.dedup_key = Some(format!(
-        "capy:{}:{}:{}:{}",
-        row.start, user, thread, raw_model
-    ));
+    let granularity = match end.map(|end| end - start) {
+        Some(duration) if duration <= HOUR_MS => "hour",
+        Some(_) => "day",
+        None => "unknown",
+    };
+    // Use normalized interval boundaries rather than the source strings so
+    // equivalent RFC 3339 offsets deduplicate, while a midnight hour and its
+    // residual day bucket remain distinct. JSON tuple encoding keeps arbitrary
+    // user/thread/model strings from creating delimiter collisions.
+    let interval_key = serde_json::to_string(&(start, end, granularity, user, thread, raw_model))
+        .expect("Capy dedup tuple is serializable");
+    message.dedup_key = Some(format!("capy:{interval_key}"));
     Some(message)
 }
 

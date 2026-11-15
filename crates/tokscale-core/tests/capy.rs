@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use tokscale_core::pricing::{litellm::ModelPricing, PricingService};
 use tokscale_core::scanner::ScannerSettings;
 use tokscale_core::{
-    parse_local_clients, parse_local_unified_messages_with_pricing_uncached, ClientId,
-    LocalParseOptions,
+    parse_local_clients, parse_local_unified_messages_with_pricing,
+    parse_local_unified_messages_with_pricing_uncached, ClientId, LocalParseOptions,
 };
 
 fn config_dir(home: &Path) -> PathBuf {
@@ -143,4 +143,75 @@ async fn missing_capy_cache_yields_no_messages() {
         .await
         .unwrap();
     assert!(messages.is_empty());
+}
+
+#[tokio::test]
+async fn midnight_hour_and_daily_residual_survive_cached_and_uncached_dedup() {
+    let home_dir = common::temp_home();
+    let home = home_dir.path();
+    write_capy_cache(
+        home,
+        r#"{
+            "version": 1,
+            "syncedAt": "2026-11-14T12:00:00.000Z",
+            "items": [
+                {
+                    "start": "2026-10-14T00:00:00Z",
+                    "end": "2026-10-14T01:00:00Z",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 100, "outputTokens": 10,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                },
+                {
+                    "start": "2026-10-14T00:00:00-00:00",
+                    "end": "2026-10-14T01:00:00+00:00",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 100, "outputTokens": 10,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                },
+                {
+                    "start": "2026-10-14T00:00:00.000Z",
+                    "end": "2026-10-15T00:00:00.000Z",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 200, "outputTokens": 20,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                },
+                {
+                    "start": "2026-10-14T00:00:00+00:00",
+                    "end": "2026-10-15T00:00:00Z",
+                    "dimensions": {"userId": "u", "threadId": "t", "itemType": "llm",
+                        "itemId": "openai/gpt-5.5", "model": "openai/gpt-5.5"},
+                    "tokens": {"inputTokens": 200, "outputTokens": 20,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0}
+                }
+            ]
+        }"#,
+    );
+
+    let assert_usage = |messages: &[tokscale_core::UnifiedMessage]| {
+        assert_eq!(messages.len(), 2);
+        let mut amounts: Vec<(i64, i64)> = messages
+            .iter()
+            .map(|message| (message.tokens.input, message.tokens.output))
+            .collect();
+        amounts.sort_unstable();
+        assert_eq!(amounts, [(100, 10), (200, 20)]);
+    };
+
+    let uncached = parse_local_unified_messages_with_pricing_uncached(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_usage(&uncached);
+
+    let cold_cached = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_usage(&cold_cached);
+    let warm_cached = parse_local_unified_messages_with_pricing(capy_options(home), None)
+        .await
+        .unwrap();
+    assert_usage(&warm_cached);
 }
