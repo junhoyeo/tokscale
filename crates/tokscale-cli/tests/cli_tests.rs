@@ -2340,7 +2340,9 @@ fn test_models_with_invalid_date_format() {
         .arg("--since")
         .arg("invalid-date")
         .assert()
-        .success();
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("YYYY-MM-DD"));
 }
 
 #[test]
@@ -2354,7 +2356,21 @@ fn test_models_with_invalid_year() {
         .arg("--year")
         .arg("not-a-year")
         .assert()
-        .success();
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("YYYY"));
+}
+
+#[test]
+fn test_models_rejects_noncanonical_date_instead_of_silently_omitting_usage() {
+    let tmp = create_temp_fixture_dir();
+    cmd_with_home(tmp.path())
+        .args(["models", "--json", "--client", "opencode", "--no-spinner"])
+        .args(["--since", "2024-6-01", "--until", "2024-06-30"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("YYYY-MM-DD"));
 }
 
 #[test]
