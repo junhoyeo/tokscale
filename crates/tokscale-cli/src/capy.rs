@@ -36,12 +36,14 @@ pub const CAPY_AUTO_SYNC_FRESHNESS: Duration = Duration::from_secs(10 * 60);
 struct CapyUsageCache {
     version: i32,
     synced_at: String,
-    #[serde(default)]
-    user_ids: Vec<String>,
     /// Fingerprint of the API key and user filter that produced `items`, so a
     /// cache written under other credentials is never treated as current.
+    /// Keep this before variable-size fields: core admits cache scope from a
+    /// bounded JSON prefix and stops before `userIds` and `items`.
     #[serde(default)]
     identity: Option<String>,
+    #[serde(default)]
+    user_ids: Vec<String>,
     items: Vec<Value>,
 }
 
@@ -800,6 +802,23 @@ mod tests {
         assert_ne!(base, credentials_identity(&creds("capy_a", &["u1"])));
         assert_ne!(base, credentials_identity(&creds("capy_a", &[])));
         assert!(!base.contains("capy_a"));
+    }
+
+    #[test]
+    fn usage_cache_writer_places_identity_before_variable_fields() {
+        let cache = CapyUsageCache {
+            version: 1,
+            synced_at: "synthetic".to_string(),
+            user_ids: vec!["u".repeat(70 * 1024)],
+            identity: Some("scope-a".to_string()),
+            items: Vec::new(),
+        };
+        let serialized = serde_json::to_string(&cache).unwrap();
+        let identity = serialized.find(r#""identity""#).unwrap();
+        let user_ids = serialized.find(r#""userIds""#).unwrap();
+        let items = serialized.find(r#""items""#).unwrap();
+        assert!(identity < user_ids);
+        assert!(identity < items);
     }
 
     fn status_cache(identity: Option<String>) -> CapyUsageCache {

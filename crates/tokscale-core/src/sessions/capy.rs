@@ -215,7 +215,9 @@ fn usage_cache_identity_from_reader<R: Read>(reader: R) -> Option<String> {
     identity
 }
 
-/// Read only the bounded metadata prefix written before Capy's `items` array.
+/// Read only the bounded metadata prefix. The CLI writer keeps `identity`
+/// before both variable-size fields (`userIds` and `items`) so every cache it
+/// writes can be admitted without scanning either field.
 pub fn usage_cache_identity(path: &Path) -> Option<String> {
     usage_cache_identity_from_reader(File::open(path).ok()?)
 }
