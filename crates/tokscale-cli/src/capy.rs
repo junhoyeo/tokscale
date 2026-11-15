@@ -506,7 +506,7 @@ pub fn auto_sync_for_local_report() -> Option<String> {
         return None;
     }
     let (credentials, _) = load_credentials()?;
-    let cache_identity = load_usage_cache().and_then(|cache| cache.identity);
+    let cache_identity = tokscale_core::sessions::capy::usage_cache_identity(&usage_path());
     if cache_is_current(
         cache_identity.as_deref(),
         usage_cache_age(),
@@ -515,7 +515,11 @@ pub fn auto_sync_for_local_report() -> Option<String> {
     ) {
         return None;
     }
-    let had_cache = has_reportable_usage_cache();
+    let had_cache = has_usage_cache()
+        && tokscale_core::sessions::capy::cache_identity_is_eligible(
+            cache_identity.as_deref(),
+            Some(&credentials),
+        );
     let result = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(sync_capy_cache()),
         Err(error) => SyncCapyResult {

@@ -18,8 +18,12 @@ use super::UnifiedMessage;
 use crate::provider_identity::inferred_provider_from_model_delimited;
 use crate::TokenBreakdown;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer as _, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 pub const CLIENT_ID: &str = "capy";
@@ -30,6 +34,8 @@ pub const CLIENT_ID: &str = "capy";
 const DAY_BUCKET_MIDPOINT_MS: i64 = 12 * 60 * 60 * 1000;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const CAPY_API_KEY_ENV: &str = "CAPY_API_KEY";
+const IDENTITY_SCAN_LIMIT: u64 = 64 * 1024;
+const IDENTITY_READER_CAPACITY: usize = 4 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,12 +62,6 @@ impl std::fmt::Debug for CapyCredentials {
 struct CapyUsageCache {
     #[serde(default)]
     items: Vec<CapyUsageRow>,
-}
-
-#[derive(Deserialize)]
-struct CapyUsageCacheMetadata {
-    #[serde(default)]
-    identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,11 +163,71 @@ pub fn credentials_identity(credentials: &CapyCredentials) -> String {
         .collect()
 }
 
-fn cache_identity(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<CapyUsageCacheMetadata>(&content)
-        .ok()?
-        .identity
+struct CapyUsageIdentityVisitor<'a> {
+    identity: &'a mut Option<String>,
+}
+
+impl<'de> Visitor<'de> for CapyUsageIdentityVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Capy usage cache object with identity before items")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "identity" => {
+                    *self.identity = map
+                        .next_value::<Option<String>>()?
+                        .filter(|identity| !identity.trim().is_empty());
+                    // Stop before `items`. The caller intentionally ignores this
+                    // controlled error and uses the captured identity.
+                    return Err(serde::de::Error::custom("Capy identity captured"));
+                }
+                "items" => {
+                    // The writer always puts identity before items. Do not scan
+                    // an unbounded array to recover a reordered/malformed cache.
+                    return Err(serde::de::Error::custom(
+                        "Capy items reached before identity",
+                    ));
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn usage_cache_identity_from_reader<R: Read>(reader: R) -> Option<String> {
+    let limited = reader.take(IDENTITY_SCAN_LIMIT);
+    let buffered = BufReader::with_capacity(IDENTITY_READER_CAPACITY, limited);
+    let mut deserializer = serde_json::Deserializer::from_reader(buffered);
+    let mut identity = None;
+    let _ = deserializer.deserialize_map(CapyUsageIdentityVisitor {
+        identity: &mut identity,
+    });
+    identity
+}
+
+/// Read only the bounded metadata prefix written before Capy's `items` array.
+pub fn usage_cache_identity(path: &Path) -> Option<String> {
+    usage_cache_identity_from_reader(File::open(path).ok()?)
+}
+
+/// Evaluate already-read cache metadata against an optional active scope.
+pub fn cache_identity_is_eligible(
+    cache_identity: Option<&str>,
+    credentials: Option<&CapyCredentials>,
+) -> bool {
+    credentials.is_none_or(|credentials| {
+        cache_identity == Some(credentials_identity(credentials).as_str())
+    })
 }
 
 /// A cache is reportable when it belongs to the active credential scope. With
@@ -179,7 +239,7 @@ pub fn usage_cache_is_eligible(path: &Path) -> bool {
     let Some((credentials, _)) = load_credentials(cache_dir) else {
         return true;
     };
-    cache_identity(path).as_deref() == Some(credentials_identity(&credentials).as_str())
+    cache_identity_is_eligible(usage_cache_identity(path).as_deref(), Some(&credentials))
 }
 
 /// Capy-specific key for aggregate caches. It changes when the active scope
@@ -189,7 +249,7 @@ pub fn report_scope_identity(path: &Path) -> String {
         .parent()
         .and_then(load_credentials)
         .map(|(credentials, _)| credentials_identity(&credentials));
-    let cached = cache_identity(path);
+    let cached = usage_cache_identity(path);
     match active {
         Some(active) if cached.as_deref() == Some(active.as_str()) => {
             format!("active:{active}:eligible")
@@ -315,7 +375,9 @@ fn parse_rfc3339_millis(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::cell::Cell;
+    use std::io::{Cursor, Read, Write};
+    use std::rc::Rc;
 
     fn parse_json(json: &str) -> Vec<UnifiedMessage> {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -428,6 +490,44 @@ mod tests {
             assert_eq!(model, raw);
         }
         assert_eq!(split_model("gpt-5.5").0, "openai");
+    }
+
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: Rc<Cell<usize>>,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.bytes_read.set(self.bytes_read.get() + read);
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn identity_reader_stops_before_large_items_array() {
+        let padding = "x".repeat(2 * 1024 * 1024);
+        let json = format!(
+            r#"{{"version":1,"syncedAt":"synthetic","userIds":[],"identity":"scope-a","items":[{{"padding":"{padding}"}}]}}"#
+        );
+        let bytes_read = Rc::new(Cell::new(0));
+        let reader = CountingReader {
+            inner: Cursor::new(json.as_bytes()),
+            bytes_read: Rc::clone(&bytes_read),
+        };
+
+        assert_eq!(
+            usage_cache_identity_from_reader(reader).as_deref(),
+            Some("scope-a")
+        );
+        assert!(json.len() > 2 * 1024 * 1024);
+        assert!(
+            bytes_read.get() <= IDENTITY_READER_CAPACITY,
+            "identity lookup read {} bytes from a {} byte cache",
+            bytes_read.get(),
+            json.len()
+        );
     }
 
     #[test]
