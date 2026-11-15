@@ -2613,23 +2613,26 @@ fn parse_all_messages_streaming<S: MessageSink>(
             all_messages,
             machine_labeler,
             scan_client,
+            |_| true,
             message_cache::SourceFingerprint::check_path_samples_only,
             parse,
         );
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn parse_cached_lane_deduped_with_fingerprint<F, FingerprintFn>(
+    fn parse_cached_lane_deduped_with_fingerprint<F, AdmitFn, FingerprintFn>(
         scan_result: &scanner::ScanResult,
         source_cache: &mut message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
         all_messages: &mut Vec<UnifiedMessage>,
         machine_labeler: &machine_label::MachineLabeler,
         scan_client: ClientId,
+        admit_path: AdmitFn,
         fingerprint_from_path: FingerprintFn,
         parse: F,
     ) where
         F: Fn(&Path) -> Vec<UnifiedMessage> + Sync,
+        AdmitFn: Fn(&Path) -> bool + Sync,
         FingerprintFn: Fn(
                 &Path,
                 Option<&message_cache::SourceFingerprint>,
@@ -2640,6 +2643,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let outcomes: Vec<CachedParseOutcome> = scan_result
             .get(scan_client)
             .par_iter()
+            .filter(|path| admit_path(path))
             .map(|path| {
                 let mut outcome = load_or_parse_source_with_fingerprint(
                     cache_identity,
@@ -2648,48 +2652,6 @@ fn parse_all_messages_streaming<S: MessageSink>(
                     pricing,
                     &fingerprint_from_path,
                     &parse,
-                );
-                machine_labeler.label_messages(path, &mut outcome.messages);
-                outcome
-            })
-            .collect();
-        let mut seen: HashSet<String> = HashSet::new();
-        for outcome in outcomes {
-            all_messages.extend(
-                outcome
-                    .messages
-                    .into_iter()
-                    .filter(|message| should_keep_deduped_message(&mut seen, message)),
-            );
-            if let Some(entry) = outcome.cache_entry {
-                source_cache.insert(entry);
-            }
-        }
-    }
-
-    /// Parse Capy only after its usage cache is admitted for the active
-    /// credential scope. This check intentionally precedes the source-message
-    /// cache lookup so a warm entry from another key cannot bypass it.
-    fn parse_cached_capy_lane(
-        scan_result: &scanner::ScanResult,
-        source_cache: &mut message_cache::SourceMessageCache,
-        pricing: Option<&pricing::PricingService>,
-        all_messages: &mut Vec<UnifiedMessage>,
-        machine_labeler: &machine_label::MachineLabeler,
-    ) {
-        let identity = message_cache::CacheIdentity::for_client(ClientId::Capy);
-        let outcomes: Vec<CachedParseOutcome> = scan_result
-            .get(ClientId::Capy)
-            .par_iter()
-            .filter(|path| sessions::capy::usage_cache_is_eligible(path))
-            .map(|path| {
-                let mut outcome = load_or_parse_source_with_fingerprint(
-                    identity,
-                    path,
-                    source_cache,
-                    pricing,
-                    message_cache::SourceFingerprint::check_path_samples_only,
-                    sessions::capy::parse_capy_file,
                 );
                 machine_labeler.label_messages(path, &mut outcome.messages);
                 outcome
@@ -4106,13 +4068,18 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::warp::parse_warp_file,
     );
 
-    // Capy usage-series rows cached by `tokscale capy sync`.
-    parse_cached_capy_lane(
+    // Check Capy's credential scope before source-cache lookup so a warm
+    // entry from another key cannot bypass admission.
+    parse_cached_lane_deduped_with_fingerprint(
         &scan_result,
         &mut source_cache,
         pricing,
         &mut all_messages,
         &machine_labeler,
+        ClientId::Capy,
+        sessions::capy::usage_cache_is_eligible,
+        message_cache::SourceFingerprint::check_path_samples_only,
+        sessions::capy::parse_capy_file,
     );
 
     let grok_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -5006,6 +4973,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         &mut all_messages,
         &machine_labeler,
         ClientId::Qoder,
+        |_| true,
         message_cache::SourceFingerprint::check_qoder_path_with_meta_samples_only,
         sessions::qoder::parse_qoder_file,
     );
