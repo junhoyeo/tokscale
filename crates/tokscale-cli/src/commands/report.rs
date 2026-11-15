@@ -35,9 +35,21 @@ fn should_auto_sync_amp_for_report(home_dir: &Option<String>, client: &Option<St
     home_dir.is_none() && client.as_deref().is_none_or(|client| client == "amp")
 }
 
+/// Capy keeps no local token record, so its API cache is refreshed the same
+/// way. The sync itself is skipped offline, without a key, or while the cache
+/// is current.
+fn should_auto_sync_capy_for_report(home_dir: &Option<String>, client: &Option<String>) -> bool {
+    home_dir.is_none() && client.as_deref().is_none_or(|client| client == "capy")
+}
+
 pub fn run_report(opts: ReportOptions) -> Result<()> {
     if should_auto_sync_amp_for_report(&opts.home_dir, &opts.client) {
         if let Some(warning) = crate::amp::auto_sync() {
+            eprintln!("{warning}");
+        }
+    }
+    if should_auto_sync_capy_for_report(&opts.home_dir, &opts.client) {
+        if let Some(warning) = crate::capy::auto_sync_for_local_report() {
             eprintln!("{warning}");
         }
     }
@@ -2753,6 +2765,23 @@ mod tests {
         let error =
             run_command_with_timeout(command, Duration::from_millis(200), None).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn report_capy_auto_sync_respects_client_filter_and_home_isolation() {
+        assert!(should_auto_sync_capy_for_report(&None, &None));
+        assert!(should_auto_sync_capy_for_report(
+            &None,
+            &Some("capy".into())
+        ));
+        assert!(!should_auto_sync_capy_for_report(
+            &None,
+            &Some("codex".into())
+        ));
+        assert!(!should_auto_sync_capy_for_report(
+            &Some("/tmp/profile".into()),
+            &Some("capy".into())
+        ));
     }
 
     #[test]

@@ -75,6 +75,7 @@ export const AGENT_ICONS: Readonly<Record<string, string>> = {
   proma: "/assets/v2/agents/raw-githubusercontent-com-proma-icon.webp",
   bb: "/assets/v2/agents/gh-get-bb.webp",
   qoder: "/assets/v2/agents/gh-alibaba.webp",
+  capy: "/assets/v2/agents/client-capy.webp",
 };
 
 /** Vendored icon for a client id, or null when there is none. */

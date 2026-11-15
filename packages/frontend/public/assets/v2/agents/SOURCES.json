@@ -408,6 +408,14 @@
       "source": "https://github.com/get-bb.png",
       "readme_row": "BB",
       "retrieved": "2026-11-11"
+    },
+    "client-capy.webp": {
+      "clients": [
+        "capy"
+      ],
+      "source": ".github/assets/client-capy.png",
+      "readme_row": "Capy",
+      "retrieved": "2026-11-14"
     }
   }
 }

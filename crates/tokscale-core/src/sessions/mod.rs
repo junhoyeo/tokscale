@@ -8,6 +8,7 @@ pub mod antigravity_cli;
 pub mod aside;
 pub mod augment;
 pub mod bb;
+pub mod capy;
 pub mod cherrystudio;
 pub mod claudecode;
 pub mod cline;
@@ -596,8 +597,10 @@ impl UnifiedMessage {
             service_tier: self.service_tier.as_deref(),
             // A Grok turn row aggregates every call of the turn, so
             // per-request full-request tier boundaries cannot be inferred
-            // from its token sums (#1410).
-            multi_call_aggregate: self.client == "grok" && self.message_count > 1,
+            // from its token sums (#1410). Every Capy row sums a whole
+            // hour or day bucket of a thread's requests, so the same holds.
+            multi_call_aggregate: (self.client == "grok" && self.message_count > 1)
+                || self.client == "capy",
         }
     }
 

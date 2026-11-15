@@ -2297,6 +2297,7 @@ fn parser_version(client: ClientId) -> u32 {
         // v1->v2: extract workspace key from project ancestors avoiding
         // subagents and canonicalize BYOK/managed provider metadata.
         ClientId::Qoder => crate::sessions::qoder::QODER_PARSER_BASE_VERSION,
+        ClientId::Capy => 1,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching
