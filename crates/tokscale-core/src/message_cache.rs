@@ -6777,7 +6777,11 @@ mod tests {
     fn capy_v2_rebuilds_persisted_v1_midnight_undercount() {
         let home = TempDir::new().unwrap();
         let _env = sandbox_cache_env(home.path());
-        let capy_dir = home.path().join(".config/tokscale/capy-cache");
+        let capy_dir = PathBuf::from(
+            ClientId::Capy
+                .data()
+                .resolve_path_with_env_strategy(home.path().to_str().unwrap(), false),
+        );
         fs::create_dir_all(&capy_dir).unwrap();
         let source = capy_dir.join("usage.json");
         fs::write(
