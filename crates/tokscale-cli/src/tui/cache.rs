@@ -785,6 +785,13 @@ enum ClientMatch {
     /// No usable overlap (superset, disjoint, or synthetic flag mismatch)
     Mismatch,
 }
+fn capy_scope_identity(enabled_clients: &HashSet<ClientFilter>) -> Option<String> {
+    enabled_clients.contains(&ClientFilter::Capy).then(|| {
+        let usage = crate::capy::get_capy_cache_dir().join("usage.json");
+        tokscale_core::sessions::capy::report_scope_identity(&usage)
+    })
+}
+
 /// Load cached TUI data from disk with a single read/parse.
 /// Returns Fresh/Stale/Miss so the caller can decide whether to
 /// display cached data immediately and/or trigger a background refresh.
@@ -794,13 +801,6 @@ enum ClientMatch {
 /// `(enabled_clients: Vec<String>, include_synthetic: bool)` shape so
 /// existing user caches keep working across upgrades — projection
 /// happens here.
-fn capy_scope_identity(enabled_clients: &HashSet<ClientFilter>) -> Option<String> {
-    enabled_clients.contains(&ClientFilter::Capy).then(|| {
-        let usage = crate::capy::get_capy_cache_dir().join("usage.json");
-        tokscale_core::sessions::capy::report_scope_identity(&usage)
-    })
-}
-
 pub fn load_cache(
     enabled_clients: &HashSet<ClientFilter>,
     group_by: &GroupBy,
@@ -816,9 +816,9 @@ pub fn load_cache(
 }
 
 /// Decide whether a payload that was already read off disk is usable, and how
-/// stale it is. Pure given its inputs apart from the current clock, so the
-/// freshness contract can be asserted without redirecting process-global
-/// paths.
+/// stale it is. Besides the current clock, Capy-enabled classification reads
+/// the active credential environment and the bounded identity prefix on disk;
+/// tests redirect those process-global inputs.
 fn classify_cached_payload(
     cached: CachedTUIData,
     enabled_clients: &HashSet<ClientFilter>,
@@ -1362,6 +1362,16 @@ mod tests {
         value["enabledClients"] = serde_json::json!(["capy"]);
         value["capyScopeIdentity"] = serde_json::json!(capy_scope_identity(&clients));
         let payload: CachedTUIData = serde_json::from_value(value).unwrap();
+        let matching = classify_cached_payload(
+            payload.clone(),
+            &clients,
+            &GroupBy::Model,
+            &CacheReportScope::default(),
+        );
+        assert!(matches!(
+            matching,
+            CacheResult::Fresh(_) | CacheResult::Stale(_)
+        ));
 
         unsafe {
             env::set_var("CAPY_API_KEY", "capy_scope_b_synthetic");
