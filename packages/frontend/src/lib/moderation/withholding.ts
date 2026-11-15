@@ -15,8 +15,9 @@ export const WITHHOLDING_MAX_TOKENS_PER_MESSAGE = 100_000_000;
 
 /**
  * Clients whose exported tokens and `messages` are not guaranteed to describe
- * the same set of individual inferences — e.g. whole-session fallback records
- * with `messages = 1` (Droid when transcript is missing or exceeds
+ * the same set of individual inferences. Capy hourly/daily buckets represent
+ * multiple inferences with `messages = 1`; whole-session fallback records do
+ * the same (Droid when transcript is missing or exceeds
  * `MAX_TRANSCRIPT_BYTES`, Zed `cumulative_token_usage` fallback, Vibe session
  * files, WorkBuddy `session_usage` rows, Kiro session/execution fallbacks),
  * agent-execution or session-level model summaries (`codebuddy`, `fx`,
@@ -36,6 +37,7 @@ export const WITHHOLDING_MAX_TOKENS_PER_MESSAGE = 100_000_000;
  */
 export const NON_PER_INFERENCE_MESSAGE_CLIENTS = [
   "bb",
+  "capy",
   "claude",
   "codebuddy",
   "codex",
