@@ -132,6 +132,10 @@ pub fn has_usage_cache() -> bool {
     usage_path().is_file()
 }
 
+pub fn has_reportable_usage_cache() -> bool {
+    has_usage_cache() && tokscale_core::sessions::capy::usage_cache_is_eligible(&usage_path())
+}
+
 fn load_usage_cache() -> Option<CapyUsageCache> {
     let content = fs::read_to_string(usage_path()).ok()?;
     serde_json::from_str(&content).ok()
@@ -511,8 +515,7 @@ pub fn auto_sync_for_local_report() -> Option<String> {
     ) {
         return None;
     }
-    let had_cache =
-        has_usage_cache() && tokscale_core::sessions::capy::usage_cache_is_eligible(&usage_path());
+    let had_cache = has_reportable_usage_cache();
     let result = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(sync_capy_cache()),
         Err(error) => SyncCapyResult {
