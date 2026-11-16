@@ -296,6 +296,7 @@ tokscale --json                    # Default models view as JSON
 tokscale models --json             # Models breakdown as JSON
 tokscale monthly --json            # Monthly breakdown as JSON
 tokscale models --json > report.json   # Save to file
+tokscale sessions --json --today    # Sessions with project, model, tokens, cost and active window
 ```
 
 ### TUI Features

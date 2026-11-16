@@ -432,6 +432,17 @@ enum Commands {
         #[arg(long, help = "Disable spinner")]
         no_spinner: bool,
     },
+    #[command(about = "List sessions with project, models, tokens, cost and activity window")]
+    Sessions {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+        #[command(flatten)]
+        clients: ClientFlags,
+        #[command(flatten)]
+        date: DateRangeFlags,
+        #[arg(long, help = "Disable spinner")]
+        no_spinner: bool,
+    },
     #[command(about = "Warm TUI cache in background (internal)", hide = true)]
     WarmTuiCache,
     #[command(about = "Read and write persistent tokscale settings")]
@@ -717,7 +728,8 @@ fn validate_offline_command(command: Option<&Commands>) -> Result<()> {
     match command {
         None | Some(Commands::Models { .. } | Commands::Monthly { .. }
             | Commands::Hourly { .. } | Commands::Clients { .. } | Commands::Graph { .. }
-            | Commands::Tui { .. } | Commands::TimeMetrics { .. } | Commands::WarmTuiCache
+            | Commands::Tui { .. } | Commands::TimeMetrics { .. } | Commands::Sessions { .. }
+            | Commands::WarmTuiCache
             | Commands::Wrapped { .. } | Commands::Config { .. }) => Ok(()),
         Some(Commands::Pricing { model_id, .. }) if !model_id.eq_ignore_ascii_case("refresh") => Ok(()),
         Some(Commands::Import { submit: false, .. }) => Ok(()),
@@ -1084,6 +1096,18 @@ fn main() -> Result<()> {
         }) => {
             let clients = build_client_filter(clients, &cli.home);
             run_time_metrics_report(json, cli.home.clone(), clients, &date, no_spinner)
+        }
+        Some(Commands::Sessions {
+            json,
+            clients,
+            date,
+            no_spinner: _,
+        }) => {
+            // DataLoader resolves the scan root from this machine's home, so a
+            // --home override would silently report the wrong profile.
+            reject_unsupported_home_override(&cli.home, "sessions")?;
+            let clients = build_client_filter(clients, &cli.home);
+            run_sessions_report(json, clients, &date, &cli.home)
         }
         Some(Commands::WarmTuiCache) => run_warm_tui_cache(),
         Some(Commands::Config { subcommand }) => {
@@ -6277,6 +6301,123 @@ fn run_time_metrics_report(
         println!("Max concurrent sessions: {}", m.max_concurrent_sessions);
         println!("Total sessions:          {}", m.session_count);
         println!("Processing time:         {}ms", report.processing_time_ms);
+    }
+
+    Ok(())
+}
+
+/// One row of `tokscale sessions --json`. Subagent sessions are rolled into
+/// their parent, matching the TUI Sessions tab.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionReportRow<'a> {
+    client: &'a str,
+    session_id: &'a str,
+    title: Option<&'a str>,
+    workspace: Option<String>,
+    workspace_path: Option<String>,
+    models: Vec<&'a str>,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: u64,
+    cost: f64,
+    message_count: u32,
+    turn_count: u32,
+    subagent_count: u32,
+    first_active_ms: i64,
+    last_active_ms: i64,
+}
+
+impl<'a> SessionReportRow<'a> {
+    /// Builds a row, naming the workspace the way the Projects tab does: by
+    /// repository, with worktrees folded into their repo and Claude Code's
+    /// dash-mangled folder keys decoded back to a path.
+    fn new(s: &'a tui::data::SessionUsage, labeler: &mut tokscale_core::WorkspaceLabeler) -> Self {
+        let (workspace, workspace_path) = match s.workspace_key.as_deref() {
+            Some(key) => {
+                let root = labeler.repo_root(key);
+                let label = labeler.label(root.as_deref().unwrap_or(key));
+                (Some(label), Some(root.unwrap_or_else(|| key.to_string())))
+            }
+            None => (s.workspace_label.clone(), None),
+        };
+        Self {
+            client: &s.client,
+            session_id: &s.session_id,
+            title: s.title.as_deref(),
+            workspace,
+            workspace_path,
+            models: s.models.iter().map(|m| m.display_name.as_str()).collect(),
+            input: s.tokens.input,
+            output: s.tokens.output,
+            cache_read: s.tokens.cache_read,
+            cache_write: s.tokens.cache_write,
+            reasoning: s.tokens.reasoning,
+            cost: s.cost,
+            message_count: s.message_count,
+            turn_count: s.turn_count,
+            subagent_count: s.subagent_count,
+            first_active_ms: s.first_active_ms,
+            last_active_ms: s.last_active_ms,
+        }
+    }
+}
+
+fn run_sessions_report(
+    json: bool,
+    clients: Option<Vec<String>>,
+    date: &DateRangeFlags,
+    home_dir: &Option<String>,
+) -> Result<()> {
+    use crate::tui::{DataLoader, TUI_DEFAULT_GROUP_BY};
+
+    let (since, until) = build_date_filter(date, home_dir);
+    let enabled_set = resolve_light_cache_filter_set(&clients);
+    let scan_clients: Vec<tokscale_core::ClientId> = enabled_set
+        .iter()
+        .filter_map(|filter| filter.to_client_id())
+        .collect();
+    let include_synthetic = enabled_set.contains(&ClientFilter::Synthetic);
+
+    let started = std::time::Instant::now();
+    let loader = DataLoader::with_filters(None, since, until, date.year.clone());
+    let data = loader.load(&scan_clients, &TUI_DEFAULT_GROUP_BY, include_synthetic)?;
+
+    let mut sessions: Vec<&tui::data::SessionUsage> = data.sessions_rolled.iter().collect();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active_ms));
+    let mut labeler = tokscale_core::WorkspaceLabeler::default();
+    let rows: Vec<SessionReportRow> = sessions
+        .iter()
+        .map(|s| SessionReportRow::new(s, &mut labeler))
+        .collect();
+
+    if json {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SessionsReportJson<'a> {
+            sessions: Vec<SessionReportRow<'a>>,
+            total_cost: f64,
+            processing_time_ms: u128,
+        }
+        let output = SessionsReportJson {
+            total_cost: rows.iter().map(|r| r.cost).sum(),
+            sessions: rows,
+            processing_time_ms: started.elapsed().as_millis(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        for r in &rows {
+            let label = r.title.or(r.workspace.as_deref()).unwrap_or(r.session_id);
+            let model = r.models.first().copied().unwrap_or("-");
+            let span = format_duration_ms(r.last_active_ms - r.first_active_ms);
+            println!(
+                "{:<10} {:<32} {:<20} {:>9} ${:.2}",
+                r.client, label, model, span, r.cost
+            );
+        }
+        println!("{} sessions", rows.len());
     }
 
     Ok(())
@@ -11808,6 +11949,26 @@ mod tests {
             ),
             tui::CacheResult::Miss
         ));
+    }
+
+    #[test]
+    fn sessions_json_row_uses_camel_case_and_keeps_activity_window() {
+        let mut usage = tui::data::SessionUsage::new("claude", "abc");
+        usage.tokens.input = 10;
+        usage.tokens.output = 20;
+        usage.cost = 1.5;
+        usage.first_active_ms = 1_000;
+        usage.last_active_ms = 61_000;
+        let mut labeler = tokscale_core::WorkspaceLabeler::default();
+        let row = SessionReportRow::new(&usage, &mut labeler);
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["sessionId"], "abc");
+        assert_eq!(json["client"], "claude");
+        assert_eq!(json["input"], 10);
+        assert_eq!(json["output"], 20);
+        assert_eq!(json["firstActiveMs"], 1_000);
+        assert_eq!(json["lastActiveMs"], 61_000);
+        assert!(json["workspace"].is_null());
     }
 
     #[test]
