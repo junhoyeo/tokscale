@@ -6690,7 +6690,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_parser_version_invalidates_v4_entries() {
+    fn test_kimi_parser_version_invalidates_v5_entries() {
         assert_eq!(parser_version(ClientId::Kimi), 6);
     }
 
@@ -6701,7 +6701,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_kimi_v5_cache_reused_with_current_workspace_metadata() {
+    fn test_kimi_current_cache_reused_with_current_workspace_metadata() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -6724,10 +6724,7 @@ mod tests {
         // A full reparse would restore the path-derived session ID, so this
         // marker distinguishes a cache hit from equivalent parsed usage.
         cached_messages[0].session_id = "cache-hit-marker".to_string().into();
-        let identity = CacheIdentity {
-            namespace: "kimi",
-            parser_version: 5,
-        };
+        let identity = CacheIdentity::for_client(ClientId::Kimi);
         let fingerprint = SourceFingerprint::from_kimi_path(&wire_path).unwrap();
         let mut cache = SourceMessageCache::default();
         cache.insert(CachedSourceEntry::new(
