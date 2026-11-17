@@ -1812,21 +1812,13 @@ fn truncate_username(username: &str, max_chars: usize) -> Option<String> {
     Some(format!("{}\u{2026}", truncated))
 }
 
+/// Every registered client plus `synthetic`, as the other reports scan when
+/// no client flag or `defaultClients` is set.
 fn default_clients() -> Vec<String> {
-    vec![
-        "opencode".to_string(),
-        "claude".to_string(),
-        "codex".to_string(),
-        "copilot".to_string(),
-        "gemini".to_string(),
-        ClientId::Cursor.as_str().to_string(),
-        "amp".to_string(),
-        "codebuff".to_string(),
-        "droid".to_string(),
-        "openclaw".to_string(),
-        "hermes".to_string(),
-        "pi".to_string(),
-    ]
+    ClientId::iter()
+        .map(|client| client.as_str().to_string())
+        .chain(std::iter::once("synthetic".to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -2463,6 +2455,19 @@ mod tests {
     fn test_default_clients_includes_copilot() {
         let clients = default_clients();
         assert!(clients.iter().any(|client| client == "copilot"));
+    }
+
+    #[test]
+    fn test_default_clients_covers_every_registered_client() {
+        let clients = default_clients();
+        for client in ClientId::iter() {
+            assert!(
+                clients.iter().any(|c| c == client.as_str()),
+                "{} is missing from the default wrapped clients",
+                client.as_str()
+            );
+        }
+        assert!(clients.iter().any(|c| c == "synthetic"));
     }
 
     // ========== client_logo_url tests ==========
