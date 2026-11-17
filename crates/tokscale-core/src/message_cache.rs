@@ -2089,7 +2089,8 @@ fn parser_version(client: ClientId) -> u32 {
         // warm v4 entry would keep replaying rows with no duration sample and
         // the ms/1K column would stay empty for them.
         // v5->v6: recover native step timing when llm.request is absent.
-        ClientId::Kimi => 6,
+        // v6->v7: retain legacy request timing across a matching step.begin.
+        ClientId::Kimi => 7,
         // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
         // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV
         // `Cost` (including explicit zero) is retained as provider-reported so
@@ -6690,8 +6691,8 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_parser_version_invalidates_v5_entries() {
-        assert_eq!(parser_version(ClientId::Kimi), 6);
+    fn test_kimi_parser_version_invalidates_v6_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 7);
     }
 
     #[test]
