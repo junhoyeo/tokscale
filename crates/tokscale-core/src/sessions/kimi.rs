@@ -364,7 +364,9 @@ impl StepTiming {
         // step.end can follow tool execution. Without a step.begin, back-calculate
         // from the usage record's response time, never the delayed step.end time.
         let start = self.start_ms.or_else(|| {
-            usage_time_ms?.checked_sub(self.duration_ms).filter(|ms| *ms > 0)
+            usage_time_ms?
+                .checked_sub(self.duration_ms)
+                .filter(|ms| *ms > 0)
         });
         if let Some(start) = start.filter(|ms| ms.checked_add(self.duration_ms).is_some()) {
             message.timestamp = start;
@@ -393,7 +395,10 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
     // Start time of the most recent llm.request, paired with the next
     // turn-scoped usage.record to derive that call's response duration.
     let mut pending_request_time_ms: Option<i64> = None;
-    let own_agent = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str());
+    let own_agent = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str());
     let mut step_start_ms = None;
     let mut step_uuid: Option<String> = None;
     let mut pending_usage: Option<(usize, Option<i64>)> = None;
@@ -407,10 +412,18 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             Err(_) => return,
         };
 
-        if wire_line.agent_id.as_deref().zip(own_agent).is_some_and(|(id, own)| id != own) {
+        if wire_line
+            .agent_id
+            .as_deref()
+            .zip(own_agent)
+            .is_some_and(|(id, own)| id != own)
+        {
             return;
         }
-        if matches!(wire_line.line_type.as_str(), "agent.switched" | "agent.turn.started") {
+        if matches!(
+            wire_line.line_type.as_str(),
+            "agent.switched" | "agent.turn.started"
+        ) {
             pending_usage = None;
             pending_timing = None;
             pending_request_time_ms = None;
@@ -419,7 +432,9 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             return;
         }
         if wire_line.line_type == "context.append_loop_event" {
-            let Some(event) = wire_line.event else { return; };
+            let Some(event) = wire_line.event else {
+                return;
+            };
             if event.event_type == "step.begin" {
                 pending_usage = None;
                 pending_timing = None;
@@ -427,14 +442,28 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
                 step_start_ms = wire_line.time.filter(|ms| *ms > 0);
                 step_uuid = event.uuid;
             } else if event.event_type == "step.end" {
-                if step_uuid.as_ref().zip(event.uuid.as_ref()).is_some_and(|(a, b)| a != b) {
+                if step_uuid
+                    .as_ref()
+                    .zip(event.uuid.as_ref())
+                    .is_some_and(|(a, b)| a != b)
+                {
                     return;
                 }
-                if event.message_id.as_ref().filter(|id| !id.is_empty()).is_some_and(|id| !seen_steps.insert(id.clone())) {
+                if event
+                    .message_id
+                    .as_ref()
+                    .filter(|id| !id.is_empty())
+                    .is_some_and(|id| !seen_steps.insert(id.clone()))
+                {
                     return;
                 }
-                let timing = native_step_duration(&event).zip(event.usage.as_ref().and_then(TokenUsage::to_breakdown))
-                    .map(|(duration_ms, tokens)| StepTiming { tokens, duration_ms, start_ms: step_start_ms });
+                let timing = native_step_duration(&event)
+                    .zip(event.usage.as_ref().and_then(TokenUsage::to_breakdown))
+                    .map(|(duration_ms, tokens)| StepTiming {
+                        tokens,
+                        duration_ms,
+                        start_ms: step_start_ms,
+                    });
                 if let Some((index, usage_time)) = pending_usage.take() {
                     if let Some(timing) = timing {
                         timing.apply(&mut messages[index], usage_time);
@@ -978,16 +1007,27 @@ not valid json at all
 
     fn native_step_fixture(id: &str, reverse: bool) -> Vec<serde_json::Value> {
         use serde_json::json;
-        let usage = json!({"inputOther":100,"output":60,"inputCacheRead":20,"inputCacheCreation":0});
+        let usage =
+            json!({"inputOther":100,"output":60,"inputCacheRead":20,"inputCacheCreation":0});
         let record = json!({"type":"usage.record","agentId":"main","model":"kimi-code/kimi-for-coding","usageScope":"turn","time":1800000001500i64,"usage":usage});
         let end = json!({"type":"context.append_loop_event","agentId":"main","time":1800000021500i64,"event":{"type":"step.end","uuid":id,"messageId":id,"usage":usage,"llmFirstTokenLatencyMs":500,"llmStreamDurationMs":1000}});
-        let mut records = vec![json!({"type":"context.append_loop_event","agentId":"main","time":1800000000000i64,"event":{"type":"step.begin","uuid":id}})];
-        records.extend(if reverse { vec![end, record] } else { vec![record, end] });
+        let mut records = vec![
+            json!({"type":"context.append_loop_event","agentId":"main","time":1800000000000i64,"event":{"type":"step.begin","uuid":id}}),
+        ];
+        records.extend(if reverse {
+            vec![end, record]
+        } else {
+            vec![record, end]
+        });
         records
     }
 
     fn parse_native_fixture(records: &[serde_json::Value]) -> Vec<UnifiedMessage> {
-        let contents = records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n");
+        let contents = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         let (_dir, path) = create_kimi_code_test_file(&contents);
         parse_kimi_code_file(&path)
     }
@@ -997,7 +1037,7 @@ not valid json at all
         for reverse in [false, true] {
             let messages = parse_native_fixture(&native_step_fixture("native", reverse));
             assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].model, "kimi-for-coding");
+            assert_eq!(messages[0].model_id, "kimi-for-coding");
             assert_eq!(messages[0].tokens.output, 60);
             assert_eq!(messages[0].duration_ms, Some(1500));
             assert_eq!(messages[0].timestamp, 1800000000000);
