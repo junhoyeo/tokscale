@@ -4848,6 +4848,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::hindsight::parse_hindsight_file,
     );
 
+    // Empryo meters every model request it sends into a per-month append-only
+    // ledger (`~/.empryo/usage/usage-<YYYY-MM>.jsonl`): main turns, subagent
+    // runs and internal lanes alike. Each row already names its model and
+    // provider, carries the client's own recorded cost, and is keyed by the
+    // request fields, so the generic cached lane is enough — the monthly files
+    // never overlap and a row repeated in a later file is deduped.
+    parse_cached_lane_deduped(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        &machine_labeler,
+        ClientId::Empryo,
+        sessions::empryo::parse_empryo_file,
+    );
+
     // Muse Code `model_completed` records carry usage but never a cost, so
     // every message leaves the parser at 0.0 and pricing is its only cost
     // source. That makes the generic source cache safe here — unlike Junie
@@ -8631,6 +8647,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let hindsight_count = summed_parsed_message_count(&hindsight_msgs);
     counts.set(ClientId::Hindsight, hindsight_count);
     messages.extend(hindsight_msgs);
+
+    let empryo_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Empryo)
+        .par_iter()
+        .flat_map(|path| sessions::empryo::parse_empryo_file(path))
+        .collect();
+    let mut empryo_seen: HashSet<String> = HashSet::new();
+    let empryo_msgs: Vec<ParsedMessage> = empryo_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut empryo_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let empryo_count = summed_parsed_message_count(&empryo_msgs);
+    counts.set(ClientId::Empryo, empryo_count);
+    messages.extend(empryo_msgs);
 
     let muse_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Muse)

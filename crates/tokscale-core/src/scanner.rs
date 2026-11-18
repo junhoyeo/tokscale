@@ -691,6 +691,13 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
 
                     true
                 }
+                // Empryo's monthly usage ledger: `usage-<YYYY-MM>.jsonl`, one
+                // JSON object per model request, appended forever. The
+                // `usage-` prefix keeps the other files beside it
+                // (`workspace-usage.json`, `pane-usage.json`, `anon-id.json`)
+                // and in-flight temporaries out of the scan; an unknown
+                // pattern would silently match nothing, not everything.
+                "usage-*.jsonl" => file_name.starts_with("usage-") && file_name.ends_with(".jsonl"),
                 "session-*.json" => {
                     file_name.starts_with("session-") && file_name.ends_with(".json")
                 }
@@ -4121,6 +4128,33 @@ mod tests {
             std::slice::from_ref(&expected)
         );
         assert_eq!(result.total_files(), 1);
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_empryo_usage_ledger() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let usage_root = home.join(".empryo/usage");
+        fs::create_dir_all(&usage_root).unwrap();
+        let expected = usage_root.join("usage-2026-11.jsonl");
+        File::create(&expected).unwrap();
+        File::create(usage_root.join("usage-2026-10.jsonl")).unwrap();
+        // Empryo keeps non-usage files beside the ledger (`anon-id.json`,
+        // `workspace-usage.json` and so on), which must not be admitted.
+        File::create(usage_root.join("workspace-usage.json")).unwrap();
+        File::create(usage_root.join("usage-2026-11.jsonl.tmp")).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["empryo".to_string()],
+            false,
+        );
+
+        let mut found = result.get(ClientId::Empryo).as_slice().to_vec();
+        found.sort();
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&expected));
+        assert!(found.contains(&usage_root.join("usage-2026-10.jsonl")));
     }
 
     #[test]
