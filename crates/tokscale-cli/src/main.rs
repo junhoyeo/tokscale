@@ -1280,6 +1280,7 @@ pub enum ClientFilter {
     Bb,
     Qoder,
     Capy,
+    Empryo,
     Synthetic,
 }
 
@@ -1352,6 +1353,7 @@ impl ClientFilter {
             Self::Bb => "bb",
             Self::Qoder => "qoder",
             Self::Capy => "capy",
+            Self::Empryo => "empryo",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1427,6 +1429,7 @@ impl ClientFilter {
             Self::Bb => Some(ClientId::Bb),
             Self::Qoder => Some(ClientId::Qoder),
             Self::Capy => Some(ClientId::Capy),
+            Self::Empryo => Some(ClientId::Empryo),
             Self::Synthetic => None,
         }
     }
@@ -1498,6 +1501,7 @@ impl ClientFilter {
             ClientId::Bb => Self::Bb,
             ClientId::Qoder => Self::Qoder,
             ClientId::Capy => Self::Capy,
+            ClientId::Empryo => Self::Empryo,
         }
     }
 
@@ -11651,6 +11655,23 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("tokscale warp"));
         assert!(warnings[0].contains("does not infer tokens from request counts"));
+    }
+
+    #[test]
+    fn client_filter_round_trips_empryo() {
+        assert_eq!(
+            ClientFilter::from_filter_str("empryo"),
+            Some(ClientFilter::Empryo)
+        );
+        assert_eq!(ClientFilter::Empryo.as_filter_str(), "empryo");
+        assert_eq!(
+            ClientFilter::Empryo.to_client_id(),
+            Some(tokscale_core::ClientId::Empryo)
+        );
+        assert_eq!(
+            ClientFilter::from_client_id(tokscale_core::ClientId::Empryo),
+            ClientFilter::Empryo
+        );
     }
 
     #[test]

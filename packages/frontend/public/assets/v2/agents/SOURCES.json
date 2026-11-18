@@ -416,6 +416,14 @@
       "source": ".github/assets/client-capy.png",
       "readme_row": "Capy",
       "retrieved": "2026-11-14"
+    },
+    "client-empryo.webp": {
+      "clients": [
+        "empryo"
+      ],
+      "source": ".github/assets/client-empryo.png",
+      "readme_row": "Empryo",
+      "retrieved": "2026-11-18"
     }
   }
 }
