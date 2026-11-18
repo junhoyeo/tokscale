@@ -63,6 +63,7 @@ pub mod reasonix;
 pub mod roocode;
 pub mod senpi;
 pub mod synthetic;
+pub mod syok_code;
 pub(crate) mod tencent_buddy;
 pub mod trae;
 pub mod unsloth;

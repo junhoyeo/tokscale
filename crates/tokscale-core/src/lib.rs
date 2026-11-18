@@ -4965,6 +4965,17 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::qwen::parse_qwen_file,
     );
 
+    // Parse the Syok Code usage history (one JSON line per model call)
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        &machine_labeler,
+        ClientId::SyokCode,
+        sessions::syok_code::parse_syok_code_file,
+    );
+
     // Parse Qoder and Qoder CN JSONL transcripts
     parse_cached_lane_deduped_with_fingerprint(
         &scan_result,
@@ -8724,6 +8735,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let qwen_count = qwen_msgs.len() as i32;
     counts.set(ClientId::Qwen, qwen_count);
     messages.extend(qwen_msgs);
+
+    let syok_code_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::SyokCode)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::syok_code::parse_syok_code_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let syok_code_count = syok_code_msgs.len() as i32;
+    counts.set(ClientId::SyokCode, syok_code_count);
+    messages.extend(syok_code_msgs);
 
     let qoder_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Qoder)

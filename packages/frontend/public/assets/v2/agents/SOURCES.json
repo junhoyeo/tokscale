@@ -416,6 +416,14 @@
       "source": ".github/assets/client-capy.png",
       "readme_row": "Capy",
       "retrieved": "2026-11-14"
+    },
+    "client-syok-code.webp": {
+      "clients": [
+        "syok-code"
+      ],
+      "source": ".github/assets/client-syok-code.png",
+      "readme_row": "Syok Code",
+      "retrieved": "2026-11-19"
     }
   }
 }

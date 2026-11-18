@@ -90,6 +90,9 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // Capy: every letter in both cases and every digit is taken (`s` is the
     // global "sources" picker binding), so the first punctuation slot is used.
     ClientUi { hotkey: '!' },
+    // Syok Code: both cases of `s` are taken (and `s` opens the sources
+    // picker), as are `y`/`Y` and `o`/`O`, so the next punctuation slot is used.
+    ClientUi { hotkey: '@' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

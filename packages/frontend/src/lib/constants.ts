@@ -91,6 +91,7 @@ export const SOURCE_DISPLAY_NAMES: Record<ClientType, string> = {
   bb: "BB",
   qoder: "Qoder",
   capy: "Capy",
+  "syok-code": "Syok Code",
 };
 
 // Client logos from GitHub CDN (public repo)
@@ -166,6 +167,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   bb: "https://github.com/get-bb.png",
   qoder: "https://github.com/alibaba.png",
   capy: `${GITHUB_CDN_BASE}/client-capy.png`,
+  "syok-code": `${GITHUB_CDN_BASE}/client-syok-code.png`,
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {
@@ -233,6 +235,7 @@ export const SOURCE_COLORS: Record<ClientType, string> = {
   bb: "#4F46E5",
   qoder: "#FF4D00",
   capy: "#B07C4F",
+  "syok-code": "#EC4899",
 };
 
 // Derived values

@@ -123,6 +123,7 @@
 | <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
 | <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl`（ルートは `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` で変更可能） |
 | <img width="48px" src=".github/assets/client-capy.png" alt="Capy" /> | [Capy](https://capy.ai) | `~/.config/tokscale/capy-cache/usage.json` (API sync via `tokscale capy login` + `tokscale capy sync`) |
+| <img width="48px" src=".github/assets/client-syok-code.png" alt="Syok Code" /> | [Syok Code](https://syok-ai.com/syok-code/) | `~/.syok/usage/*.jsonl` |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
 
@@ -467,7 +468,7 @@ tokscale --client synthetic
 tokscale --client opencode,claude --week --json
 ```
 
-利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`、`aside`、`vibe`、`proma`、`bb`、`qoder`、`capy`。
+利用可能な値: `opencode`, `claude`, `codex`, `copilot`, `gemini`, `cursor`, `amp`, `codebuff`, `droid`, `openclaw`, `hermes`, `pi`, `prime-agent`, `kimchi`, `kimi`, `qwen`, `roocode`, `kilocode`, `kilo`, `mux`, `crush`, `goose`, `antigravity`, `antigravity-cli`, `antigravity-extension`, `zed`, `kiro`, `trae`, `warp`, `cline`, `gjc`, `grok`, `jcode`, `micode`, `micode-desktop`, `commandcode`, `junie`, `zcode`, `opencodereview`, `codebuddy`, `augment`, `synthetic`, `cherrystudio`, `lmstudio`, `unsloth`, `hindsight`, `muse`、`aside`、`vibe`、`proma`、`bb`、`qoder`、`capy`、`syok-code`。
 
 > **破壊的変更 (v4.0.0)**: クライアント単位のブール型フラグ（`--opencode`、`--claude`、`--codex` など）は削除され、現在はエラーになります。代わりに正規の `--client`/`-c` フラグを使用してください — 例: `tokscale --client opencode,claude`。
 
@@ -1595,6 +1596,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | BB | `$BB_DATA_DIR`（既定: `~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（既定: `%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | `bb.db` SQLite データベース（`threads`、`events` テーブル）を解析。オーケストレーションされたエージェントハーネス全体のプロンプトキャッシュおよび推論トークンの内訳を正確に抽出。BB は Claude Code と Codex を通常のホームで実行するため、両方に記録された応答は `claude` または `codex` の下で 1 回だけ集計されます。`--client bb` のみを指定すると BB が記録した内容をすべて表示します。 |
 | Qoder | `$QODER_CONFIG_DIR/projects/`（既定: `~/.qoder/projects/`）、`$QODERCN_CONFIG_DIR/projects/`（既定: `~/.qoder-cn/projects/`） | `%QODER_CONFIG_DIR%\projects\`（既定: `%USERPROFILE%\.qoder\projects\`）、`%QODERCN_CONFIG_DIR%\projects\`（既定: `%USERPROFILE%\.qoder-cn\projects\`） | Qoder および Qoder CN の JSONL セッション・サブエージェントログを解析。複数ブロックに分割されたアシスタント断片を統合し、マネージドモデルでトークン数が 0 にマスクされている場合は会話テキストからトークン数を推定 |
 | Capy | `~/.config/tokscale/capy-cache/usage.json` (or `$TOKSCALE_CONFIG_DIR/capy-cache/`) | `%APPDATA%\tokscale\capy-cache\usage.json` (or `%TOKSCALE_CONFIG_DIR%\capy-cache\`) | API sync via `tokscale capy login` and `tokscale capy sync` (reports refresh it automatically). Capy runs its agent loop on its servers, including local threads and connected subscriptions such as Codex, so no session log is written locally; token totals come from Capy's usage API per hour (last 30 days) or UTC day (older), per thread and model. Use `tokscale capy login --user <email>` in a multi-member organization to count only your own usage |
+| Syok Code | `~/.syok/usage/` | `%USERPROFILE%\.syok\usage\` | One JSON line per model call in monthly `YYYY-MM.jsonl` files; token counts and the provider and model that answered, never message text. Cached prompt tokens and reasoning tokens are split out of the OpenAI-style totals. |
 
 > **Devin Desktop のエージェント対応**: ローカル使用量の解析は、NDJSON ストリームで `usage_update` イベントを出力する ACP 接続エージェント（例: Cascade/Windsurf、claude-code、opencode）で機能します。既定の **devin-cloud** エージェントはローカルの `usage_update` を出力しないため、使用量はサーバー側にとどまり、アカウントレベルの API なしには tokscale で追跡できません。
 

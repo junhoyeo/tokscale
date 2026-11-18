@@ -1183,6 +1183,19 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Syok Code appends one line per model call to `~/.syok/usage/YYYY-MM.jsonl`
+    // (token counts and who answered; never message text).
+    SyokCode = 62 => {
+        id: "syok-code",
+        display: "Syok Code",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-syok-code.png"),
+        root: PathRoot::Home,
+        relative: ".syok/usage",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1298,7 +1311,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 62);
+        assert_eq!(ClientId::COUNT, 63);
     }
 
     #[test]
