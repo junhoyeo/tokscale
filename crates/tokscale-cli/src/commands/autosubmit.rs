@@ -638,16 +638,19 @@ fn status_output(settings: &AutosubmitSettings) -> StatusOutput {
     }
 }
 
-/// Fraction of the interval by which a run may start before
-/// `last_run_at_ms + interval` and still count as due.
+/// How long before `last_run_at_ms + interval` a run may start and still count
+/// as due: a tenth of the interval, capped at five minutes.
 ///
-/// Every installed scheduler fires on a fixed start-to-start cadence equal to
-/// the interval, so a regular tick lands at `last_run_at_ms + interval` give or
-/// take launch jitter. Without this slack a tick that starts a few
-/// milliseconds earlier relative to its predecessor is `NotDue`, and the
-/// effective cadence silently doubles. Extra launches well inside the interval
-/// (launchd `RunAtLoad`, systemd `OnBootSec`, a manual `run`) stay `NotDue`.
-const SCHEDULE_TOLERANCE_DIVISOR: i64 = 10;
+/// Every installed scheduler fires on a fixed start-to-start cadence, so a
+/// regular tick lands at `last_run_at_ms + interval` give or take launch
+/// jitter. Without this slack a tick that starts a few milliseconds earlier
+/// relative to its predecessor is `NotDue`, and the effective cadence silently
+/// doubles. The bound only has to absorb jitter, so it stays small for long
+/// intervals: extra launches (launchd `RunAtLoad`, systemd `OnBootSec`, a
+/// manual `run`) outside it stay `NotDue`.
+fn schedule_tolerance_ms(interval_ms: i64) -> i64 {
+    (interval_ms / 10).min(5 * 60_000)
+}
 
 pub fn run_decision(
     settings: &AutosubmitSettings,
@@ -661,7 +664,7 @@ pub fn run_decision(
         return AutosubmitRunDecision::Due;
     }
     let interval_ms = (settings.interval_minutes as i64).saturating_mul(60_000);
-    let tolerance_ms = interval_ms / SCHEDULE_TOLERANCE_DIVISOR;
+    let tolerance_ms = schedule_tolerance_ms(interval_ms);
     match settings.last_run_at_ms {
         Some(last) if now_ms < last.saturating_add(interval_ms - tolerance_ms) => {
             AutosubmitRunDecision::NotDue {
@@ -1741,14 +1744,43 @@ mod tests {
             AutosubmitRunDecision::Due
         );
 
-        // A launch well inside the interval (login, boot, manual run) is not
-        // a scheduler tick and stays deduplicated.
-        let tolerance_ms = interval_ms / SCHEDULE_TOLERANCE_DIVISOR;
+        // The earliest start that still counts as this tick.
+        let tolerance_ms = schedule_tolerance_ms(interval_ms);
+        assert_eq!(
+            run_decision(&settings, 500 + interval_ms - tolerance_ms, false),
+            AutosubmitRunDecision::Due
+        );
+
+        // A launch outside the tolerance (login, boot, manual run) is not a
+        // scheduler tick and stays deduplicated.
         assert_eq!(
             run_decision(&settings, 500 + interval_ms - tolerance_ms - 1, false),
             AutosubmitRunDecision::NotDue {
                 next_run_at_ms: 500 + interval_ms
             }
+        );
+    }
+
+    #[test]
+    fn run_decision_tolerance_stays_small_for_long_intervals() {
+        // A tenth of a day would accept a login launch 2.4h early; the cap
+        // keeps the slack at jitter scale.
+        let interval_ms: i64 = 24 * 60 * 60_000;
+        let settings = AutosubmitSettings {
+            enabled: true,
+            interval_minutes: 24 * 60,
+            last_run_at_ms: Some(0),
+            ..AutosubmitSettings::default()
+        };
+        assert_eq!(
+            run_decision(&settings, interval_ms - 6 * 60_000, false),
+            AutosubmitRunDecision::NotDue {
+                next_run_at_ms: interval_ms
+            }
+        );
+        assert_eq!(
+            run_decision(&settings, interval_ms - 5 * 60_000, false),
+            AutosubmitRunDecision::Due
         );
     }
 
