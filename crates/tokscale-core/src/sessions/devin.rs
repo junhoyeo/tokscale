@@ -14,6 +14,7 @@ use super::utils::{
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::{provider_identity, TokenBreakdown};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -173,6 +174,23 @@ fn session_id_from_session_dir(source_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Exact byte size and SHA-256 digest of a single read file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DevinCliFileDigest {
+    pub size: u64,
+    pub hash: [u8; 32],
+}
+
+/// Exact byte-level snapshot of the `log.jsonl` and optional sibling `meta.json`
+/// consumed during a single parse of a Devin CLI session log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DevinCliLogSnapshot {
+    pub log: DevinCliFileDigest,
+    /// `Some(digest)` when sibling `meta.json` existed and was read,
+    /// `None` when `meta.json` was absent (`NotFound`) or unreadable.
+    pub meta: Option<DevinCliFileDigest>,
+}
+
 fn load_devin_cli_session_meta(meta_path: &Path) -> (Option<DevinCliSessionMeta>, bool) {
     match std::fs::read_to_string(meta_path) {
         Ok(contents) => match serde_json::from_str::<DevinCliSessionMeta>(&contents) {
@@ -181,6 +199,29 @@ fn load_devin_cli_session_meta(meta_path: &Path) -> (Option<DevinCliSessionMeta>
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, true),
         Err(_) => (None, false),
+    }
+}
+
+fn load_devin_cli_session_meta_with_snapshot(
+    meta_path: &Path,
+) -> (
+    Option<DevinCliSessionMeta>,
+    bool,
+    Option<DevinCliFileDigest>,
+) {
+    match std::fs::read(meta_path) {
+        Ok(bytes) => {
+            let digest = DevinCliFileDigest {
+                size: bytes.len() as u64,
+                hash: Sha256::digest(&bytes).into(),
+            };
+            match serde_json::from_slice::<DevinCliSessionMeta>(&bytes) {
+                Ok(meta) => (Some(meta), true, Some(digest)),
+                Err(_) => (None, false, Some(digest)),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, true, None),
+        Err(_) => (None, false, None),
     }
 }
 
@@ -489,6 +530,17 @@ pub(crate) fn scan_devin_cli_sqlite(db_path: &Path) -> (Vec<UnifiedMessage>, boo
 /// `node.id`s sharing a `request_id` deduplicate while preserving the
 /// `devin-cli:{session_id}:request:{request_id}` key for cross-store dedup.
 pub(crate) fn scan_devin_cli_session_log(log_path: &Path) -> (Vec<UnifiedMessage>, bool) {
+    let (messages, complete, _) = scan_devin_cli_session_log_with_snapshot(log_path);
+    (messages, complete)
+}
+
+/// Same as [`scan_devin_cli_session_log`], also returning the exact byte sizes
+/// and SHA-256 digests of the `log.jsonl` and sibling `meta.json` consumed by
+/// this read so the persistent cache can verify the read matched the exact
+/// pre/post snapshot.
+pub(crate) fn scan_devin_cli_session_log_with_snapshot(
+    log_path: &Path,
+) -> (Vec<UnifiedMessage>, bool, Option<DevinCliLogSnapshot>) {
     #[cfg(test)]
     cache_test_hooks::before_read(log_path);
     let fallback_timestamp = file_modified_timestamp_ms(log_path);
@@ -501,13 +553,14 @@ pub(crate) fn scan_devin_cli_session_log(log_path: &Path) -> (Vec<UnifiedMessage
 fn scan_devin_cli_session_log_inner(
     log_path: &Path,
     fallback_timestamp: i64,
-) -> (Vec<UnifiedMessage>, bool) {
+) -> (Vec<UnifiedMessage>, bool, Option<DevinCliLogSnapshot>) {
     let Ok(file) = std::fs::File::open(log_path) else {
-        return (Vec::new(), false);
+        return (Vec::new(), false, None);
     };
 
     let meta_path = devin_cli_session_meta_path(log_path);
-    let (meta, meta_complete) = load_devin_cli_session_meta(&meta_path);
+    let (meta, meta_complete, meta_snapshot) =
+        load_devin_cli_session_meta_with_snapshot(&meta_path);
     let session_id = meta
         .as_ref()
         .map(|m| m.effective_id(log_path))
@@ -523,12 +576,16 @@ fn scan_devin_cli_session_log_inner(
     let mut at_start = true;
     let mut complete = meta_complete;
     let mut nodes_by_id: BTreeMap<i64, DevinLogNodeEntry> = BTreeMap::new();
+    let mut log_hasher = Sha256::new();
+    let mut log_size: u64 = 0;
 
     loop {
         buf.clear();
         match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break,
-            Ok(_) => {
+            Ok(n) => {
+                log_hasher.update(&buf[..n]);
+                log_size = log_size.saturating_add(n as u64);
                 if buf.last() == Some(&b'\n') {
                     buf.pop();
                     if buf.last() == Some(&b'\r') {
@@ -607,7 +664,14 @@ fn scan_devin_cli_session_log_inner(
         messages.push(unified);
     }
 
-    (messages, complete)
+    let snapshot = DevinCliLogSnapshot {
+        log: DevinCliFileDigest {
+            size: log_size,
+            hash: log_hasher.finalize().into(),
+        },
+        meta: meta_snapshot,
+    };
+    (messages, complete, Some(snapshot))
 }
 
 fn scan_devin_cli_sqlite_inner(
@@ -843,6 +907,7 @@ pub(crate) mod cache_test_hooks {
         before_sql: Option<String>,
         after_sql: Option<String>,
         after_append_bytes: Option<Vec<u8>>,
+        after_rewrite_preserving_mtime: Option<(PathBuf, Vec<u8>)>,
         remove_before_read: bool,
     }
 
@@ -890,6 +955,19 @@ pub(crate) mod cache_test_hooks {
                 .unwrap()
                 .after_append_bytes = Some(bytes.into());
         }
+
+        pub(crate) fn after_read_rewrite_preserving_mtime(
+            &self,
+            target: PathBuf,
+            bytes: impl Into<Vec<u8>>,
+        ) {
+            STATES
+                .lock()
+                .unwrap()
+                .get_mut(&self.0)
+                .unwrap()
+                .after_rewrite_preserving_mtime = Some((target, bytes.into()));
+        }
     }
 
     impl Drop for Probe {
@@ -907,7 +985,7 @@ pub(crate) mod cache_test_hooks {
     }
 
     fn run(path: &Path, before: bool) {
-        let (sql, append_bytes) = {
+        let (sql, append_bytes, rewrite) = {
             let mut states = STATES.lock().unwrap();
             let Some(state) = states.get_mut(path) else {
                 return;
@@ -917,9 +995,13 @@ pub(crate) mod cache_test_hooks {
                 if std::mem::take(&mut state.remove_before_read) {
                     std::fs::remove_file(path).unwrap();
                 }
-                (state.before_sql.take(), None)
+                (state.before_sql.take(), None, None)
             } else {
-                (state.after_sql.take(), state.after_append_bytes.take())
+                (
+                    state.after_sql.take(),
+                    state.after_append_bytes.take(),
+                    state.after_rewrite_preserving_mtime.take(),
+                )
             }
         };
         if let Some(sql) = sql {
@@ -932,6 +1014,16 @@ pub(crate) mod cache_test_hooks {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
             file.write_all(&bytes).unwrap();
+        }
+        if let Some((target, bytes)) = rewrite {
+            let original_modified = std::fs::metadata(&target).unwrap().modified().unwrap();
+            std::fs::write(&target, bytes).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+                .unwrap();
         }
     }
 }

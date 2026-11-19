@@ -2928,9 +2928,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let is_session_log = sessions::devin::is_devin_cli_session_log_path(path);
         let check_fingerprint = |path: &Path, cached: Option<&message_cache::SourceFingerprint>| {
             if is_session_log {
-                message_cache::SourceFingerprint::check_devin_cli_log_path_samples_only(
-                    path, cached,
-                )
+                message_cache::SourceFingerprint::check_devin_cli_log_path(path, cached)
             } else {
                 message_cache::SourceFingerprint::check_sqlite_path(path, cached)
             }
@@ -2951,20 +2949,30 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 status
             },
             |path, before| {
-                let (messages, read_complete) = if is_session_log {
-                    sessions::devin::scan_devin_cli_session_log(path)
+                let (messages, read_complete, parsed_matches_before) = if is_session_log {
+                    let (messages, read_complete, snapshot) =
+                        sessions::devin::scan_devin_cli_session_log_with_snapshot(path);
+                    let matches_before = match (before, snapshot.as_ref()) {
+                        (Some(before), Some(snapshot)) => {
+                            before.matches_devin_cli_log_snapshot(snapshot)
+                        }
+                        _ => false,
+                    };
+                    (messages, read_complete, matches_before)
                 } else {
-                    sessions::devin::scan_devin_cli_sqlite(path)
+                    let (messages, read_complete) = sessions::devin::scan_devin_cli_sqlite(path);
+                    (messages, read_complete, true)
                 };
                 // An internally consistent read is not complete-history
                 // authority if the surrounding source snapshot changed.
                 // Do not let a second probe certify a different read instead.
-                let stable = before.is_some_and(|before| {
-                    matches!(
-                        check_fingerprint(path, Some(before)),
-                        Some(message_cache::FingerprintStatus::Unchanged)
-                    )
-                });
+                let stable = parsed_matches_before
+                    && before.is_some_and(|before| {
+                        matches!(
+                            check_fingerprint(path, Some(before)),
+                            Some(message_cache::FingerprintStatus::Unchanged)
+                        )
+                    });
                 complete.set(read_complete && stable);
                 (messages, complete.get())
             },
@@ -26183,6 +26191,173 @@ mod tests {
                 cached(&log_path).is_none(),
                 "corrupt log.jsonl must invalidate existing cache entry"
             );
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cli_session_log_exact_snapshot_catches_unsampled_inplace_edits_and_races() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+
+            let session_dir = home
+                .path()
+                .join(".local/share/devin/cli/sessions/sess-exact-1");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let meta_path = session_dir.join("meta.json");
+            let log_path = session_dir.join("log.jsonl");
+
+            let head_pad = "a".repeat(5_000);
+            let tail_pad = "b".repeat(35_000);
+            let make_log = |input_tokens: i64| {
+                format!(
+                    "{{\"kind\":\"event\",\"pad\":\"{head_pad}\"}}\n\
+                     {{\"kind\":\"node\",\"at\":1700000000.0,\"node\":{{\"id\":1,\"message\":{{\"role\":\"assistant\",\"metadata\":{{\"request_id\":\"req-1\",\"metrics\":{{\"input_tokens\":{input_tokens:04},\"output_tokens\":20}}}}}}}}}}\n\
+                     {{\"kind\":\"event\",\"pad\":\"{tail_pad}\"}}\n"
+                )
+            };
+            let make_meta = |model: &str| {
+                format!(
+                    "{{\"id\":\"sess-exact-1\",\"pad_head\":\"{head_pad}\",\"model\":\"{model}\",\"working_directory\":\"/tmp/devin-exact\",\"pad_tail\":\"{tail_pad}\"}}"
+                )
+            };
+            let rewrite_preserving_mtime = |target: &Path, content: &str| {
+                let original_modified = std::fs::metadata(target).unwrap().modified().unwrap();
+                std::fs::write(target, content).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(target)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+                    .unwrap();
+            };
+
+            let log_v1 = make_log(1000);
+            let log_v2 = make_log(2000);
+            let log_v3 = make_log(3000);
+            let meta_v1 = make_meta("claude-sonnet-4-5");
+            let meta_v2 = make_meta("claude-sonnet-4-6");
+            let meta_v3 = make_meta("claude-sonnet-4-7");
+            assert_eq!(log_v1.len(), log_v2.len());
+            assert_eq!(log_v2.len(), log_v3.len());
+            assert_eq!(meta_v1.len(), meta_v2.len());
+            assert_eq!(meta_v2.len(), meta_v3.len());
+
+            std::fs::write(&meta_path, &meta_v1).unwrap();
+            std::fs::write(&log_path, &log_v1).unwrap();
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&log_path);
+
+            // Cold scan caches exact full-content snapshot; warm scan reuses without decoding.
+            let (first, first_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 1);
+            assert!(first_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].tokens.input, 1000);
+            assert_eq!(first[0].model_id, "claude-sonnet-4-5");
+            let entry_v1 = cached(&log_path).expect("cold scan must cache stable log");
+
+            let (warm, warm_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(
+                probe.reads(),
+                1,
+                "unchanged warm scan must reuse verified exact snapshot without re-parsing"
+            );
+            assert!(warm_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(warm, first);
+
+            // In-place middle-of-file edit to log.jsonl with identical size,
+            // mtime, and sampled bytes must invalidate the warm cache.
+            rewrite_preserving_mtime(&log_path, &log_v2);
+            let fp_after_log_edit =
+                message_cache::SourceFingerprint::from_devin_cli_log_path(&log_path).unwrap();
+            assert_eq!(fp_after_log_edit.size, entry_v1.fingerprint.size);
+            assert_eq!(
+                fp_after_log_edit.modified_ns,
+                entry_v1.fingerprint.modified_ns
+            );
+            assert_eq!(
+                fp_after_log_edit.sample_hashes,
+                entry_v1.fingerprint.sample_hashes
+            );
+            assert_ne!(
+                fp_after_log_edit.content_hash,
+                entry_v1.fingerprint.content_hash
+            );
+
+            let (after_log_edit, log_edit_outcome) =
+                scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 2);
+            assert!(log_edit_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(after_log_edit[0].tokens.input, 2000);
+            let entry_v2 = cached(&log_path).expect("updated log must be cached");
+
+            // In-place middle-of-file edit to meta.json with identical size,
+            // mtime, and sampled bytes must also invalidate the warm cache.
+            rewrite_preserving_mtime(&meta_path, &meta_v2);
+            let fp_after_meta_edit =
+                message_cache::SourceFingerprint::from_devin_cli_log_path(&log_path).unwrap();
+            assert_eq!(
+                fp_after_meta_edit.related_files[0].size,
+                entry_v2.fingerprint.related_files[0].size
+            );
+            assert_eq!(
+                fp_after_meta_edit.related_files[0].modified_ns,
+                entry_v2.fingerprint.related_files[0].modified_ns
+            );
+            assert_eq!(
+                fp_after_meta_edit.related_files[0].sample_hashes,
+                entry_v2.fingerprint.related_files[0].sample_hashes
+            );
+            assert_ne!(
+                fp_after_meta_edit.related_files[0].content_hash,
+                entry_v2.fingerprint.related_files[0].content_hash
+            );
+
+            let (after_meta_edit, meta_edit_outcome) =
+                scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 3);
+            assert!(meta_edit_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(after_meta_edit[0].model_id, "claude-sonnet-4-6");
+            assert!(cached(&log_path).is_some());
+
+            // Mid-read in-place rewrite of log.jsonl (preserving size, mtime,
+            // and sampled bytes) must fail post-read verification and refuse to
+            // store a cache entry.
+            rewrite_preserving_mtime(&log_path, &log_v1);
+            probe.after_read_rewrite_preserving_mtime(log_path.clone(), log_v3.as_bytes());
+            let (_, log_race_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 4);
+            assert!(
+                !log_race_outcome.source_reads["devin-cli"].complete(),
+                "mid-read unsampled in-place log.jsonl rewrite must revoke completeness"
+            );
+            assert!(
+                cached(&log_path).is_none(),
+                "mid-read unsampled in-place log.jsonl rewrite must not be cached"
+            );
+
+            // Mid-read in-place rewrite of meta.json (preserving size, mtime,
+            // and sampled bytes) must also fail post-read verification and
+            // refuse to store a cache entry.
+            probe.after_read_rewrite_preserving_mtime(meta_path.clone(), meta_v3.as_bytes());
+            let (_, meta_race_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 5);
+            assert!(
+                !meta_race_outcome.source_reads["devin-cli"].complete(),
+                "mid-read unsampled in-place meta.json rewrite must revoke completeness"
+            );
+            assert!(
+                cached(&log_path).is_none(),
+                "mid-read unsampled in-place meta.json rewrite must not be cached"
+            );
+
+            // Next stable scan observes both updated files and caches cleanly.
+            let (final_msgs, final_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 6);
+            assert!(final_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(final_msgs[0].tokens.input, 3000);
+            assert_eq!(final_msgs[0].model_id, "claude-sonnet-4-7");
+            assert!(cached(&log_path).is_some());
         }
 
         #[test]

@@ -544,23 +544,57 @@ impl SourceFingerprint {
         )
     }
 
-    /// Fingerprint a Devin CLI per-session `sessions/<id>/log.jsonl` alongside
-    /// its sibling `meta.json`, which supplies the authoritative session id,
-    /// fallback model, and workspace directory.
-    pub(crate) fn check_devin_cli_log_path_samples_only(
-        path: &Path,
-        cached: Option<&Self>,
-    ) -> Option<FingerprintStatus> {
+    /// Build an exact full-content fingerprint for a Devin CLI per-session
+    /// `sessions/<id>/log.jsonl` alongside its sibling `meta.json` (which
+    /// supplies the authoritative session id, fallback model, and workspace
+    /// directory). Both files are hashed with SHA-256 so an in-place edit that
+    /// preserves size, mtime, and sampled bytes cannot go undetected.
+    pub(crate) fn from_devin_cli_log_path(path: &Path) -> Option<Self> {
         let related_paths = std::iter::once((
             "meta.json".to_string(),
             crate::sessions::devin::devin_cli_session_meta_path(path),
         ));
-        Self::check_path_with_related_mode(
-            path,
-            related_paths,
-            cached,
-            ContentHashMode::SamplesOnly,
-        )
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::Full)
+    }
+
+    /// Validate a Devin CLI `sessions/<id>/log.jsonl` and sibling `meta.json`
+    /// against an exact full-content snapshot. Unlike sample-only checks, every
+    /// warm hit and post-read verification compares full SHA-256 content hashes
+    /// for both files.
+    pub(crate) fn check_devin_cli_log_path(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        let current = Self::from_devin_cli_log_path(path)?;
+        if cached.is_some_and(|expected| *expected == current) {
+            Some(FingerprintStatus::Unchanged)
+        } else {
+            Some(FingerprintStatus::Changed(current))
+        }
+    }
+
+    /// Verify that a parsed Devin CLI session log/meta byte snapshot matches
+    /// the exact full-content fingerprint captured for this entry.
+    pub(crate) fn matches_devin_cli_log_snapshot(
+        &self,
+        snapshot: &crate::sessions::devin::DevinCliLogSnapshot,
+    ) -> bool {
+        if self.size != snapshot.log.size || self.content_hash != snapshot.log.hash {
+            return false;
+        }
+        let Some(meta_fp) = self
+            .related_files
+            .iter()
+            .find(|related| related.suffix == "meta.json")
+        else {
+            return false;
+        };
+        match snapshot.meta {
+            Some(meta) => {
+                meta_fp.exists && meta_fp.size == meta.size && meta_fp.content_hash == meta.hash
+            }
+            None => !meta_fp.exists,
+        }
     }
 
     /// Fold every discovered Devin CLI `sessions/*/meta.json` into a single
@@ -583,24 +617,30 @@ impl SourceFingerprint {
         sorted_paths.dedup();
 
         let mut hasher = Sha256::new();
-        hasher.update(b"devin-cli-metas-v1\0");
+        hasher.update(b"devin-cli-metas-v2\0");
         hasher.update((sorted_paths.len() as u64).to_le_bytes());
         for meta_path in &sorted_paths {
             let mut path_hasher = Sha256::new();
             CachedPath::from_path(meta_path).update_digest(&mut path_hasher);
             hasher.update(path_hasher.finalize());
-            match metadata_signature(meta_path) {
-                Ok((size, modified_ns)) => {
-                    let samples = compute_sample_hashes(meta_path, size)?;
+            match meta_path.metadata() {
+                Ok(metadata) => {
+                    let size = metadata.len();
+                    let modified_ns = metadata
+                        .modified()
+                        .ok()?
+                        .duration_since(UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos() as u64;
+                    let content_hash = if metadata.is_dir() {
+                        [0_u8; 32]
+                    } else {
+                        hash_prefix(meta_path, size)?
+                    };
                     hasher.update([1u8]);
                     hasher.update(size.to_le_bytes());
                     hasher.update(modified_ns.to_le_bytes());
-                    hasher.update((samples.len() as u64).to_le_bytes());
-                    for sample in samples {
-                        hasher.update(sample.offset.to_le_bytes());
-                        hasher.update(sample.len.to_le_bytes());
-                        hasher.update(sample.hash.to_le_bytes());
-                    }
+                    hasher.update(content_hash);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     hasher.update([0u8]);
@@ -5027,11 +5067,12 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 ///
 /// Most warm validation uses size + mtime + samples
 /// ([`primary_fingerprint_matches`] and [`related_fingerprint_metadata_matches`]).
-/// Codex reads `content_hash` for incremental resume, while Prime hashes the
-/// complete transcript on every warm hit because its cached messages and
-/// reconciliation accounting must describe one exact byte snapshot. Generic
-/// parsers and SQLite sources store a zero sentinel so their changed or cold
-/// files do not pay for a whole-file hash that cannot affect parsing.
+/// Codex reads `content_hash` for incremental resume, while Prime and Devin
+/// CLI session logs hash the complete bytes on every warm hit because their
+/// cached messages and reconciliation/recount accounting must describe one
+/// exact byte snapshot. Generic parsers and SQLite sources store a zero
+/// sentinel so their changed or cold files do not pay for a whole-file hash
+/// that cannot affect parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentHashMode {
     Full,
@@ -6539,6 +6580,225 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn devin_cli_rebuilds_predecessor_v7_cache_for_unchanged_sqlite() {
+        let home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(home.path());
+        let db_path = home.path().join(".local/share/devin/cli/sessions.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT, working_directory TEXT, title TEXT);
+             CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT, created_at INTEGER);
+             INSERT INTO sessions VALUES (
+                 'sess-fusion',
+                 'fusion-claude-opus-4-6-medium-sidekick-swe-2-medium',
+                 '/tmp/devin-project',
+                 'Fusion task'
+             );",
+        )
+        .unwrap();
+        // Row without generation_model: v7 fell back to the composite Fusion
+        // profile string, while v8 skips composite routing profiles.
+        conn.execute(
+            "INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('sess-fusion', ?1, 1700000000)",
+            [serde_json::json!({
+                "role": "assistant",
+                "metadata": {
+                    "request_id": "req-fusion-only",
+                    "metrics": {"input_tokens": 120, "output_tokens": 30}
+                }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        // Row with concrete generation_model: kept by v8.
+        conn.execute(
+            "INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('sess-fusion', ?1, 1700000010)",
+            [serde_json::json!({
+                "role": "assistant",
+                "metadata": {
+                    "request_id": "req-concrete",
+                    "generation_model": "claude-opus-4-6",
+                    "metrics": {"input_tokens": 80, "output_tokens": 15}
+                }
+            })
+            .to_string()],
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::DevinCli);
+        assert_eq!(identity.parser_version, 8);
+        let predecessor = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: 7,
+        };
+        let current_messages = crate::sessions::devin::parse_devin_cli_sqlite(&db_path);
+        assert_eq!(current_messages.len(), 1);
+        let fingerprint = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
+
+        let mut stale_v7_row = current_messages[0].clone();
+        stale_v7_row.model_id = "fusion-claude-opus-4-6-medium-sidekick-swe-2-medium".into();
+        stale_v7_row.tokens.input = 120;
+        stale_v7_row.tokens.output = 30;
+        stale_v7_row.dedup_key = Some("devin-cli:sess-fusion:request:req-fusion-only".to_string());
+        let legacy_messages = vec![stale_v7_row, current_messages[0].clone()];
+
+        let entry = CachedSourceEntry::new(
+            predecessor,
+            &db_path,
+            fingerprint.clone(),
+            legacy_messages,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &db_path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, predecessor, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+        assert!(matches!(
+            read_shard(&shard, identity),
+            ShardReadStatus::Stale
+        ));
+
+        let scan = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                home.path().to_str().unwrap(),
+                &["devin-cli".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let rebuilt = scan();
+        assert_eq!(
+            rebuilt.len(),
+            1,
+            "unchanged v7 shard must be reparsed so composite Fusion fallback rows are dropped"
+        );
+        assert_eq!(rebuilt[0].model_id, "claude-opus-4-6");
+        assert_eq!(rebuilt[0].tokens.input, 80);
+        assert_eq!(rebuilt[0].tokens.output, 15);
+        assert!(matches!(
+            SourceFingerprint::check_sqlite_path(&db_path, Some(&fingerprint)),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let cache = SourceMessageCache::load();
+        let persisted = cache.get(identity, &db_path).unwrap();
+        assert_eq!(persisted.parser_version, 8);
+        assert_eq!(persisted.messages, rebuilt);
+        assert_eq!(scan(), rebuilt);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn devin_desktop_rebuilds_predecessor_v2_cache_for_unchanged_ndjson() {
+        let home = TempDir::new().unwrap();
+        let _env = sandbox_cache_env(home.path());
+
+        let meta_path = home
+            .path()
+            .join(".local/share/devin/cli/sessions/cli-meta-1/meta.json");
+        fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
+        fs::write(
+            &meta_path,
+            r#"{"id":"cli-meta-1","title":"Build the release","model":"claude-opus-4-6","working_directory":"/tmp/devin-ws"}"#,
+        )
+        .unwrap();
+
+        let ndjson_path = home
+            .path()
+            .join("Library/Application Support/Devin/User/acp-events/desktop-session.ndjson");
+        fs::create_dir_all(ndjson_path.parent().unwrap()).unwrap();
+        fs::write(
+            &ndjson_path,
+            concat!(
+                r#"{"notification":{"sessionUpdate":"session_info_update","title":"Build the release"}}"#,
+                "\n",
+                r#"{"notification":{"sessionUpdate":"usage_update","_meta":{"cognition.ai/inputTokens":100,"cognition.ai/outputTokens":20,"cognition.ai/cachedReadTokens":10}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let identity = CacheIdentity::for_client(ClientId::DevinDesktop);
+        assert_eq!(identity.parser_version, 3);
+        let predecessor = CacheIdentity {
+            namespace: identity.namespace,
+            parser_version: 2,
+        };
+        let lookup_paths = vec![meta_path.clone()];
+        let fingerprint = match SourceFingerprint::check_devin_desktop_path_samples_only(
+            &ndjson_path,
+            &lookup_paths,
+            None,
+        ) {
+            Some(FingerprintStatus::Changed(fp)) => fp,
+            other => panic!("expected initial desktop fingerprint, got {other:?}"),
+        };
+
+        let lookup = crate::sessions::devin::load_devin_desktop_session_lookup(&lookup_paths);
+        let mut legacy =
+            crate::sessions::devin::parse_devin_desktop_ndjson_with_lookup(&ndjson_path, &lookup);
+        assert_eq!(legacy.len(), 1);
+        // Simulate predecessor v2 output that did not resolve CLI meta.json
+        // lookups and could carry a composite Fusion routing profile.
+        legacy[0].session_id = "desktop-session".into();
+        legacy[0].model_id = "fusion-claude-opus-4-6-medium-sidekick-swe-2-medium".into();
+        legacy[0].workspace_key = None;
+
+        let entry = CachedSourceEntry::new(
+            predecessor,
+            &ndjson_path,
+            fingerprint.clone(),
+            legacy,
+            Vec::new(),
+            None,
+        );
+        let shard = cache_shard_path(identity, &ndjson_path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, predecessor, &[entry], MAX_CACHE_SHARD_BYTES).unwrap();
+        assert!(matches!(
+            read_shard(&shard, identity),
+            ShardReadStatus::Stale
+        ));
+
+        let scan = || {
+            crate::parse_all_messages_with_pricing_with_env_strategy(
+                home.path().to_str().unwrap(),
+                &["devin-desktop".to_string()],
+                None,
+                false,
+                &crate::scanner::ScannerSettings::default(),
+            )
+        };
+        let rebuilt = scan();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(
+            rebuilt[0].session_id, "cli-meta-1",
+            "unchanged v2 desktop shard must reparse with CLI meta.json lookup"
+        );
+        assert_eq!(rebuilt[0].model_id, "claude-opus-4-6");
+        assert_eq!(rebuilt[0].workspace_key.as_deref(), Some("/tmp/devin-ws"));
+        assert!(matches!(
+            SourceFingerprint::check_devin_desktop_path_samples_only(
+                &ndjson_path,
+                &lookup_paths,
+                Some(&fingerprint),
+            ),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        let cache = SourceMessageCache::load();
+        let persisted = cache.get(identity, &ndjson_path).unwrap();
+        assert_eq!(persisted.parser_version, 3);
+        assert_eq!(persisted.messages, rebuilt);
+        assert_eq!(scan(), rebuilt);
+    }
+
+    #[test]
     fn test_devin_cli_log_fingerprint_invalidates_when_sibling_meta_changes() {
         let dir = TempDir::new().unwrap();
         let session_dir = dir.path().join("sessions/sess-1");
@@ -6547,55 +6807,121 @@ mod tests {
         let meta_path = session_dir.join("meta.json");
         fs::write(&log_path, "{\"kind\":\"node\"}\n").unwrap();
 
-        // Initially absent meta.json produces a stable fingerprint.
-        let fp_no_meta = match SourceFingerprint::check_devin_cli_log_path_samples_only(
-            &log_path, None,
-        )
-        .unwrap()
+        // Initially absent meta.json produces a stable exact fingerprint.
+        let fp_no_meta = match SourceFingerprint::check_devin_cli_log_path(&log_path, None).unwrap()
         {
             FingerprintStatus::Changed(fp) => fp,
             FingerprintStatus::Unchanged => panic!("initial check must report Changed"),
         };
+        assert_ne!(
+            fp_no_meta.content_hash, [0_u8; 32],
+            "exact log fingerprint must carry full SHA-256 content_hash"
+        );
         assert_eq!(
-            SourceFingerprint::check_devin_cli_log_path_samples_only(&log_path, Some(&fp_no_meta)),
+            SourceFingerprint::check_devin_cli_log_path(&log_path, Some(&fp_no_meta)),
             Some(FingerprintStatus::Unchanged)
         );
 
         // Creating sibling meta.json invalidates even though log.jsonl is untouched.
         fs::write(&meta_path, r#"{"id":"sess-1","model":"gpt-5"}"#).unwrap();
-        let fp_with_meta = match SourceFingerprint::check_devin_cli_log_path_samples_only(
+        let fp_with_meta = match SourceFingerprint::check_devin_cli_log_path(
             &log_path,
             Some(&fp_no_meta),
         )
         .unwrap()
         {
             FingerprintStatus::Changed(fp) => fp,
-            FingerprintStatus::Unchanged => panic!("creating meta.json must invalidate cache"),
+            FingerprintStatus::Unchanged => {
+                panic!("creating meta.json must invalidate cache")
+            }
         };
         assert_eq!(
-            SourceFingerprint::check_devin_cli_log_path_samples_only(
-                &log_path,
-                Some(&fp_with_meta)
-            ),
+            SourceFingerprint::check_devin_cli_log_path(&log_path, Some(&fp_with_meta)),
             Some(FingerprintStatus::Unchanged)
         );
 
-        // Editing meta.json invalidates again.
-        fs::write(&meta_path, r#"{"id":"sess-1","model":"claude-opus-4-6"}"#).unwrap();
-        let fp_edited = match SourceFingerprint::check_devin_cli_log_path_samples_only(
+        // In-place edits in an unsampled byte window of log.jsonl or meta.json
+        // with preserved size, mtime, and sample hashes must still invalidate.
+        let head_pad = "a".repeat(5_000);
+        let tail_pad = "b".repeat(35_000);
+        let log_v1 = format!("{{\"kind\":\"event\",\"h\":\"{head_pad}\"}}\n{{\"kind\":\"node\",\"v\":1000}}\n{{\"kind\":\"event\",\"t\":\"{tail_pad}\"}}\n");
+        let log_v2 = format!("{{\"kind\":\"event\",\"h\":\"{head_pad}\"}}\n{{\"kind\":\"node\",\"v\":2000}}\n{{\"kind\":\"event\",\"t\":\"{tail_pad}\"}}\n");
+        let meta_v1 = format!("{{\"id\":\"sess-1\",\"h\":\"{head_pad}\",\"model\":\"claude-sonnet-4-5\",\"t\":\"{tail_pad}\"}}");
+        let meta_v2 = format!("{{\"id\":\"sess-1\",\"h\":\"{head_pad}\",\"model\":\"claude-sonnet-4-6\",\"t\":\"{tail_pad}\"}}");
+        assert_eq!(log_v1.len(), log_v2.len());
+        assert_eq!(meta_v1.len(), meta_v2.len());
+
+        fs::write(&log_path, &log_v1).unwrap();
+        fs::write(&meta_path, &meta_v1).unwrap();
+        let fp_large = match SourceFingerprint::check_devin_cli_log_path(&log_path, None).unwrap() {
+            FingerprintStatus::Changed(fp) => fp,
+            FingerprintStatus::Unchanged => panic!("expected Changed"),
+        };
+
+        // Rewrite log.jsonl in place while preserving mtime.
+        let log_mtime = fs::metadata(&log_path).unwrap().modified().unwrap();
+        fs::write(&log_path, &log_v2).unwrap();
+        File::options()
+            .write(true)
+            .open(&log_path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(log_mtime))
+            .unwrap();
+        let fp_log_edited = match SourceFingerprint::check_devin_cli_log_path(
             &log_path,
-            Some(&fp_with_meta),
+            Some(&fp_large),
         )
         .unwrap()
         {
             FingerprintStatus::Changed(fp) => fp,
-            FingerprintStatus::Unchanged => panic!("editing meta.json must invalidate cache"),
+            FingerprintStatus::Unchanged => {
+                panic!("unsampled in-place log.jsonl edit must invalidate exact fingerprint")
+            }
         };
+        assert_eq!(fp_log_edited.size, fp_large.size);
+        assert_eq!(fp_log_edited.modified_ns, fp_large.modified_ns);
+        assert_eq!(fp_log_edited.sample_hashes, fp_large.sample_hashes);
+        assert_ne!(fp_log_edited.content_hash, fp_large.content_hash);
+
+        // Rewrite meta.json in place while preserving mtime.
+        let meta_mtime = fs::metadata(&meta_path).unwrap().modified().unwrap();
+        fs::write(&meta_path, &meta_v2).unwrap();
+        File::options()
+            .write(true)
+            .open(&meta_path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(meta_mtime))
+            .unwrap();
+        let fp_meta_edited =
+            match SourceFingerprint::check_devin_cli_log_path(&log_path, Some(&fp_log_edited))
+                .unwrap()
+            {
+                FingerprintStatus::Changed(fp) => fp,
+                FingerprintStatus::Unchanged => {
+                    panic!("unsampled in-place meta.json edit must invalidate exact fingerprint")
+                }
+            };
+        assert_eq!(
+            fp_meta_edited.related_files[0].size,
+            fp_log_edited.related_files[0].size
+        );
+        assert_eq!(
+            fp_meta_edited.related_files[0].modified_ns,
+            fp_log_edited.related_files[0].modified_ns
+        );
+        assert_eq!(
+            fp_meta_edited.related_files[0].sample_hashes,
+            fp_log_edited.related_files[0].sample_hashes
+        );
+        assert_ne!(
+            fp_meta_edited.related_files[0].content_hash,
+            fp_log_edited.related_files[0].content_hash
+        );
 
         // Removing meta.json invalidates back.
         fs::remove_file(&meta_path).unwrap();
         assert!(matches!(
-            SourceFingerprint::check_devin_cli_log_path_samples_only(&log_path, Some(&fp_edited)),
+            SourceFingerprint::check_devin_cli_log_path(&log_path, Some(&fp_meta_edited)),
             Some(FingerprintStatus::Changed(_))
         ));
     }
