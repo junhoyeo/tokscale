@@ -5,7 +5,7 @@
 //! aggregate agent records are only used as a fallback to avoid double counting.
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line};
-use super::UnifiedMessage;
+use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde_json::{Map, Value};
@@ -105,6 +105,8 @@ struct TraceContext {
     session_id: Option<String>,
     session_id_priority: SessionIdPriority,
     agent_id: Option<String>,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
 }
 
 /// Whether an attribution was observed or merely a display fallback. Provider
@@ -135,6 +137,8 @@ struct CopilotUsageCandidate {
     model: String,
     provider_id: String,
     session_id: String,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
     timestamp_ms: i64,
     duration_ms: Option<i64>,
     start_timestamp_ms: Option<i64>,
@@ -259,6 +263,9 @@ impl PendingUsageCandidate {
             .agent
             .or_else(|| trace_context.and_then(|context| context.agent_id.clone()));
 
+        let (workspace_key, workspace_label) = trace_context
+            .map(|context| (context.workspace_key.clone(), context.workspace_label.clone()))
+            .unwrap_or((None, None));
         CopilotUsageCandidate {
             source: self.source,
             trace_id: self.trace_id,
@@ -266,6 +273,8 @@ impl PendingUsageCandidate {
             model,
             provider_id,
             session_id,
+            workspace_key,
+            workspace_label,
             timestamp_ms: self.timestamp_ms,
             duration_ms: self.duration_ms,
             start_timestamp_ms: self.start_timestamp_ms,
@@ -302,6 +311,7 @@ impl CopilotUsageCandidate {
         );
         message.duration_ms = self.duration_ms;
         message.agent = self.agent.map(crate::sessions::SharedStr::from);
+        message.set_workspace(self.workspace_key, self.workspace_label);
         message.copilot_context = Some(self.context);
         message
     }
@@ -354,6 +364,13 @@ impl CopilotUsageCandidate {
             self.agent_is_direct = duplicate.agent_is_direct;
             self.context.agent = duplicate.context.agent;
         }
+
+        if self.workspace_key.is_none() {
+            self.workspace_key = duplicate.workspace_key;
+            self.workspace_label = duplicate.workspace_label;
+        } else if self.workspace_label.is_none() {
+            self.workspace_label = duplicate.workspace_label;
+        }
     }
 }
 
@@ -401,6 +418,8 @@ fn accumulate_trace_context(contexts: &mut HashMap<String, TraceContext>, record
             session_id: None,
             session_id_priority: SessionIdPriority::Missing,
             agent_id: None,
+            workspace_key: None,
+            workspace_label: None,
         });
 
     if context.model.is_none() {
@@ -411,6 +430,13 @@ fn accumulate_trace_context(contexts: &mut HashMap<String, TraceContext>, record
         if priority > context.session_id_priority {
             context.session_id = Some(session_id.to_string());
             context.session_id_priority = priority;
+        }
+    }
+
+    if context.workspace_key.is_none() {
+        if let Some((workspace_key, workspace_label)) = workspace_from_record(record, attributes) {
+            context.workspace_key = Some(workspace_key);
+            context.workspace_label = workspace_label;
         }
     }
 }
@@ -878,6 +904,107 @@ fn is_valid_span_identity_id(id: &str) -> bool {
     !id.is_empty() && !id.chars().all(|c| c == '0')
 }
 
+fn workspace_from_record(
+    record: &Value,
+    attributes: &Map<String, Value>,
+) -> Option<(String, Option<String>)> {
+    let resource_attributes_object = record
+        .pointer("/resource/attributes")
+        .and_then(Value::as_object);
+
+    let explicit_cwd = resource_attributes_object
+        .and_then(|attrs| attrs.get("cwd").and_then(Value::as_str))
+        .or_else(|| resource_raw_attribute(record, "cwd").and_then(Value::as_str))
+        .or_else(|| first_non_empty_attr(attributes, &["cwd", "process.cwd", "process.working_directory", "working_directory"]))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(cwd) = explicit_cwd {
+        if let Some(workspace_key) = normalize_workspace_key(cwd) {
+            let workspace_label = workspace_label_from_key(&workspace_key);
+            return Some((workspace_key, workspace_label));
+        }
+    }
+
+    let project_name = resource_attributes_object
+        .and_then(|attrs| {
+            attrs
+                .get("project.name")
+                .or_else(|| attrs.get("workspace.name"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            resource_raw_attribute(record, "project.name")
+                .or_else(|| resource_raw_attribute(record, "workspace.name"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            first_non_empty_attr(
+                attributes,
+                &["project.name", "workspace.name", "github.copilot.project.name", "github.copilot.workspace.name"],
+            )
+        });
+
+    if let Some(project_name) = project_name {
+        let project_name = project_name.trim().trim_matches('/').trim_matches('\\');
+        if !project_name.is_empty() {
+            return Some((project_name.to_string(), Some(project_name.to_string())));
+        }
+    }
+
+    let file_path = first_non_empty_attr(
+        attributes,
+        &["github.copilot.tool.parameters.file_path", "file_path", "code.file.path"],
+    );
+    if let Some(file_path) = file_path {
+        if let Some(workspace_key) = infer_workspace_from_file_path(file_path) {
+            let workspace_label = workspace_label_from_key(&workspace_key);
+            return Some((workspace_key, workspace_label));
+        }
+    }
+
+    let repository = first_non_empty_attr(
+        attributes,
+        &["github.copilot.git.repository", "vcs.repository.url", "git.repository"],
+    );
+    if let Some(repository) = repository {
+        let name = repository
+            .trim_end_matches(".git")
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .or_else(|| repository.rsplit(':').find(|segment| !segment.is_empty()))
+            .map(str::trim);
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            return Some((name.to_string(), Some(name.to_string())));
+        }
+    }
+
+    None
+}
+
+fn resource_raw_attribute<'a>(record: &'a Value, key: &str) -> Option<&'a Value> {
+    record
+        .pointer("/resource/_rawAttributes")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_array)
+        .find_map(|pair| {
+            (pair.len() >= 2 && pair[0].as_str() == Some(key)).then(|| &pair[1])
+        })
+}
+
+fn infer_workspace_from_file_path(file_path: &str) -> Option<String> {
+    let mut path = std::path::Path::new(file_path.trim());
+    while let Some(parent) = path.parent() {
+        let git_dir = parent.join(".git");
+        if git_dir.is_dir() || git_dir.is_file() {
+            return normalize_workspace_key(parent.to_string_lossy().as_ref());
+        }
+        path = parent;
+    }
+    None
+}
+
 fn trace_id_from_record(value: &Value) -> Option<&str> {
     // Filter each candidate individually: a zero/empty top-level sentinel must
     // fall through to a valid nested `spanContext` id instead of masking it.
@@ -1115,6 +1242,12 @@ pub(crate) fn merge_copilot_messages(mut messages: Vec<UnifiedMessage>) -> Vec<U
                 existing.tokens.reasoning.max(message.tokens.reasoning),
             );
             existing.duration_ms = existing.duration_ms.max(message.duration_ms);
+            if existing.workspace_key.is_none() {
+                existing.workspace_key = message.workspace_key.clone();
+                existing.workspace_label = message.workspace_label.clone();
+            } else if existing.workspace_label.is_none() {
+                existing.workspace_label = message.workspace_label.clone();
+            }
             // These OTEL rows have no provider-reported cost. The cached
             // lane must price the merged usage, not either earlier snapshot.
             existing.cost = 0.0;
@@ -1394,6 +1527,41 @@ mod tests {
             .to_string(),
         );
         parse_copilot_file(file.path()).pop().unwrap()
+    }
+
+    #[test]
+    fn parser_extracts_cwd_and_project_resource_attributes() {
+        let file = create_test_file(
+            &serde_json::json!({
+                "type":"span",
+                "traceId":"trace-workspace",
+                "spanId":"span-workspace",
+                "name":"chat test-model",
+                "resource":{"_rawAttributes":[["cwd","/workspaces/tokscale"],["project.name","tokscale"]]},
+                "attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"test-model","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":5}
+            }).to_string(),
+        );
+
+        let message = parse_copilot_file(file.path()).pop().unwrap();
+        assert_eq!(message.workspace_key.as_deref(), Some("/workspaces/tokscale"));
+        assert_eq!(message.workspace_label.as_deref(), Some("tokscale"));
+    }
+
+    #[test]
+    fn parser_extracts_git_repository_as_project_fallback() {
+        let file = create_test_file(
+            &serde_json::json!({
+                "type":"span",
+                "traceId":"trace-git",
+                "spanId":"span-git",
+                "name":"invoke_agent GitHub Copilot Chat",
+                "attributes":{"gen_ai.operation.name":"invoke_agent","github.copilot.git.repository":"https://github.com/twsl/tokscale.git","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":5}
+            }).to_string(),
+        );
+
+        let message = parse_copilot_file(file.path()).pop().unwrap();
+        assert_eq!(message.workspace_key.as_deref(), Some("tokscale"));
+        assert_eq!(message.workspace_label.as_deref(), Some("tokscale"));
     }
 
     #[test]
