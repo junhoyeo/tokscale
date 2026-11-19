@@ -5848,11 +5848,15 @@ mod tests {
 
         let files = result.get(ClientId::DevinDesktop);
         assert_eq!(files.len(), 3, "unexpected desktop files: {files:?}");
-        assert!(files.contains(&legacy_ndjson));
-        assert!(files.contains(&mac_db));
-        assert!(files.contains(&linux_db));
-        assert!(!files.contains(&mac_db_wal));
-        assert!(!files.contains(&mac_db_shm));
+        let canonical_files: HashSet<PathBuf> = files
+            .iter()
+            .map(|path| fs::canonicalize(path).unwrap())
+            .collect();
+        assert!(canonical_files.contains(&fs::canonicalize(&legacy_ndjson).unwrap()));
+        assert!(canonical_files.contains(&fs::canonicalize(&mac_db).unwrap()));
+        assert!(canonical_files.contains(&fs::canonicalize(&linux_db).unwrap()));
+        assert!(!canonical_files.contains(&fs::canonicalize(&mac_db_wal).unwrap()));
+        assert!(!canonical_files.contains(&fs::canonicalize(&mac_db_shm).unwrap()));
     }
 
     #[test]
