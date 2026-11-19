@@ -7273,9 +7273,7 @@ fn run_autosubmit_command(subcommand: commands::autosubmit::AutosubmitSubcommand
                 None,
             ) {
                 Ok(()) => {
-                    commands::autosubmit::record_run_success(
-                        chrono::Utc::now().timestamp_millis(),
-                    )?;
+                    commands::autosubmit::record_run_success(now_ms)?;
                     Ok(())
                 }
                 Err(err) => {

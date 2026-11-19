@@ -434,9 +434,12 @@ pub fn load_run_config(
     Ok((settings, decision))
 }
 
-pub fn record_run_success(now_ms: i64) -> Result<()> {
+/// Records `started_at_ms`, the time the run was decided at, rather than when
+/// the submit finished: schedulers fire start-to-start, so a finish time would
+/// push the next regular tick before `last_run_at_ms + interval`.
+pub fn record_run_success(started_at_ms: i64) -> Result<()> {
     let (mut settings, origin) = crate::tui::settings::Settings::load_with_origin();
-    settings.autosubmit.last_run_at_ms = Some(now_ms);
+    settings.autosubmit.last_run_at_ms = Some(started_at_ms);
     settings.autosubmit.last_error = None;
     settings.save_with_origin(origin)
 }
@@ -635,6 +638,20 @@ fn status_output(settings: &AutosubmitSettings) -> StatusOutput {
     }
 }
 
+/// How long before `last_run_at_ms + interval` a run may start and still count
+/// as due: a tenth of the interval, capped at five minutes.
+///
+/// Every installed scheduler fires on a fixed start-to-start cadence, so a
+/// regular tick lands at `last_run_at_ms + interval` give or take launch
+/// jitter. Without this slack a tick that starts a few milliseconds earlier
+/// relative to its predecessor is `NotDue`, and the effective cadence silently
+/// doubles. The bound only has to absorb jitter, so it stays small for long
+/// intervals: extra launches (launchd `RunAtLoad`, systemd `OnBootSec`, a
+/// manual `run`) outside it stay `NotDue`.
+fn schedule_tolerance_ms(interval_ms: i64) -> i64 {
+    (interval_ms / 10).min(5 * 60_000)
+}
+
 pub fn run_decision(
     settings: &AutosubmitSettings,
     now_ms: i64,
@@ -647,10 +664,13 @@ pub fn run_decision(
         return AutosubmitRunDecision::Due;
     }
     let interval_ms = (settings.interval_minutes as i64).saturating_mul(60_000);
+    let tolerance_ms = schedule_tolerance_ms(interval_ms);
     match settings.last_run_at_ms {
-        Some(last) if now_ms < last.saturating_add(interval_ms) => AutosubmitRunDecision::NotDue {
-            next_run_at_ms: last.saturating_add(interval_ms),
-        },
+        Some(last) if now_ms < last.saturating_add(interval_ms - tolerance_ms) => {
+            AutosubmitRunDecision::NotDue {
+                next_run_at_ms: last.saturating_add(interval_ms),
+            }
+        }
         _ => AutosubmitRunDecision::Due,
     }
 }
@@ -1703,6 +1723,63 @@ mod tests {
         );
         assert_eq!(
             run_decision(&settings, 3_601_000, false),
+            AutosubmitRunDecision::Due
+        );
+    }
+
+    #[test]
+    fn run_decision_accepts_a_tick_that_lands_just_before_the_interval() {
+        // A scheduler tick starts one interval after the previous run started,
+        // give or take launch jitter. A tick 2.5s short of the full interval
+        // must still submit, or every other tick is skipped.
+        let interval_ms = 180 * 60_000;
+        let settings = AutosubmitSettings {
+            enabled: true,
+            interval_minutes: 180,
+            last_run_at_ms: Some(500),
+            ..AutosubmitSettings::default()
+        };
+        assert_eq!(
+            run_decision(&settings, interval_ms - 2_000, false),
+            AutosubmitRunDecision::Due
+        );
+
+        // The earliest start that still counts as this tick.
+        let tolerance_ms = schedule_tolerance_ms(interval_ms);
+        assert_eq!(
+            run_decision(&settings, 500 + interval_ms - tolerance_ms, false),
+            AutosubmitRunDecision::Due
+        );
+
+        // A launch outside the tolerance (login, boot, manual run) is not a
+        // scheduler tick and stays deduplicated.
+        assert_eq!(
+            run_decision(&settings, 500 + interval_ms - tolerance_ms - 1, false),
+            AutosubmitRunDecision::NotDue {
+                next_run_at_ms: 500 + interval_ms
+            }
+        );
+    }
+
+    #[test]
+    fn run_decision_tolerance_stays_small_for_long_intervals() {
+        // A tenth of a day would accept a login launch 2.4h early; the cap
+        // keeps the slack at jitter scale.
+        let interval_ms: i64 = 24 * 60 * 60_000;
+        let settings = AutosubmitSettings {
+            enabled: true,
+            interval_minutes: 24 * 60,
+            last_run_at_ms: Some(0),
+            ..AutosubmitSettings::default()
+        };
+        assert_eq!(
+            run_decision(&settings, interval_ms - 6 * 60_000, false),
+            AutosubmitRunDecision::NotDue {
+                next_run_at_ms: interval_ms
+            }
+        );
+        assert_eq!(
+            run_decision(&settings, interval_ms - 5 * 60_000, false),
             AutosubmitRunDecision::Due
         );
     }
