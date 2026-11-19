@@ -155,6 +155,12 @@ pub struct ScanResult {
     /// Devin CLI SQLite databases, including the default data path and any
     /// user-configured scan roots.
     pub devin_dbs: Vec<PathBuf>,
+    /// Devin CLI per-session JSONL logs (`sessions/<id>/log.jsonl`) discovered
+    /// under default and configured CLI roots.
+    pub devin_session_logs: Vec<PathBuf>,
+    /// Devin CLI per-session metadata files (`sessions/<id>/meta.json`) used
+    /// both alongside `log.jsonl` and for Devin Desktop title/session lookup.
+    pub devin_session_metas: Vec<PathBuf>,
     /// VS Code Copilot chat session JSONL files discovered under
     /// `workspaceStorage/*/chatSessions/*.jsonl`, plus the empty-window
     /// store at `globalStorage/emptyWindowChatSessions/*.jsonl`.
@@ -185,6 +191,8 @@ impl Default for ScanResult {
             micode_dbs: Vec::new(),
             opencode_json_dir: None,
             devin_dbs: Vec::new(),
+            devin_session_logs: Vec::new(),
+            devin_session_metas: Vec::new(),
             copilot_vscode_sessions: Vec::new(),
             bb_dbs: Vec::new(),
         }
@@ -267,6 +275,16 @@ impl ScanResult {
             push(path);
         }
 
+        paths
+    }
+
+    /// Return every Devin CLI metadata source (`sessions.db` databases and
+    /// per-session `meta.json` files) that can resolve Devin Desktop ACP
+    /// titles and session ids.
+    pub fn devin_lookup_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(self.devin_dbs.len() + self.devin_session_metas.len());
+        paths.extend(self.devin_dbs.iter().cloned());
+        paths.extend(self.devin_session_metas.iter().cloned());
         paths
     }
 }
@@ -587,6 +605,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                     file_name.ends_with(".jsonl") && file_name != "rlm-subagents.jsonl"
                 }
                 "*.ndjson" => file_name.ends_with(".ndjson"),
+                "*.ndjson|*.db" => file_name.ends_with(".ndjson") || file_name.ends_with(".db"),
                 "*.log" => file_name.ends_with(".log"),
                 "codebuddy-extension-log" => {
                     file_name.ends_with(".log")
@@ -1524,6 +1543,75 @@ fn discover_devin_cli_dbs(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
     )
 }
 
+fn is_under_devin_sessions_dir(path: &Path) -> bool {
+    path.parent()
+        .and_then(|session_dir| session_dir.parent())
+        .and_then(|grandparent| grandparent.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("sessions"))
+}
+
+/// Discover Devin CLI per-session `log.jsonl` and `meta.json` files under
+/// `<cli_root>/sessions/<session-id>/` (or explicit extra scan paths pointing
+/// at a session directory or file).
+fn discover_devin_cli_session_files(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut logs = Vec::new();
+    let mut metas = Vec::new();
+
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        if root.is_file() {
+            match root.file_name().and_then(|name| name.to_str()) {
+                Some("log.jsonl") => {
+                    let sibling_meta = root.with_file_name("meta.json");
+                    if sibling_meta.is_file() {
+                        metas.push(sibling_meta);
+                    }
+                    logs.push(root);
+                }
+                Some("meta.json") => {
+                    metas.push(root);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let file_type = entry.file_type();
+            let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
+            if !is_file {
+                continue;
+            }
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some("log.jsonl")
+                    if is_under_devin_sessions_dir(path)
+                        || path.with_file_name("meta.json").is_file() =>
+                {
+                    logs.push(path.to_path_buf());
+                }
+                Some("meta.json")
+                    if is_under_devin_sessions_dir(path)
+                        || path.with_file_name("log.jsonl").is_file() =>
+                {
+                    metas.push(path.to_path_buf());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (
+        dedup_dbs_by_canonical_path(logs),
+        dedup_dbs_by_canonical_path(metas),
+    )
+}
+
 /// Discover BB (`get-bb/bb`) `bb.db` SQLite databases.
 ///
 /// Looks in:
@@ -1739,39 +1827,80 @@ fn cline_cli_session_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> 
 }
 
 pub fn devin_desktop_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let home = Path::new(home_dir);
     let mut roots = vec![
-        PathBuf::from(home_dir).join(".config/Devin/User/acp-events"),
-        PathBuf::from(home_dir).join(".config/devin/User/acp-events"),
+        join_native_path(home, "Library/Application Support/devin/User/acp-events"),
+        join_native_path(home, "Library/Application Support/Devin/User/acp-messages"),
+        join_native_path(home, "Library/Application Support/devin/User/acp-messages"),
+        join_native_path(home, ".config/Devin/User/acp-events"),
+        join_native_path(home, ".config/devin/User/acp-events"),
+        join_native_path(home, ".config/Devin/User/acp-messages"),
+        join_native_path(home, ".config/devin/User/acp-messages"),
     ];
 
-    if cfg!(target_os = "windows") && use_env_roots {
-        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-            roots.push(PathBuf::from(app_data).join("Devin/User/acp-events"));
+    if use_env_roots {
+        if let Some(xdg_config) =
+            std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
+        {
+            let xdg_config = PathBuf::from(xdg_config);
+            roots.push(join_native_path(&xdg_config, "Devin/User/acp-events"));
+            roots.push(join_native_path(&xdg_config, "devin/User/acp-events"));
+            roots.push(join_native_path(&xdg_config, "Devin/User/acp-messages"));
+            roots.push(join_native_path(&xdg_config, "devin/User/acp-messages"));
         }
     }
 
-    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Devin/User/acp-events"));
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            let app_data = PathBuf::from(app_data);
+            roots.push(join_native_path(&app_data, "Devin/User/acp-events"));
+            roots.push(join_native_path(&app_data, "devin/User/acp-events"));
+            roots.push(join_native_path(&app_data, "Devin/User/acp-messages"));
+            roots.push(join_native_path(&app_data, "devin/User/acp-messages"));
+        }
+    }
+
+    roots.push(join_native_path(
+        home,
+        "AppData/Roaming/Devin/User/acp-events",
+    ));
+    roots.push(join_native_path(
+        home,
+        "AppData/Roaming/devin/User/acp-events",
+    ));
+    roots.push(join_native_path(
+        home,
+        "AppData/Roaming/Devin/User/acp-messages",
+    ));
+    roots.push(join_native_path(
+        home,
+        "AppData/Roaming/devin/User/acp-messages",
+    ));
 
     roots
 }
 
-/// Candidate roots for Devin CLI's Windows `sessions.db`.
+/// Candidate roots for Devin CLI's Windows data directory (`sessions.db` and
+/// `sessions/*/log.jsonl`).
 ///
-/// Devin CLI stores its database under `%APPDATA%/devin/cli` on Windows,
-/// while the registered `PathRoot::XdgData` path remains the portable default.
-/// Keep the home-relative fallback alongside the environment-derived path so
-/// tests and explicit home overrides can exercise the same layout without
-/// depending on the process user's real AppData directory.
-fn devin_cli_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+/// Devin CLI stores its data under `%APPDATA%/devin/cli` on Windows, while the
+/// registered `PathRoot::XdgData` path remains the portable default. Keep the
+/// home-relative fallback alongside the environment-derived path so tests and
+/// explicit home overrides can exercise the same layout without depending on
+/// the process user's real AppData directory.
+pub fn devin_cli_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if cfg!(target_os = "windows") && use_env_roots {
         if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-            roots.push(PathBuf::from(app_data).join("devin/cli"));
+            roots.push(join_native_path(&PathBuf::from(app_data), "devin/cli"));
         }
     }
 
-    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/devin/cli"));
+    roots.push(join_native_path(
+        Path::new(home_dir),
+        "AppData/Roaming/devin/cli",
+    ));
     roots
 }
 
@@ -1832,6 +1961,8 @@ fn push_unique_scan_task(
             return;
         }
         "micode-db"
+    } else if client_id == ClientId::DevinDesktop {
+        "*.ndjson|*.db"
     } else {
         client_id.data().pattern
     };
@@ -2851,11 +2982,21 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::DevinCli) || enabled.contains(&ClientId::DevinDesktop) {
         devin_cli_roots.extend(devin_cli_additional_roots(home_dir, use_env_roots));
-        let devin_db_path = ClientId::DevinCli
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        devin_cli_roots.push(PathBuf::from(devin_db_path));
+        let devin_db_path = PathBuf::from(
+            ClientId::DevinCli
+                .data()
+                .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        );
+        let mut devin_cli_session_roots = devin_cli_roots.clone();
+        if let Some(cli_dir) = devin_db_path.parent() {
+            devin_cli_session_roots.push(cli_dir.join("sessions"));
+        }
+        devin_cli_roots.push(devin_db_path);
         result.devin_dbs = discover_devin_cli_dbs(devin_cli_roots);
+        let (session_logs, session_metas) =
+            discover_devin_cli_session_files(devin_cli_session_roots);
+        result.devin_session_logs = session_logs;
+        result.devin_session_metas = session_metas;
     }
 
     if enabled.contains(&ClientId::Bb) {
@@ -5590,6 +5731,128 @@ mod tests {
         );
 
         assert_eq!(result.devin_dbs, vec![extra_db]);
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_devin_cli_session_logs_and_metas() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        // Default XDG location with NO legacy sessions.db present.
+        let default_session = home.join(".local/share/devin/cli/sessions/sess-default");
+        fs::create_dir_all(&default_session).unwrap();
+        let default_log = default_session.join("log.jsonl");
+        let default_meta = default_session.join("meta.json");
+        File::create(&default_log).unwrap();
+        File::create(&default_meta).unwrap();
+
+        // Unrelated log.jsonl outside `sessions/<id>/` with no sibling meta.json must be ignored.
+        let debug_dir = home.join(".local/share/devin/cli/debug");
+        fs::create_dir_all(&debug_dir).unwrap();
+        File::create(debug_dir.join("log.jsonl")).unwrap();
+
+        // Windows AppData fallback layout.
+        let win_session = home.join("AppData/Roaming/devin/cli/sessions/sess-win");
+        fs::create_dir_all(&win_session).unwrap();
+        let win_log = win_session.join("log.jsonl");
+        let win_meta = win_session.join("meta.json");
+        File::create(&win_log).unwrap();
+        File::create(&win_meta).unwrap();
+
+        // Extra scan paths: cli root, single session dir, and direct log.jsonl path.
+        let extra_cli_root = home.join("imports/devin-extra");
+        let extra_s1 = extra_cli_root.join("sessions/sess-extra-1");
+        fs::create_dir_all(&extra_s1).unwrap();
+        let extra_s1_log = extra_s1.join("log.jsonl");
+        let extra_s1_meta = extra_s1.join("meta.json");
+        File::create(&extra_s1_log).unwrap();
+        File::create(&extra_s1_meta).unwrap();
+
+        let direct_session_dir = home.join("standalone-session");
+        fs::create_dir_all(&direct_session_dir).unwrap();
+        let direct_log = direct_session_dir.join("log.jsonl");
+        let direct_meta = direct_session_dir.join("meta.json");
+        File::create(&direct_log).unwrap();
+        File::create(&direct_meta).unwrap();
+
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {
+                "devin-cli": [extra_cli_root, direct_log]
+            }
+        }))
+        .unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["devin-cli".to_string()],
+            false,
+            &settings,
+        );
+
+        assert!(result.devin_dbs.is_empty());
+        assert_eq!(result.devin_session_logs.len(), 4);
+        assert!(result.devin_session_logs.contains(&default_log));
+        assert!(result.devin_session_logs.contains(&win_log));
+        assert!(result.devin_session_logs.contains(&extra_s1_log));
+        assert!(result.devin_session_logs.contains(&direct_log));
+        assert_eq!(result.devin_session_metas.len(), 4);
+        assert!(result.devin_session_metas.contains(&default_meta));
+        assert!(result.devin_session_metas.contains(&win_meta));
+        assert!(result.devin_session_metas.contains(&extra_s1_meta));
+        assert!(result.devin_session_metas.contains(&direct_meta));
+        assert!(
+            result.get(ClientId::DevinCli).is_empty(),
+            "Devin CLI session logs should use dedicated ScanResult fields"
+        );
+
+        // Desktop-only scan must still discover CLI session metas for lookup.
+        let desktop_only = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["devin-desktop".to_string()],
+            false,
+            &settings,
+        );
+        assert_eq!(desktop_only.devin_session_metas.len(), 4);
+        assert!(desktop_only.devin_lookup_paths().contains(&default_meta));
+    }
+
+    #[test]
+    fn test_scan_all_clients_discovers_devin_desktop_acp_messages_sqlite_and_legacy_ndjson() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let mac_events = home.join("Library/Application Support/Devin/User/acp-events");
+        let mac_messages = home.join("Library/Application Support/Devin/User/acp-messages");
+        let linux_messages = home.join(".config/devin/User/acp-messages");
+        fs::create_dir_all(&mac_events).unwrap();
+        fs::create_dir_all(&mac_messages).unwrap();
+        fs::create_dir_all(&linux_messages).unwrap();
+
+        let legacy_ndjson = mac_events.join("legacy-session.ndjson");
+        let mac_db = mac_messages.join("0123456789abcdef0123456789abcdef01234567.db");
+        let mac_db_wal = mac_messages.join("0123456789abcdef0123456789abcdef01234567.db-wal");
+        let mac_db_shm = mac_messages.join("0123456789abcdef0123456789abcdef01234567.db-shm");
+        let linux_db = linux_messages.join("fedcba9876543210fedcba9876543210fedcba98.db");
+        File::create(&legacy_ndjson).unwrap();
+        File::create(&mac_db).unwrap();
+        File::create(&mac_db_wal).unwrap();
+        File::create(&mac_db_shm).unwrap();
+        File::create(&linux_db).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["devin-desktop".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        let files = result.get(ClientId::DevinDesktop);
+        assert_eq!(files.len(), 3, "unexpected desktop files: {files:?}");
+        assert!(files.contains(&legacy_ndjson));
+        assert!(files.contains(&mac_db));
+        assert!(files.contains(&linux_db));
+        assert!(!files.contains(&mac_db_wal));
+        assert!(!files.contains(&mac_db_shm));
     }
 
     #[test]

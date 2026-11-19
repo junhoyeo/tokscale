@@ -473,12 +473,12 @@ impl std::fmt::Debug for ParsedMessages {
     }
 }
 
-/// Database state used to resolve Devin Desktop ACP titles. The source stream
-/// is deliberately absent: one lookup is valid for every Desktop file that
-/// observed the same CLI database/WAL snapshot.
+/// CLI metadata state used to resolve Devin Desktop ACP sessions. The source
+/// stream and Desktop SQLite `-wal` are deliberately excluded so every Desktop
+/// file that observed the same CLI database/meta snapshot shares one lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DevinDesktopLookupSnapshot {
-    db_paths: Vec<PathBuf>,
+    lookup_paths: Vec<PathBuf>,
     related_files: Vec<message_cache::RelatedFileFingerprint>,
 }
 
@@ -486,18 +486,23 @@ type DevinDesktopLookupCache = Mutex<
     HashMap<DevinDesktopLookupSnapshot, Arc<OnceLock<sessions::devin::DevinDesktopSessionLookup>>>,
 >;
 
-/// Return the shared title lookup cell for one post-validation database
+/// Return the shared session lookup cell for one post-validation CLI metadata
 /// snapshot. The cell is placed in the map before it is initialized, allowing
-/// parallel Desktop files from one snapshot to share one SQLite scan without
-/// holding the map lock during that scan.
+/// parallel Desktop files from one snapshot to share one lookup build without
+/// holding the map lock during I/O.
 fn devin_desktop_lookup_cell_for_snapshot(
     lookup_cache: &DevinDesktopLookupCache,
-    db_paths: &[PathBuf],
+    lookup_paths: &[PathBuf],
     fingerprint: &message_cache::SourceFingerprint,
 ) -> Arc<OnceLock<sessions::devin::DevinDesktopSessionLookup>> {
     let snapshot = DevinDesktopLookupSnapshot {
-        db_paths: db_paths.to_vec(),
-        related_files: fingerprint.related_files.clone(),
+        lookup_paths: lookup_paths.to_vec(),
+        related_files: fingerprint
+            .related_files
+            .iter()
+            .filter(|related| related.suffix.starts_with("devin-cli-"))
+            .cloned()
+            .collect(),
     };
     let mut lookups = lookup_cache
         .lock()
@@ -2913,13 +2918,23 @@ fn parse_all_messages_streaming<S: MessageSink>(
 
     /// A request dedup key is not a SQLite row identity. Cached messages do
     /// not retain row ids, and count/sum watermarks cannot detect in-place
-    /// edits. Reparse changed databases rather than merging an ambiguous
-    /// suffix: the raw recount must retain every persisted request copy.
+    /// edits. Reparse changed stores rather than merging an ambiguous suffix:
+    /// the raw recount must retain every persisted request copy.
     fn load_or_parse_devin_cli_source(
         path: &Path,
         source_cache: &message_cache::SourceMessageCache,
         pricing: Option<&pricing::PricingService>,
     ) -> (CachedParseOutcome, bool) {
+        let is_session_log = sessions::devin::is_devin_cli_session_log_path(path);
+        let check_fingerprint = |path: &Path, cached: Option<&message_cache::SourceFingerprint>| {
+            if is_session_log {
+                message_cache::SourceFingerprint::check_devin_cli_log_path_samples_only(
+                    path, cached,
+                )
+            } else {
+                message_cache::SourceFingerprint::check_sqlite_path(path, cached)
+            }
+        };
         // Only admitted current-generation entries may inherit completeness
         // without decoding rows. Failed fingerprints and every fresh parse
         // overwrite this verdict, including legacy-cache fallback returns.
@@ -2931,18 +2946,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
             pricing,
             HistoryRetention::LiveFileOnly,
             |path, cached| {
-                let status = message_cache::SourceFingerprint::check_sqlite_path(path, cached);
+                let status = check_fingerprint(path, cached);
                 complete.set(status.is_some());
                 status
             },
             |path, before| {
-                let (messages, read_complete) = sessions::devin::scan_devin_cli_sqlite(path);
-                // An internally consistent SELECT is not complete-history
-                // authority if the surrounding database snapshot changed.
+                let (messages, read_complete) = if is_session_log {
+                    sessions::devin::scan_devin_cli_session_log(path)
+                } else {
+                    sessions::devin::scan_devin_cli_sqlite(path)
+                };
+                // An internally consistent read is not complete-history
+                // authority if the surrounding source snapshot changed.
                 // Do not let a second probe certify a different read instead.
                 let stable = before.is_some_and(|before| {
                     matches!(
-                        message_cache::SourceFingerprint::check_sqlite_path(path, Some(before)),
+                        check_fingerprint(path, Some(before)),
                         Some(message_cache::FingerprintStatus::Unchanged)
                     )
                 });
@@ -5144,51 +5163,69 @@ fn parse_all_messages_streaming<S: MessageSink>(
         all_messages.extend(goose_messages);
     }
 
-    // Devin CLI stores authoritative model usage in SQLite. Multiple paths can
-    // be configured through scanner extra roots, so parse and dedupe all of
-    // them instead of silently ignoring non-default databases.
+    // Devin CLI stores authoritative model usage in SQLite (legacy
+    // `sessions.db`) and per-session JSONL logs (`sessions/<id>/log.jsonl`).
+    // Multiple paths can be configured through scanner extra roots, so parse
+    // and dedupe all of them instead of silently ignoring non-default stores.
     let mut devin_cli_session_ids: HashSet<String> = HashSet::new();
     if include_devin_cli {
-        let devin_cli_outcomes: Vec<(CachedParseOutcome, bool)> = scan_result
+        // Process legacy SQLite databases ahead of JSONL session logs so any
+        // cross-store request_id overlap resolves deterministically in favor
+        // of the SQLite copy while keeping generation-1 recount proofs sound.
+        let devin_cli_sources: Vec<(&PathBuf, bool)> = scan_result
             .devin_dbs
+            .iter()
+            .map(|path| (path, true))
+            .chain(
+                scan_result
+                    .devin_session_logs
+                    .iter()
+                    .map(|path| (path, false)),
+            )
+            .collect();
+        let devin_cli_outcomes: Vec<(CachedParseOutcome, bool, bool)> = devin_cli_sources
             .par_iter()
-            .map(|db_path| {
+            .map(|(source_path, is_sqlite)| {
                 let (mut outcome, complete) =
-                    load_or_parse_devin_cli_source(db_path, &source_cache, pricing);
-                machine_labeler.label_messages(db_path, &mut outcome.messages);
-                (outcome, complete)
+                    load_or_parse_devin_cli_source(source_path, &source_cache, pricing);
+                machine_labeler.label_messages(source_path, &mut outcome.messages);
+                (outcome, complete, *is_sqlite)
             })
             .collect();
         // Preserve the verdict of the exact read that supplied these rows;
         // a separate COUNT(*) probe cannot detect row conversion failures or
-        // prove that it saw the same database snapshot.
+        // prove that it saw the same source snapshot.
         let unreadable = devin_cli_outcomes
             .iter()
-            .filter(|(_, complete)| !complete)
+            .filter(|(_, complete, _)| !complete)
             .count();
         source_reads.insert(
             ClientId::DevinCli.as_str().to_string(),
             SourceReadSummary {
-                discovered: scan_result.devin_dbs.len(),
+                discovered: devin_cli_sources.len(),
                 unreadable,
             },
         );
-        // Devin CLI generation 1 keyed these rows by row id and so counted
+        // Devin CLI generation 1 keyed SQLite rows by row id and so counted
         // every persisted copy of an API request; the request_id key collapses
         // them. Record both views from the same rows so the receiver can
         // subtract exactly the over-count instead of trusting a lower total.
+        // JSONL session logs were never read by generation 1, so duplicates
+        // dropped from JSONL sources must not claim generation-1 over-counts.
         let mut devin_cli_seen = HashSet::new();
         let mut devin_cli_proof = RecountProofBuilder::default();
-        for (outcome, _) in devin_cli_outcomes {
+        for (outcome, _, is_sqlite) in devin_cli_outcomes {
             for message in outcome.messages {
                 let kept = should_keep_deduped_message(&mut devin_cli_seen, &message);
                 if let Some((date, model_id)) = flushed_message_identity(&message, &flush_context) {
                     if kept {
                         devin_cli_proof.record_kept(&date, &model_id, &message);
-                    } else if sessions::devin::is_devin_cli_request_dedup_key(
-                        message.dedup_key.as_deref(),
-                    ) {
-                        // Only a request_id collision is a generation
+                    } else if is_sqlite
+                        && sessions::devin::is_devin_cli_request_dedup_key(
+                            message.dedup_key.as_deref(),
+                        )
+                    {
+                        // Only a SQLite request_id collision is a generation
                         // difference. Row keys are unique per database, so a
                         // row-key collision across databases was dropped by
                         // generation 1 as well and proves nothing.
@@ -5342,14 +5379,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
         }
     }
 
-    // Devin Desktop ACP file names are unrelated to the CLI database session
-    // ids. Resolve their session titles through the database so the CLI can
-    // take precedence only when both sources really describe one session.
-    if include_devin_desktop {
+    // Devin Desktop ACP file names are unrelated to the CLI session ids.
+    // Resolve their session metadata through CLI SQLite databases and
+    // `sessions/*/meta.json` files so the CLI can take precedence only when
+    // both sources really describe one session.
+    if include_devin_desktop && !scan_result.get(ClientId::DevinDesktop).is_empty() {
         // Lookups are constructed only for cache misses. Key them by the
-        // post-validation database snapshot so parallel misses that observe
-        // different SQLite states never share stale metadata; identical
-        // snapshots still share one query on a cold scan.
+        // post-validation CLI metadata snapshot so parallel misses that observe
+        // different CLI states never share stale metadata; identical snapshots
+        // still share one lookup build on a cold scan.
+        let devin_lookup_paths = scan_result.devin_lookup_paths();
+        let devin_meta_digest = message_cache::SourceFingerprint::devin_cli_metas_fingerprint(
+            &scan_result.devin_session_metas,
+        );
         let devin_desktop_lookups = DevinDesktopLookupCache::default();
         let devin_desktop_outcomes: Vec<CachedParseOutcome> = scan_result
             .get(ClientId::DevinDesktop)
@@ -5361,9 +5403,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
                     &source_cache,
                     pricing,
                     |path, cached| {
-                        message_cache::SourceFingerprint::check_devin_desktop_path_samples_only(
+                        let meta_digest = devin_meta_digest.as_ref()?;
+                        message_cache::SourceFingerprint::check_devin_desktop_path_with_meta_digest(
                             path,
                             &scan_result.devin_dbs,
+                            meta_digest.as_ref(),
                             cached,
                         )
                     },
@@ -5371,22 +5415,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
                         if let Some(fingerprint) = fingerprint {
                             let lookup_cell = devin_desktop_lookup_cell_for_snapshot(
                                 &devin_desktop_lookups,
-                                &scan_result.devin_dbs,
+                                &devin_lookup_paths,
                                 fingerprint,
                             );
                             let lookup = lookup_cell.get_or_init(|| {
                                 sessions::devin::load_devin_desktop_session_lookup(
-                                    &scan_result.devin_dbs,
+                                    &devin_lookup_paths,
                                 )
                             });
-                            sessions::devin::parse_devin_desktop_ndjson_with_lookup(path, lookup)
+                            sessions::devin::parse_devin_desktop_source_with_lookup(path, lookup)
                         } else {
                             // Unreadable sources cannot produce a cache entry,
                             // so they do not need a snapshot-keyed lookup.
-                            sessions::devin::parse_devin_desktop_ndjson_with_lookup(
+                            sessions::devin::parse_devin_desktop_source_with_lookup(
                                 path,
                                 &sessions::devin::load_devin_desktop_session_lookup(
-                                    &scan_result.devin_dbs,
+                                    &devin_lookup_paths,
                                 ),
                             )
                         }
@@ -8987,16 +9031,22 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Capy, capy_count);
     messages.extend(capy_msgs);
 
-    // Devin CLI SQLite usage plus Desktop NDJSON event streams. The CLI
-    // database is authoritative only when the CLI client itself is selected;
-    // Desktop-only reports still use the database for title/model metadata but
-    // must not leak CLI usage into their result.
+    // Devin CLI SQLite + per-session JSONL usage plus Desktop ACP streams and
+    // SQLite message stores. CLI stores are authoritative only when the CLI
+    // client itself is selected; Desktop-only reports still use CLI metadata
+    // for session/model resolution but must not leak CLI usage into their result.
     let mut devin_cli_seen = HashSet::new();
     let devin_cli_messages: Vec<UnifiedMessage> = if include_devin_cli {
         scan_result
             .devin_dbs
             .iter()
             .flat_map(|db_path| sessions::devin::parse_devin_cli_sqlite(db_path))
+            .chain(
+                scan_result
+                    .devin_session_logs
+                    .iter()
+                    .flat_map(|log_path| sessions::devin::parse_devin_cli_session_log(log_path)),
+            )
             .filter(|message| should_keep_deduped_message(&mut devin_cli_seen, message))
             .collect()
     } else {
@@ -9007,13 +9057,14 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .map(|message| message.session_id.clone())
         .collect();
     let devin_desktop_messages_raw: Vec<UnifiedMessage> = if include_devin_desktop {
+        let devin_lookup_paths = scan_result.devin_lookup_paths();
         let devin_desktop_lookup =
-            sessions::devin::load_devin_desktop_session_lookup(&scan_result.devin_dbs);
+            sessions::devin::load_devin_desktop_session_lookup(&devin_lookup_paths);
         scan_result
             .get(ClientId::DevinDesktop)
             .par_iter()
             .flat_map(|path| {
-                sessions::devin::parse_devin_desktop_ndjson_with_lookup(path, &devin_desktop_lookup)
+                sessions::devin::parse_devin_desktop_source_with_lookup(path, &devin_desktop_lookup)
             })
             .collect()
     } else {
@@ -26021,6 +26072,276 @@ mod tests {
             assert!(!outcome.source_reads["devin-cli"].complete());
             assert!(cached(&path).is_none());
         }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cli_session_log_cache_parity_meta_invalidation_race_and_corruption() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+
+            let session_dir = home
+                .path()
+                .join(".local/share/devin/cli/sessions/sess-log-1");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let meta_path = session_dir.join("meta.json");
+            let log_path = session_dir.join("log.jsonl");
+            std::fs::write(
+                &meta_path,
+                r#"{"id":"sess-log-1","model":"gpt-5","working_directory":"/tmp/devin-a"}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                &log_path,
+                concat!(
+                    r#"{"kind":"node","at":1700000000.0,"node":{"id":1,"message":{"role":"assistant","metadata":{"request_id":"req-1","metrics":{"input_tokens":100,"output_tokens":20}}}}}"#,
+                    "\n"
+                ),
+            )
+            .unwrap();
+
+            let probe = crate::sessions::devin::cache_test_hooks::watch(&log_path);
+
+            // Cold scan caches the entry and matches uncached scan.
+            let (warm1, warm_outcome1) = scan(home.path(), SourceCachePolicy::Persistent);
+            let (cold1, cold_outcome1) = scan(home.path(), SourceCachePolicy::InMemory);
+            assert_eq!(probe.reads(), 2);
+            assert_eq!(warm_outcome1.source_reads, cold_outcome1.source_reads);
+            assert!(warm_outcome1.source_reads["devin-cli"].complete());
+            assert_eq!(warm_outcome1.source_reads["devin-cli"].discovered, 1);
+            assert_eq!(
+                serde_json::to_value(&warm1).unwrap(),
+                serde_json::to_value(&cold1).unwrap()
+            );
+            assert_eq!(warm1.len(), 1);
+            assert_eq!(warm1[0].model_id, "gpt-5");
+            assert!(cached(&log_path).is_some());
+
+            // Unchanged warm scan must NOT re-read log.jsonl.
+            let (warm2, warm_outcome2) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(
+                probe.reads(),
+                2,
+                "warm cache hit must not re-read log.jsonl"
+            );
+            assert!(warm_outcome2.source_reads["devin-cli"].complete());
+            assert_eq!(warm2[0].model_id, "gpt-5");
+
+            // Editing sibling meta.json invalidates cache even when log.jsonl is untouched.
+            std::fs::write(
+                &meta_path,
+                r#"{"id":"sess-log-1","model":"claude-opus-4-6","working_directory":"/tmp/devin-b"}"#,
+            )
+            .unwrap();
+            let (warm3, warm_outcome3) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(probe.reads(), 3, "meta.json edit must trigger reparse");
+            assert!(warm_outcome3.source_reads["devin-cli"].complete());
+            assert_eq!(warm3[0].model_id, "claude-opus-4-6");
+            assert_eq!(warm3[0].workspace_key.as_deref(), Some("/tmp/devin-b"));
+
+            // Mid-read append race revokes completeness and prevents caching stale snapshot.
+            std::fs::write(
+                &meta_path,
+                r#"{"id":"sess-log-1","model":"claude-sonnet-4","working_directory":"/tmp/devin-c"}"#,
+            )
+            .unwrap();
+            probe.after_read_append(concat!(
+                r#"{"kind":"node","at":1700000010.0,"node":{"id":2,"message":{"role":"assistant","metadata":{"request_id":"req-2","metrics":{"input_tokens":50,"output_tokens":10}}}}}"#,
+                "\n"
+            ));
+            let (_, race_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(
+                !race_outcome.source_reads["devin-cli"].complete(),
+                "mid-read append race must revoke source completeness"
+            );
+            assert!(
+                cached(&log_path).is_none(),
+                "racing log.jsonl read must not publish a stale cache entry"
+            );
+
+            // Subsequent stable scan succeeds and sees both messages.
+            let (after_race, after_race_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(after_race_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(after_race.len(), 2);
+            assert!(cached(&log_path).is_some());
+
+            // Corrupt trailing JSON line revokes completeness and invalidates cache
+            // while still preserving readable messages for local display.
+            {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&log_path)
+                    .unwrap();
+                writeln!(f, "{{corrupt trailing line").unwrap();
+            }
+            let (corrupt_msgs, corrupt_outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert!(!corrupt_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(corrupt_outcome.source_reads["devin-cli"].unreadable, 1);
+            assert_eq!(corrupt_msgs.len(), 2);
+            assert!(
+                cached(&log_path).is_none(),
+                "corrupt log.jsonl must invalidate existing cache entry"
+            );
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_cli_cross_store_request_id_dedup_does_not_inflate_recount_proof() {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+
+            // Legacy SQLite sessions.db with a generation-1 duplicate on req-1 plus req-2.
+            let (_db_path, _conn) = database(home.path());
+            append(&_conn, "req-1", 67, 103);
+            append(&_conn, "req-1", 67, 103);
+            append(&_conn, "req-2", 10, 5);
+
+            // New per-session log.jsonl for the same session ("sess") repeating req-1
+            // and req-2 plus adding a new req-3 on the same day/model.
+            let session_dir = home.path().join(".local/share/devin/cli/sessions/sess");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(
+                session_dir.join("meta.json"),
+                r#"{"id":"sess","model":"gpt-5","working_directory":"/tmp/project"}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                session_dir.join("log.jsonl"),
+                concat!(
+                    r#"{"kind":"node","at":1700000000.0,"node":{"id":1,"message":{"role":"assistant","metadata":{"request_id":"req-1","metrics":{"input_tokens":67,"output_tokens":103}}}}}"#,
+                    "\n",
+                    r#"{"kind":"node","at":1700000001.0,"node":{"id":2,"message":{"role":"assistant","metadata":{"request_id":"req-2","metrics":{"input_tokens":10,"output_tokens":5}}}}}"#,
+                    "\n",
+                    r#"{"kind":"node","at":1700000002.0,"node":{"id":3,"message":{"role":"assistant","metadata":{"request_id":"req-3","metrics":{"input_tokens":40,"output_tokens":12}}}}}"#,
+                    "\n"
+                ),
+            )
+            .unwrap();
+
+            let (messages, outcome) = scan(home.path(), SourceCachePolicy::Persistent);
+            assert_eq!(outcome.source_reads["devin-cli"].discovered, 2);
+            assert!(outcome.source_reads["devin-cli"].complete());
+            assert_eq!(messages.len(), 3);
+
+            let date = messages[0].date.as_str();
+            let proof = &outcome.recount_proofs["devin-cli"][date]["gpt-5"];
+            // Submitted/corrected == req-1 + req-2 + req-3 (3 messages).
+            assert_eq!(proof.corrected.messages, 3);
+            assert_eq!(proof.corrected.tokens.input, 67 + 10 + 40);
+            assert_eq!(proof.corrected.tokens.output, 103 + 5 + 12);
+            // Previous == corrected + ONLY the single SQLite duplicate of req-1 (4 messages).
+            // Cross-store duplicates dropped from log.jsonl must NOT inflate previous.
+            assert_eq!(proof.previous.messages, 4);
+            assert_eq!(proof.previous.tokens.input, 67 * 2 + 10 + 40);
+            assert_eq!(proof.previous.tokens.output, 103 * 2 + 5 + 12);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn devin_desktop_sqlite_streaming_cache_invalidation_on_cli_meta_change_and_cli_suppression(
+        ) {
+            let cache_home = tempfile::TempDir::new().unwrap();
+            let home = tempfile::TempDir::new().unwrap();
+            let _env = redirect_cache_home(cache_home.path());
+
+            let cli_session_dir = home
+                .path()
+                .join(".local/share/devin/cli/sessions/sess-stream-1");
+            std::fs::create_dir_all(&cli_session_dir).unwrap();
+            let meta_path = cli_session_dir.join("meta.json");
+            std::fs::write(
+                &meta_path,
+                r#"{"id":"sess-stream-1","title":"Streaming desktop task","model":"gpt-5","working_directory":"/tmp/stream-a"}"#,
+            )
+            .unwrap();
+
+            let desktop_dir = home
+                .path()
+                .join("Library/Application Support/Devin/User/acp-messages");
+            std::fs::create_dir_all(&desktop_dir).unwrap();
+            let desktop_db = desktop_dir.join("1111111111111111111111111111111111111111.db");
+            let conn = rusqlite::Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE messages (position INTEGER PRIMARY KEY, kind TEXT, payload TEXT);
+                 INSERT INTO meta (key, value) VALUES ('info', '{\"title\":\"Streaming desktop task\"}');
+                 INSERT INTO messages (position, kind, payload) VALUES (1, 'usage_update', '{\"_meta\":{\"cognition.ai/inputTokens\":250,\"cognition.ai/cachedReadTokens\":50,\"cognition.ai/outputTokens\":30}}');",
+            )
+            .unwrap();
+            drop(conn);
+
+            // 1. Desktop-only streaming scan populates persistent cache with model from meta.json.
+            let mut first_messages = Vec::new();
+            crate::parse_all_messages_streaming(
+                home.path().to_str().unwrap(),
+                &["devin-desktop".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                SourceCachePolicy::Persistent,
+                &mut first_messages,
+            );
+            assert_eq!(first_messages.len(), 1);
+            assert_eq!(first_messages[0].client, "devin-desktop");
+            assert_eq!(first_messages[0].session_id, "sess-stream-1");
+            assert_eq!(first_messages[0].model_id, "gpt-5");
+            assert!(message_cache::SourceMessageCache::load()
+                .get(
+                    message_cache::CacheIdentity::for_client(ClientId::DevinDesktop),
+                    &desktop_db,
+                )
+                .is_some());
+
+            // 2. Updating CLI meta.json invalidates the cached Desktop SQLite entry via `devin-cli-metas`.
+            std::fs::write(
+                &meta_path,
+                r#"{"id":"sess-stream-1","title":"Streaming desktop task","model":"claude-opus-4-6","working_directory":"/tmp/stream-b"}"#,
+            )
+            .unwrap();
+            let mut updated_messages = Vec::new();
+            crate::parse_all_messages_streaming(
+                home.path().to_str().unwrap(),
+                &["devin-desktop".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                SourceCachePolicy::Persistent,
+                &mut updated_messages,
+            );
+            assert_eq!(updated_messages.len(), 1);
+            assert_eq!(updated_messages[0].model_id, "claude-opus-4-6");
+            assert_eq!(
+                updated_messages[0].workspace_key.as_deref(),
+                Some("/tmp/stream-b")
+            );
+
+            // 3. Adding CLI log.jsonl usage for the same session suppresses the Desktop duplicate
+            //    when both clients are scanned together.
+            std::fs::write(
+                cli_session_dir.join("log.jsonl"),
+                concat!(
+                    r#"{"kind":"node","at":1700000000.0,"node":{"id":1,"message":{"role":"assistant","metadata":{"request_id":"req-stream-1","generation_model":"claude-opus-4-6","metrics":{"input_tokens":200,"output_tokens":30,"cache_read_tokens":50}}}}}"#,
+                    "\n"
+                ),
+            )
+            .unwrap();
+            let mut combined_messages = Vec::new();
+            let combined_outcome = crate::parse_all_messages_streaming(
+                home.path().to_str().unwrap(),
+                &["devin-cli".to_string(), "devin-desktop".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                SourceCachePolicy::Persistent,
+                &mut combined_messages,
+            );
+            assert!(combined_outcome.source_reads["devin-cli"].complete());
+            assert_eq!(combined_messages.len(), 1);
+            assert_eq!(combined_messages[0].client, "devin-cli");
+            assert_eq!(combined_messages[0].session_id, "sess-stream-1");
+        }
     }
 
     #[test]
@@ -26357,6 +26678,209 @@ mod tests {
         );
         assert_eq!(second_messages[0].model_id, "claude-sonnet-4");
         assert_eq!(lookup_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_devin_desktop_lookup_cache_shares_cell_across_ndjson_and_sqlite_with_wal() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let meta_path = temp_dir.path().join("sessions/sess-1/meta.json");
+        std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &meta_path,
+            r#"{"id":"sess-1","title":"Shared lookup","model":"claude-opus-4-6"}"#,
+        )
+        .unwrap();
+
+        let ndjson_path = temp_dir.path().join("a.ndjson");
+        let db_path = temp_dir.path().join("b.db");
+        let db_wal_path = temp_dir.path().join("b.db-wal");
+        std::fs::write(&ndjson_path, "{}\n").unwrap();
+        std::fs::write(&db_path, b"sqlite-placeholder").unwrap();
+        std::fs::write(&db_wal_path, b"wal-bytes").unwrap();
+
+        let lookup_paths = vec![meta_path];
+        let ndjson_fp =
+            match message_cache::SourceFingerprint::check_devin_desktop_path_samples_only(
+                &ndjson_path,
+                &lookup_paths,
+                None,
+            )
+            .unwrap()
+            {
+                message_cache::FingerprintStatus::Changed(fp) => fp,
+                message_cache::FingerprintStatus::Unchanged => panic!("expected Changed"),
+            };
+        let db_fp = match message_cache::SourceFingerprint::check_devin_desktop_path_samples_only(
+            &db_path,
+            &lookup_paths,
+            None,
+        )
+        .unwrap()
+        {
+            message_cache::FingerprintStatus::Changed(fp) => fp,
+            message_cache::FingerprintStatus::Unchanged => panic!("expected Changed"),
+        };
+
+        // Desktop SQLite carries its own `-wal` related file, which must NOT
+        // prevent it from sharing the CLI lookup cell with sibling NDJSON files.
+        assert_ne!(ndjson_fp.related_files, db_fp.related_files);
+        let lookup_cache = std::sync::Mutex::new(HashMap::new());
+        let ndjson_cell =
+            super::devin_desktop_lookup_cell_for_snapshot(&lookup_cache, &lookup_paths, &ndjson_fp);
+        let db_cell =
+            super::devin_desktop_lookup_cell_for_snapshot(&lookup_cache, &lookup_paths, &db_fp);
+        assert!(
+            Arc::ptr_eq(&ndjson_cell, &db_cell),
+            "Desktop NDJSON and SQLite files observing the same CLI snapshot must share one lookup cell"
+        );
+        assert_eq!(lookup_cache.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_local_clients_devin_new_cli_log_and_desktop_sqlite_integration() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        // 1. New Devin CLI session stored in `sessions/<id>/{meta.json, log.jsonl}` (no sessions.db).
+        let cli_session_dir = temp_dir
+            .path()
+            .join(".local/share/devin/cli/sessions/cli-new-1");
+        std::fs::create_dir_all(&cli_session_dir).unwrap();
+        std::fs::write(
+            cli_session_dir.join("meta.json"),
+            r#"{"id":"cli-new-1","title":"Build new parser","model":"fusion-claude-opus-5-5-medium-sidekick-swe-2-medium","working_directory":"/Users/alice/tokscale"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cli_session_dir.join("log.jsonl"),
+            concat!(
+                r#"{"kind":"node","at":1775645526.259,"node":{"id":2,"message":{"role":"assistant","metadata":{"request_id":"req-new-1","generation_model":"claude-opus-4-6","created_at":"2026-04-08T10:52:06.259Z","metrics":{"input_tokens":500,"output_tokens":120,"cache_read_tokens":200}}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        // 2. Second CLI meta.json with no log usage yet, used to test Desktop-only resolution.
+        let cli_meta_only_dir = temp_dir
+            .path()
+            .join(".local/share/devin/cli/sessions/cli-meta-only");
+        std::fs::create_dir_all(&cli_meta_only_dir).unwrap();
+        std::fs::write(
+            cli_meta_only_dir.join("meta.json"),
+            r#"{"id":"cli-meta-only","title":"Desktop-only session","model":"gpt-5","working_directory":"/Users/alice/desktop-proj"}"#,
+        )
+        .unwrap();
+
+        // 3. New Devin Desktop `User/acp-messages/*.db` stores:
+        //    - overlapping DB matching `cli-new-1` via title (must be suppressed when CLI is included)
+        //    - standalone DB matching `cli-meta-only` via title (must survive and resolve model/id)
+        //    - ACU-only DB (must produce 0 messages)
+        let desktop_dir = temp_dir
+            .path()
+            .join("Library/Application Support/Devin/User/acp-messages");
+        std::fs::create_dir_all(&desktop_dir).unwrap();
+
+        let write_desktop_db = |name: &str, info: &str, rows: &[(i64, &str, &str)]| {
+            let conn = rusqlite::Connection::open(desktop_dir.join(name)).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE messages (position INTEGER PRIMARY KEY, kind TEXT, payload TEXT);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('info', ?1)",
+                rusqlite::params![info],
+            )
+            .unwrap();
+            for (pos, kind, payload) in rows {
+                conn.execute(
+                    "INSERT INTO messages (position, kind, payload) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![pos, kind, payload],
+                )
+                .unwrap();
+            }
+        };
+
+        write_desktop_db(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.db",
+            r#"{"title":"Build new parser"}"#,
+            &[(
+                1,
+                "usage_update",
+                r#"{"_meta":{"cognition.ai/inputTokens":700,"cognition.ai/cachedReadTokens":200,"cognition.ai/outputTokens":120}}"#,
+            )],
+        );
+        write_desktop_db(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.db",
+            r#"{"title":"Desktop-only session"}"#,
+            &[(
+                1,
+                "usage_update",
+                r#"{"_meta":{"cognition.ai/inputTokens":300,"cognition.ai/cachedReadTokens":50,"cognition.ai/outputTokens":40}}"#,
+            )],
+        );
+        write_desktop_db(
+            "cccccccccccccccccccccccccccccccccccccccc.db",
+            r#"{"title":"Cloud ACU session"}"#,
+            &[(
+                1,
+                "usage_update",
+                r#"{"_meta":{"cognition.ai/eventType":"acu_consumption_at_last_user_interaction","cognition.ai/acuAmount":1.25}}"#,
+            )],
+        );
+
+        // Combined CLI + Desktop parse: CLI wins on overlapping session, Desktop-only
+        // survives with resolved CLI metadata, ACU-only yields 0, raw Desktop count == 2.
+        let combined = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["devin-cli".to_string(), "devin-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+
+        assert_eq!(combined.counts.get(ClientId::DevinCli), 1);
+        assert_eq!(combined.counts.get(ClientId::DevinDesktop), 2);
+        assert_eq!(combined.messages.len(), 2);
+        let cli_msg = combined
+            .messages
+            .iter()
+            .find(|m| m.client == "devin-cli")
+            .unwrap();
+        assert_eq!(cli_msg.session_id, "cli-new-1");
+        assert_eq!(cli_msg.model_id, "claude-opus-4-6");
+        let desktop_msg = combined
+            .messages
+            .iter()
+            .find(|m| m.client == "devin-desktop")
+            .unwrap();
+        assert_eq!(desktop_msg.session_id, "cli-meta-only");
+        assert_eq!(desktop_msg.model_id, "gpt-5");
+        assert_eq!(
+            desktop_msg.workspace_key.as_deref(),
+            Some("/Users/alice/desktop-proj")
+        );
+
+        // Desktop-only parse resolves metadata from CLI meta.json without leaking CLI usage.
+        let desktop_only = parse_local_clients(LocalParseOptions {
+            home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["devin-desktop".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(desktop_only.counts.get(ClientId::DevinCli), 0);
+        assert_eq!(desktop_only.counts.get(ClientId::DevinDesktop), 2);
+        assert_eq!(desktop_only.messages.len(), 2);
+        assert!(desktop_only
+            .messages
+            .iter()
+            .all(|m| m.client == "devin-desktop"));
     }
 
     #[test]
