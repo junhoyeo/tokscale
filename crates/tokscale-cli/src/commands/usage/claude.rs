@@ -444,7 +444,8 @@ fn unreadable_keychain_message(code: Option<i32>, stderr: &str) -> String {
     };
     let stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     if !stderr.is_empty() {
-        message.push_str(" security: ");
+        // `security` already labels its stderr ("security: ..."); add none.
+        message.push_str("; ");
         message.push_str(&stderr);
     }
     message
@@ -1809,11 +1810,14 @@ mod tests {
 
     #[test]
     fn unreadable_message_appends_collapsed_stderr() {
-        let message = unreadable_keychain_message(Some(36), "line1\n  line2\n");
+        // `security` already prefixes its stderr with "security: ".
+        let message =
+            unreadable_keychain_message(Some(36), "security: SecKeychainSearch\n  failed\n");
         assert!(
-            message.ends_with(" security: line1 line2"),
+            message.ends_with("; security: SecKeychainSearch failed"),
             "unexpected message: {message}"
         );
+        assert!(!message.contains("security: security:"), "{message}");
     }
 
     #[test]
