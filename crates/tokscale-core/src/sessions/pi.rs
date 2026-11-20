@@ -847,8 +847,8 @@ fn parse_pi_format_file_inner(
     // Title from the v3 `session` header — authoritative latest, since OMP
     // rewrites the header in place when the title changes.
     let mut header_title: Option<String> = None;
-    // Latest title seen in a `title`/`title_change` record; used only when
-    // the header carries no title.
+    // Latest title record or explicit Pi session name, used when the header
+    // carries no title.
     let mut rolling_title: Option<String> = None;
 
     for_each_json_line_with_bytes(path, &mut |line| {

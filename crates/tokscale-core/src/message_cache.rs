@@ -1749,6 +1749,7 @@ const SHARED_PARSER_FAMILIES: &[SharedParserFamily] = &[
             // +1 more: Pi now counts the billed operations that are not
             // assistant replies (`compaction`, `branch_summary`, `usage`,
             // `toolResult`), which version-6 caches omit entirely.
+            // +1 more: use ordinary Pi session_info names as display titles.
             (ClientId::Pi, 4),
             // +1: Kimchi's Pi-compatible messages now carry stable
             // namespaced deduplication keys.
@@ -6908,7 +6909,16 @@ mod tests {
             (ClientId::PrimeAgent, 6),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert!(current.parser_version > previous_version, "{client:?}");
+            let expected_diff = if matches!(client, ClientId::Omp | ClientId::Pi) {
+                4
+            } else {
+                3
+            };
+            assert_eq!(
+                current.parser_version,
+                previous_version + expected_diff,
+                "{client:?}"
+            );
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: previous_version,
@@ -6949,7 +6959,16 @@ mod tests {
             (ClientId::PrimeAgent, 8),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert!(current.parser_version > pre_merge_version, "{client:?}");
+            let expected_diff = if matches!(client, ClientId::Omp | ClientId::Pi) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                current.parser_version,
+                pre_merge_version + expected_diff,
+                "{client:?}"
+            );
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: pre_merge_version,
@@ -6990,8 +7009,14 @@ mod tests {
             (ClientId::PrimeAgent, 7),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert!(
-                current.parser_version > completion_anchored_version,
+            let expected_diff = if matches!(client, ClientId::Omp | ClientId::Pi) {
+                3
+            } else {
+                2
+            };
+            assert_eq!(
+                current.parser_version,
+                completion_anchored_version + expected_diff,
                 "{client:?}"
             );
             let completion_anchored = CacheIdentity {
