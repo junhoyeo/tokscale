@@ -2245,10 +2245,8 @@ fn parser_version(client: ClientId) -> u32 {
         // `usage.timestamp`. Reparse old rows so those messages move off the
         // synthesized `created + messageId * 1000` time onto their real day.
         ClientId::Amp => 2,
-        // The remaining clients parse their own formats and have never
-        // shipped a parser-only change that leaves byte-identical input
-        // parsing differently, so all of them are at version 1. Repeating
-        // values across independent parsers is harmless -- every cache
+        // These clients parse independent formats. Repeating
+        // version numbers across independent parsers is harmless -- every cache
         // identity is namespaced by `client.as_str()` first, so one client's
         // bump can never invalidate or collide with another's entries
         // (`CacheIdentity` / `CachedSourceEntry::matches_identity`). Sharing
@@ -2272,7 +2270,8 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Goose => 1,
         // v1->v2: fall back to session_meta / file mtime when usage timestamp is null.
         ClientId::Antigravity => 2,
-        ClientId::Zed => 1,
+        // v1->v2: include native ChatGPT subscription threads and use their cumulative totals.
+        ClientId::Zed => 2,
         ClientId::Trae => 1,
         ClientId::Warp => 1,
         ClientId::Gjc => 1,
@@ -7247,6 +7246,62 @@ mod tests {
         let entry = warm.get(current_identity, source.path()).unwrap();
         assert_eq!(entry.parser_version, 4);
         assert_eq!(entry.messages, vec![rebuilt]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zed_cache_reparses_v1_sqlite_entries_for_subscription_threads() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let db_path = source_home
+            .path()
+            .join("AppData/Local/Zed/threads/threads.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT, updated_at TEXT, data_type TEXT, data BLOB);",
+        )
+        .unwrap();
+        for (id, provider) in [("hosted", "zed.dev"), ("native", "openai-subscribed")] {
+            let payload = serde_json::json!({
+                "model": {"provider": provider, "model": "gpt-5.2"},
+                "cumulative_token_usage": {"input_tokens": 12, "output_tokens": 3}
+            });
+            conn.execute(
+                "INSERT INTO threads VALUES (?1, '2026-05-01T12:30:00Z', 'json', ?2)",
+                rusqlite::params![id, payload.to_string().into_bytes()],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let current = CacheIdentity::for_client(ClientId::Zed);
+        let old = CacheIdentity {
+            parser_version: 1,
+            ..current
+        };
+        let mut stale = test_entry(old, &db_path, "hosted");
+        stale.fingerprint = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
+        let shard = cache_shard_path(current, &db_path);
+        ensure_cache_dir(shard.parent().unwrap()).unwrap();
+        write_shard_with_limit(&shard, old, &[stale], MAX_CACHE_SHARD_BYTES).unwrap();
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["zed".to_string()],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 2);
+        let native = messages
+            .iter()
+            .find(|message| message.session_id == "native")
+            .unwrap();
+        assert_eq!(native.provider_id, "openai-subscribed");
+        assert_eq!(native.tokens.total(), 15);
+        assert_eq!(current.parser_version, 2);
     }
 
     #[test]
