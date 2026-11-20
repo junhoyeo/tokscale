@@ -424,28 +424,23 @@ pub fn has_credentials() -> bool {
     credentials_path().exists() || keychain_signals_credentials(&read_keychain())
 }
 
-/// Explains an unreadable Keychain item with the cause and the remedy first:
-/// the TUI shows a diagnostic as one truncated line, so the actionable part
-/// has to land early. `security` exits with the low byte of the OSStatus.
+/// Explains an unreadable Keychain item remedy-first, cause in parentheses:
+/// the TUI shows a diagnostic as one truncated line, so the action has to
+/// survive the narrowest Usage Summary box. `security` exits with the low
+/// byte of the OSStatus.
 fn unreadable_keychain_message(code: Option<i32>, stderr: &str) -> String {
     let exit = code.map_or_else(|| "unknown".to_string(), |code| code.to_string());
     let mut message = match code {
         // errSecInteractionNotAllowed: often a locked keychain in a session
         // that cannot show the unlock prompt.
-        Some(36) => format!(
-            "Keychain locked? (security exit {exit}) Run 'security unlock-keychain', then refresh."
-        ),
+        Some(36) => {
+            format!("Run 'security unlock-keychain', then refresh (exit {exit}: Keychain locked?)")
+        }
         // errSecAuthFailed
-        Some(51) => format!(
-            "Keychain access denied (security exit {exit}). Allow access in Keychain Access, then refresh."
-        ),
+        Some(51) => format!("Allow Keychain access, then refresh (exit {exit}: access denied)"),
         // errSecUserCanceled
-        Some(128) => format!(
-            "Keychain prompt canceled (security exit {exit}). Allow access when macOS asks, then refresh."
-        ),
-        _ => format!(
-            "Keychain unreadable (security exit {exit}). Check Keychain Access, then refresh."
-        ),
+        Some(128) => format!("Allow Keychain access, then refresh (exit {exit}: prompt canceled)"),
+        _ => format!("Check Keychain Access, then refresh (exit {exit}: Keychain unreadable)"),
     };
     let stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     if !stderr.is_empty() {
@@ -1792,23 +1787,23 @@ mod tests {
     fn unreadable_message_matches_spec_copy() {
         assert_eq!(
             unreadable_keychain_message(Some(36), ""),
-            "Keychain locked? (security exit 36) Run 'security unlock-keychain', then refresh."
+            "Run 'security unlock-keychain', then refresh (exit 36: Keychain locked?)"
         );
         assert_eq!(
             unreadable_keychain_message(Some(51), ""),
-            "Keychain access denied (security exit 51). Allow access in Keychain Access, then refresh."
+            "Allow Keychain access, then refresh (exit 51: access denied)"
         );
         assert_eq!(
             unreadable_keychain_message(Some(128), ""),
-            "Keychain prompt canceled (security exit 128). Allow access when macOS asks, then refresh."
+            "Allow Keychain access, then refresh (exit 128: prompt canceled)"
         );
         assert_eq!(
             unreadable_keychain_message(Some(7), ""),
-            "Keychain unreadable (security exit 7). Check Keychain Access, then refresh."
+            "Check Keychain Access, then refresh (exit 7: Keychain unreadable)"
         );
         assert_eq!(
             unreadable_keychain_message(None, ""),
-            "Keychain unreadable (security exit unknown). Check Keychain Access, then refresh."
+            "Check Keychain Access, then refresh (exit unknown: Keychain unreadable)"
         );
     }
 
@@ -1823,12 +1818,19 @@ mod tests {
 
     #[test]
     fn unreadable_message_leads_with_remedy() {
-        // The TUI renders a diagnostic as one truncated line, so the remedy
-        // must come before the cut on ordinary terminal widths.
+        // The TUI renders a diagnostic as one truncated `  Claude: {message}`
+        // line inside the Usage Summary box. Its narrowest form is the
+        // two-column layout at 132 columns: a 64-column interior, leaving 54
+        // characters after the 10-character prefix. The remedy must fit there.
+        const NARROWEST_MESSAGE_WIDTH: usize = 54;
         for code in [Some(36), Some(51), Some(128), Some(7), None] {
             let message = unreadable_keychain_message(code, "");
-            let at = message.find(", then refresh.").expect("remedy present");
-            assert!(at < 80, "remedy starts at {at} for {code:?}: {message}");
+            let end =
+                message.find(", then refresh").expect("remedy present") + ", then refresh".len();
+            assert!(
+                end <= NARROWEST_MESSAGE_WIDTH,
+                "remedy ends at {end} for {code:?}: {message}"
+            );
         }
     }
 
