@@ -2587,6 +2587,8 @@ fn is_openai_full_request_272k_model(model_id: &str) -> bool {
         "gpt-6-sol",
         "gpt-6-luna",
         "gpt-6.1-sol",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
     ]
     .into_iter()
     .any(|base| matches_model_or_snapshot(model_id, base))
@@ -9055,6 +9057,10 @@ mod tests {
             "openai/gpt-6-luna",
             "gpt-6.1-sol",
             "openai/gpt-6.1-sol-2026-09-29",
+            "gpt-6.2-astra",
+            "openai/gpt-6.2-astra",
+            "gpt-6.2-sol",
+            "openai/gpt-6.2-sol",
         ] {
             assert!(
                 uses_openai_full_request_272k_pricing(
@@ -9072,6 +9078,7 @@ mod tests {
             "gpt-5.2",
             "gpt-6.1-astra",
             "gpt-6.1-luna",
+            "gpt-6.2-astra-law",
             "fugu-ultra",
             "custom/gpt-5.5-pro",
         ] {
@@ -9339,6 +9346,69 @@ mod tests {
                 &usage(270_001), // 270,001 + 1,999 + 1 = 272,001
             );
             let expected_high = 270_001.0 * 4e-6 + 10.0 * 15e-6 + 1_999.0 * 0.2e-6 + 5e-6;
+            assert!(
+                (above_boundary - expected_high).abs() < 1e-12,
+                "long rate mismatch for {model}: {above_boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_6_2_models_use_full_request_rates_above_272k() {
+        // OpenAI's long-context rates apply to the whole request once input
+        // exceeds 272k tokens: 2x input and cached input, 1.5x output.
+        for (model, input, output, cached, cache_write) in [
+            ("gpt-6.2-sol", 2e-6, 10e-6, 0.1e-6, 2.5e-6),
+            ("gpt-6.2-astra", 8e-6, 40e-6, 0.4e-6, 10e-6),
+        ] {
+            let result = LookupResult {
+                matched_provider_id: None,
+                matched_key: model.into(),
+                source: "LiteLLM".into(),
+                evidence: ResolutionEvidence::deterministic(ResolutionKind::Exact),
+                pricing: ModelPricing {
+                    input_cost_per_token: Some(input),
+                    input_cost_per_token_above_272k_tokens: Some(input * 2.0),
+                    output_cost_per_token: Some(output),
+                    output_cost_per_token_above_272k_tokens: Some(output * 1.5),
+                    cache_read_input_token_cost: Some(cached),
+                    cache_read_input_token_cost_above_272k_tokens: Some(cached * 2.0),
+                    cache_creation_input_token_cost: Some(cache_write),
+                    ..Default::default()
+                },
+            };
+            assert!(uses_openai_full_request_272k_pricing(
+                &result,
+                Some("openai")
+            ));
+
+            let usage = |input| TokenBreakdown {
+                input,
+                output: 10,
+                cache_read: 1_999,
+                cache_write: 1,
+                ..Default::default()
+            };
+            let at_boundary = compute_cost_for_lookup(
+                &result,
+                Some("openai"),
+                &usage(270_000), // 270,000 + 1,999 + 1 = 272,000
+            );
+            let expected_base = 270_000.0 * input + 10.0 * output + 1_999.0 * cached + cache_write;
+            assert!(
+                (at_boundary - expected_base).abs() < 1e-12,
+                "base rate mismatch for {model}: {at_boundary}"
+            );
+
+            let above_boundary = compute_cost_for_lookup(
+                &result,
+                Some("openai"),
+                &usage(270_001), // 270,001 + 1,999 + 1 = 272,001
+            );
+            let expected_high = 270_001.0 * input * 2.0
+                + 10.0 * output * 1.5
+                + 1_999.0 * cached * 2.0
+                + cache_write * 2.0;
             assert!(
                 (above_boundary - expected_high).abs() < 1e-12,
                 "long rate mismatch for {model}: {above_boundary}"
