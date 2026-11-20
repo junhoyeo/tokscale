@@ -847,8 +847,8 @@ fn parse_pi_format_file_inner(
     // Title from the v3 `session` header — authoritative latest, since OMP
     // rewrites the header in place when the title changes.
     let mut header_title: Option<String> = None;
-    // Latest title seen in a `title`/`title_change` record; used only when
-    // the header carries no title.
+    // Latest title record or explicit Pi session name, used when the header
+    // carries no title.
     let mut rolling_title: Option<String> = None;
 
     for_each_json_line_with_bytes(path, &mut |line| {
@@ -948,22 +948,21 @@ fn parse_pi_format_file_inner(
         }
 
         if entry.entry_type == "session_info" {
+            let name = entry
+                .name
+                .as_deref()
+                .filter(|name| accepts_replacement_field(name, options.lossy_line_reader));
             agent = if options.rlm_session_name_as_agent && is_rlm_subagent {
-                entry
-                    .name
-                    .as_ref()
-                    .filter(|name| {
-                        !name.trim().is_empty()
-                            && accepts_replacement_field(name, options.lossy_line_reader)
-                    })
-                    .cloned()
+                name.filter(|name| !name.trim().is_empty())
+                    .map(str::to_owned)
             } else {
-                entry
-                    .name
-                    .as_deref()
-                    .filter(|name| accepts_replacement_field(name, options.lossy_line_reader))
-                    .and_then(pi_subagent_name)
+                name.and_then(pi_subagent_name)
             };
+            if client == "pi" && agent.is_none() {
+                if let Some(title) = normalized_title(name) {
+                    rolling_title = Some(title);
+                }
+            }
             observer.observe_entry(&entry, None);
             return ControlFlow::Continue(());
         }
@@ -1176,7 +1175,7 @@ fn parse_pi_format_file_inner(
         return Vec::new();
     }
 
-    // A `title_change` after the last message has no later message to retitle,
+    // A rename after the last message has no later message to retitle,
     // and a pre-v3 transcript has no header title to fall back on, so the
     // rename would never surface. The Sessions bucket adopts the latest title
     // from the latest message, so stamp the final title there.
@@ -2066,6 +2065,22 @@ not valid json
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].session_title, None);
         assert_eq!(messages[1].session_title.as_deref(), Some("Refined title"));
+    }
+
+    #[test]
+    fn test_parse_pi_uses_the_latest_nonblank_session_name() {
+        let content = r#"{"type":"session","id":"named","timestamp":"2026-07-28T18:22:13.943Z"}
+{"type":"session_info","name":" First name "}
+{"type":"message","timestamp":"2026-07-28T18:23:00.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":10,"output":5}}}
+{"type":"message","timestamp":"2026-07-28T18:24:00.000Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","usage":{"input":20,"output":6}}}
+{"type":"session_info","name":" Renamed "}
+{"type":"session_info","name":"   "}"#;
+        let file = create_test_file(content);
+        let messages = parse_pi_file(file.path());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].session_title.as_deref(), Some("First name"));
+        assert_eq!(messages[1].session_title.as_deref(), Some("Renamed"));
     }
 
     #[test]
