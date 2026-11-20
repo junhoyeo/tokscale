@@ -73,8 +73,9 @@ pub fn read_keychain(service: &str) -> Result<String> {
 /// prompt, makes `security ... -w` fail with exit 36 even though the item
 /// exists. Callers that treat every failure as "not logged in" hide the
 /// provider without saying why; `Unreadable` lets them report it instead.
-/// It never carries stdout, which is where `security -w` writes the secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// It never carries stdout, which is where `security -w` writes the secret,
+/// and its `Debug` output redacts the secret held by `Found`.
+#[derive(Clone, PartialEq, Eq)]
 pub enum KeychainLookup {
     Found(String),
     Missing,
@@ -85,6 +86,20 @@ pub enum KeychainLookup {
     },
 }
 
+impl std::fmt::Debug for KeychainLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Found(_) => f.debug_tuple("Found").field(&"<redacted>").finish(),
+            Self::Missing => f.write_str("Missing"),
+            Self::Unreadable { code, stderr } => f
+                .debug_struct("Unreadable")
+                .field("code", code)
+                .field("stderr", stderr)
+                .finish(),
+        }
+    }
+}
+
 /// One `security` invocation, reduced to what classification needs.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) struct SecurityRun {
@@ -93,18 +108,16 @@ pub(super) struct SecurityRun {
     pub stderr: Vec<u8>,
 }
 
-/// `security` exits with the low byte of the OSStatus: -25300
-/// (errSecItemNotFound) becomes 44.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const SECURITY_EXIT_ITEM_NOT_FOUND: i32 = 44;
-
 /// Classifies a `security find-generic-password -s <service> -w` result.
 ///
-/// Exit 44 means the item does not exist. Any other failure, including no
-/// exit code at all, runs `probe` -- the same lookup without `-w`, which reads
-/// only attributes and keeps working while the secret is locked away. Only a
-/// probe that succeeds proves the item exists; anything else stays `Missing`
-/// so users who never stored the item are not shown a warning about it.
+/// Any failure, including no exit code at all, runs `probe` -- the same
+/// lookup without `-w`, which reads only attributes and keeps working while
+/// the secret is locked away. Exit 44 is not special-cased: `security` keeps
+/// only the low byte of the OSStatus, so errSecItemNotFound (-25300) shares it
+/// with other statuses. Only a probe that succeeds proves the item exists;
+/// anything else stays `Missing` so users who never stored the item are not
+/// shown a warning about it. Exit 0 with a payload that is not UTF-8 also
+/// proves the item exists, so it is `Unreadable` rather than `Missing`.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn classify_keychain_lookup(
     read: std::io::Result<SecurityRun>,
@@ -116,9 +129,11 @@ pub(super) fn classify_keychain_lookup(
     match read.code {
         Some(0) => match String::from_utf8(read.stdout) {
             Ok(secret) => KeychainLookup::Found(secret.trim_end().to_string()),
-            Err(_) => KeychainLookup::Missing,
+            Err(_) => KeychainLookup::Unreadable {
+                code: Some(0),
+                stderr: String::from_utf8_lossy(&read.stderr).trim().to_string(),
+            },
         },
-        Some(SECURITY_EXIT_ITEM_NOT_FOUND) => KeychainLookup::Missing,
         code => match probe() {
             Ok(SecurityRun { code: Some(0), .. }) => KeychainLookup::Unreadable {
                 code,
@@ -354,9 +369,27 @@ mod tests {
     }
 
     #[test]
-    fn classify_not_found_is_missing_without_probe() {
-        let result = classify_keychain_lookup(run(Some(44), "", "x"), never);
-        assert_eq!(result, KeychainLookup::Missing);
+    fn classify_exit_44_is_confirmed_by_probe() {
+        // The exit status keeps only the OSStatus low byte, so 44 is not
+        // proof of errSecItemNotFound; the probe decides.
+        let absent = classify_keychain_lookup(run(Some(44), "", "x"), || run(Some(44), "", ""));
+        assert_eq!(absent, KeychainLookup::Missing);
+        let present =
+            classify_keychain_lookup(run(Some(44), "", "x"), || run(Some(0), "attrs", ""));
+        assert_eq!(
+            present,
+            KeychainLookup::Unreadable {
+                code: Some(44),
+                stderr: "x".into()
+            }
+        );
+    }
+
+    #[test]
+    fn found_debug_redacts_secret() {
+        let rendered = format!("{:?}", KeychainLookup::Found("oauth-secret".into()));
+        assert!(!rendered.contains("oauth-secret"), "leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "unexpected: {rendered}");
     }
 
     #[test]
@@ -423,7 +456,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_non_utf8_secret_is_missing() {
+    fn classify_non_utf8_secret_is_unreadable() {
+        // Exit 0 proves the item exists, so a payload that is not text must
+        // surface as unreadable rather than hide the provider.
         let read = Ok(SecurityRun {
             code: Some(0),
             stdout: vec![0xff, 0xfe],
@@ -431,7 +466,10 @@ mod tests {
         });
         assert_eq!(
             classify_keychain_lookup(read, never),
-            KeychainLookup::Missing
+            KeychainLookup::Unreadable {
+                code: Some(0),
+                stderr: String::new()
+            }
         );
     }
 
