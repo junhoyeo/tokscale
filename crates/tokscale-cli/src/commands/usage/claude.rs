@@ -11,7 +11,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::helpers::capitalize;
+use super::helpers::{capitalize, KeychainLookup};
 use super::{UsageFetchReport, UsageFreshness, UsageMetric, UsageOutput};
 #[path = "claude_state.rs"]
 mod state;
@@ -406,12 +406,53 @@ fn credentials_path() -> std::path::PathBuf {
     home.join(".claude").join(".credentials.json")
 }
 
-fn read_keychain() -> Result<String> {
-    super::helpers::read_keychain("Claude Code-credentials")
+fn read_keychain() -> KeychainLookup {
+    super::helpers::keychain_lookup("Claude Code-credentials")
+}
+
+/// A Keychain item that exists but could not be read still counts as a login:
+/// the fetch then reports why it is unreadable instead of Claude vanishing
+/// from the Usage view as if the user had never logged in.
+fn keychain_signals_credentials(keychain: &KeychainLookup) -> bool {
+    matches!(
+        keychain,
+        KeychainLookup::Found(_) | KeychainLookup::Unreadable { .. }
+    )
 }
 
 pub fn has_credentials() -> bool {
-    credentials_path().exists() || read_keychain().is_ok()
+    credentials_path().exists() || keychain_signals_credentials(&read_keychain())
+}
+
+/// Explains an unreadable Keychain item with the cause and the remedy first:
+/// the TUI shows a diagnostic as one truncated line, so the actionable part
+/// has to land early. `security` exits with the low byte of the OSStatus.
+fn unreadable_keychain_message(code: Option<i32>, stderr: &str) -> String {
+    let exit = code.map_or_else(|| "unknown".to_string(), |code| code.to_string());
+    let mut message = match code {
+        // errSecInteractionNotAllowed: often a locked keychain in a session
+        // that cannot show the unlock prompt.
+        Some(36) => format!(
+            "Keychain locked? (security exit {exit}) Run 'security unlock-keychain', then refresh."
+        ),
+        // errSecAuthFailed
+        Some(51) => format!(
+            "Keychain access denied (security exit {exit}). Allow access in Keychain Access, then refresh."
+        ),
+        // errSecUserCanceled
+        Some(128) => format!(
+            "Keychain prompt canceled (security exit {exit}). Allow access when macOS asks, then refresh."
+        ),
+        _ => format!(
+            "Keychain unreadable (security exit {exit}). Check Keychain Access, then refresh."
+        ),
+    };
+    let stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !stderr.is_empty() {
+        message.push_str(" security: ");
+        message.push_str(&stderr);
+    }
+    message
 }
 
 /// How [`fetch_policy`] obtains Claude Code's credential document. Injected
@@ -487,15 +528,24 @@ fn read_file_credentials() -> Result<Credentials> {
     parse_credentials_json(&content)
 }
 
-fn read_keychain_credentials() -> Result<Credentials> {
-    parse_credentials_json(&read_keychain()?)
+fn read_credentials_from(
+    file: Option<Credentials>,
+    keychain: KeychainLookup,
+) -> Result<Credentials> {
+    let keychain_creds = match &keychain {
+        KeychainLookup::Found(raw) => parse_credentials_json(raw).ok(),
+        KeychainLookup::Missing | KeychainLookup::Unreadable { .. } => None,
+    };
+    select_claude_credentials(file, keychain_creds).map_err(|error| match keychain {
+        KeychainLookup::Unreadable { code, stderr } => {
+            anyhow::anyhow!(unreadable_keychain_message(code, &stderr))
+        }
+        _ => error,
+    })
 }
 
 fn read_credentials() -> Result<Credentials> {
-    select_claude_credentials(
-        read_file_credentials().ok(),
-        read_keychain_credentials().ok(),
-    )
+    read_credentials_from(read_file_credentials().ok(), read_keychain())
 }
 
 #[derive(Debug)]
@@ -1720,6 +1770,117 @@ mod tests {
                 rate_limit_tier: None,
             }),
         }
+    }
+
+    fn unreadable(code: Option<i32>) -> KeychainLookup {
+        KeychainLookup::Unreadable {
+            code,
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn keychain_signals_credentials_for_found_and_unreadable() {
+        assert!(keychain_signals_credentials(&KeychainLookup::Found(
+            FIXTURE.to_string()
+        )));
+        assert!(keychain_signals_credentials(&unreadable(Some(36))));
+        assert!(!keychain_signals_credentials(&KeychainLookup::Missing));
+    }
+
+    #[test]
+    fn unreadable_message_matches_spec_copy() {
+        assert_eq!(
+            unreadable_keychain_message(Some(36), ""),
+            "Keychain locked? (security exit 36) Run 'security unlock-keychain', then refresh."
+        );
+        assert_eq!(
+            unreadable_keychain_message(Some(51), ""),
+            "Keychain access denied (security exit 51). Allow access in Keychain Access, then refresh."
+        );
+        assert_eq!(
+            unreadable_keychain_message(Some(128), ""),
+            "Keychain prompt canceled (security exit 128). Allow access when macOS asks, then refresh."
+        );
+        assert_eq!(
+            unreadable_keychain_message(Some(7), ""),
+            "Keychain unreadable (security exit 7). Check Keychain Access, then refresh."
+        );
+        assert_eq!(
+            unreadable_keychain_message(None, ""),
+            "Keychain unreadable (security exit unknown). Check Keychain Access, then refresh."
+        );
+    }
+
+    #[test]
+    fn unreadable_message_appends_collapsed_stderr() {
+        let message = unreadable_keychain_message(Some(36), "line1\n  line2\n");
+        assert!(
+            message.ends_with(" security: line1 line2"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn unreadable_message_leads_with_remedy() {
+        // The TUI renders a diagnostic as one truncated line, so the remedy
+        // must come before the cut on ordinary terminal widths.
+        for code in [Some(36), Some(51), Some(128), Some(7), None] {
+            let message = unreadable_keychain_message(code, "");
+            let at = message.find(", then refresh.").expect("remedy present");
+            assert!(at < 80, "remedy starts at {at} for {code:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn unreadable_keychain_without_file_reports_reason() {
+        let error = read_credentials_from(None, unreadable(Some(36))).unwrap_err();
+        assert_eq!(error.to_string(), unreadable_keychain_message(Some(36), ""));
+    }
+
+    #[test]
+    fn unreadable_keychain_falls_back_to_file() {
+        let file = creds_with("file-token", None);
+        let selected = read_credentials_from(Some(file), unreadable(Some(36))).unwrap();
+        assert_eq!(access_token(&selected), Some("file-token"));
+    }
+
+    #[test]
+    fn missing_keychain_without_file_keeps_login_hint() {
+        let error = read_credentials_from(None, KeychainLookup::Missing).unwrap_err();
+        assert!(error.to_string().contains("Run 'claude' to log in."));
+    }
+
+    #[test]
+    fn found_keychain_parses_like_before() {
+        let selected =
+            read_credentials_from(None, KeychainLookup::Found(FIXTURE.to_string())).unwrap();
+        assert_eq!(access_token(&selected), Some("stale-access-token"));
+        let error =
+            read_credentials_from(None, KeychainLookup::Found("not json".to_string())).unwrap_err();
+        assert!(error.to_string().contains("Run 'claude' to log in."));
+    }
+
+    fn unreadable_reader() -> Result<Credentials> {
+        read_credentials_from(None, unreadable(Some(36)))
+    }
+
+    #[test]
+    fn fetch_report_surfaces_unreadable_keychain() {
+        let (url, log) = spawn_usage_server(200);
+        let temp = tempfile::tempdir().unwrap();
+        let report = fetch_report_at(&url, unreadable_reader, temp.path(), 1000);
+        assert!(report.outputs.is_empty());
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].provider, "Claude");
+        assert!(
+            report.diagnostics[0]
+                .message
+                .contains("security unlock-keychain"),
+            "unexpected diagnostic: {}",
+            report.diagnostics[0].message
+        );
+        assert!(log.lock().unwrap().is_empty(), "no usage request expected");
     }
 
     #[test]

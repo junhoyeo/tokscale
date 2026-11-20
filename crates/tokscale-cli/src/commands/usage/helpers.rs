@@ -361,9 +361,7 @@ mod tests {
 
     #[test]
     fn classify_locked_but_present_is_unreadable() {
-        let result = classify_keychain_lookup(run(Some(36), "", ""), || {
-            run(Some(0), "attrs", "")
-        });
+        let result = classify_keychain_lookup(run(Some(36), "", ""), || run(Some(0), "attrs", ""));
         assert_eq!(
             result,
             KeychainLookup::Unreadable {
@@ -431,7 +429,10 @@ mod tests {
             stdout: vec![0xff, 0xfe],
             stderr: vec![],
         });
-        assert_eq!(classify_keychain_lookup(read, never), KeychainLookup::Missing);
+        assert_eq!(
+            classify_keychain_lookup(read, never),
+            KeychainLookup::Missing
+        );
     }
 
     #[test]
