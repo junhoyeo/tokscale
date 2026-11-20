@@ -2272,7 +2272,7 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Goose => 1,
         // v1->v2: fall back to session_meta / file mtime when usage timestamp is null.
         ClientId::Antigravity => 2,
-        ClientId::Zed => 1,
+        ClientId::Zed => 2,
         ClientId::Trae => 1,
         ClientId::Warp => 1,
         ClientId::Gjc => 1,

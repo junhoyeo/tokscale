@@ -1,13 +1,12 @@
 //! Zed Agent session parser
 //!
-//! Parses hosted Zed Agent thread rows from Zed's SQLite database:
+//! Parses native Zed Agent thread rows from Zed's SQLite database:
 //! - Linux/FreeBSD: `$XDG_DATA_HOME/zed/threads/threads.db`
 //! - macOS: `~/Library/Application Support/Zed/threads/threads.db`
 //! - Windows: `%LOCALAPPDATA%\Zed\threads\threads.db`
 //!
-//! Only Zed-hosted model rows (`provider == "zed.dev"`) are counted. External
-//! ACP agents are billed and logged by their own providers/CLIs, and counting
-//! their Zed UI rows would duplicate those sources.
+//! Counts Zed-hosted models and native threads backed by a ChatGPT
+//! subscription. External ACP agents have their own usage sources.
 
 use super::utils::{open_readonly_sqlite, parse_timestamp_str, sqlite_for_each_row_on};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
@@ -20,6 +19,7 @@ use std::path::Path;
 use tracing::warn;
 
 pub(crate) const ZED_HOSTED_PROVIDER: &str = "zed.dev";
+const OPENAI_SUBSCRIBED_PROVIDER: &str = "openai-subscribed";
 const MAX_ZED_THREAD_JSON_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -139,34 +139,53 @@ fn parse_thread_row(db_path: &Path, row: ZedThreadRow) -> Option<UnifiedMessage>
     }
 
     let model = thread.get("model")?;
-    let provider = model.get("provider")?.as_str()?.trim();
-    if !provider.eq_ignore_ascii_case(ZED_HOSTED_PROVIDER) {
-        return None;
-    }
+    let (provider, billing_origin) = match model
+        .get("provider")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        ZED_HOSTED_PROVIDER => (
+            ZED_HOSTED_PROVIDER,
+            super::BillingIdentityOrigin::KnownHostedChannel,
+        ),
+        OPENAI_SUBSCRIBED_PROVIDER => (
+            OPENAI_SUBSCRIBED_PROVIDER,
+            super::BillingIdentityOrigin::ExplicitSession,
+        ),
+        _ => return None,
+    };
 
     let model_id = model.get("model")?.as_str()?.trim();
     if model_id.is_empty() {
         return None;
     }
 
-    let (tokens, message_count) = thread_usage(&thread)?;
+    let subscribed = provider == OPENAI_SUBSCRIBED_PROVIDER;
+    let (tokens, message_count) = thread_usage(&thread, subscribed)?;
     let timestamp = timestamp_ms(&row, &thread)?;
 
     let mut message = UnifiedMessage::new_with_dedup(
         "zed",
         model_id,
-        ZED_HOSTED_PROVIDER,
+        provider,
         row.id.clone(),
         timestamp,
         tokens,
         0.0,
         Some(format!("zed:{}", row.id)),
     )
-    .with_billing(
-        Some(ZED_HOSTED_PROVIDER),
-        super::BillingIdentityOrigin::KnownHostedChannel,
-    );
+    .with_billing(Some(provider), billing_origin);
     message.message_count = message_count;
+    if subscribed {
+        message.session_title = thread
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(Into::into);
+    }
 
     if let Some(workspace_key) = workspace_key_from_folders(
         row.folder_paths.as_deref(),
@@ -209,18 +228,23 @@ fn decode_thread_json(data_type: &str, data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn thread_usage(thread: &Value) -> Option<(TokenBreakdown, i32)> {
+fn thread_usage(thread: &Value, prefer_cumulative: bool) -> Option<(TokenBreakdown, i32)> {
     let (request_usage, request_count) = sum_request_token_usage(thread.get("request_token_usage"));
+    let cumulative = thread
+        .get("cumulative_token_usage")
+        .and_then(token_usage_from_value)
+        .filter(|usage| usage.total() > 0);
+    // The per-turn map can retain only the last request in a native agent loop.
+    if prefer_cumulative {
+        if let Some(usage) = cumulative {
+            return Some((usage, request_count.max(1)));
+        }
+    }
     if request_usage.total() > 0 {
         return Some((request_usage, request_count.max(1)));
     }
 
-    let cumulative = token_usage_from_value(thread.get("cumulative_token_usage")?)?;
-    if cumulative.total() > 0 {
-        Some((cumulative, 1))
-    } else {
-        None
-    }
+    cumulative.map(|usage| (usage, 1))
 }
 
 fn sum_request_token_usage(value: Option<&Value>) -> (TokenBreakdown, i32) {
@@ -489,6 +513,43 @@ mod tests {
         );
 
         assert!(parse_zed_sqlite(&db_path).is_empty());
+    }
+
+    #[test]
+    fn parse_zed_sqlite_counts_native_subscription_usage_once() {
+        let dir = TempDir::new().unwrap();
+        let (db_path, conn) = create_threads_db(&dir);
+        let payload = thread_json(
+            OPENAI_SUBSCRIBED_PROVIDER,
+            "gpt-5.2",
+            json!({"user-1": {"input_tokens": 100, "output_tokens": 20}}),
+        );
+        let mut imported: Value = serde_json::from_str(&payload).unwrap();
+        imported["imported"] = json!(true);
+        for (id, data) in [("native", payload), ("imported", imported.to_string())] {
+            insert_thread(
+                &conn,
+                id,
+                &data,
+                "zstd",
+                "2026-05-01T12:30:00Z",
+                None,
+                None,
+                None,
+            );
+        }
+
+        let messages = parse_zed_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.provider_id, OPENAI_SUBSCRIBED_PROVIDER);
+        assert_eq!(
+            message.billing_identity.id(),
+            Some(OPENAI_SUBSCRIBED_PROVIDER)
+        );
+        assert_eq!(message.tokens.total(), 1998);
+        assert_eq!(message.session_title.as_deref(), Some("Test thread"));
+        assert_eq!(message.dedup_key.as_deref(), Some("zed:native"));
     }
 
     #[test]
