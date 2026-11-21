@@ -2089,7 +2089,9 @@ fn parser_version(client: ClientId) -> u32 {
         // request's start. Untouched wire files keep valid fingerprints, so a
         // warm v4 entry would keep replaying rows with no duration sample and
         // the ms/1K column would stay empty for them.
-        ClientId::Kimi => 5,
+        // v5->v6: recover native step timing when llm.request is absent.
+        // v6->v7: retain legacy request timing across a matching step.begin.
+        ClientId::Kimi => 7,
         // v1->v2: cache-write now maps directly from `Input (w/ Cache Write)`
         // instead of subtracting `Input (w/o Cache Write)`, and a numeric CSV
         // `Cost` (including explicit zero) is retained as provider-reported so
@@ -6689,8 +6691,8 @@ mod tests {
     }
 
     #[test]
-    fn test_kimi_parser_version_invalidates_v4_entries() {
-        assert_eq!(parser_version(ClientId::Kimi), 5);
+    fn test_kimi_parser_version_invalidates_v6_entries() {
+        assert_eq!(parser_version(ClientId::Kimi), 7);
     }
 
     #[test]
@@ -6700,7 +6702,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_kimi_v5_cache_reused_with_current_workspace_metadata() {
+    fn test_kimi_current_cache_reused_with_current_workspace_metadata() {
         let cache_home = TempDir::new().unwrap();
         let source_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(cache_home.path());
@@ -6723,10 +6725,7 @@ mod tests {
         // A full reparse would restore the path-derived session ID, so this
         // marker distinguishes a cache hit from equivalent parsed usage.
         cached_messages[0].session_id = "cache-hit-marker".to_string().into();
-        let identity = CacheIdentity {
-            namespace: "kimi",
-            parser_version: 5,
-        };
+        let identity = CacheIdentity::for_client(ClientId::Kimi);
         let fingerprint = SourceFingerprint::from_kimi_path(&wire_path).unwrap();
         let mut cache = SourceMessageCache::default();
         cache.insert(CachedSourceEntry::new(

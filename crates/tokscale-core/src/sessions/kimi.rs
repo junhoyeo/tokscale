@@ -7,14 +7,14 @@
 //!
 //! `~/.kimi-code/sessions/[WORKSPACE]/[SESSION]/agents/[AGENT]/wire.jsonl`
 //!   Token data comes from usage.record lines; a record's response duration is
-//!   derived from the timestamp of the llm.request that precedes it, and a
-//!   paired record is anchored at that request's start.
+//!   derived from the preceding llm.request, falling back to native step.end
+//!   timing on newer logs. Usage is counted once and timing is start-anchored.
 
 use super::utils::{file_modified_timestamp_ms, for_each_json_line};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Top-level wire.jsonl line: either metadata or a timestamped message
@@ -333,6 +333,60 @@ struct KimiCodeWireLine {
     #[serde(rename = "usageScope")]
     usage_scope: Option<String>,
     time: Option<i64>,
+    #[serde(rename = "agentId")]
+    agent_id: Option<String>,
+    #[serde(rename = "turnStep")]
+    turn_step: Option<String>,
+    event: Option<KimiCodeLoopEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KimiCodeLoopEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    uuid: Option<String>,
+    turn_id: Option<String>,
+    step: Option<u64>,
+    message_id: Option<String>,
+    usage: Option<TokenUsage>,
+    llm_first_token_latency_ms: Option<f64>,
+    llm_stream_duration_ms: Option<f64>,
+}
+
+struct StepTiming {
+    tokens: TokenBreakdown,
+    duration_ms: i64,
+    start_ms: Option<i64>,
+}
+
+impl StepTiming {
+    fn apply(&self, message: &mut UnifiedMessage, usage_time_ms: Option<i64>) {
+        if message.duration_ms.is_some() || message.tokens != self.tokens {
+            return;
+        }
+        // step.end can follow tool execution. Without a step.begin, back-calculate
+        // from the usage record's response time, never the delayed step.end time.
+        let start = self.start_ms.or_else(|| {
+            usage_time_ms?
+                .checked_sub(self.duration_ms)
+                .filter(|ms| *ms > 0)
+        });
+        if let Some(start) = start.filter(|ms| ms.checked_add(self.duration_ms).is_some()) {
+            message.timestamp = start;
+            message.duration_ms = Some(self.duration_ms);
+        }
+    }
+}
+
+fn native_step_duration(event: &KimiCodeLoopEvent) -> Option<i64> {
+    let first = event.llm_first_token_latency_ms?;
+    let stream = event.llm_stream_duration_ms?;
+    if !first.is_finite() || !stream.is_finite() || first < 0.0 || stream < 0.0 {
+        return None;
+    }
+    let duration = (first + stream).round();
+    (duration > 0.0 && duration < i64::MAX as f64).then_some(duration as i64)
 }
 
 /// Parse a Kimi Code wire.jsonl file.
@@ -345,6 +399,16 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
     // Start time of the most recent llm.request, paired with the next
     // turn-scoped usage.record to derive that call's response duration.
     let mut pending_request_time_ms: Option<i64> = None;
+    let mut pending_request_step: Option<String> = None;
+    let own_agent = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str());
+    let mut step_start_ms = None;
+    let mut step_uuid: Option<String> = None;
+    let mut pending_usage: Option<(usize, Option<i64>)> = None;
+    let mut pending_timing: Option<StepTiming> = None;
+    let mut seen_steps = HashSet::new();
 
     for_each_json_line(path, &mut |_index, trimmed| {
         let mut bytes = trimmed.as_bytes().to_vec();
@@ -352,6 +416,87 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             Ok(wl) => wl,
             Err(_) => return,
         };
+
+        if wire_line
+            .agent_id
+            .as_deref()
+            .zip(own_agent)
+            .is_some_and(|(id, own)| id != own)
+        {
+            return;
+        }
+        if matches!(
+            wire_line.line_type.as_str(),
+            "agent.switched" | "agent.turn.started"
+        ) {
+            pending_usage = None;
+            pending_timing = None;
+            pending_request_time_ms = None;
+            pending_request_step = None;
+            step_start_ms = None;
+            step_uuid = None;
+            return;
+        }
+        if wire_line.line_type == "context.append_loop_event" {
+            let Some(event) = wire_line.event else {
+                return;
+            };
+            if event.event_type == "step.begin" {
+                pending_usage = None;
+                pending_timing = None;
+                // Older logs may place step.begin after llm.request. Keep that
+                // request unless explicit step identity proves it is stale.
+                let begin_step = event
+                    .turn_id
+                    .as_ref()
+                    .zip(event.step)
+                    .map(|(turn, step)| format!("{turn}.{step}"));
+                if pending_request_step
+                    .as_deref()
+                    .zip(begin_step.as_deref())
+                    .is_some_and(|(request, begin)| request != begin)
+                {
+                    pending_request_time_ms = None;
+                    pending_request_step = None;
+                }
+                step_start_ms = wire_line.time.filter(|ms| *ms > 0);
+                step_uuid = event.uuid;
+            } else if event.event_type == "step.end" {
+                if step_uuid
+                    .as_ref()
+                    .zip(event.uuid.as_ref())
+                    .is_some_and(|(a, b)| a != b)
+                {
+                    return;
+                }
+                if event
+                    .message_id
+                    .as_ref()
+                    .filter(|id| !id.is_empty())
+                    .is_some_and(|id| !seen_steps.insert(id.clone()))
+                {
+                    return;
+                }
+                let timing = native_step_duration(&event)
+                    .zip(event.usage.as_ref().and_then(TokenUsage::to_breakdown))
+                    .map(|(duration_ms, tokens)| StepTiming {
+                        tokens,
+                        duration_ms,
+                        start_ms: step_start_ms,
+                    });
+                if let Some((index, usage_time)) = pending_usage.take() {
+                    if let Some(timing) = timing {
+                        timing.apply(&mut messages[index], usage_time);
+                    }
+                    pending_timing = None;
+                } else {
+                    pending_timing = timing;
+                }
+                step_start_ms = None;
+                step_uuid = None;
+            }
+            return;
+        }
 
         // usage.record can contain only a symbolic config reference, while the
         // preceding llm.request records the concrete model sent to the provider.
@@ -367,12 +512,12 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             // unreadable clock invalidates the pairing rather than borrowing
             // the previous request's start.
             pending_request_time_ms = wire_line.time.filter(|ms| *ms > 0);
+            pending_request_step = wire_line.turn_step;
             return;
         }
 
-        // Only process usage.record lines.
-        // step.end also carries usage, but it duplicates the same usage.record
-        // that was emitted in the same turn, so we ignore it to avoid double counting.
+        // Tokens still come exclusively from turn-scoped usage.record. step.end
+        // enriches that row's timing; it never creates another usage message.
         if wire_line.line_type != "usage.record" {
             return;
         }
@@ -390,6 +535,8 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
         // reports zero tokens, so take the pending start before that skip: a
         // later record without its own request must not pair against it.
         let request_time_ms = pending_request_time_ms.take();
+        pending_request_step = None;
+        pending_usage = None;
 
         // Skip entries with zero tokens
         let Some(tokens) = wire_line.usage.as_ref().and_then(TokenUsage::to_breakdown) else {
@@ -432,6 +579,11 @@ pub fn parse_kimi_code_file(path: &Path) -> Vec<UnifiedMessage> {
             0.0,
         );
         message.duration_ms = duration_ms;
+        if let Some(timing) = pending_timing.take() {
+            timing.apply(&mut message, wire_time_ms);
+        } else {
+            pending_usage = Some((messages.len(), wire_time_ms));
+        }
         messages.push(message);
     });
 
@@ -874,6 +1026,135 @@ not valid json at all
     // -------------------------------------------------------------------------
     // Kimi Code tests
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_kimi_request_timing_survives_matching_intervening_step_begin() {
+        use serde_json::json;
+        for tagged in [false, true] {
+            let mut request = json!({"type":"llm.request","time":1800000000000i64});
+            let mut begin = json!({"type":"context.append_loop_event","time":1800000000100i64,"event":{"type":"step.begin","uuid":"matching"}});
+            if tagged {
+                request["turnStep"] = json!("0.1");
+                begin["event"]["turnId"] = json!("0");
+                begin["event"]["step"] = json!(1);
+            }
+            let usage = json!({"type":"usage.record","model":"kimi-code/kimi-for-coding","usageScope":"turn","time":1800000003000i64,"usage":{"inputOther":100,"output":60}});
+            let messages = parse_native_fixture(&[request, begin, usage]);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].timestamp, 1800000000000);
+            assert_eq!(messages[0].duration_ms, Some(3000));
+        }
+    }
+
+    #[test]
+    fn test_kimi_request_timing_does_not_cross_explicit_step_identity() {
+        use serde_json::json;
+        let records = vec![
+            json!({"type":"llm.request","turnStep":"0.1","time":1800000000000i64}),
+            json!({"type":"context.append_loop_event","time":1800000000100i64,"event":{"type":"step.begin","uuid":"next","turnId":"0","step":2}}),
+            json!({"type":"usage.record","model":"kimi-code/kimi-for-coding","usageScope":"turn","time":1800000003000i64,"usage":{"inputOther":100,"output":60}}),
+        ];
+        let messages = parse_native_fixture(&records);
+        assert_eq!(messages[0].duration_ms, None);
+        assert_eq!(messages[0].timestamp, 1800000003000);
+    }
+
+    fn native_step_fixture(id: &str, reverse: bool) -> Vec<serde_json::Value> {
+        use serde_json::json;
+        let usage =
+            json!({"inputOther":100,"output":60,"inputCacheRead":20,"inputCacheCreation":0});
+        let record = json!({"type":"usage.record","agentId":"main","model":"kimi-code/kimi-for-coding","usageScope":"turn","time":1800000001500i64,"usage":usage});
+        let end = json!({"type":"context.append_loop_event","agentId":"main","time":1800000021500i64,"event":{"type":"step.end","uuid":id,"messageId":id,"usage":usage,"llmFirstTokenLatencyMs":500,"llmStreamDurationMs":1000}});
+        let mut records = vec![
+            json!({"type":"context.append_loop_event","agentId":"main","time":1800000000000i64,"event":{"type":"step.begin","uuid":id}}),
+        ];
+        records.extend(if reverse {
+            vec![end, record]
+        } else {
+            vec![record, end]
+        });
+        records
+    }
+
+    fn parse_native_fixture(records: &[serde_json::Value]) -> Vec<UnifiedMessage> {
+        let contents = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_dir, path) = create_kimi_code_test_file(&contents);
+        parse_kimi_code_file(&path)
+    }
+
+    #[test]
+    fn test_kimi_native_step_timing_counts_usage_once_in_either_order() {
+        for reverse in [false, true] {
+            let messages = parse_native_fixture(&native_step_fixture("native", reverse));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].model_id, "kimi-for-coding");
+            assert_eq!(messages[0].tokens.output, 60);
+            assert_eq!(messages[0].duration_ms, Some(1500));
+            assert_eq!(messages[0].timestamp, 1800000000000);
+        }
+    }
+
+    #[test]
+    fn test_kimi_native_mixed_file_preserves_old_duration_and_duplicate_steps() {
+        use serde_json::json;
+        let mut records = vec![
+            json!({"type":"llm.request","model":"kimi-code/old-model","time":1799999990000i64}),
+            json!({"type":"usage.record","model":"kimi-code/old-model","usageScope":"turn","time":1799999994000i64,"usage":{"inputOther":100,"output":60,"inputCacheRead":20,"inputCacheCreation":0}}),
+        ];
+        // A native event must not replace the old request-derived duration.
+        records.push(native_step_fixture("old", false).pop().unwrap());
+        records.extend(native_step_fixture("new", false));
+        records.push(records.last().unwrap().clone());
+        let messages = parse_native_fixture(&records);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].duration_ms, Some(4000));
+        assert_eq!(messages[0].timestamp, 1799999990000);
+        assert_eq!(messages[1].duration_ms, Some(1500));
+        assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 120);
+    }
+
+    #[test]
+    fn test_kimi_native_timing_requires_matching_usage_and_valid_components() {
+        use serde_json::json;
+        for invalid in [json!(-1), json!(null), json!(1e30)] {
+            let mut records = native_step_fixture("invalid", false);
+            records[2]["event"]["llmStreamDurationMs"] = invalid;
+            let messages = parse_native_fixture(&records);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].duration_ms, None);
+        }
+        let mut records = native_step_fixture("mismatch", false);
+        records[2]["event"]["usage"]["inputCacheRead"] = json!(21);
+        assert_eq!(parse_native_fixture(&records)[0].duration_ms, None);
+        records[1]["usageScope"] = json!("session");
+        assert!(parse_native_fixture(&records).is_empty());
+    }
+
+    #[test]
+    fn test_kimi_native_timing_does_not_cross_steps_or_agents() {
+        use serde_json::json;
+        let mut records = native_step_fixture("interrupted", false);
+        records.pop();
+        records.push(native_step_fixture("next", false).remove(0));
+        records.push(native_step_fixture("next", false).pop().unwrap());
+        assert_eq!(parse_native_fixture(&records)[0].duration_ms, None);
+        let mut records = native_step_fixture("other-agent", false);
+        records[2]["agentId"] = json!("child");
+        assert_eq!(parse_native_fixture(&records)[0].duration_ms, None);
+    }
+
+    #[test]
+    fn test_kimi_native_without_begin_anchors_at_usage_response_not_tool_end() {
+        let mut records = native_step_fixture("no-begin", false);
+        records.remove(0);
+        let messages = parse_native_fixture(&records);
+        assert_eq!(messages[0].timestamp, 1800000000000);
+        assert_eq!(messages[0].duration_ms, Some(1500));
+    }
 
     fn create_kimi_code_test_file(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
