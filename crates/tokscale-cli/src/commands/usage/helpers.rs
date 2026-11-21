@@ -66,6 +66,115 @@ pub fn read_keychain(service: &str) -> Result<String> {
     }
 }
 
+/// Outcome of a credential-store lookup that keeps "absent" apart from
+/// "present but unreadable".
+///
+/// On macOS a locked keychain, or a session that may not show the access
+/// prompt, makes `security ... -w` fail with exit 36 even though the item
+/// exists. Callers that treat every failure as "not logged in" hide the
+/// provider without saying why; `Unreadable` lets them report it instead.
+/// It never carries stdout, which is where `security -w` writes the secret,
+/// and its `Debug` output redacts the secret held by `Found`.
+#[derive(Clone, PartialEq, Eq)]
+pub enum KeychainLookup {
+    Found(String),
+    Missing,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Unreadable {
+        code: Option<i32>,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Debug for KeychainLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Found(_) => f.debug_tuple("Found").field(&"<redacted>").finish(),
+            Self::Missing => f.write_str("Missing"),
+            Self::Unreadable { code, stderr } => f
+                .debug_struct("Unreadable")
+                .field("code", code)
+                .field("stderr", stderr)
+                .finish(),
+        }
+    }
+}
+
+/// One `security` invocation, reduced to what classification needs.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) struct SecurityRun {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Classifies a `security find-generic-password -s <service> -w` result.
+///
+/// Any failure, including no exit code at all, runs `probe` -- the same
+/// lookup without `-w`, which reads only attributes and keeps working while
+/// the secret is locked away. Exit 44 is not special-cased: `security` keeps
+/// only the low byte of the OSStatus, so errSecItemNotFound (-25300) shares it
+/// with other statuses. Only a probe that succeeds proves the item exists;
+/// anything else stays `Missing` so users who never stored the item are not
+/// shown a warning about it. Exit 0 with a payload that is not UTF-8 also
+/// proves the item exists, so it is `Unreadable` rather than `Missing`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn classify_keychain_lookup(
+    read: std::io::Result<SecurityRun>,
+    probe: impl FnOnce() -> std::io::Result<SecurityRun>,
+) -> KeychainLookup {
+    let Ok(read) = read else {
+        return KeychainLookup::Missing;
+    };
+    match read.code {
+        Some(0) => match String::from_utf8(read.stdout) {
+            Ok(secret) => KeychainLookup::Found(secret.trim_end().to_string()),
+            Err(_) => KeychainLookup::Unreadable {
+                code: Some(0),
+                stderr: String::from_utf8_lossy(&read.stderr).trim().to_string(),
+            },
+        },
+        code => match probe() {
+            Ok(SecurityRun { code: Some(0), .. }) => KeychainLookup::Unreadable {
+                code,
+                stderr: String::from_utf8_lossy(&read.stderr).trim().to_string(),
+            },
+            _ => KeychainLookup::Missing,
+        },
+    }
+}
+
+/// Looks up `service` and reports whether it is found, missing, or present
+/// but unreadable. Unlike [`read_keychain`], this distinguishes the last two
+/// on macOS. Other platforms keep [`read_keychain`]'s lookup unchanged and
+/// report every failure as `Missing`.
+pub fn keychain_lookup(service: &str) -> KeychainLookup {
+    #[cfg(target_os = "macos")]
+    {
+        let security = |args: &[&str]| {
+            std::process::Command::new("security")
+                .args(args)
+                .output()
+                .map(|out| SecurityRun {
+                    code: out.status.code(),
+                    stdout: out.stdout,
+                    stderr: out.stderr,
+                })
+        };
+        classify_keychain_lookup(
+            security(&["find-generic-password", "-s", service, "-w"]),
+            || security(&["find-generic-password", "-s", service]),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        read_keychain(service)
+            .map(KeychainLookup::Found)
+            .unwrap_or(KeychainLookup::Missing)
+    }
+}
+
 /// Reads a credential blob from the Windows Credential Manager.
 ///
 /// `target` must be the *full* `TargetName` exactly as stored: `CredReadW`
@@ -239,6 +348,129 @@ mod tests {
         DateTime::parse_from_rfc3339(value)
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    fn run(code: Option<i32>, out: &str, err: &str) -> std::io::Result<SecurityRun> {
+        Ok(SecurityRun {
+            code,
+            stdout: out.as_bytes().to_vec(),
+            stderr: err.as_bytes().to_vec(),
+        })
+    }
+
+    fn never() -> std::io::Result<SecurityRun> {
+        panic!("probe must not run for this read result")
+    }
+
+    #[test]
+    fn classify_found_trims_trailing_newline() {
+        let result = classify_keychain_lookup(run(Some(0), "secret\n", ""), never);
+        assert_eq!(result, KeychainLookup::Found("secret".into()));
+    }
+
+    #[test]
+    fn classify_exit_44_is_confirmed_by_probe() {
+        // The exit status keeps only the OSStatus low byte, so 44 is not
+        // proof of errSecItemNotFound; the probe decides.
+        let absent = classify_keychain_lookup(run(Some(44), "", "x"), || run(Some(44), "", ""));
+        assert_eq!(absent, KeychainLookup::Missing);
+        let present =
+            classify_keychain_lookup(run(Some(44), "", "x"), || run(Some(0), "attrs", ""));
+        assert_eq!(
+            present,
+            KeychainLookup::Unreadable {
+                code: Some(44),
+                stderr: "x".into()
+            }
+        );
+    }
+
+    #[test]
+    fn found_debug_redacts_secret() {
+        let rendered = format!("{:?}", KeychainLookup::Found("oauth-secret".into()));
+        assert!(!rendered.contains("oauth-secret"), "leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "unexpected: {rendered}");
+    }
+
+    #[test]
+    fn classify_locked_but_present_is_unreadable() {
+        let result = classify_keychain_lookup(run(Some(36), "", ""), || run(Some(0), "attrs", ""));
+        assert_eq!(
+            result,
+            KeychainLookup::Unreadable {
+                code: Some(36),
+                stderr: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_locked_but_absent_is_missing() {
+        let result = classify_keychain_lookup(run(Some(36), "", ""), || run(Some(44), "", ""));
+        assert_eq!(result, KeychainLookup::Missing);
+    }
+
+    #[test]
+    fn classify_probe_other_failure_is_missing() {
+        let other = classify_keychain_lookup(run(Some(36), "", ""), || run(Some(36), "", ""));
+        assert_eq!(other, KeychainLookup::Missing);
+        let no_code = classify_keychain_lookup(run(Some(36), "", ""), || run(None, "", ""));
+        assert_eq!(no_code, KeychainLookup::Missing);
+        let spawn = classify_keychain_lookup(run(Some(36), "", ""), || {
+            Err(std::io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(spawn, KeychainLookup::Missing);
+    }
+
+    #[test]
+    fn classify_no_exit_code_probes() {
+        let result = classify_keychain_lookup(run(None, "", ""), || run(Some(0), "attrs", ""));
+        assert_eq!(
+            result,
+            KeychainLookup::Unreadable {
+                code: None,
+                stderr: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_spawn_error_is_missing() {
+        let result = classify_keychain_lookup(Err(std::io::ErrorKind::NotFound.into()), never);
+        assert_eq!(result, KeychainLookup::Missing);
+    }
+
+    #[test]
+    fn unreadable_never_captures_stdout() {
+        let result = classify_keychain_lookup(run(Some(51), "LEAKED-TOKEN", "  denied \n"), || {
+            run(Some(0), "attrs", "")
+        });
+        assert_eq!(
+            result,
+            KeychainLookup::Unreadable {
+                code: Some(51),
+                stderr: "denied".into()
+            }
+        );
+        assert!(!format!("{result:?}").contains("LEAKED-TOKEN"));
+    }
+
+    #[test]
+    fn classify_non_utf8_secret_is_unreadable() {
+        // Exit 0 proves the item exists, so a payload that is not text must
+        // surface as unreadable rather than hide the provider.
+        let read = Ok(SecurityRun {
+            code: Some(0),
+            stdout: vec![0xff, 0xfe],
+            stderr: vec![],
+        });
+        assert_eq!(
+            classify_keychain_lookup(read, never),
+            KeychainLookup::Unreadable {
+                code: Some(0),
+                stderr: String::new()
+            }
+        );
     }
 
     #[test]
