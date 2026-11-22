@@ -4912,13 +4912,38 @@ fn run_clients_command(json: bool, home_dir: Option<String>) -> Result<()> {
                     }
                 }
             }
+            if client == ClientId::DevinCli {
+                let mut devin_cli_candidates = Vec::new();
+                if let Some(cli_dir) = Path::new(&sessions_path).parent() {
+                    devin_cli_candidates.push(cli_dir.join("sessions"));
+                }
+                for root in
+                    tokscale_core::scanner::devin_cli_additional_roots(&home_dir_str, use_env_roots)
+                {
+                    devin_cli_candidates.push(root.join("sessions"));
+                    devin_cli_candidates.push(root.join("sessions.db"));
+                }
+                for candidate in devin_cli_candidates {
+                    let path_str = candidate.to_string_lossy().to_string();
+                    if path_str != sessions_path
+                        && !additional_paths.iter().any(|p| p.path == path_str)
+                    {
+                        additional_paths.push(AdditionalPath {
+                            path: path_str,
+                            exists: candidate.exists(),
+                        });
+                    }
+                }
+            }
             if client == ClientId::DevinDesktop {
                 for root in tokscale_core::scanner::devin_desktop_additional_roots(
                     &home_dir_str,
                     use_env_roots,
                 ) {
                     let path_str = root.to_string_lossy().to_string();
-                    if !additional_paths.iter().any(|p| p.path == path_str) {
+                    if path_str != sessions_path
+                        && !additional_paths.iter().any(|p| p.path == path_str)
+                    {
                         additional_paths.push(AdditionalPath {
                             path: path_str,
                             exists: root.exists(),
