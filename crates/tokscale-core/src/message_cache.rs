@@ -2302,6 +2302,7 @@ fn parser_version(client: ClientId) -> u32 {
         // v2: dedup keys include canonical interval end/granularity so a
         // carried midnight hour does not suppress its residual daily row.
         ClientId::Capy => 2,
+        ClientId::Empryo => 1,
         // Shared-family members are versioned by `SHARED_PARSER_FAMILIES`
         // through the roster lookup at the top of this function. Listing
         // them here keeps the match exhaustive at compile time; reaching

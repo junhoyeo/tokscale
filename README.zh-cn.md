@@ -124,6 +124,7 @@
 | <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
 | <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl`（可用 `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` 覆盖根目录） |
 | <img width="48px" src=".github/assets/client-capy.png" alt="Capy" /> | [Capy](https://capy.ai) | `~/.config/tokscale/capy-cache/usage.json` (API sync via `tokscale capy login` + `tokscale capy sync`) |
+| <img width="48px" src=".github/assets/client-empryo.png" alt="Empryo" /> | [Empryo](https://empryo.com) | `~/.empryo/usage/usage-<YYYY-MM>.jsonl` (append-only ledger Empryo writes for every model request, with the model and recorded cost on each row) |
 
 使用 [🚅 LiteLLM 的价格数据](https://github.com/BerriAI/litellm)提供实时价格计算，支持分层定价模型和缓存 Token 折扣。
 
@@ -196,7 +197,7 @@
   - 支持可配置颜色主题的 GitHub 风格贡献图
   - 实时筛选和排序
   - 零闪烁渲染
-- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe、Proma、BB 和 Qoder 的使用情况
+- **多平台支持** - 跟踪 OpenCode、Claude Code、Codex CLI、Prime Agent、Copilot CLI、Cursor IDE、Gemini CLI、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Kimchi Coding、Reasonix、Kimi CLI、Kimi Work、Qwen CLI、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp/Oz、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth Studio、Hindsight、fx、Oh My Pi、Muse Code、Aside、Mistral Vibe、Proma、BB、Qoder 和 Empryo 的使用情况
 - **实时定价** - 从 LiteLLM 获取当前价格，带 1 小时磁盘缓存；OpenRouter 自动回退和新模型的 Cursor 定价支持
 - **详细分解** - 输入、输出、缓存读写和推理 Token 跟踪
 - **原生 Rust 核心** - 所有解析和聚合在 Rust 中完成，处理速度提升 10 倍
@@ -1167,7 +1168,7 @@ tokscale sources --json
 - **交互式提示**：悬停查看详细的每日分解
 - **每日分解面板**：点击查看每个来源和模型的详情
 - **年份筛选**：在年份之间导航
-- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe、Proma、BB、Qoder、Capy）
+- **来源筛选**：按平台筛选（OpenCode、Claude、Codex、Copilot、Cursor、Gemini、Amp、Codebuff、Droid、OpenClaw、Hermes Agent、Pi、Prime Agent、Kimi、Qwen、Roo Code、Kilo、Mux、Kilo CLI、Crush、Goose、Antigravity、Antigravity CLI、Antigravity IDE Extension、Zed、Kiro、Trae、Warp、Cline、Gajae-Code、Grok Build、Jcode、MiMo Code、Xiaomi MiMo AI、Command Code、Junie、ZCode、OpenCodeReview、CodeBuddy、WorkBuddy、Devin CLI、Devin Desktop、Augment Code、Synthetic、Cherry Studio、LM Studio、Unsloth、Hindsight、Muse Code、Aside、Mistral Vibe、Proma、BB、Qoder、Capy、Empryo）
 - **统计面板**：总成本、Token、活跃天数、连续记录
 - **FOUC 防护**：在 React 水合前应用主题（无闪烁）
 
@@ -1594,6 +1595,7 @@ AI 编程工具将会话数据存储在跨平台位置。大多数工具在所�
 | BB | `$BB_DATA_DIR`（默认：`~/.bb/`）、`~/.bb-dev/` | `%BB_DATA_DIR%`（默认：`%USERPROFILE%\.bb\`）、`%USERPROFILE%\.bb-dev\` | 解析 `bb.db` SQLite 数据库（`threads` 和 `events` 表）。准确提取编排代理 Harness 中的 Prompt 缓存和推理 Token 分解。BB 在常规主目录下运行 Claude Code 和 Codex，因此两边都记录的响应只在 `claude` 或 `codex` 下统计一次；仅指定 `--client bb` 时仍显示 BB 记录的全部内容。 |
 | Qoder | `$QODER_CONFIG_DIR/projects/`（默认：`~/.qoder/projects/`）、`$QODERCN_CONFIG_DIR/projects/`（默认：`~/.qoder-cn/projects/`） | `%QODER_CONFIG_DIR%\projects\`（默认：`%USERPROFILE%\.qoder\projects\`）、`%QODERCN_CONFIG_DIR%\projects\`（默认：`%USERPROFILE%\.qoder-cn\projects\`） | 解析 Qoder 和 Qoder CN 的 JSONL 会话及子代理日志；合并多分块助手片段，并在托管模型 Token 数被归零时从对话文本进行估算 |
 | Capy | `~/.config/tokscale/capy-cache/usage.json` (or `$TOKSCALE_CONFIG_DIR/capy-cache/`) | `%APPDATA%\tokscale\capy-cache\usage.json` (or `%TOKSCALE_CONFIG_DIR%\capy-cache\`) | API sync via `tokscale capy login` and `tokscale capy sync` (reports refresh it automatically). Capy runs its agent loop on its servers, including local threads and connected subscriptions such as Codex, so no session log is written locally; token totals come from Capy's usage API per hour (last 30 days) or UTC day (older), per thread and model. Use `tokscale capy login --user <email>` in a multi-member organization to count only your own usage |
+| Empryo | `~/.empryo/usage/` | `%USERPROFILE%\.empryo\usage\` | Reads Empryo's own append-only `usage-<YYYY-MM>.jsonl` ledger, which records every model request — main turns, subagent runs, and internal lanes such as the session namer — with its model, provider, token buckets, duration and the cost Empryo recorded. The ledger's `input` is a cache-inclusive prompt total, so cached tokens are split out instead of counted twice. Session transcripts under `~/.empryo/sessions/` are not parsed: they record usage without a model identity |
 
 > **Devin Desktop 代理支持**：本地用量解析适用于会在 NDJSON 流中发出 `usage_update` 事件的 ACP 连接代理（例如 Cascade/Windsurf、claude-code、opencode）。默认的 **devin-cloud** 代理不会发出本地 `usage_update` 事件——其用量仍保留在服务器端，tokscale 无法在没有账号级 API 的情况下跟踪它。
 

@@ -123,6 +123,7 @@
 | <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
 | <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl` (`QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR`로 루트 경로 변경 가능) |
 | <img width="48px" src=".github/assets/client-capy.png" alt="Capy" /> | [Capy](https://capy.ai) | `~/.config/tokscale/capy-cache/usage.json` (API sync via `tokscale capy login` + `tokscale capy sync`) |
+| <img width="48px" src=".github/assets/client-empryo.png" alt="Empryo" /> | [Empryo](https://empryo.com) | `~/.empryo/usage/usage-<YYYY-MM>.jsonl` (append-only ledger Empryo writes for every model request, with the model and recorded cost on each row) |
 
 [🚅 LiteLLM의 가격 데이터](https://github.com/BerriAI/litellm)를 사용해 **실시간 비용 계산**을 제공합니다. 구간별 가격 모델(대용량 컨텍스트 등)과 **캐시 토큰 할인**도 지원합니다.
 
@@ -196,7 +197,7 @@ AI 지원 개발 시대에 **토큰은 새로운 에너지**입니다. 토큰은
   - 설정 가능한 색상 테마의 GitHub 스타일 기여 그래프
   - 실시간 필터링 및 정렬
   - 깜빡임 없는 렌더링
-- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder 사용량 통합 추적
+- **멀티 플랫폼 지원** - OpenCode, Claude Code, Codex CLI, Prime Agent, Copilot CLI, Cursor IDE, Gemini CLI, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Kimchi Coding, Reasonix, Kimi CLI, Kimi Work, Qwen CLI, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp/Oz, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth Studio, Hindsight, fx, Oh My Pi, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder, Empryo 사용량 통합 추적
 - **실시간 가격 반영** - LiteLLM에서 최신 가격을 가져와(디스크 캐시 1시간) 비용 계산; OpenRouter 자동 폴백 및 신규 모델용 Cursor 가격 지원
 - **상세 분석** - 입력, 출력, 캐시 읽기/쓰기, 추론 토큰까지 추적
 - **네이티브 Rust 코어** - 모든 파싱과 집계를 Rust로 처리해 최대 10배 빠른 성능
@@ -1164,7 +1165,7 @@ tokscale sources --json
 - **인터랙티브 툴팁**: 호버 시 상세 일별 분석 표시
 - **일별 분석 패널**: 클릭하여 소스별, 모델별 세부사항 확인
 - **연도 필터링**: 연도 간 탐색
-- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder, Capy)
+- **소스 필터링**: 플랫폼별 필터 (OpenCode, Claude, Codex, Copilot, Cursor, Gemini, Amp, Codebuff, Droid, OpenClaw, Hermes Agent, Pi, Prime Agent, Kimi, Qwen, Roo Code, Kilo, Mux, Kilo CLI, Crush, Goose, Antigravity, Antigravity CLI, Antigravity IDE Extension, Zed, Kiro, Trae, Warp, Cline, Gajae-Code, Grok Build, Jcode, MiMo Code, Xiaomi MiMo AI, Command Code, Junie, ZCode, OpenCodeReview, CodeBuddy, WorkBuddy, Devin CLI, Devin Desktop, Augment Code, Synthetic, Cherry Studio, LM Studio, Unsloth, Hindsight, Muse Code, Aside, Mistral Vibe, Proma, BB, Qoder, Capy, Empryo)
 - **통계 패널**: 총 비용, 토큰, 활동 일수, 연속 기록
 - **FOUC 방지**: React 하이드레이션 전 테마 적용 (깜빡임 없음)
 
@@ -1594,6 +1595,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | BB | `$BB_DATA_DIR` (기본값: `~/.bb/`), `~/.bb-dev/` | `%BB_DATA_DIR%` (기본값: `%USERPROFILE%\.bb\`), `%USERPROFILE%\.bb-dev\` | `bb.db` SQLite 데이터베이스(`threads`, `events` 테이블) 파싱. 오케스트레이션된 에이전트 하네스 전반의 프롬프트 캐시 및 추론 토큰 분석을 정확히 추출. BB는 Claude Code와 Codex를 평소 홈에서 실행하므로, 두 도구가 함께 기록한 응답은 `claude` 또는 `codex` 아래에 한 번만 집계됩니다. `--client bb`만 지정하면 BB가 기록한 내역을 모두 보여 줍니다. |
 | Qoder | `$QODER_CONFIG_DIR/projects/` (기본값: `~/.qoder/projects/`), `$QODERCN_CONFIG_DIR/projects/` (기본값: `~/.qoder-cn/projects/`) | `%QODER_CONFIG_DIR%\projects\` (기본값: `%USERPROFILE%\.qoder\projects\`), `%QODERCN_CONFIG_DIR%\projects\` (기본값: `%USERPROFILE%\.qoder-cn\projects\`) | Qoder 및 Qoder CN의 JSONL 세션/서브에이전트 트랜스크립트 파싱. 다중 블록 어시스턴트 조각을 병합하고, 매니지드 모델의 토큰 수치가 0으로 마스킹된 경우 대화 텍스트 기반 토큰 추정을 적용 |
 | Capy | `~/.config/tokscale/capy-cache/usage.json` (or `$TOKSCALE_CONFIG_DIR/capy-cache/`) | `%APPDATA%\tokscale\capy-cache\usage.json` (or `%TOKSCALE_CONFIG_DIR%\capy-cache\`) | API sync via `tokscale capy login` and `tokscale capy sync` (reports refresh it automatically). Capy runs its agent loop on its servers, including local threads and connected subscriptions such as Codex, so no session log is written locally; token totals come from Capy's usage API per hour (last 30 days) or UTC day (older), per thread and model. Use `tokscale capy login --user <email>` in a multi-member organization to count only your own usage |
+| Empryo | `~/.empryo/usage/` | `%USERPROFILE%\.empryo\usage\` | Reads Empryo's own append-only `usage-<YYYY-MM>.jsonl` ledger, which records every model request — main turns, subagent runs, and internal lanes such as the session namer — with its model, provider, token buckets, duration and the cost Empryo recorded. The ledger's `input` is a cache-inclusive prompt total, so cached tokens are split out instead of counted twice. Session transcripts under `~/.empryo/sessions/` are not parsed: they record usage without a model identity |
 
 > **참고**: Windows에서 `~`는 `%USERPROFILE%`로 확장됩니다 (예: `C:\Users\사용자이름`). 일부 도구는 크로스 플랫폼 일관성을 위해 Unix 스타일 경로(`.local/share` 등)를 사용하고, Goose를 포함한 다른 도구는 위 표의 Windows 기본 경로(`%APPDATA%` 등)를 사용합니다.
 

@@ -1183,6 +1183,22 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Empryo meters every model request it sends — main turns, subagent runs
+    // and its internal lanes such as the session namer — into a per-month
+    // append-only ledger at `~/.empryo/usage/usage-<YYYY-MM>.jsonl`. That
+    // ledger is the only local record that attributes tokens to a model, so it
+    // is the parsed source; the session transcripts beside it are not.
+    Empryo = 62 => {
+        id: "empryo",
+        display: "Empryo",
+        logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-empryo.png"),
+        root: PathRoot::Home,
+        relative: ".empryo/usage",
+        pattern: "usage-*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1298,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 62);
+        assert_eq!(ClientId::COUNT, 63);
     }
 
     #[test]
@@ -2502,6 +2518,23 @@ mod tests {
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
         assert!(!client.data().headless);
+    }
+
+    #[test]
+    fn test_empryo_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("empryo").expect("empryo client should be registered");
+        assert_eq!(
+            client.data().resolve_path("/tmp/home"),
+            native_join(std::path::Path::new("/tmp/home"), ".empryo/usage")
+        );
+        assert_eq!(client.data().relative_path, ".empryo/usage");
+        // The ledger is append-only per month, so the glob has to admit a
+        // `usage-<YYYY-MM>.jsonl` name rather than a bare `*.jsonl` set.
+        assert_eq!(client.data().pattern, "usage-*.jsonl");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
+        assert_eq!(client.display_name(), "Empryo");
     }
 
     #[test]

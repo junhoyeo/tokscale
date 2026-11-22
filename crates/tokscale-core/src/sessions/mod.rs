@@ -26,6 +26,7 @@ pub mod cursor;
 pub mod devin;
 pub mod droid;
 pub mod dsh;
+pub mod empryo;
 pub mod freebuff;
 pub mod fx;
 pub mod gemini;
