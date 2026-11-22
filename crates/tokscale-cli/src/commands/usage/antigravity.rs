@@ -1,10 +1,9 @@
 //! Antigravity subscription quota.
 //!
-//! Unlike every other provider here, this one never reaches a cloud API. The
-//! Antigravity CLI (`agy`) and IDE both run a language server that holds the
-//! OAuth token, calls Google Code Assist, caches the answer, and exposes it
-//! over a loopback Connect-RPC endpoint. `/usage` inside the CLI reads exactly
-//! that:
+//! The first route never reaches a cloud API. The Antigravity CLI (`agy`) and
+//! IDE both run a language server that holds the OAuth token, calls Google
+//! Code Assist, caches the answer, and exposes it over a loopback Connect-RPC
+//! endpoint. `/usage` inside the CLI reads exactly that:
 //!
 //! ```text
 //! POST http://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
@@ -21,11 +20,27 @@
 //! Older language server versions that do not require a CSRF token continue
 //! to be supported when no token is present.
 //!
-//! Calling Google's `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
-//! directly was tried first and rejected: authentication succeeds, but a
-//! `GEMINI_CLI` client identity is answered with `UNSUPPORTED_CLIENT` /
-//! `SUBSCRIPTION_REQUIRED` now that individual users have been migrated to
-//! Antigravity.
+//! When no language server answers, the quota is read from Code Assist
+//! directly with the access token `agy` saved, so the card does not need a
+//! running Antigravity. An earlier attempt at this called
+//! `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` as a
+//! `GEMINI_CLI` client and was answered with `UNSUPPORTED_CLIENT` /
+//! `SUBSCRIPTION_REQUIRED`. The route that works asks the way Antigravity
+//! itself does, and differs in three ways:
+//!
+//! 1. The `User-Agent` names the Antigravity desktop app
+//!    (`antigravity/<version> <goos>/<goarch>`). Without it Google answers 403,
+//!    and only the desktop version is sent the "Gemini Models" group.
+//! 2. The method is `retrieveUserQuotaSummary`, for the project that
+//!    `loadCodeAssist` names, not `retrieveUserQuota`.
+//! 3. The summary comes from `daily-cloudcode-pa.googleapis.com`, the host that
+//!    meters a Google-account sign-in.
+//!
+//! The answer has the same `groups` shape the language server returns, without
+//! its `response` envelope. The saved token is never refreshed (tokscale does
+//! not hold the CLI's client secret). With no unexpired token the provider is
+//! left out of the report, as it was before this route existed; a failed call
+//! is reported like any other provider's fetch error. See [`direct_quota`].
 //!
 //! Antigravity meters quota **per model group** — Gemini models share one
 //! weekly and one five-hour limit, Claude and GPT models share another — so
@@ -134,12 +149,15 @@ struct QuotaBucket {
 
 // ── Provider interface ──
 
-/// Whether a reachable language server is serving quota right now.
+/// Whether a reachable language server is serving quota right now, or, failing
+/// that, whether `agy` saved a sign-in that [`direct_quota`] can use.
 ///
-/// This probes rather than checking for a credential file, because Antigravity
-/// keeps its token inside the running process: "is it installed" and "can we
-/// read quota" are different questions, and only the second one should put a
-/// card on screen. The probe is a loopback request against a port read out of
+/// The second check reads local state only (a file, or the macOS Keychain) and
+/// sends nothing, so a machine without Antigravity still pays no request.
+///
+/// The language server is probed rather than assumed from an install, because
+/// "is it installed" and "can we read quota" are different questions, and only
+/// the second one should put a card on screen. The probe is a loopback request against a port read out of
 /// the CLI log, so on a machine that has one it costs a few milliseconds. A
 /// machine with neither a logged port nor an Antigravity process sends no
 /// request at all and builds no HTTP client: what it pays is the log read and
@@ -156,7 +174,7 @@ pub fn has_credentials() -> bool {
         else {
             return false;
         };
-        rt.block_on(async { discover_quota().await.is_some() })
+        rt.block_on(async { discover_quota().await.is_some() }) || saved_access_token().is_some()
     })
     .unwrap_or(false)
 }
@@ -168,13 +186,13 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
             .build()?;
 
         rt.block_on(async {
-            let summary = discover_quota()
-                .await
-                .context("Antigravity language server is not running")?;
-
-            if summary.groups.is_empty() {
-                anyhow::bail!("Antigravity is running but not signed in");
-            }
+            let summary = match discover_quota().await {
+                Some(summary) if summary.groups.is_empty() => {
+                    anyhow::bail!("Antigravity is running but not signed in")
+                }
+                Some(summary) => summary,
+                None => direct_quota().await?,
+            };
 
             Ok(summary.groups.into_iter().map(output_for_group).collect())
         })
@@ -1196,6 +1214,208 @@ fn parse_logged_ports(text: &str) -> Vec<u16> {
             digits.parse::<u16>().ok().filter(|p| *p != 0)
         })
         .collect()
+}
+
+// ── Direct Code Assist fallback ──
+
+/// Google's Code Assist service, which `agy` itself calls.
+const CODE_ASSIST_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+
+/// The Code Assist host that meters a Google-account sign-in. The summary is
+/// read only from here: the other host's numbers for such an account can be
+/// wrong, and a wrong "spent" reading is worse than none.
+const DAILY_CODE_ASSIST_URL: &str = "https://daily-cloudcode-pa.googleapis.com/v1internal";
+
+/// The Antigravity desktop version the `User-Agent` names. Google sends the
+/// "Gemini Models" group only to the desktop app's version, not to the CLI's.
+const ANTIGRAVITY_DESKTOP_VERSION: &str = "2.31.0";
+
+/// Bound on each Code Assist call, response body included.
+const DIRECT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The file `agy` keeps its Google sign-in in, inside its app data folder, on
+/// platforms where it does not use a system credential store (Linux without a
+/// Secret Service, WSL).
+const TOKEN_FILE: &str = "antigravity-oauth-token";
+
+/// The macOS Keychain service `agy` stores the same JSON under, through
+/// `go-keyring`.
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "gemini";
+
+/// A token this close to expiry is treated as expired, so it cannot lapse
+/// between the check and the second call.
+const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+
+/// No `Debug`, so the access token cannot reach a log through a `{:?}`.
+#[derive(Deserialize)]
+struct SavedSignIn {
+    token: SavedToken,
+}
+
+#[derive(Deserialize)]
+struct SavedToken {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    expiry: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoadCodeAssistResponse {
+    #[serde(rename = "cloudaicompanionProject", default)]
+    project: Option<String>,
+}
+
+/// The quota from Code Assist itself, for when no language server answered.
+///
+/// Uses the access token `agy` saved and never refreshes it: tokscale does not
+/// hold the CLI's client secret, and `agy` refreshes the token whenever it
+/// runs. No usable token, or any failed call, is an error, never a reading.
+async fn direct_quota() -> Result<QuotaSummary> {
+    let access_token = saved_access_token().context(
+        "Antigravity language server is not running and no unexpired agy sign-in was found",
+    )?;
+    let summary = fetch_direct_quota(CODE_ASSIST_URL, DAILY_CODE_ASSIST_URL, &access_token)
+        .await
+        .context(
+            "Antigravity language server is not running and Code Assist did not return a quota",
+        )?;
+    if summary.groups.is_empty() {
+        anyhow::bail!("Code Assist returned no Antigravity quota groups");
+    }
+    Ok(summary)
+}
+
+/// `loadCodeAssist` on `load_base` for the account's project, then
+/// `retrieveUserQuotaSummary` for that project on `quota_base`.
+///
+/// The two bases are parameters only so a test can point them at a loopback
+/// server; production always passes the Google hosts above.
+async fn fetch_direct_quota(
+    load_base: &str,
+    quota_base: &str,
+    access_token: &str,
+) -> Result<QuotaSummary> {
+    let client = tokscale_core::http::client_builder()
+        .timeout(DIRECT_REQUEST_TIMEOUT)
+        .build()?;
+    let load: LoadCodeAssistResponse = post_code_assist(
+        &client,
+        &format!("{load_base}:loadCodeAssist"),
+        access_token,
+        serde_json::json!({}),
+    )
+    .await?;
+    let project = load
+        .project
+        .filter(|project| !project.trim().is_empty())
+        .context("loadCodeAssist named no project for this account")?;
+    post_code_assist(
+        &client,
+        &format!("{quota_base}:retrieveUserQuotaSummary"),
+        access_token,
+        serde_json::json!({ "project": project }),
+    )
+    .await
+}
+
+async fn post_code_assist<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    access_token: &str,
+    body: serde_json::Value,
+) -> Result<T> {
+    let response = client
+        .post(url)
+        .bearer_auth(access_token)
+        .header(reqwest::header::USER_AGENT, antigravity_user_agent())
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body =
+        crate::antigravity::read_reqwest_response_with_cap(response, MAX_QUOTA_BODY_BYTES).await?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// `antigravity/<version> <goos>/<goarch>`, in Go's platform names, the way
+/// the desktop app sends it (for example `antigravity/2.31.0 darwin/arm64`).
+fn antigravity_user_agent() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        other => other,
+    };
+    format!("antigravity/{ANTIGRAVITY_DESKTOP_VERSION} {os}/{arch}")
+}
+
+/// The access token of the first saved `agy` sign-in that is not about to
+/// expire: the token file in `ANTIGRAVITY_APP_DATA_DIR`, then the one in the
+/// default app data folder, then the macOS Keychain item.
+fn saved_access_token() -> Option<String> {
+    let now = chrono::Utc::now();
+    token_file_paths()
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .chain(std::iter::once_with(keychain_sign_in).flatten())
+        .find_map(|saved| usable_access_token(&saved, now))
+}
+
+fn token_file_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(dir) = std::env::var("ANTIGRAVITY_APP_DATA_DIR") {
+        paths.push(PathBuf::from(dir).join(TOKEN_FILE));
+    }
+    if let Some(home) = tokscale_core::paths::home_dir() {
+        paths.push(
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join(TOKEN_FILE),
+        );
+    }
+    paths
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_sign_in() -> Option<String> {
+    super::helpers::read_keychain(KEYCHAIN_SERVICE)
+        .ok()
+        .and_then(|raw| decode_go_keyring(&raw))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_sign_in() -> Option<String> {
+    None
+}
+
+/// `go-keyring` stores a value as `go-keyring-base64:<base64>` on macOS.
+fn decode_go_keyring(raw: &str) -> Option<String> {
+    use base64::Engine;
+    match raw.strip_prefix("go-keyring-base64:") {
+        Some(encoded) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .ok()?;
+            String::from_utf8(bytes).ok()
+        }
+        None => Some(raw.to_string()),
+    }
+}
+
+/// The access token in a saved sign-in (`{"token":{"access_token","expiry"}}`),
+/// or `None` when it is missing, has no expiry, or expires within
+/// [`TOKEN_EXPIRY_MARGIN_SECS`] of `now`.
+fn usable_access_token(saved: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let token = serde_json::from_str::<SavedSignIn>(saved).ok()?.token;
+    let expiry = chrono::DateTime::parse_from_rfc3339(token.expiry.as_deref()?.trim()).ok()?;
+    let fresh = expiry > now + chrono::Duration::seconds(TOKEN_EXPIRY_MARGIN_SECS);
+    (fresh && !token.access_token.trim().is_empty()).then_some(token.access_token)
 }
 
 #[cfg(test)]
@@ -2766,5 +2986,187 @@ mod tests {
         env.set("ANTIGRAVITY_APP_DATA_DIR", custom_dir.to_str().unwrap());
 
         assert_eq!(cli_log_path(), Some(custom_log));
+    }
+
+    // ── Direct Code Assist fallback ──
+
+    /// A `retrieveUserQuotaSummary` answer as Code Assist sends it: no
+    /// `response` envelope, a description per group, and both windows.
+    const DIRECT_SUMMARY: &str = r#"{"description":"Quota","groups":[{"displayName":"Gemini Models","description":"Models within this group: Gemini 3.8 Flash","buckets":[{"window":"weekly","displayName":"Weekly Limit Remaining","remainingFraction":0.4,"resetTime":"2026-11-21T22:51:03Z"},{"window":"5h","displayName":"Five Hour Limit Remaining","remainingFraction":1,"resetTime":"2026-11-16T22:39:59Z"}]},{"displayName":"Claude and GPT models","description":"Models within this group: Claude Opus 5.5, GPT-OSS 120B","buckets":[{"window":"weekly","displayName":"Weekly Limit Remaining","remainingFraction":0.25,"resetTime":"2026-11-21T10:40:05Z"}]}]}"#;
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-11-16T17:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn saved_sign_in(access_token: &str, expiry: &str) -> String {
+        serde_json::json!({
+            "token": {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "refresh_token": "refresh",
+                "expiry": expiry,
+            },
+            "auth_method": "consumer",
+            "id_token_email": "user@example.com",
+        })
+        .to_string()
+    }
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn saved_token_is_used_only_while_it_has_a_minute_left() {
+        let valid = saved_sign_in("access", "2026-11-16T14:30:00.123456-03:00");
+        assert_eq!(
+            usable_access_token(&valid, now()).as_deref(),
+            Some("access")
+        );
+
+        let in_margin = saved_sign_in("access", "2026-11-16T17:00:30Z");
+        assert_eq!(usable_access_token(&in_margin, now()), None);
+
+        let expired = saved_sign_in("access", "2026-11-16T16:00:00Z");
+        assert_eq!(usable_access_token(&expired, now()), None);
+    }
+
+    #[test]
+    fn a_saved_sign_in_without_a_usable_token_gives_none() {
+        let empty = saved_sign_in("", "2026-11-16T18:00:00Z");
+        let no_expiry = r#"{"token":{"access_token":"access"}}"#;
+        let bad_expiry = saved_sign_in("access", "tomorrow");
+        for saved in [
+            empty.as_str(),
+            no_expiry,
+            bad_expiry.as_str(),
+            "{}",
+            "not json",
+            "",
+        ] {
+            assert_eq!(usable_access_token(saved, now()), None, "{saved}");
+        }
+    }
+
+    #[test]
+    fn go_keyring_values_are_decoded() {
+        use base64::Engine;
+        let saved = saved_sign_in("access", "2026-11-16T18:00:00Z");
+        let encoded = format!(
+            "go-keyring-base64:{}",
+            base64::engine::general_purpose::STANDARD.encode(&saved)
+        );
+        assert_eq!(decode_go_keyring(&encoded).as_deref(), Some(saved.as_str()));
+        assert_eq!(decode_go_keyring(&saved).as_deref(), Some(saved.as_str()));
+        assert_eq!(decode_go_keyring("go-keyring-base64:%%%"), None);
+    }
+
+    #[test]
+    #[serial]
+    fn the_token_file_in_the_app_data_dir_is_read() {
+        let dir = TempDir::new().unwrap();
+        let expiry = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        std::fs::write(
+            dir.path().join(TOKEN_FILE),
+            saved_sign_in("from-file", &expiry),
+        )
+        .unwrap();
+        let mut env = EnvGuard::capture(&["ANTIGRAVITY_APP_DATA_DIR"]);
+        env.set("ANTIGRAVITY_APP_DATA_DIR", dir.path());
+
+        assert_eq!(saved_access_token().as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn the_user_agent_names_the_desktop_app_in_go_platform_names() {
+        let agent = antigravity_user_agent();
+        let platform = agent
+            .strip_prefix(&format!("antigravity/{ANTIGRAVITY_DESKTOP_VERSION} "))
+            .expect("the desktop app's name and version come first");
+        let (os, arch) = platform.split_once('/').expect("<goos>/<goarch>");
+        assert!(!os.is_empty() && !arch.is_empty(), "{agent}");
+        assert_ne!(os, "macos", "Go calls macOS darwin");
+        assert!(
+            !["x86_64", "aarch64"].contains(&arch),
+            "Go arch names: {agent}"
+        );
+    }
+
+    #[test]
+    fn direct_quota_reads_the_project_then_the_summary() {
+        let (base, seen) = spawn_server(|path, _calls| {
+            if path.ends_with(":loadCodeAssist") {
+                (
+                    200,
+                    r#"{"cloudaicompanionProject":"project-1"}"#.to_string(),
+                )
+            } else {
+                (200, DIRECT_SUMMARY.to_string())
+            }
+        });
+        let base = format!("{base}/v1internal");
+
+        let summary = run(fetch_direct_quota(&base, &base, "access")).unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                Seen {
+                    request: "POST /v1internal:loadCodeAssist".to_string(),
+                    bearer: Some("access".to_string()),
+                },
+                Seen {
+                    request: "POST /v1internal:retrieveUserQuotaSummary".to_string(),
+                    bearer: Some("access".to_string()),
+                },
+            ]
+        );
+        let outputs: Vec<UsageOutput> = summary.groups.into_iter().map(output_for_group).collect();
+        let labels: Vec<_> = outputs
+            .iter()
+            .map(|output| output.account.as_ref().unwrap().label.as_deref().unwrap())
+            .collect();
+        assert_eq!(labels, ["Gemini Models", "Claude and GPT models"]);
+        assert_eq!(outputs[0].metrics.len(), 2);
+        assert_eq!(outputs[0].metrics[0].label, "weekly");
+        assert!((outputs[0].metrics[0].used_percent - 60.0).abs() < 1e-6);
+        assert!((outputs[1].metrics[0].used_percent - 75.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn direct_quota_without_a_project_never_asks_for_the_summary() {
+        let (base, seen) = spawn_server(|_path, _calls| (200, "{}".to_string()));
+        let base = format!("{base}/v1internal");
+
+        let error = run(fetch_direct_quota(&base, &base, "access")).unwrap_err();
+
+        assert!(error.to_string().contains("no project"), "{error}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_refused_direct_call_is_an_error_not_a_reading() {
+        let (base, seen) = spawn_server(|path, _calls| {
+            if path.ends_with(":loadCodeAssist") {
+                (
+                    200,
+                    r#"{"cloudaicompanionProject":"project-1"}"#.to_string(),
+                )
+            } else {
+                (403, r#"{"error":{"code":403}}"#.to_string())
+            }
+        });
+        let base = format!("{base}/v1internal");
+
+        let error = run(fetch_direct_quota(&base, &base, "access")).unwrap_err();
+
+        assert!(error.to_string().contains("403"), "{error}");
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 }
