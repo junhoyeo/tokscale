@@ -179,6 +179,10 @@ pub enum UsageFetchDiagnosticSeverity {
 }
 
 impl UsageFetchDiagnostic {
+    pub(crate) fn is_issue(&self) -> bool {
+        self.kind != UsageFetchDiagnosticKind::PartialUsage
+    }
+
     pub fn new(
         provider: impl Into<String>,
         account: Option<UsageAccount>,

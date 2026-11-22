@@ -111,12 +111,13 @@ fn status_label(app: &App) -> String {
     }
 
     let inventory = usage_inventory(&app.subscription_usage);
+    let issue_count = app.usage_issue_count();
 
     if inventory.providers == 0 && app.usage_fetch_attempted {
-        if app.usage_fetch_diagnostics.is_empty() {
+        if issue_count == 0 {
             tr(lang, MessageKey::StatusNoData).to_string()
         } else {
-            usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
+            usage_issue_count_label(lang, issue_count)
         }
     } else if inventory.providers == 0 {
         tr(lang, MessageKey::StatusNotLoaded).to_string()
@@ -137,7 +138,7 @@ fn status_label(app: &App) -> String {
                 )
             }
         };
-        if app.usage_fetch_diagnostics.is_empty() {
+        if issue_count == 0 {
             format!(
                 "{} {separator} {}",
                 providers_str,
@@ -148,7 +149,7 @@ fn status_label(app: &App) -> String {
                 "{} {separator} {} {separator} {}",
                 providers_str,
                 identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs),
-                usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
+                usage_issue_count_label(lang, issue_count)
             )
         }
     }
@@ -1329,19 +1330,22 @@ fn append_usage_diagnostic_lines(
         return;
     }
 
-    let visible_count = if app.usage_fetch_diagnostics.len() > available && available > 1 {
+    let issue_count = app.usage_issue_count();
+    let visible_count = if issue_count > available && available > 1 {
         available - 1
     } else {
         app.usage_fetch_diagnostics.len().min(available)
     };
-    for diagnostic in visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count) {
+    let diagnostics = visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count);
+    let visible_issues = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_issue())
+        .count();
+    for diagnostic in diagnostics {
         lines.push(usage_diagnostic_line(diagnostic, width, app.glyphs));
     }
 
-    let hidden_count = app
-        .usage_fetch_diagnostics
-        .len()
-        .saturating_sub(visible_count);
+    let hidden_count = issue_count.saturating_sub(visible_issues);
     if hidden_count > 0 && lines.len() < max_lines {
         lines.push(Line::from(Span::styled(
             truncate_string(
@@ -1372,8 +1376,13 @@ fn visible_usage_diagnostics(
     }
 
     let mut indexed: Vec<_> = diagnostics.iter().enumerate().collect();
-    indexed
-        .sort_by_key(|(index, diagnostic)| (diagnostic_severity_rank(diagnostic.severity), *index));
+    indexed.sort_by_key(|(index, diagnostic)| {
+        (
+            !diagnostic.is_issue(),
+            diagnostic_severity_rank(diagnostic.severity),
+            *index,
+        )
+    });
     indexed.truncate(visible_count);
     indexed
         .into_iter()

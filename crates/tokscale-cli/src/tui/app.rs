@@ -1180,8 +1180,15 @@ impl App {
         self.usage_rx.is_some()
     }
 
+    pub(super) fn usage_issue_count(&self) -> usize {
+        self.usage_fetch_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_issue())
+            .count()
+    }
+
     fn usage_loaded_status(&self) -> String {
-        match self.usage_fetch_diagnostics.len() {
+        match self.usage_issue_count() {
             0 => "Usage data loaded".to_string(),
             1 => "Usage data loaded with 1 issue".to_string(),
             count => format!("Usage data loaded with {count} issues"),
@@ -1189,7 +1196,7 @@ impl App {
     }
 
     fn usage_empty_status(&self) -> String {
-        if self.usage_fetch_diagnostics.is_empty() {
+        if self.usage_issue_count() == 0 {
             "No usage data available".to_string()
         } else {
             format!("Usage fetch failed: {}", self.usage_diagnostic_summary())
@@ -1200,6 +1207,7 @@ impl App {
         let mut names = self
             .usage_fetch_diagnostics
             .iter()
+            .filter(|diagnostic| diagnostic.is_issue())
             .map(|diagnostic| diagnostic.display_name())
             .collect::<Vec<_>>();
         names.sort();
@@ -5315,6 +5323,29 @@ mod tests {
             app.status_message.as_deref(),
             Some("Usage data loaded with 1 issue")
         );
+    }
+
+    #[test]
+    fn usage_partial_coverage_stays_in_details_without_counting_as_an_issue() {
+        use crate::commands::usage::{UsageFetchDiagnosticKind, UsageFetchDiagnosticSeverity};
+
+        let mut app = make_app();
+        app.usage_fetch_diagnostics
+            .push(UsageFetchDiagnostic::with_kind(
+                "Copilot",
+                None,
+                UsageFetchDiagnosticKind::PartialUsage,
+                UsageFetchDiagnosticSeverity::Info,
+                "AI Credits are unavailable.",
+            ));
+        assert_eq!(app.usage_loaded_status(), "Usage data loaded");
+        assert_eq!(app.usage_empty_status(), "No usage data available");
+
+        app.usage_fetch_diagnostics
+            .push(UsageFetchDiagnostic::new("Codex", None, "fetch failed"));
+        assert_eq!(app.usage_loaded_status(), "Usage data loaded with 1 issue");
+        assert_eq!(app.usage_empty_status(), "Usage fetch failed: Codex");
+        assert_eq!(app.usage_fetch_diagnostics.len(), 2);
     }
 
     #[test]
