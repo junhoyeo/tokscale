@@ -111,12 +111,13 @@ fn status_label(app: &App) -> String {
     }
 
     let inventory = usage_inventory(&app.subscription_usage);
+    let issue_count = app.usage_issue_count();
 
     if inventory.providers == 0 && app.usage_fetch_attempted {
-        if app.usage_fetch_diagnostics.is_empty() {
+        if issue_count == 0 {
             tr(lang, MessageKey::StatusNoData).to_string()
         } else {
-            usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
+            usage_issue_count_label(lang, issue_count)
         }
     } else if inventory.providers == 0 {
         tr(lang, MessageKey::StatusNotLoaded).to_string()
@@ -137,7 +138,7 @@ fn status_label(app: &App) -> String {
                 )
             }
         };
-        if app.usage_fetch_diagnostics.is_empty() {
+        if issue_count == 0 {
             format!(
                 "{} {separator} {}",
                 providers_str,
@@ -148,7 +149,7 @@ fn status_label(app: &App) -> String {
                 "{} {separator} {} {separator} {}",
                 providers_str,
                 identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs),
-                usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
+                usage_issue_count_label(lang, issue_count)
             )
         }
     }
@@ -1329,19 +1330,22 @@ fn append_usage_diagnostic_lines(
         return;
     }
 
-    let visible_count = if app.usage_fetch_diagnostics.len() > available && available > 1 {
+    let issue_count = app.usage_issue_count();
+    let visible_count = if issue_count > available && available > 1 {
         available - 1
     } else {
         app.usage_fetch_diagnostics.len().min(available)
     };
-    for diagnostic in visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count) {
+    let diagnostics = visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count);
+    let visible_issues = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_issue())
+        .count();
+    for diagnostic in diagnostics {
         lines.push(usage_diagnostic_line(diagnostic, width, app.glyphs));
     }
 
-    let hidden_count = app
-        .usage_fetch_diagnostics
-        .len()
-        .saturating_sub(visible_count);
+    let hidden_count = issue_count.saturating_sub(visible_issues);
     if hidden_count > 0 && lines.len() < max_lines {
         lines.push(Line::from(Span::styled(
             truncate_string(
@@ -1366,19 +1370,15 @@ fn visible_usage_diagnostics(
     diagnostics: &[UsageFetchDiagnostic],
     visible_count: usize,
 ) -> Vec<&UsageFetchDiagnostic> {
-    let visible_count = visible_count.min(diagnostics.len());
-    if visible_count >= diagnostics.len() {
-        return diagnostics.iter().collect();
-    }
-
-    let mut indexed: Vec<_> = diagnostics.iter().enumerate().collect();
-    indexed
-        .sort_by_key(|(index, diagnostic)| (diagnostic_severity_rank(diagnostic.severity), *index));
-    indexed.truncate(visible_count);
-    indexed
-        .into_iter()
-        .map(|(_, diagnostic)| diagnostic)
-        .collect()
+    let mut visible: Vec<_> = diagnostics.iter().collect();
+    visible.sort_by_key(|diagnostic| {
+        (
+            !diagnostic.is_issue(),
+            diagnostic_severity_rank(diagnostic.severity),
+        )
+    });
+    visible.truncate(visible_count);
+    visible
 }
 
 fn diagnostic_severity_rank(severity: UsageFetchDiagnosticSeverity) -> u8 {
@@ -3854,6 +3854,30 @@ mod tests {
         assert!(rendered.contains("+2 more issues"), "{rendered}");
         assert!(!rendered.contains("low priority issue"), "{rendered}");
         assert!(!rendered.contains("medium priority issue"), "{rendered}");
+    }
+
+    #[test]
+    fn usage_summary_shows_errors_before_quota_notes_when_both_fit() {
+        let mut app = make_app();
+        app.usage_fetch_diagnostics = vec![
+            UsageFetchDiagnostic::with_kind(
+                "Copilot",
+                None,
+                UsageFetchDiagnosticKind::PartialUsage,
+                UsageFetchDiagnosticSeverity::Info,
+                "AI Credits balance unavailable",
+            ),
+            UsageFetchDiagnostic::new("Codex", None, "usage endpoint failed"),
+        ];
+        let mut lines = Vec::new();
+
+        append_usage_diagnostic_lines(&mut lines, &app, 80, 3);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].to_string().contains("usage endpoint failed"));
+        assert!(lines[2]
+            .to_string()
+            .contains("AI Credits balance unavailable"));
     }
 
     #[test]

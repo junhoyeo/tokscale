@@ -166,6 +166,7 @@ pub enum UsageFetchDiagnosticKind {
     FetchFailed,
     ImportCurrentLoginFailed,
     ProviderPanicked,
+    PartialUsage,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -178,6 +179,10 @@ pub enum UsageFetchDiagnosticSeverity {
 }
 
 impl UsageFetchDiagnostic {
+    pub(crate) fn is_issue(&self) -> bool {
+        self.kind != UsageFetchDiagnosticKind::PartialUsage
+    }
+
     pub fn new(
         provider: impl Into<String>,
         account: Option<UsageAccount>,
@@ -469,7 +474,7 @@ fn usage_providers(codex_fetch: Fetch) -> Vec<UsageProvider> {
             "copilot",
             "Copilot",
             copilot::has_credentials,
-            Fetch::Single(copilot::fetch),
+            Fetch::Report(copilot::fetch_report),
         ),
         (
             "cursor",
@@ -799,10 +804,12 @@ pub fn run(json: bool, _light: bool, debug: bool) -> Result<()> {
         for o in &report.outputs {
             render_light(o);
         }
-        // Surface active-but-failed providers (e.g. an expired session cookie)
-        // so they don't silently vanish from the output. One concise line per
-        // failing provider, on stderr to keep stdout clean.
+        // Show partial coverage and fetch failures on stderr.
         for diagnostic in &report.diagnostics {
+            if diagnostic.kind == UsageFetchDiagnosticKind::PartialUsage {
+                eprintln!("{}: {}", diagnostic.display_name(), diagnostic.message);
+                continue;
+            }
             let disposition = diagnostic_disposition(&report, diagnostic);
             eprintln!(
                 "{}: {} — {}",

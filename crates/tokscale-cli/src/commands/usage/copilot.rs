@@ -4,7 +4,10 @@ use anyhow::Result;
 use serde::Deserialize;
 
 use super::helpers::capitalize;
-use super::{UsageMetric, UsageOutput};
+use super::{
+    UsageFetchDiagnostic, UsageFetchDiagnosticKind, UsageFetchDiagnosticSeverity, UsageFetchReport,
+    UsageMetric, UsageOutput,
+};
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -702,7 +705,7 @@ fn base64_decode(input: &str) -> Result<String> {
 
 fn pretty_category(key: &str) -> String {
     match key {
-        "premium_interactions" => "Premium".into(),
+        "premium_interactions" => "Premium reqs".into(),
         "chat" => "Chat".into(),
         "completions" => "Completions".into(),
         other => capitalize(other.replace('_', " ").as_str()),
@@ -746,7 +749,25 @@ pub fn has_credentials() -> bool {
     parse_token_from_hosts(&host).is_ok()
 }
 
-pub fn fetch() -> Result<UsageOutput> {
+pub fn fetch_report() -> UsageFetchReport {
+    quota_report(fetch())
+}
+
+fn quota_report(result: Result<UsageOutput>) -> UsageFetchReport {
+    let mut report = super::fetch_provider_report("Copilot", result.map(|output| vec![output]));
+    if !report.outputs.is_empty() {
+        report.diagnostics.push(UsageFetchDiagnostic::with_kind(
+            "Copilot",
+            None,
+            UsageFetchDiagnosticKind::PartialUsage,
+            UsageFetchDiagnosticSeverity::Info,
+            "Showing quota snapshots. GitHub AI Credits are unavailable from this source.",
+        ));
+    }
+    report
+}
+
+fn fetch() -> Result<UsageOutput> {
     let host = current_gh_host();
     let token = read_credentials(&host)?;
     let configured_api_host = configured_api_host(&host);
@@ -892,6 +913,22 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn quota_snapshot_keeps_its_meter_and_explains_missing_ai_credits() {
+        let report = quota_report(parse_usage_response(&serde_json::json!({
+            "quota_snapshots": {"premium_interactions": {"remaining": 5, "entitlement": 10}}
+        })));
+        assert_eq!(report.outputs[0].metrics[0].label, "Premium reqs");
+        assert_eq!(report.outputs[0].metrics[0].remaining_percent, 50.0);
+        assert_eq!(
+            report.diagnostics[0].kind,
+            UsageFetchDiagnosticKind::PartialUsage
+        );
+        assert!(report.diagnostics[0]
+            .message
+            .contains("GitHub AI Credits are unavailable"));
+    }
 
     #[test]
     fn known_quota_copilot_paid_unknown_is_not_full_availability() {
