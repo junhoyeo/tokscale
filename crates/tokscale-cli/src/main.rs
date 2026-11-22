@@ -3313,7 +3313,11 @@ fn run_models_report(
             Some(range) => format!("Token Usage Report by Model ({})", range),
             None => "Token Usage Report by Model".to_string(),
         };
-        append_report_message_counts(&mut table, report.entries.iter().map(|e| e.message_count));
+        append_report_message_counts(
+            &mut table,
+            report.entries.iter().map(|e| e.message_count),
+            i64::from(report.total_messages),
+        );
         println!("\n  \x1b[36m{}\x1b[0m\n", title);
         println!("{}", dim_borders(&table.to_string()));
 
@@ -3379,6 +3383,11 @@ fn run_monthly_report(
         .block_on(async { get_monthly_report_v2(context.report_options(GroupBy::default())).await })
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut report = report;
+    let total_messages: i64 = report
+        .entries
+        .iter()
+        .map(|entry| i64::from(entry.message_count))
+        .sum();
     if hide_zero {
         // Display-only filter: totals still include the hidden rows.
         report.entries.retain(|e| {
@@ -3648,7 +3657,11 @@ fn run_monthly_report(
             Some(range) => format!("Monthly Token Usage Report ({})", range),
             None => "Monthly Token Usage Report".to_string(),
         };
-        append_report_message_counts(&mut table, report.entries.iter().map(|e| e.message_count));
+        append_report_message_counts(
+            &mut table,
+            report.entries.iter().map(|e| e.message_count),
+            total_messages,
+        );
         println!("\n  \x1b[36m{}\x1b[0m\n", title);
         println!("{}", dim_borders(&table.to_string()));
 
@@ -3669,7 +3682,11 @@ fn run_monthly_report(
     Ok(())
 }
 
-fn append_report_message_counts(table: &mut comfy_table::Table, counts: impl Iterator<Item = i32>) {
+fn append_report_message_counts(
+    table: &mut comfy_table::Table,
+    counts: impl Iterator<Item = i32>,
+    total: i64,
+) {
     use comfy_table::{Cell, CellAlignment, Color};
 
     let Some(mut header) = table.header().cloned() else {
@@ -3683,9 +3700,7 @@ fn append_report_message_counts(table: &mut comfy_table::Table, counts: impl Ite
     let Some(total_row) = rows.next_back() else {
         return;
     };
-    let mut total = 0i64;
     for (row, count) in rows.zip(counts) {
-        total += i64::from(count);
         row.add_cell(Cell::new(count).set_alignment(CellAlignment::Right));
     }
     total_row.add_cell(
