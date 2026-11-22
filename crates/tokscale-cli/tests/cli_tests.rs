@@ -4396,6 +4396,56 @@ fn missing_codex_usage_cli_warns_without_changing_json_or_recorded_totals() {
 }
 
 #[test]
+fn missing_codex_usage_debug_distinguishes_events_on_cold_and_warm_scans() {
+    let tmp = TempDir::new().unwrap();
+    let sessions = tmp.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let activity = r#"{"type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#;
+    fs::write(
+        sessions.join("rollout-no-event.jsonl"),
+        format!("{activity}\n"),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join("rollout-with-event.jsonl"),
+        format!(
+            "{activity}\n{}\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#
+        ),
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let output = cmd_with_home(tmp.path())
+            .args([
+                "--offline",
+                "--debug",
+                "monthly",
+                "--json",
+                "--no-spinner",
+                "--client",
+                "codex",
+                "--home",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["entries"], serde_json::json!([]));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("1 without a recognized usage event"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("1 with a usage event but no supported counters"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
 fn missing_codex_usage_cli_excludes_zero_malformed_and_openclaw_sources() {
     let activity = concat!(
         r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
@@ -4455,7 +4505,7 @@ fn missing_codex_usage_task_report_warns_and_excludes_injected_context() {
         fs::write(sessions.join("rollout.jsonl"), content).unwrap();
         for _ in 0..2 {
             let output = cmd_with_home(tmp.path())
-                .args(["report", "--no-summarize", "--json"])
+                .args(["report", "--no-summarize", "--json", "--client", "codex"])
                 .output().unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

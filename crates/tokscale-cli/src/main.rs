@@ -731,6 +731,9 @@ fn main() -> Result<()> {
     use std::io::IsTerminal;
 
     let cli = Cli::parse();
+    if cli.debug {
+        tokscale_core::enable_codex_usage_debug();
+    }
     if cli.offline {
         validate_offline_command(cli.command.as_ref())?;
         tokscale_core::network::go_offline();

@@ -1044,6 +1044,7 @@ impl From<LegacyCodexStateV14> for CodexParseState {
         Self {
             has_own_activity: state.has_own_activity,
             has_supported_usage: state.has_supported_usage,
+            saw_own_usage_event: false,
             has_own_synthetic_activity: state.has_own_synthetic_activity,
             has_entered_review_mode: false,
             has_own_turn_context: true,
@@ -1187,6 +1188,7 @@ impl From<LegacyCodexStateV15> for CodexParseState {
         Self {
             has_own_activity: state.has_own_activity,
             has_supported_usage: state.has_supported_usage,
+            saw_own_usage_event: false,
             has_own_synthetic_activity: state.has_own_synthetic_activity,
             has_entered_review_mode: false,
             has_own_turn_context: true,
@@ -1332,6 +1334,7 @@ impl From<LegacyCodexStateV19> for CodexParseState {
         Self {
             has_own_activity: state.has_own_activity,
             has_supported_usage: state.has_supported_usage,
+            saw_own_usage_event: false,
             has_own_synthetic_activity: state.has_own_synthetic_activity,
             current_model: state.current_model,
             thread_service_tier: state.thread_service_tier,
