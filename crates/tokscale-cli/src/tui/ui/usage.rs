@@ -1370,24 +1370,15 @@ fn visible_usage_diagnostics(
     diagnostics: &[UsageFetchDiagnostic],
     visible_count: usize,
 ) -> Vec<&UsageFetchDiagnostic> {
-    let visible_count = visible_count.min(diagnostics.len());
-    if visible_count >= diagnostics.len() {
-        return diagnostics.iter().collect();
-    }
-
-    let mut indexed: Vec<_> = diagnostics.iter().enumerate().collect();
-    indexed.sort_by_key(|(index, diagnostic)| {
+    let mut visible: Vec<_> = diagnostics.iter().collect();
+    visible.sort_by_key(|diagnostic| {
         (
             !diagnostic.is_issue(),
             diagnostic_severity_rank(diagnostic.severity),
-            *index,
         )
     });
-    indexed.truncate(visible_count);
-    indexed
-        .into_iter()
-        .map(|(_, diagnostic)| diagnostic)
-        .collect()
+    visible.truncate(visible_count);
+    visible
 }
 
 fn diagnostic_severity_rank(severity: UsageFetchDiagnosticSeverity) -> u8 {
@@ -3863,6 +3854,30 @@ mod tests {
         assert!(rendered.contains("+2 more issues"), "{rendered}");
         assert!(!rendered.contains("low priority issue"), "{rendered}");
         assert!(!rendered.contains("medium priority issue"), "{rendered}");
+    }
+
+    #[test]
+    fn usage_summary_shows_errors_before_quota_notes_when_both_fit() {
+        let mut app = make_app();
+        app.usage_fetch_diagnostics = vec![
+            UsageFetchDiagnostic::with_kind(
+                "Copilot",
+                None,
+                UsageFetchDiagnosticKind::PartialUsage,
+                UsageFetchDiagnosticSeverity::Info,
+                "AI Credits balance unavailable",
+            ),
+            UsageFetchDiagnostic::new("Codex", None, "usage endpoint failed"),
+        ];
+        let mut lines = Vec::new();
+
+        append_usage_diagnostic_lines(&mut lines, &app, 80, 3);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].to_string().contains("usage endpoint failed"));
+        assert!(lines[2]
+            .to_string()
+            .contains("AI Credits balance unavailable"));
     }
 
     #[test]
