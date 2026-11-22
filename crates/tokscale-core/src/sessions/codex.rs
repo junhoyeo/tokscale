@@ -309,6 +309,9 @@ pub(crate) struct CodexParseState {
     pub has_own_activity: bool,
     #[serde(default)]
     pub has_supported_usage: bool,
+    // Only needed when explicitly re-inspecting a missing-usage file in debug mode.
+    #[serde(skip)]
+    pub(crate) saw_own_usage_event: bool,
     #[serde(default)]
     pub has_own_synthetic_activity: bool,
     pub current_model: Option<String>,
@@ -1134,6 +1137,7 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                         .zip(state.session_id_from_meta.as_deref())
                         .is_some_and(|(thread, own)| thread != own);
                     if !state.forked_child_waiting_for_turn_context && !from_other_thread {
+                        state.saw_own_usage_event = true;
                         let service_tier = extract_request_service_tier(&payload);
                         // A record still pending here never got its
                         // token_count, so its usage is counted from it now,
@@ -1557,6 +1561,7 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
 
                 // Process token_count events
                 if is_token_count {
+                    state.saw_own_usage_event = true;
                     let info = match payload.info {
                         Some(i) => i,
                         None => continue,
@@ -2577,6 +2582,7 @@ fn parse_codex_headless_line(
     }
 
     let usage = extract_headless_usage(&value)?;
+    state.saw_own_usage_event = true;
     let usage_event_ordinal = state.next_usage_event_ordinal();
     state.has_supported_usage |= usage.has_supported_counters;
     let model = usage

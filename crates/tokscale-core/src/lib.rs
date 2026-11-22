@@ -1854,14 +1854,54 @@ fn codex_archive_failure_warning(
     ))
 }
 
+static CODEX_USAGE_DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Include local reason counts for the files in the Codex missing-usage warning.
+pub fn enable_codex_usage_debug() {
+    CODEX_USAGE_DEBUG.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[derive(Default)]
+struct CodexUsageGaps {
+    missing: usize,
+    no_event: usize,
+    event_without_supported_usage: usize,
+    could_not_reinspect: usize,
+}
+
+impl CodexUsageGaps {
+    fn record(&mut self, path: &Path) {
+        self.missing += 1;
+        if !CODEX_USAGE_DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        // This runs only for flagged files on request. Cached and cold scans
+        // get the same diagnostic without reparsing normal files or changing cache data.
+        let parsed = sessions::codex::parse_codex_file_incremental(path, 0, Default::default());
+        if !parsed.is_missing_usage() {
+            self.could_not_reinspect += 1;
+        } else if parsed.state.saw_own_usage_event {
+            self.event_without_supported_usage += 1;
+        } else {
+            self.no_event += 1;
+        }
+    }
+}
+
 fn emit_codex_scan_warnings(
-    missing_files: usize,
+    gaps: CodexUsageGaps,
     inspected_files: usize,
     archive_failures: Vec<sessions::codex::CodexArchiveFailure>,
 ) {
     let mut warnings = Vec::new();
-    if let Some(warning) = codex_missing_usage_warning(missing_files, inspected_files) {
+    if let Some(warning) = codex_missing_usage_warning(gaps.missing, inspected_files) {
         warnings.push(warning);
+        if CODEX_USAGE_DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
+            warnings.push(format!(
+                "Codex missing usage: {} without a recognized usage event, {} with a usage event but no supported counters, {} could not be confirmed on reinspection.",
+                gaps.no_event, gaps.event_without_supported_usage, gaps.could_not_reinspect,
+            ));
+        }
     }
     if let Some(warning) = codex_archive_failure_warning(archive_failures) {
         warnings.push(warning);
@@ -3748,12 +3788,12 @@ fn parse_all_messages_streaming<S: MessageSink>(
     let mut codex_seen: HashSet<String> = HashSet::new();
     let inspected_codex_files = codex_outcomes.len();
     let include_codex_diagnostic = include_all || clients.iter().any(|client| client == "codex");
-    let mut missing_codex_usage_files = 0;
+    let mut codex_usage_gaps = CodexUsageGaps::default();
     let mut codex_archive_failures = Vec::new();
     for (path, (outcome, turn_coverage, missing_usage, archive_failure)) in codex_outcomes {
-        missing_codex_usage_files += usize::from(
-            missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)),
-        );
+        if missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)) {
+            codex_usage_gaps.record(&path);
+        }
         if let Some(failure) = archive_failure {
             codex_archive_failures.push(failure);
         }
@@ -5476,7 +5516,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     }
 
     emit_codex_scan_warnings(
-        missing_codex_usage_files,
+        codex_usage_gaps,
         inspected_codex_files,
         codex_archive_failures,
     );
@@ -7971,12 +8011,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut codex_msgs: Vec<ParsedMessage> = Vec::new();
     let inspected_codex_files = codex_files.len();
     let include_codex_diagnostic = include_all || requested.contains("codex");
-    let mut missing_codex_usage_files = 0;
+    let mut codex_usage_gaps = CodexUsageGaps::default();
     let mut codex_archive_failures = Vec::new();
     for (path, file_messages, turn_coverage, missing_usage, archive_failure) in codex_files {
-        missing_codex_usage_files += usize::from(
-            missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)),
-        );
+        if missing_usage.0 && (include_codex_diagnostic || (include_synthetic && missing_usage.1)) {
+            codex_usage_gaps.record(&path);
+        }
         if let Some(failure) = archive_failure {
             codex_archive_failures.push(failure);
         }
@@ -8295,7 +8335,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::OpenClaw, openclaw_count);
     messages.extend(openclaw_msgs);
     emit_codex_scan_warnings(
-        missing_codex_usage_files,
+        codex_usage_gaps,
         inspected_codex_files,
         codex_archive_failures,
     );
