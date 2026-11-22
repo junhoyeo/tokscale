@@ -3313,6 +3313,7 @@ fn run_models_report(
             Some(range) => format!("Token Usage Report by Model ({})", range),
             None => "Token Usage Report by Model".to_string(),
         };
+        append_report_message_counts(&mut table, report.entries.iter().map(|e| e.message_count));
         println!("\n  \x1b[36m{}\x1b[0m\n", title);
         println!("{}", dim_borders(&table.to_string()));
 
@@ -3647,6 +3648,7 @@ fn run_monthly_report(
             Some(range) => format!("Monthly Token Usage Report ({})", range),
             None => "Monthly Token Usage Report".to_string(),
         };
+        append_report_message_counts(&mut table, report.entries.iter().map(|e| e.message_count));
         println!("\n  \x1b[36m{}\x1b[0m\n", title);
         println!("{}", dim_borders(&table.to_string()));
 
@@ -3665,6 +3667,32 @@ fn run_monthly_report(
     }
 
     Ok(())
+}
+
+fn append_report_message_counts(table: &mut comfy_table::Table, counts: impl Iterator<Item = i32>) {
+    use comfy_table::{Cell, CellAlignment, Color};
+
+    let Some(mut header) = table.header().cloned() else {
+        return;
+    };
+    header.add_cell(Cell::new("Msgs").fg(Color::Cyan));
+    table.set_header(header);
+
+    // Both tables render one row per entry, followed by the total row.
+    let mut rows = table.row_iter_mut();
+    let Some(total_row) = rows.next_back() else {
+        return;
+    };
+    let mut total = 0i64;
+    for (row, count) in rows.zip(counts) {
+        total += i64::from(count);
+        row.add_cell(Cell::new(count).set_alignment(CellAlignment::Right));
+    }
+    total_row.add_cell(
+        Cell::new(total)
+            .fg(Color::Yellow)
+            .set_alignment(CellAlignment::Right),
+    );
 }
 
 fn run_hourly_report(

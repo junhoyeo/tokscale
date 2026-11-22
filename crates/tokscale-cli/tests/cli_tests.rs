@@ -4497,6 +4497,7 @@ fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
         .assert()
         .success()
         .stdout(predicate::str::contains("2026-02"))
+        .stdout(predicate::str::contains("Msgs"))
         // With no input/output/cache tokens, this finite Cost/1M value proves
         // the table's token total includes the 321 reasoning tokens.
         .stdout(predicate::str::contains("$100.00/M"));
@@ -5204,6 +5205,7 @@ fn test_models_group_by_machine_model_table_shows_a_machine_column() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Machine"))
+        .stdout(predicate::str::contains("Msgs"))
         .stdout(predicate::str::contains("steven"))
         .stdout(predicate::str::contains("local"));
 }
