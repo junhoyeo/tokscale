@@ -7,6 +7,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+#[path = "cursor_billing.rs"]
+mod billing;
+
 /// Timeout for every Cursor HTTP request, and the wall-clock budget for an
 /// implicit pre-report sync. A cached account downloads new events plus a
 /// bounded correction overlap from its recent history. If the network is
@@ -98,7 +101,9 @@ pub(crate) fn cursor_http_client_builder() -> reqwest::ClientBuilder {
     #[cfg(not(target_os = "android"))]
     let builder = builder.use_native_tls();
 
-    builder
+    // Billing V2 unit tests bind ephemeral loopback mock servers. Prefer a
+    // client-local no-proxy setting over process-wide NO_PROXY mutations.
+    builder.no_proxy()
 }
 
 fn build_cursor_http_client() -> Result<reqwest::Client> {
@@ -2377,9 +2382,14 @@ async fn read_cursor_body_with_cap(
 struct CursorUsageFetch {
     session_token: String,
     existing_cache: Option<String>,
+    /// Explicit Billing V2 history backfill start (`tokscale cursor sync --billing-since`).
+    billing_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-async fn sync_cursor_cache_with_fetcher<F, Fut>(fetch_usage_json: F) -> SyncCursorResult
+async fn sync_cursor_cache_with_fetcher<F, Fut>(
+    billing_since: Option<chrono::DateTime<chrono::Utc>>,
+    fetch_usage_json: F,
+) -> SyncCursorResult
 where
     F: Fn(CursorUsageFetch) -> Fut,
     Fut: std::future::Future<Output = Result<String>>,
@@ -2395,11 +2405,12 @@ where
         }
     };
 
-    sync_cursor_cache_with_fetcher_in_home(&home_dir, fetch_usage_json).await
+    sync_cursor_cache_with_fetcher_in_home(&home_dir, billing_since, fetch_usage_json).await
 }
 
 async fn sync_cursor_cache_with_fetcher_in_home<F, Fut>(
     home_dir: &Path,
+    billing_since: Option<chrono::DateTime<chrono::Utc>>,
     fetch_usage_json: F,
 ) -> SyncCursorResult
 where
@@ -2419,6 +2430,25 @@ where
         }
     };
 
+    sync_cursor_cache_with_store(
+        &cursor_cache_dir(home_dir),
+        &store,
+        billing_since,
+        fetch_usage_json,
+    )
+    .await
+}
+
+async fn sync_cursor_cache_with_store<F, Fut>(
+    cache_dir: &Path,
+    store: &CursorCredentialsStore,
+    billing_since: Option<chrono::DateTime<chrono::Utc>>,
+    fetch_usage_json: F,
+) -> SyncCursorResult
+where
+    F: Fn(CursorUsageFetch) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
     if store.accounts.is_empty() {
         return SyncCursorResult {
             synced: false,
@@ -2427,8 +2457,7 @@ where
         };
     }
 
-    let cache_dir = cursor_cache_dir(home_dir);
-    if let Err(e) = fs::create_dir_all(&cache_dir) {
+    if let Err(e) = fs::create_dir_all(cache_dir) {
         return SyncCursorResult {
             synced: false,
             rows: 0,
@@ -2438,10 +2467,10 @@ where
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700));
     }
 
-    if let Err(error) = prepare_cursor_cache_layout(&cache_dir, &store) {
+    if let Err(error) = prepare_cursor_cache_layout(cache_dir, store) {
         return SyncCursorResult {
             synced: false,
             rows: 0,
@@ -2468,10 +2497,14 @@ where
         match fetch_usage_json(CursorUsageFetch {
             session_token: credentials.session_token.clone(),
             existing_cache,
+            billing_since,
         })
         .await
         {
             Ok(json_text) => {
+                if let Some(warning) = billing::sync_warning_from_cache(&json_text) {
+                    errors.push(format!("{account_id}: {warning}"));
+                }
                 let json_text = match owned_cursor_cache(&json_text, account_id) {
                     Ok(contents) => contents,
                     Err(error) => {
@@ -2507,7 +2540,7 @@ where
                             .file_stem()
                             .and_then(|stem| stem.to_str())
                             .unwrap_or("usage");
-                        let _ = archive_cache_file_in_dir(&cache_dir, &legacy_csv, label);
+                        let _ = archive_cache_file_in_dir(cache_dir, &legacy_csv, label);
                     }
                 }
             }
@@ -2521,7 +2554,7 @@ where
     // suppression, while account hashes keep a later login or account switch
     // from inheriting another account's failed-attempt cooldown. Failure to
     // write the best-effort marker simply leaves the normal retry path enabled.
-    let _ = write_cursor_sync_attempt_marker(&cache_dir, &store);
+    let _ = write_cursor_sync_attempt_marker(cache_dir, store);
 
     if success_count == 0 {
         return SyncCursorResult {
@@ -2542,11 +2575,9 @@ where
         error: if errors.is_empty() {
             None
         } else {
-            Some(format!(
-                "Some accounts failed to sync ({}/{})",
-                errors.len(),
-                store.accounts.len()
-            ))
+            // Preserve concrete per-account warning text (Billing V2 backfill
+            // coverage + still-pending ranges) instead of collapsing to a count.
+            Some(errors.join("; "))
         },
     }
 }
@@ -2662,12 +2693,13 @@ fn deadline_after(start: Instant, budget: Duration) -> Instant {
 }
 
 pub async fn sync_cursor_cache(explicit: bool) -> SyncCursorResult {
-    sync_cursor_cache_with_explicit_timeout(explicit, None).await
+    sync_cursor_cache_with_explicit_timeout(explicit, None, None).await
 }
 
 pub async fn sync_cursor_cache_with_explicit_timeout(
     explicit: bool,
     explicit_timeout: Option<Duration>,
+    billing_since: Option<chrono::DateTime<chrono::Utc>>,
 ) -> SyncCursorResult {
     let home = match home_dir() {
         Ok(home) => home,
@@ -2703,14 +2735,8 @@ pub async fn sync_cursor_cache_with_explicit_timeout(
     let configured_secs =
         setting_budget_for(explicit, explicit_timeout, configured_sync_timeout_secs);
     let (timeout, is_custom) = sync_timeout_override(explicit, explicit_timeout, configured_secs);
-    sync_cursor_cache_with_fetcher(move |fetch| async move {
-        fetch_cursor_usage_events_json(
-            &fetch.session_token,
-            timeout,
-            is_custom,
-            fetch.existing_cache.as_deref(),
-        )
-        .await
+    sync_cursor_cache_with_fetcher(billing_since, move |fetch| {
+        billing::sync_account(fetch, timeout, is_custom)
     })
     .await
 }
@@ -2775,7 +2801,7 @@ where
         let _ = ensure_credentials_from_local_cursor();
     }
 
-    sync_cursor_cache_with_fetcher_in_home(home, fetch_usage_json).await
+    sync_cursor_cache_with_fetcher_in_home(home, None, fetch_usage_json).await
 }
 
 async fn sync_cursor_cache_for_submit_in_home<F>(
@@ -2788,14 +2814,8 @@ where
 {
     let configured_secs = setting_budget_for_submit(explicit_timeout, load_setting);
     let (timeout, is_custom) = sync_timeout_override_for_submit(explicit_timeout, configured_secs);
-    sync_cursor_cache_for_submit_with_fetcher_in_home(home, move |fetch| async move {
-        fetch_cursor_usage_events_json(
-            &fetch.session_token,
-            timeout,
-            is_custom,
-            fetch.existing_cache.as_deref(),
-        )
-        .await
+    sync_cursor_cache_for_submit_with_fetcher_in_home(home, move |fetch| {
+        billing::sync_account(fetch, timeout, is_custom)
     })
     .await
 }
@@ -3079,15 +3099,24 @@ pub fn run_cursor_accounts(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn run_cursor_sync(json: bool, timeout_secs: Option<u64>) -> Result<()> {
+pub fn run_cursor_sync(
+    json: bool,
+    timeout_secs: Option<u64>,
+    billing_since: Option<String>,
+) -> Result<()> {
     use colored::Colorize;
     use tokio::runtime::Runtime;
 
     let timeout_override = timeout_secs.map(Duration::from_secs);
+    let billing_since = billing_since
+        .as_deref()
+        .map(billing::parse_billing_since)
+        .transpose()?;
     let rt = Runtime::new()?;
     let result = rt.block_on(sync_cursor_cache_with_explicit_timeout(
         true,
         timeout_override,
+        billing_since,
     ));
 
     if json {
@@ -6029,7 +6058,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
-            |fetch| {
+            None, |fetch| {
                 let json = match fetch.session_token.as_str() {
                     "token-active" => {
                         r#"{"usageEventsDisplay":[{"conversationId":"s1","timestamp":"1","model":"gpt-5","chargedCents":1}]}"#
@@ -6132,6 +6161,7 @@ mod tests {
             let runtime = tokio::runtime::Runtime::new()?;
             let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
                 temp.path(),
+                None,
                 |fetch| {
                     let response = if fetch.session_token == active_id {
                         if active_fails {
@@ -6243,6 +6273,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp.path(),
+            None,
             |fetch| {
                 let url = endpoints[&fetch.session_token].clone();
                 async move {
@@ -6330,6 +6361,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
+            None,
             |_fetch| async move { Ok(r#"{"usageEventsDisplay":[]}"#.to_string()) },
         ));
 
@@ -6384,6 +6416,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
+            None,
             |_fetch| async move { Err(anyhow::anyhow!("network down")) },
         ));
 
@@ -6730,6 +6763,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let _result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp_dir.path(),
+            None,
             |fetch| {
                 // Secondary deliberately fails to simulate a broken account.
                 let result: Result<String> = match fetch.session_token.as_str() {
@@ -6812,6 +6846,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             home.path(),
+            None,
             |_fetch| async move { Err(anyhow::anyhow!("offline")) },
         ));
         assert!(!result.synced);
@@ -7197,6 +7232,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new()?;
         let result = runtime.block_on(sync_cursor_cache_with_fetcher_in_home(
             temp.path(),
+            None,
             |fetch| {
                 inputs
                     .lock()
@@ -7404,7 +7440,7 @@ mod tests {
         let wrong_contents = owned_cursor_cache(&old, "team/account-a")?;
         fs::write(dir.join(&wrong), &wrong_contents)?;
         let failed = tokio::runtime::Runtime::new()?.block_on(
-            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+            sync_cursor_cache_with_fetcher_in_home(home.path(), None, |fetch| {
                 assert!(fetch.existing_cache.is_none());
                 std::future::ready(Err(anyhow::anyhow!("network unavailable")))
             }),
@@ -7416,7 +7452,7 @@ mod tests {
         // A retry still fetches from the beginning and leaves every backup intact.
         let seen = std::sync::Mutex::new(Vec::new());
         let result = tokio::runtime::Runtime::new()?.block_on(
-            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+            sync_cursor_cache_with_fetcher_in_home(home.path(), None, |fetch| {
                 assert!(
                     fetch.existing_cache.is_none(),
                     "legacy or foreign history must never seed a watermark"
@@ -7579,7 +7615,7 @@ mod tests {
         assert_eq!(fs::read(cursor_credentials_path(home.path()))?, credentials);
         let fetched = std::sync::atomic::AtomicBool::new(false);
         let result = tokio::runtime::Runtime::new()?.block_on(
-            sync_cursor_cache_with_fetcher_in_home(home.path(), |_| {
+            sync_cursor_cache_with_fetcher_in_home(home.path(), None, |_| {
                 fetched.store(true, std::sync::atomic::Ordering::SeqCst);
                 std::future::ready(Err(anyhow::anyhow!("fetch must not start")))
             }),
@@ -7713,7 +7749,7 @@ mod tests {
         fs::write(dir.join("usage.json"), &active)?;
         fs::write(&named, &duplicate)?;
         let result = tokio::runtime::Runtime::new()?.block_on(
-            sync_cursor_cache_with_fetcher_in_home(home.path(), |fetch| {
+            sync_cursor_cache_with_fetcher_in_home(home.path(), None, |fetch| {
                 assert_eq!(
                     fetch.existing_cache.as_deref(),
                     Some(active.as_str()),
