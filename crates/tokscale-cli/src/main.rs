@@ -546,6 +546,12 @@ enum CursorSubcommand {
             help = "Overall sync timeout in seconds, 1-86400 (overrides cursor.syncTimeoutSeconds in settings.json and the default dynamic budget)"
         )]
         timeout: Option<u64>,
+        #[arg(
+            long = "billing-since",
+            value_name = "YYYY-MM-DD",
+            help = "Explicitly backfill Cursor Billing V2 history from this UTC date; coverage is tracked separately from the incremental watermark"
+        )]
+        billing_since: Option<String>,
     },
     #[command(about = "Switch active Cursor account")]
     Switch {
@@ -7965,7 +7971,11 @@ fn run_cursor_command(subcommand: CursorSubcommand) -> Result<()> {
         } => cursor::run_cursor_logout(name, all, purge_cache),
         CursorSubcommand::Status { name } => cursor::run_cursor_status(name),
         CursorSubcommand::Accounts { json } => cursor::run_cursor_accounts(json),
-        CursorSubcommand::Sync { json, timeout } => cursor::run_cursor_sync(json, timeout),
+        CursorSubcommand::Sync {
+            json,
+            timeout,
+            billing_since,
+        } => cursor::run_cursor_sync(json, timeout, billing_since),
         CursorSubcommand::Switch { name } => cursor::run_cursor_switch(&name),
     }
 }
