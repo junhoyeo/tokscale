@@ -611,8 +611,9 @@ function ProfilePeriodSelector({
         <PeriodButton
           type="button"
           $active={current === "custom"}
+          aria-current={current === "custom" ? "page" : undefined}
           aria-expanded={isCustomOpen}
-          aria-controls={customFormId}
+          aria-controls={isCustomOpen ? customFormId : undefined}
           onClick={() => setIsCustomOpen((open) => !open)}
         >
           {PROFILE_PERIOD_LABELS.custom}
