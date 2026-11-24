@@ -2,9 +2,15 @@
 
 import { useId, useMemo, useState } from "react";
 import Link from "next/link";
-import styled from "styled-components";
+import { useRouter } from "next/navigation";
+import styled, { css } from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
 import { PublicFooter } from "@/components/layout/PublicFooter";
+import {
+  DateApplyButton,
+  DateInput,
+  DateSeparator,
+} from "@/components/leaderboard/RankingUI";
 import {
   createContributionRangeOptions,
   getContributionDayForDate,
@@ -27,12 +33,20 @@ import {
   type ProfileContributionView,
   type ProfileUser,
 } from "@/components/profile";
+import { formatDateRange } from "@/components/explore/format";
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
 import { resolveEffectiveTimeZone } from "@/lib/timezone";
 import type { ModerationNotice } from "@/lib/moderation/notice";
 
-import { PROFILE_PERIODS, PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
+import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
+import {
+  PROFILE_PERIODS,
+  PROFILE_PERIOD_LABELS,
+  profilePeriodSearch,
+  type ProfilePeriod,
+  type ReportDateRange,
+} from "@/lib/reportingPeriods";
 
 export interface ProfileData {
   user: {
@@ -153,6 +167,10 @@ export default function ProfilePageClient({
   const contributionBreakdownId = useId();
   const data = initialData;
   const period = data.period ?? "all";
+  const customRange =
+    period === "custom" && data.dateRange.start && data.dateRange.end
+      ? { start: data.dateRange.start, end: data.dateRange.end }
+      : null;
   // Absolute instants ("Updated", "Joined") render in the viewer's display
   // timezone; calendar-day buckets never do — see resolveEffectiveTimeZone.
   // UTC before mount so the first client render matches the server markup.
@@ -316,7 +334,13 @@ export default function ProfilePageClient({
             <TabsScroller>
               <ProfileTabBar activeTab={activeTab} onTabChange={setActiveTab} />
             </TabsScroller>
-            <ProfilePeriodSelector username={username} current={period} />
+            <ProfilePeriodSelector
+              // Remount per loaded window so the form never shows stale drafts.
+              key={profilePeriodSearch(period, customRange)}
+              username={username}
+              current={period}
+              customRange={customRange}
+            />
           </ViewControls>
 
           {activeTab === "activity" && (
@@ -362,7 +386,9 @@ export default function ProfilePageClient({
                               ? "Daily contribution density across the last 30 days."
                               : period === "week"
                                 ? "Daily contribution density across the last 7 days."
-                                : `Daily contribution density for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC).`
+                                : customRange
+                                  ? `Daily contribution density for ${formatDateRange(customRange.start, customRange.end)}.`
+                                  : `Daily contribution density for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC).`
                         }
                       />
                     </ContributionArea>
@@ -390,7 +416,9 @@ export default function ProfilePageClient({
                               ? "Model activity for the last 30 days, grouped by provider."
                               : period === "week"
                                 ? "Model activity for the last 7 days, grouped by provider."
-                                : `Model activity for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC), grouped by provider.`
+                                : customRange
+                                  ? `Model activity for ${formatDateRange(customRange.start, customRange.end)}, grouped by provider.`
+                                  : `Model activity for ${PROFILE_PERIOD_LABELS[period].toLowerCase()} (UTC), grouped by provider.`
                         }
                       />
                     </UsageArea>
@@ -402,6 +430,7 @@ export default function ProfilePageClient({
                         models={data.models}
                         mcpServers={data.mcpServers ?? []}
                         period={period}
+                        customRange={customRange}
                       />
                     </DetailsArea>
                     <TokenArea>
@@ -450,6 +479,7 @@ function ProfileInsights({
   models,
   mcpServers,
   period,
+  customRange,
 }: {
   stats: ProfileStatsData;
   favoriteModel: string | null;
@@ -457,6 +487,7 @@ function ProfileInsights({
   models: string[];
   mcpServers: string[];
   period: ProfilePeriod;
+  customRange: ReportDateRange | null;
 }) {
   const rangeLabel =
     period === "all" ? "1y" : PROFILE_PERIOD_LABELS[period];
@@ -474,7 +505,7 @@ function ProfileInsights({
         }
       : {
           label: "Selected range",
-          value: period === "month" ? "Last 30 days" : period === "week" ? "Last 7 days" : `${rangeLabel} (UTC)`,
+          value: customRange ? formatDateRange(customRange.start, customRange.end) : period === "month" ? "Last 30 days" : period === "week" ? "Last 7 days" : `${rangeLabel} (UTC)`,
         },
     {
       label: period === "all" ? "Models (latest)" : `Models (${rangeLabel})`,
@@ -532,40 +563,101 @@ function MetadataList({ label, items }: { label: string; items: string[] }) {
   );
 }
 
-const PERIOD_OPTIONS = PROFILE_PERIODS.map((value) => ({ value, label: PROFILE_PERIOD_LABELS[value] }));
+const PRESET_PERIOD_OPTIONS = PROFILE_PERIODS.filter(
+  (value) => value !== "custom",
+).map((value) => ({ value, label: PROFILE_PERIOD_LABELS[value] }));
 
 function buildProfilePeriodHref(
   username: string,
   period: ProfilePeriod,
+  customRange?: ReportDateRange | null,
 ): string {
-  const basePath = `/u/${encodeURIComponent(username)}`;
-  return period === "all" ? basePath : `${basePath}?period=${period}`;
+  return `/u/${encodeURIComponent(username)}${profilePeriodSearch(period, customRange)}`;
 }
 
 function ProfilePeriodSelector({
   username,
   current,
+  customRange,
 }: {
   username: string;
   current: ProfilePeriod;
+  customRange: ReportDateRange | null;
 }) {
+  const router = useRouter();
+  const customFormId = useId();
+  const [isCustomOpen, setIsCustomOpen] = useState(current === "custom");
+  const [from, setFrom] = useState(customRange?.start ?? "");
+  const [to, setTo] = useState(customRange?.end ?? "");
+  const draft = parseCustomDateRange(from, to);
+
   return (
-    <PeriodSelectorContainer aria-label="Usage range">
-      {PERIOD_OPTIONS.map((option) => {
-        const isActive = current === option.value;
-        return (
-          <PeriodLink
-            key={option.value}
-            href={buildProfilePeriodHref(username, option.value)}
-            prefetch={false}
-            $active={isActive}
-            aria-current={isActive ? "page" : undefined}
-          >
-            {option.label}
-          </PeriodLink>
-        );
-      })}
-    </PeriodSelectorContainer>
+    <PeriodControls>
+      <PeriodSelectorContainer aria-label="Usage range">
+        {PRESET_PERIOD_OPTIONS.map((option) => {
+          const isActive = current === option.value;
+          return (
+            <PeriodLink
+              key={option.value}
+              href={buildProfilePeriodHref(username, option.value)}
+              prefetch={false}
+              $active={isActive}
+              aria-current={isActive ? "page" : undefined}
+            >
+              {option.label}
+            </PeriodLink>
+          );
+        })}
+        <PeriodButton
+          type="button"
+          $active={current === "custom"}
+          aria-current={current === "custom" ? "page" : undefined}
+          aria-expanded={isCustomOpen}
+          aria-controls={isCustomOpen ? customFormId : undefined}
+          onClick={() => setIsCustomOpen((open) => !open)}
+        >
+          {PROFILE_PERIOD_LABELS.custom}
+        </PeriodButton>
+      </PeriodSelectorContainer>
+      {isCustomOpen && (
+        <CustomRangeForm
+          id={customFormId}
+          aria-label="Custom usage range"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (draft) {
+              router.push(
+                buildProfilePeriodHref(username, "custom", {
+                  start: draft.from,
+                  end: draft.to,
+                }),
+              );
+            }
+          }}
+        >
+          <DateInput
+            type="date"
+            name="profile-from"
+            aria-label="Start date"
+            value={from}
+            max={to || undefined}
+            onChange={(event) => setFrom(event.target.value)}
+          />
+          <DateSeparator>~</DateSeparator>
+          <DateInput
+            type="date"
+            name="profile-to"
+            aria-label="End date"
+            value={to}
+            min={from || undefined}
+            onChange={(event) => setTo(event.target.value)}
+          />
+          <DateApplyButton type="submit" disabled={!draft}>
+            Apply
+          </DateApplyButton>
+        </CustomRangeForm>
+      )}
+    </PeriodControls>
   );
 }
 
@@ -672,7 +764,26 @@ const PeriodSelectorContainer = styled.nav`
   background: var(--service-surface-muted);
 `;
 
-const PeriodLink = styled(Link)<{ $active: boolean }>`
+const PeriodControls = styled.div`
+  display: flex;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+
+  @media (max-width: 560px) {
+    align-items: flex-start;
+  }
+`;
+
+const CustomRangeForm = styled.form`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+`;
+
+const periodOptionStyles = css<{ $active: boolean }>`
   position: relative;
   display: inline-flex;
   min-width: 44px;
@@ -709,6 +820,17 @@ const PeriodLink = styled(Link)<{ $active: boolean }>`
       transform: translate(-50%, -50%);
     }
   }
+`;
+
+const PeriodLink = styled(Link)<{ $active: boolean }>`
+  ${periodOptionStyles}
+`;
+
+const PeriodButton = styled.button<{ $active: boolean }>`
+  ${periodOptionStyles}
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
 `;
 
 const TabPanel = styled.section`

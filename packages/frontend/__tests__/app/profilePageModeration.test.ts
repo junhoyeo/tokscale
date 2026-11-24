@@ -10,7 +10,10 @@ vi.mock("next/navigation", () => ({
   permanentRedirect: vi.fn(),
 }));
 
-vi.mock("@/lib/publicProfileData", () => ({ loadPublicProfileForPage }));
+vi.mock("@/lib/publicProfileData", () => ({
+  loadPublicProfileForPage,
+  parseProfileWindow: () => ({ period: "all", customRange: null }),
+}));
 vi.mock("@/lib/publicProfileDevices", () => ({ loadPublicProfileDevicesForPage }));
 vi.mock("@/lib/auth/session", () => ({ getSession }));
 vi.mock("@/lib/moderation/notice", () => ({ getModerationNotice }));

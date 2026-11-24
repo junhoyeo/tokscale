@@ -7,6 +7,9 @@ import styled from "styled-components";
 import { CopyIcon, CheckIcon, SearchIcon, XIcon } from "@/components/ui/Icons";
 import { InstantTooltip } from "@/components/ui/InstantTooltip";
 import {
+  DateApplyButton,
+  DateInput,
+  DateSeparator,
   MetricItem,
   MetricLabel,
   MetricStrip,
@@ -690,70 +693,6 @@ const DateRangeRow = styled.div`
   gap: 8px;
   margin-bottom: 14px;
   flex-wrap: wrap;
-`;
-
-const DateInput = styled.input`
-  min-height: 36px;
-  padding: 0 10px;
-  border-radius: 8px;
-  border: 1px solid var(--service-border-strong);
-  background: var(--service-surface);
-  color: var(--service-text);
-  font-size: 0.875rem;
-  outline: none;
-  min-width: 140px;
-
-  &:focus-visible {
-    border-color: var(--service-focus);
-    outline: 2px solid var(--service-focus);
-    outline-offset: -1px;
-  }
-
-  &::-webkit-calendar-picker-indicator {
-    filter: invert(0.7);
-    cursor: pointer;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
-`;
-
-const DateSeparator = styled.span`
-  font-size: 14px;
-  color: var(--service-text-muted);
-`;
-
-const DateApplyButton = styled.button`
-  min-height: 36px;
-  padding: 0 12px;
-  border-radius: 8px;
-  border: 1px solid var(--service-accent);
-  background: var(--service-accent);
-  color: #fff;
-  font-size: 0.875rem;
-  font-weight: 500;
-
-  &:hover {
-    border-color: var(--service-accent-hover);
-    background: var(--service-accent-hover);
-  }
-
-  &:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--service-focus);
-    outline-offset: 2px;
-  }
-
-  @media (max-width: 640px) {
-    min-height: 44px;
-    font-size: 1rem;
-  }
 `;
 
 const PaginationNav = styled.nav`

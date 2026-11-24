@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { finitePeriodCacheControl, getProfileDateRange, getCalendarDateRange } from "../../src/lib/reportingPeriods";
+import { finitePeriodCacheControl, getProfileDateRange, getCalendarDateRange, profilePeriodSearch } from "../../src/lib/reportingPeriods";
 
 describe("reporting calendar", () => {
   it.each([
@@ -41,6 +41,16 @@ describe("UTC rank windows", () => {
     expect(getProfileDateRange("this-month", now)).toEqual({ start: "2024-03-01", end: "2024-03-01" });
     expect(getProfileDateRange("last-month", now)).toEqual({ start: "2024-02-01", end: "2024-02-29" });
     expect(getProfileDateRange("all", now)).toBeNull();
+  });
+
+  it("uses a custom window's own dates and carries them in the query string", () => {
+    const range = { start: "2026-11-01", end: "2026-11-15" };
+    const now = new Date("2026-11-24T00:00:00Z");
+    expect(getProfileDateRange("custom", now, range)).toEqual(range);
+    expect(getProfileDateRange("custom", now)).toBeNull();
+    expect(profilePeriodSearch("all")).toBe("");
+    expect(profilePeriodSearch("week")).toBe("?period=week");
+    expect(profilePeriodSearch("custom", range)).toBe("?period=custom&from=2026-11-01&to=2026-11-15");
   });
 
   it("bounds fresh and stale HTTP caching by midnight, including slow requests", () => {

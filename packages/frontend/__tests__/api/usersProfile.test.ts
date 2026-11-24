@@ -240,6 +240,27 @@ describe("public profile page cache", () => {
   });
 });
 
+describe("public profile page cache (custom range)", () => {
+  it("keys a custom window by its dates", async () => {
+    unstableCacheMock.mockImplementation(
+      () => async () => ({ kind: "error", status: 599 }),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-31T12:00:00.000Z"));
+
+    await loadPublicProfileForPage("alice", "custom", {
+      start: "2026-01-01",
+      end: "2026-01-15",
+    });
+
+    expect(unstableCacheMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      ["public-profile-page", "alice", "custom", "2026-01-31", "2026-01-01", "2026-01-15"],
+      expect.any(Object),
+    );
+  });
+});
+
 describe("GET /api/users/[username]", () => {
   it("redirects mixed-case requests to the canonical username path", async () => {
     mockState.pushSelectResult([
@@ -1495,6 +1516,133 @@ describe("GET /api/users/[username]", () => {
     expect(body.user.rank).toBeNull();
     expect(mockState.db.execute).not.toHaveBeenCalled();
     expect(unstableCacheMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a custom range when redirecting to the canonical username", async () => {
+    mockState.pushSelectResult([
+      {
+        id: "user-imlunahey",
+        username: "ImLunaHey",
+        displayName: "Luna",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const response = await GET(
+      new Request(
+        "http://localhost:3000/api/users/imlunahey?period=custom&from=2026-06-10&to=2026-06-12",
+      ),
+      { params: Promise.resolve({ username: "imlunahey" }) },
+    );
+
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/api/users/ImLunaHey?period=custom&from=2026-06-10&to=2026-06-12",
+    );
+  });
+
+  it("scopes rows, totals and rank to a custom range's own dates", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 1000,
+        totalCost: 10,
+        submissionCount: 3,
+        earliestDate: "2026-01-01",
+        latestDate: "2026-06-28",
+        sessionCount: 8,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        sourcesUsed: ["codex"],
+        modelsUsed: ["gpt-5.5"],
+        updatedAt: new Date("2026-06-28T10:00:00.000Z"),
+        cliVersion: "2.0.0",
+        schemaVersion: 2,
+      },
+    ]);
+    mockState.pushSelectResult([
+      { date: "2026-06-10", tokens: 200, cost: "2.0000", inputTokens: 120, outputTokens: 80, sourceBreakdown: {} },
+      { date: "2026-06-12", tokens: 300, cost: "3.0000", inputTokens: 180, outputTokens: 120, sourceBreakdown: {} },
+    ]);
+    mockState.pushExecuteResult([{ rank: 7 }]);
+
+    const response = await GET(
+      new Request(
+        "http://localhost:3000/api/users/alice?period=custom&from=2026-06-10&to=2026-06-12",
+      ),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+    const range = { start: "2026-06-10", end: "2026-06-12" };
+
+    expect(response.status).toBe(200);
+    expect(mockState.gte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, range.start);
+    expect(mockState.lte).toHaveBeenCalledWith(mockState.tables.dailyBreakdown.date, range.end);
+    expect(body.period).toBe("custom");
+    expect(body.dateRange).toEqual(range);
+    expect(body.chartRange).toEqual(range);
+    expect(body.user).toEqual(expect.objectContaining({ rank: 7, rankDateRange: range }));
+    expect(body.stats).toEqual(
+      expect.objectContaining({ totalTokens: 500, totalCost: 5, activeDays: 2, sessionCount: 0 }),
+    );
+    expect(
+      serializeSqlCalls().some(
+        (text) =>
+          text.includes(`d.date >= ${range.start}`) &&
+          text.includes(`d.date <= ${range.end}`),
+      ),
+    ).toBe(true);
+    expect(unstableCacheMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      ["profile-period-rank", "user-1", range.start, range.end],
+      expect.any(Object),
+    );
+  });
+
+  it.each([
+    ["a reversed range", "from=2026-06-12&to=2026-06-10"],
+    ["a missing end date", "from=2026-06-10"],
+    ["an impossible date", "from=2026-02-30&to=2026-03-01"],
+  ])("falls back to the lifetime profile for %s", async (_label, query) => {
+    mockState.pushSelectResult([
+      {
+        id: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([{ totalTokens: 1000, totalCost: 10 }]);
+    mockState.pushSelectResult([]);
+    mockState.pushSelectResult([]);
+    mockState.pushExecuteResult([{ rank: 2 }]);
+
+    const response = await GET(
+      new Request(`http://localhost:3000/api/users/alice?period=custom&${query}`),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.period).toBe("all");
+    expect(body.user.rankDateRange).toBeNull();
+    expect(mockState.gte).not.toHaveBeenCalled();
+    expect(mockState.lte).not.toHaveBeenCalled();
   });
 
   it("returns submission freshness metadata for the latest submission", async () => {
