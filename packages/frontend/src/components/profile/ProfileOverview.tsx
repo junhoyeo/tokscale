@@ -33,6 +33,7 @@ export function getProfileRankLabel(
   if (period === "month") return "30d rank (UTC)";
   if (period === "week") return "7d rank (UTC)";
   if (period === "this-month" || period === "last-month") return `${PROFILE_PERIOD_LABELS[period]} rank (UTC)`;
+  if (period === "custom") return `${PROFILE_PERIOD_LABELS.custom} rank`;
   return "All-time rank";
 }
 

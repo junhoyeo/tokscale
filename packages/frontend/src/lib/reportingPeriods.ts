@@ -1,4 +1,4 @@
-export const PROFILE_PERIODS = ["all", "month", "week", "this-month", "last-month"] as const;
+export const PROFILE_PERIODS = ["all", "month", "week", "this-month", "last-month", "custom"] as const;
 export type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
 
 export const PROFILE_PERIOD_LABELS: Record<ProfilePeriod, string> = {
@@ -7,6 +7,7 @@ export const PROFILE_PERIOD_LABELS: Record<ProfilePeriod, string> = {
   week: "7d",
   "this-month": "This month",
   "last-month": "Last month",
+  custom: "Custom",
 };
 
 export const GROUP_PERIODS = ["all", "month", "last-month", "week", "last-week"] as const;
@@ -17,9 +18,17 @@ export interface ReportDateRange {
   end: string;
 }
 
-/** Rolling profile periods and UTC calendar periods, evaluated at one anchor. */
-export function getProfileDateRange(period: ProfilePeriod, anchor: Date): ReportDateRange | null {
+/**
+ * Rolling profile periods and UTC calendar periods, evaluated at one anchor.
+ * A custom period is fixed by its own inclusive dates and ignores the anchor.
+ */
+export function getProfileDateRange(
+  period: ProfilePeriod,
+  anchor: Date,
+  customRange?: ReportDateRange | null,
+): ReportDateRange | null {
   if (period === "all") return null;
+  if (period === "custom") return customRange ?? null;
   if (period === "this-month" || period === "last-month") {
     return getCalendarDateRange(period === "this-month" ? "month" : period, anchor);
   }
@@ -27,6 +36,20 @@ export function getProfileDateRange(period: ProfilePeriod, anchor: Date): Report
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - (period === "week" ? 6 : 29));
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+/** Query string that selects a profile window; lifetime is the bare URL. */
+export function profilePeriodSearch(
+  period: ProfilePeriod,
+  customRange?: ReportDateRange | null,
+): string {
+  if (period === "all") return "";
+  const params = new URLSearchParams({ period });
+  if (period === "custom" && customRange) {
+    params.set("from", customRange.start);
+    params.set("to", customRange.end);
+  }
+  return `?${params}`;
 }
 
 export function describeRankingWindow(range: ReportDateRange | null | undefined): string {

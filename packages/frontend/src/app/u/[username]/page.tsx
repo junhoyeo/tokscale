@@ -2,29 +2,27 @@ import type { Metadata } from 'next';
 import { notFound, permanentRedirect } from 'next/navigation';
 import type { ProfileDevice } from '@/components/profile';
 import { loadPublicProfileDevicesForPage } from '@/lib/publicProfileDevices';
-import { loadPublicProfileForPage } from '@/lib/publicProfileData';
+import { loadPublicProfileForPage, parseProfileWindow } from '@/lib/publicProfileData';
 import { profileUrl } from '@/lib/seo/urls';
 import { getSession } from '@/lib/auth/session';
 import { getModerationNotice } from '@/lib/moderation/notice';
 import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
-import { PROFILE_PERIODS, type ProfilePeriod } from '@/lib/reportingPeriods';
+import { profilePeriodSearch, type ProfilePeriod, type ReportDateRange } from '@/lib/reportingPeriods';
 import { TOKSCALE_X_HANDLE } from '@/lib/community';
 
-function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod {
-  const period = Array.isArray(value) ? value[0] : value;
-  return PROFILE_PERIODS.includes(period as ProfilePeriod)
-    ? (period as ProfilePeriod)
-    : "all";
+function firstParam(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 async function getProfileData(
   username: string,
   period: ProfilePeriod,
+  customRange: ReportDateRange | null,
 ): Promise<ProfileData | null> {
   // Calling the shared server handler keeps Vercel Deployment Protection out
   // of the render path. A server-side HTTP self-fetch is anonymous and is
   // redirected to Vercel's HTML login page on protected preview deployments.
-  const result = await loadPublicProfileForPage(username, period);
+  const result = await loadPublicProfileForPage(username, period, customRange);
 
   if (result.kind === "redirect") {
     if (result.location) {
@@ -32,7 +30,7 @@ async function getProfileData(
         new URL(result.location).pathname.split("/").at(-1) ?? "",
       );
       if (canonicalUsername && canonicalUsername !== username) {
-        return getProfileData(canonicalUsername, period);
+        return getProfileData(canonicalUsername, period, customRange);
       }
     }
   }
@@ -94,9 +92,13 @@ export default async function ProfilePage({
 }) {
   const { username } = await params;
   const resolvedSearchParams = await searchParams;
-  const period = parseProfilePeriod(resolvedSearchParams.period);
+  const { period, customRange } = parseProfileWindow(
+    firstParam(resolvedSearchParams.period),
+    firstParam(resolvedSearchParams.from),
+    firstParam(resolvedSearchParams.to),
+  );
   const [data, devices] = await Promise.all([
-    getProfileData(username, period),
+    getProfileData(username, period, customRange),
     getProfileDevices(username),
   ]);
 
@@ -105,7 +107,7 @@ export default async function ProfilePage({
   }
 
   if (data.user?.username && data.user.username !== username) {
-    permanentRedirect(`/u/${data.user.username}${period === "all" ? "" : `?period=${period}`}`);
+    permanentRedirect(`/u/${data.user.username}${profilePeriodSearch(period, customRange)}`);
   }
 
   // Fetched outside the cached public payload: publicProfileData is

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { unstable_cache } from "next/cache";
 import { db, users, submissions, dailyBreakdown } from "@/lib/db";
-import { eq, desc, sql, and, gte } from "drizzle-orm";
+import { eq, desc, sql, and, gte, lte } from "drizzle-orm";
 import {
   AmbiguousUsernameError,
   USERNAME_LOOKUP_LIMIT,
@@ -11,7 +11,14 @@ import {
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
 import { calculateIntensity } from "@/lib/utils";
-import { PROFILE_PERIODS, getProfileDateRange, type ProfilePeriod } from "@/lib/reportingPeriods";
+import {
+  PROFILE_PERIODS,
+  getProfileDateRange,
+  profilePeriodSearch,
+  type ProfilePeriod,
+  type ReportDateRange,
+} from "@/lib/reportingPeriods";
+import { parseCustomDateRange } from "@/lib/leaderboard/dateRange";
 
 const LEGACY_CLIENT_ALIASES: Record<string, string> = { kilocode: "kilo" };
 function normalizeClientId(id: string): string {
@@ -35,10 +42,25 @@ function getUtcToday(now: Date): Date {
   );
 }
 
-function parseProfilePeriod(value: string | null): ProfilePeriod {
-  return PROFILE_PERIODS.includes(value as ProfilePeriod)
-    ? (value as ProfilePeriod)
-    : "all";
+/**
+ * `?period=&from=&to=` to the window a profile shows. A custom period without
+ * a usable `from <= to` pair falls back to lifetime, as the leaderboard does.
+ */
+export function parseProfileWindow(
+  period: string | null | undefined,
+  from: string | null | undefined,
+  to: string | null | undefined,
+): { period: ProfilePeriod; customRange: ReportDateRange | null } {
+  if (!PROFILE_PERIODS.includes(period as ProfilePeriod)) {
+    return { period: "all", customRange: null };
+  }
+  if (period !== "custom") {
+    return { period: period as ProfilePeriod, customRange: null };
+  }
+  const custom = parseCustomDateRange(from, to);
+  return custom
+    ? { period: "custom", customRange: { start: custom.from, end: custom.to } }
+    : { period: "all", customRange: null };
 }
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -112,15 +134,20 @@ export async function getPublicProfileResponse(
   try {
     const { username } = await params;
     const { searchParams } = new URL(request.url);
-    const period = parseProfilePeriod(searchParams.get("period"));
+    const { period, customRange } = parseProfileWindow(
+      searchParams.get("period"),
+      searchParams.get("from"),
+      searchParams.get("to"),
+    );
     // One clock reading for the whole request, so a UTC midnight crossed
     // mid-request cannot put the query and the window on different days.
     // The window a period request draws ends on the anchor, which is only known
     // once the stats query returns. The anchor can only move *forward* of UTC
     // today, so a window measured back from UTC today starts on or before the
     // real one — fetching from there is a superset that `scopedContributions`
-    // trims to the anchored window.
-    const rankingRange = getProfileDateRange(period, now);
+    // trims to the anchored window. A custom window is its own dates for both
+    // the rank and the personal totals.
+    const rankingRange = getProfileDateRange(period, now, customRange);
     const periodFetchStart = rankingRange?.start;
 
     // Find user
@@ -142,21 +169,22 @@ export async function getPublicProfileResponse(
     }
 
     if (username !== user.username) {
-      const canonicalUrl = new URL(`/api/users/${user.username}`, request.url);
-      if (period !== "all") {
-        canonicalUrl.searchParams.set("period", period);
-      }
+      const canonicalUrl = new URL(
+        `/api/users/${user.username}${profilePeriodSearch(period, customRange)}`,
+        request.url,
+      );
       return NextResponse.redirect(canonicalUrl, 308);
     }
 
-    // Deliberately unbounded above: `submissions.dateEnd` is
+    // Preset windows are deliberately unbounded above: `submissions.dateEnd` is
     // `MAX(dailyBreakdown.date)`, so the anchor already dominates every row this
     // user has and an upper bound could only ever drop the newest day of an
-    // owner whose calendar runs ahead of UTC.
+    // owner whose calendar runs ahead of UTC. A custom window names its last day.
     const dailyBreakdownFilter = periodFetchStart
       ? and(
           eq(submissions.userId, user.id),
           gte(dailyBreakdown.date, periodFetchStart),
+          customRange ? lte(dailyBreakdown.date, customRange.end) : undefined,
         )
       : eq(submissions.userId, user.id);
 
@@ -257,6 +285,7 @@ export async function getPublicProfileResponse(
     const periodRange = getProfileDateRange(
       period,
       period === "this-month" || period === "last-month" ? now : rangeAnchor,
+      customRange,
     );
     if (period === "this-month" && periodRange) {
       const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
@@ -790,13 +819,14 @@ export type PublicProfilePageResult =
 export async function loadPublicProfileForPage(
   username: string,
   period: PublicProfilePeriod,
+  customRange: ReportDateRange | null = null,
 ): Promise<PublicProfilePageResult> {
   const now = new Date();
   const utcDateKey =
     period === "all" ? "all" : toUtcDateString(getUtcToday(now));
   const load = unstable_cache(
     async (): Promise<PublicProfilePageResult> => {
-      const query = period === "all" ? "" : `?period=${period}`;
+      const query = profilePeriodSearch(period, customRange);
       const response = await getPublicProfileResponse(
         new Request(
           `http://tokscale.internal/api/users/${encodeURIComponent(username)}${query}`,
@@ -818,7 +848,13 @@ export async function loadPublicProfileForPage(
 
       return { data: await response.json(), kind: "data" };
     },
-    ["public-profile-page", username, period, utcDateKey],
+    [
+      "public-profile-page",
+      username,
+      period,
+      utcDateKey,
+      ...(customRange ? [customRange.start, customRange.end] : []),
+    ],
     {
       revalidate: 60,
       tags: [`user:${normalizeUsernameCacheKey(username)}`],
