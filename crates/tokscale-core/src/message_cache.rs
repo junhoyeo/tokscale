@@ -2155,7 +2155,8 @@ fn parser_version(client: ClientId) -> u32 {
         // message_count = 1 and no provider-reported cost (#1387).
         // v8->v9: unified inference durations are now measured and anchored
         // at request start, while overlap selection retains the source clock.
-        ClientId::Grok => 9,
+        // v9->v10: turn updates cap inclusive cache and reasoning subsets.
+        ClientId::Grok => 10,
         // Droid's cumulative session totals now anchor on the settings file's
         // mtime (floored at providerLockTimestamp) instead of the lock
         // timestamp alone, so a long-running session stops reporting every
@@ -7326,7 +7327,7 @@ mod tests {
         // A closed Grok log keeps its fingerprint forever, so only the version
         // bump discards v8 rows (shipped in 4.20.0) that carry no inference
         // duration and still sit on the completion clock.
-        assert_eq!(parser_version(ClientId::Grok), 9);
+        assert_eq!(parser_version(ClientId::Grok), 10);
     }
 
     #[test]
@@ -7415,8 +7416,8 @@ mod tests {
         let cache = SourceMessageCache::load();
         let rebuilt = cache
             .get(current_identity, &source)
-            .expect("the v9 parse must replace the stale v7 row");
-        assert_eq!(rebuilt.parser_version, 9);
+            .expect("the current parser must replace the stale v7 row");
+        assert_eq!(rebuilt.parser_version, current_identity.parser_version);
         assert_eq!(rebuilt.messages[0].message_count, 8);
         assert_eq!(
             rebuilt.messages[0].cost_source,

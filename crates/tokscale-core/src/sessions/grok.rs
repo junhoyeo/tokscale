@@ -222,19 +222,6 @@ impl GrokUsage {
         let cost_usd_ticks = extract_cost_usd_ticks(usage, get_path(value, &["params", "update"]));
         let model_calls = extract_model_calls(usage);
 
-        if raw_input == 0
-            && raw_output == 0
-            && cache_read == 0
-            && cache_write == 0
-            && reasoning == 0
-        {
-            // A cost-only completion cannot replace the token-bearing fallback
-            // row: emitting it here would make the reconciliation below discard
-            // those tokens. Keep the fallback rather than report a zero-token
-            // authoritative bill that silently undercounts usage.
-            return None;
-        }
-
         // Grok's `inputTokens` includes the `cachedReadTokens` subset, and its
         // `outputTokens` includes the `reasoningTokens` subset. The reported
         // total is input + output, so split those overlaps before handing the
@@ -246,19 +233,28 @@ impl GrokUsage {
         // and reasoning buckets.
         let reported_total_is_inclusive =
             reported_total.is_none() || reported_total == Some(inclusive_total);
+        let (input, output, cache_read, reasoning) = if reported_total_is_inclusive {
+            // An inconsistent subset cannot add tokens beyond its parent total.
+            let cache_read = cache_read.min(raw_input);
+            let reasoning = reasoning.min(raw_output);
+            (
+                raw_input - cache_read,
+                raw_output - reasoning,
+                cache_read,
+                reasoning,
+            )
+        } else {
+            (raw_input, raw_output, cache_read, reasoning)
+        };
+        if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 && reasoning == 0 {
+            // A zero-token completion cannot replace a token-bearing fallback.
+            return None;
+        }
 
         Some(Self {
             tokens: TokenBreakdown {
-                input: if reported_total_is_inclusive {
-                    raw_input.saturating_sub(cache_read)
-                } else {
-                    raw_input
-                },
-                output: if reported_total_is_inclusive {
-                    raw_output.saturating_sub(reasoning)
-                } else {
-                    raw_output
-                },
+                input,
+                output,
                 cache_read,
                 cache_write,
                 cache_write_1h: 0,
@@ -2375,6 +2371,25 @@ mod tests {
         assert_eq!(messages[0].tokens.cache_read, 60);
         assert_eq!(messages[0].tokens.reasoning, 5);
         assert_eq!(messages[0].tokens.total(), 125);
+    }
+
+    #[test]
+    fn bounds_inclusive_usage_subsets_to_their_reported_totals() {
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":100,"outputTokens":25,"cachedReadTokens":120,"reasoningTokens":30,"totalTokens":125}},"_meta":{"agentTimestampMs":1700000003000}}}"#,
+            None,
+            None,
+        );
+
+        let messages = parse_grok_updates_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let tokens = &messages[0].tokens;
+        assert_eq!(tokens.input, 0);
+        assert_eq!(tokens.cache_read, 100);
+        assert_eq!(tokens.output, 0);
+        assert_eq!(tokens.reasoning, 25);
+        assert_eq!(tokens.total(), 125);
     }
 
     #[test]
