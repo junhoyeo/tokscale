@@ -8396,6 +8396,16 @@ fn create_request_tier_pricing_explain_fixture() -> TempDir {
     tmp
 }
 
+fn pricing_explain_fixture_cmd(tmp: &Path) -> Command {
+    let mut cmd = cmd_with_home(tmp);
+    cmd.args(["pricing", "explain", "--no-spinner"]);
+    // Pricing explain scans AppData-based clients even with a fixture HOME.
+    #[cfg(windows)]
+    cmd.env("APPDATA", tmp.join("AppData/Roaming"))
+        .env("LOCALAPPDATA", tmp.join("AppData/Local"));
+    cmd
+}
+
 #[test]
 fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
     let tmp = TempDir::new().unwrap();
@@ -8428,8 +8438,8 @@ fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
         .to_string(),
     )
     .unwrap();
-    let output = cmd_with_home(tmp.path())
-        .args(["pricing", "explain", "--json", "--no-spinner"])
+    let output = pricing_explain_fixture_cmd(tmp.path())
+        .arg("--json")
         .assert()
         .success()
         .get_output()
@@ -8442,8 +8452,7 @@ fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
         rows[0]["submissionSafetyGap"],
         "unverified_provider_identity"
     );
-    cmd_with_home(tmp.path())
-        .args(["pricing", "explain", "--no-spinner"])
+    pricing_explain_fixture_cmd(tmp.path())
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -8454,9 +8463,9 @@ fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
 #[test]
 fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
     let tmp = create_request_tier_pricing_explain_fixture();
-    let output = cmd_with_home(tmp.path())
+    let output = pricing_explain_fixture_cmd(tmp.path())
         .timeout(Duration::from_secs(10))
-        .args(["pricing", "explain", "--json", "--no-spinner"])
+        .arg("--json")
         .output()
         .unwrap();
     assert!(
@@ -8489,9 +8498,8 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         serde_json::json!(["cache_write_1h_tier"])
     );
 
-    cmd_with_home(tmp.path())
+    pricing_explain_fixture_cmd(tmp.path())
         .timeout(Duration::from_secs(10))
-        .args(["pricing", "explain", "--no-spinner"])
         .assert()
         .success()
         .stdout(predicate::str::contains("claude-haiku-5-5 billing=unknown"))
