@@ -2431,6 +2431,7 @@ mod tests {
         assert_eq!(clients[59], ClientId::Bb);
         assert_eq!(clients[60], ClientId::Qoder);
         assert_eq!(clients[61], ClientId::Capy);
+        assert_eq!(clients[62], ClientId::Raven);
     }
 
     #[test]
@@ -2498,6 +2499,7 @@ mod tests {
             "BB",
             "Qoder",
             "Capy",
+            "Raven",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);

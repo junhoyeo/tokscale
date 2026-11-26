@@ -1183,6 +1183,20 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Raven = 62 => {
+        id: "raven",
+        display: "Raven",
+        logo: Some("https://github.com/EverMind-AI.png"),
+        root: PathRoot::EnvVar {
+            var: "RAVEN_HOME",
+            fallback_relative: ".raven",
+        },
+        relative: "telemetry",
+        pattern: "usage-*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1298,7 +1312,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 62);
+        assert_eq!(ClientId::COUNT, 63);
     }
 
     #[test]
