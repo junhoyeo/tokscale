@@ -1859,7 +1859,10 @@ fn test_import_submit_dry_run_survives_cold_pricing_cache_with_local_sessions() 
     // Unpriced local session on the same (date, client) as the export: with
     // the old submission-grade scan this combination was the failure trigger.
     // `write_codex_token_session` hardcodes a 2026-01-01 timestamp, so write
-    // the 2026-05-11 session inline to land on the export's day.
+    // the 2026-05-11 session inline to land on the export's day. It sits one
+    // second after UTC midnight, so pin the bucket zone to keep it on that day
+    // from any host timezone.
+    pin_bucket_timezone(home.path(), "UTC");
     let sessions = home.path().join(".codex/sessions");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
@@ -1957,6 +1960,9 @@ fn test_import_submit_stops_when_the_local_scan_covers_every_row() {
     // overlap pass removes all of them. That must end with "Nothing left to
     // submit." and no payload, not an empty backfill POST.
     let home = TempDir::new().unwrap();
+    // The session sits one second after UTC midnight. Pin the bucket zone so
+    // it lands on the export's day from any host timezone.
+    pin_bucket_timezone(home.path(), "UTC");
     let sessions = home.path().join(".codex/sessions");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
