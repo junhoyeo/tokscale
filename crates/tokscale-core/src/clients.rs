@@ -1187,7 +1187,7 @@ define_clients!(
     Raven = 62 => {
         id: "raven",
         display: "Raven",
-        logo: Some("https://github.com/EverMind-AI.png"),
+        logo: Some("https://raw.githubusercontent.com/EverMind-AI/Raven/814e67f2f1146ca7608b4b290d35988eabe52577/ui-web/icon/raven.svg"),
         root: PathRoot::EnvVar {
             var: "RAVEN_HOME",
             fallback_relative: ".raven",

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>Raven — Sacred Watcher</title>
+  <desc>An ivory raven in profile before a muted gold solar halo on an ink-black field.</desc>
+  <rect width="64" height="64" rx="14" fill="#141614"/>
+  <circle cx="31" cy="29" r="22" stroke="#BAA174" stroke-width="1.6"/>
+  <path d="M13 53C14.5 45.5 19 42 22 36.5C24 32.8 22.9 29.7 23.8 25.5C25 19.8 29.4 16 35 16C40.1 16 44 19.1 45.8 23.5C50.2 24.5 54.1 27.4 56 31.5C51.5 30.2 47.7 29.8 43.5 30.7C41.5 31.2 40.3 33 40.1 35.5C39.5 42 42.1 48 46 53H13Z" fill="#141614" stroke="#141614" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M13 53C14.5 45.5 19 42 22 36.5C24 32.8 22.9 29.7 23.8 25.5C25 19.8 29.4 16 35 16C40.1 16 44 19.1 45.8 23.5C50.2 24.5 54.1 27.4 56 31.5C51.5 30.2 47.7 29.8 43.5 30.7C41.5 31.2 40.3 33 40.1 35.5C39.5 42 42.1 48 46 53H13Z" fill="#F1EBDD"/>
+  <path d="M34.8 24.6Q38.6 20.7 42.4 24.6Q38.6 28.5 34.8 24.6Z" fill="#141614"/>
+  <circle cx="38.6" cy="24.6" r="1.5" fill="#BAA174"/>
+  <circle cx="38.6" cy="24.6" r="0.65" fill="#141614"/>
+  <path d="M18 53C22 46 27 41.8 33 38C30.4 43.3 29.8 47.8 30 53H18Z" fill="#141614"/>
+</svg>
