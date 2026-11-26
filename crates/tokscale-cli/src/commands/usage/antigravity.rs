@@ -743,31 +743,7 @@ fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathB
 
     let formatted = serde_json::to_string_pretty(&root)?;
     let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    let write_res = (|| -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            use std::os::unix::fs::PermissionsExt;
-
-            let mode = std::fs::metadata(&path)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0o600);
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(mode)
-                .open(&tmp_path)?;
-            file.write_all(formatted.as_bytes())?;
-            file.flush()?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&tmp_path, formatted)
-        }
-    })();
+    let write_res = write_hooks_temp_file(&path, &tmp_path, &formatted);
 
     if let Err(e) = write_res {
         let _ = std::fs::remove_file(&tmp_path);
@@ -788,6 +764,32 @@ fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathB
         return Err(e.into());
     }
     Ok(path)
+}
+
+/// Writes the new hooks.json content to `tmp_path`, keeping the current file's
+/// permissions on Unix.
+#[cfg(unix)]
+fn write_hooks_temp_file(path: &Path, tmp_path: &Path, formatted: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)
+        .map(|m| m.permissions().mode())
+        .unwrap_or(0o600);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(tmp_path)?;
+    file.write_all(formatted.as_bytes())?;
+    file.flush()
+}
+
+#[cfg(not(unix))]
+fn write_hooks_temp_file(_path: &Path, tmp_path: &Path, formatted: &str) -> std::io::Result<()> {
+    std::fs::write(tmp_path, formatted)
 }
 
 // ── Port discovery ──

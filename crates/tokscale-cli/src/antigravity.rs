@@ -1304,7 +1304,7 @@ fn candidate_probe_ports(candidate: &ProcessCandidate, mut ports: Vec<u16>) -> V
 fn detect_process_candidates() -> Result<Vec<ProcessCandidate>> {
     #[cfg(target_os = "windows")]
     {
-        return detect_windows_process_candidates();
+        detect_windows_process_candidates()
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1555,7 +1555,7 @@ fn extract_flag_value(command: &str, flag: &str) -> Option<String> {
 fn find_listening_ports(pid: u32) -> Result<Vec<u16>> {
     #[cfg(target_os = "windows")]
     {
-        return find_windows_listening_ports(pid);
+        find_windows_listening_ports(pid)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -2364,7 +2364,7 @@ fn rpc_timeout_for_deadline(deadline: Option<&SyncDeadline>) -> Result<Duration>
 /// handed to a configured remote proxy together with the CSRF token and the
 /// RPC body. The non-Windows path gets the same guarantee from `reqwest`'s
 /// `.no_proxy()`.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_curl_rpc_args(url: &str) -> Vec<&str> {
     windows_curl_rpc_args_with_timeout(url, "10")
 }
