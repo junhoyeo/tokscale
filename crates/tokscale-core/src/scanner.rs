@@ -575,6 +575,16 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.json" => file_name.ends_with(".json"),
                 "*.json|*.jsonl" => file_name.ends_with(".json") || file_name.ends_with(".jsonl"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "usage-*.jsonl" => {
+                    path.parent() == Some(Path::new(root))
+                        && file_name
+                            .strip_prefix("usage-")
+                            .and_then(|name| name.strip_suffix(".jsonl"))
+                            .is_some_and(|date| {
+                                date.len() == 10
+                                    && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
+                            })
+                }
                 "proma-session" => {
                     file_name.ends_with(".jsonl")
                         && file_type.is_file()

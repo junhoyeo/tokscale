@@ -4068,6 +4068,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
         sessions::warp::parse_warp_file,
     );
 
+    parse_cached_lane(
+        &scan_result,
+        &mut source_cache,
+        pricing,
+        &mut all_messages,
+        &machine_labeler,
+        ClientId::Raven,
+        sessions::raven::parse_raven_file,
+    );
+
     // Check Capy's credential scope before source-cache lookup so a warm
     // entry from another key cannot bypass admission.
     parse_cached_lane_deduped_with_fingerprint(
@@ -8971,6 +8981,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let warp_count = summed_parsed_message_count(&warp_msgs);
     counts.set(ClientId::Warp, warp_count);
     messages.extend(warp_msgs);
+
+    let raven_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Raven)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::raven::parse_raven_file(path)
+                .iter()
+                .map(unified_to_parsed)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    counts.set(ClientId::Raven, summed_parsed_message_count(&raven_msgs));
+    messages.extend(raven_msgs);
 
     let capy_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Capy)

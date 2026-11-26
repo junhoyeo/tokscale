@@ -1280,6 +1280,7 @@ pub enum ClientFilter {
     Bb,
     Qoder,
     Capy,
+    Raven,
     Synthetic,
 }
 
@@ -1352,6 +1353,7 @@ impl ClientFilter {
             Self::Bb => "bb",
             Self::Qoder => "qoder",
             Self::Capy => "capy",
+            Self::Raven => "raven",
             Self::Synthetic => "synthetic",
         }
     }
@@ -1427,6 +1429,7 @@ impl ClientFilter {
             Self::Bb => Some(ClientId::Bb),
             Self::Qoder => Some(ClientId::Qoder),
             Self::Capy => Some(ClientId::Capy),
+            Self::Raven => Some(ClientId::Raven),
             Self::Synthetic => None,
         }
     }
@@ -1498,6 +1501,7 @@ impl ClientFilter {
             ClientId::Bb => Self::Bb,
             ClientId::Qoder => Self::Qoder,
             ClientId::Capy => Self::Capy,
+            ClientId::Raven => Self::Raven,
         }
     }
 

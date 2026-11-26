@@ -59,6 +59,7 @@ pub mod prime_agent;
 pub mod proma;
 pub mod qoder;
 pub mod qwen;
+pub mod raven;
 pub mod reasonix;
 pub mod roocode;
 pub mod senpi;

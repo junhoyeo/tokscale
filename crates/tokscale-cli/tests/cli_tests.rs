@@ -1090,6 +1090,7 @@ fn cmd_with_home(tmp: &Path) -> Command {
         .env_remove("CODEBUFF_DATA_DIR")
         .env_remove("GEMINI_CLI_HOME")
         .env_remove("HERMES_HOME")
+        .env_remove("RAVEN_HOME")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         .env_remove("PRIME_AGENT_SESSION_DIR")
         .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
@@ -1139,6 +1140,7 @@ fn offline_cmd_with_home(tmp: &Path) -> Command {
         .env_remove("CODEBUFF_DATA_DIR")
         .env_remove("GEMINI_CLI_HOME")
         .env_remove("HERMES_HOME")
+        .env_remove("RAVEN_HOME")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
         .env_remove("PRIME_AGENT_SESSION_DIR")
         .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
@@ -7309,6 +7311,41 @@ fn test_models_with_client_filter_gjc() {
         has_sonnet,
         "expected claude-sonnet-4 in gjc entries; got: {entries:?}"
     );
+}
+
+#[test]
+fn test_client_raven_uses_relocated_home() {
+    let tmp = TempDir::new().unwrap();
+    let raven_home = tmp.path().join("relocated");
+    let telemetry = raven_home.join("telemetry");
+    fs::create_dir_all(&telemetry).unwrap();
+    fs::write(
+        telemetry.join("usage-2026-11-23.jsonl"),
+        r#"{"ts":"2026-11-23T12:00:00Z","schema_version":2,"model":"gpt-5","input_tokens":60,"output_tokens":40,"cache_read_tokens":30,"cache_write_tokens":10,"reasoning_tokens":10,"cost_usd":0,"session_key":"fixture"}"#,
+    )
+    .unwrap();
+
+    let output = offline_cmd_with_home(tmp.path())
+        .env("RAVEN_HOME", &raven_home)
+        .args([
+            "--offline",
+            "models",
+            "--client",
+            "raven",
+            "--json",
+            "--no-spinner",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["client"], "raven");
+    assert_eq!(entries[0]["output"], 30);
+    assert_eq!(entries[0]["reasoning"], 10);
 }
 
 #[test]
