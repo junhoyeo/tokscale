@@ -4466,6 +4466,50 @@ fn missing_codex_usage_task_report_warns_and_excludes_injected_context() {
 }
 
 #[test]
+fn test_hide_zero_keeps_message_counts_in_report_tables() {
+    let tmp = create_empty_fixture_dir();
+    add_zero_usage_opencode_message(tmp.path());
+    add_reasoning_only_opencode_message(tmp.path());
+
+    for (command, label) in [("models", "gpt-4o"), ("monthly", "2026-02")] {
+        let output = offline_cmd_with_home(tmp.path())
+            .args([
+                command,
+                "--hide-zero",
+                "--light",
+                "--client",
+                "opencode",
+                "--no-spinner",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut segments = stdout.split('\x1b');
+        let mut table = segments.next().unwrap_or_default().to_owned();
+        for segment in segments {
+            if let Some((_, text)) = segment.split_once('m') {
+                table.push_str(text);
+            }
+        }
+        let row = |label| {
+            table
+                .lines()
+                .filter_map(|line| line.strip_prefix('│')?.strip_suffix('│'))
+                .rfind(|line| line.split('│').any(|cell| cell.trim() == label))
+                .and_then(|line| line.rsplit('│').next())
+                .map(str::trim)
+        };
+        assert_eq!(row(label), Some("1"), "{command}: {table}");
+        assert_eq!(row("Total"), Some("2"), "{command}: {table}");
+    }
+}
+
+#[test]
 fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
     let tmp = create_temp_fixture_dir();
     add_reasoning_only_opencode_message(tmp.path());
@@ -4497,6 +4541,7 @@ fn test_monthly_v2_outputs_reasoning_in_json_and_table() {
         .assert()
         .success()
         .stdout(predicate::str::contains("2026-02"))
+        .stdout(predicate::str::contains("Msgs"))
         // With no input/output/cache tokens, this finite Cost/1M value proves
         // the table's token total includes the 321 reasoning tokens.
         .stdout(predicate::str::contains("$100.00/M"));
@@ -5204,6 +5249,7 @@ fn test_models_group_by_machine_model_table_shows_a_machine_column() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Machine"))
+        .stdout(predicate::str::contains("Msgs"))
         .stdout(predicate::str::contains("steven"))
         .stdout(predicate::str::contains("local"));
 }
