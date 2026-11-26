@@ -8399,7 +8399,8 @@ fn create_request_tier_pricing_explain_fixture() -> TempDir {
 fn pricing_explain_fixture_cmd(tmp: &Path) -> Command {
     let mut cmd = cmd_with_home(tmp);
     cmd.args(["pricing", "explain", "--no-spinner"]);
-    // Pricing explain scans AppData-based clients even with a fixture HOME.
+    // Redirect scanners that read the AppData environment variables. Windows
+    // known-folder lookups can still contribute rows from other clients.
     #[cfg(windows)]
     cmd.env("APPDATA", tmp.join("AppData/Roaming"))
         .env("LOCALAPPDATA", tmp.join("AppData/Local"));
@@ -8409,6 +8410,13 @@ fn pricing_explain_fixture_cmd(tmp: &Path) -> Command {
 #[test]
 fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
     let tmp = TempDir::new().unwrap();
+    write_codex_token_session(
+        &tmp.path().join(".codex/sessions"),
+        "unrelated-session.jsonl",
+        "pricing-fixture-unrelated",
+        1,
+        1,
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -8445,7 +8453,11 @@ fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
         .get_output()
         .stdout
         .clone();
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    let mut rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    assert!(rows
+        .iter()
+        .any(|row| row["client"] == "codex" && row["rawModelId"] == "pricing-fixture-unrelated"));
+    rows.retain(|row| row["client"] == "opencode");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["coverage"], false);
     assert_eq!(
@@ -8455,9 +8467,12 @@ fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
     pricing_explain_fixture_cmd(tmp.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "submission_safety_gap=unverified_provider_identity",
-        ));
+        .stdout(
+            predicate::str::is_match(
+                r"(?m)^opencode / atlas-chat .*submission_safety_gap=unverified_provider_identity",
+            )
+            .unwrap(),
+        );
 }
 
 #[test]
@@ -8473,7 +8488,8 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let mut rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    rows.retain(|row| row["client"] == "claude");
     assert_eq!(rows.len(), 2);
 
     let long = rows
@@ -8502,12 +8518,18 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::contains("claude-haiku-5-5 billing=unknown"))
-        .stdout(predicate::str::contains(
-            "uncovered=input_long_context_tier,output_long_context_tier",
-        ))
-        .stdout(predicate::str::contains("claude-haiku-5.5 billing=unknown"))
-        .stdout(predicate::str::contains("uncovered=cache_write_1h_tier"));
+        .stdout(
+            predicate::str::is_match(
+                r"(?m)^claude / claude-haiku-5-5 billing=unknown .*uncovered=input_long_context_tier,output_long_context_tier",
+            )
+            .unwrap(),
+        )
+        .stdout(
+            predicate::str::is_match(
+                r"(?m)^claude / claude-haiku-5\.5 billing=unknown .*uncovered=cache_write_1h_tier",
+            )
+            .unwrap(),
+        );
 }
 
 #[test]
