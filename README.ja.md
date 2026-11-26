@@ -123,7 +123,7 @@
 | <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
 | <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl`（ルートは `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` で変更可能） |
 | <img width="48px" src=".github/assets/client-capy.png" alt="Capy" /> | [Capy](https://capy.ai) | `~/.config/tokscale/capy-cache/usage.json` (API sync via `tokscale capy login` + `tokscale capy sync`) |
-| <img width="48px" src="packages/frontend/public/assets/v2/agents/raven.svg" alt="Raven" /> | [Raven](https://github.com/EverMind-AI/Raven) | `~/.raven/telemetry/usage-*.jsonl` (`$RAVEN_HOME/telemetry/` when set) |
+| <img width="48px" src="packages/frontend/public/assets/v2/agents/raven.png" alt="Raven" /> | [Raven](https://github.com/EverMind-AI/Raven) | `~/.raven/telemetry/usage-*.jsonl` (`$RAVEN_HOME/telemetry/` when set) |
 
 [🚅 LiteLLMの価格データ](https://github.com/BerriAI/litellm)を使用してリアルタイム価格計算を提供し、階層型価格モデルとキャッシュトークン割引をサポートしています。
 

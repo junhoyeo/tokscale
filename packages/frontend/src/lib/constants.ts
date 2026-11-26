@@ -167,7 +167,7 @@ export const SOURCE_LOGOS: Record<ClientType, string> = {
   bb: "https://github.com/get-bb.png",
   qoder: "https://github.com/alibaba.png",
   capy: `${GITHUB_CDN_BASE}/client-capy.png`,
-  raven: "/assets/v2/agents/raven.svg",
+  raven: "/assets/v2/agents/raven.png",
 };
 
 export const SOURCE_COLORS: Record<ClientType, string> = {

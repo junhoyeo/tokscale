@@ -124,7 +124,7 @@
 | <img width="48px" src="https://github.com/get-bb.png" alt="BB" /> | [BB](https://getbb.app) | `~/.bb/bb.db`, `$BB_DATA_DIR/bb.db`, `~/.bb-dev/*/bb.db` |
 | <img width="48px" src="https://github.com/alibaba.png" alt="Qoder" /> | [Qoder](https://qoder.com) | `~/.qoder/projects/**/*.jsonl`, `~/.qoder-cn/projects/**/*.jsonl` (override roots via `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR`) |
 | <img width="48px" src=".github/assets/client-capy.png" alt="Capy" /> | [Capy](https://capy.ai) | `~/.config/tokscale/capy-cache/usage.json` (API sync via `tokscale capy login` + `tokscale capy sync`) |
-| <img width="48px" src="packages/frontend/public/assets/v2/agents/raven.svg" alt="Raven" /> | [Raven](https://github.com/EverMind-AI/Raven) | `~/.raven/telemetry/usage-*.jsonl` (`$RAVEN_HOME/telemetry/` when set) |
+| <img width="48px" src="packages/frontend/public/assets/v2/agents/raven.png" alt="Raven" /> | [Raven](https://github.com/EverMind-AI/Raven) | `~/.raven/telemetry/usage-*.jsonl` (`$RAVEN_HOME/telemetry/` when set) |
 
 Get real-time pricing calculations using [🚅 LiteLLM's pricing data](https://github.com/BerriAI/litellm), with support for tiered pricing models and cache token discounts.
 

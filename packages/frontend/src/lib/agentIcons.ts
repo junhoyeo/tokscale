@@ -77,7 +77,7 @@ export const AGENT_ICONS: Readonly<Record<string, string>> = {
   qoder: "/assets/v2/agents/gh-alibaba.webp",
   capy: "/assets/v2/agents/client-capy.webp",
   // Raven v0.2.8 icon (Apache-2.0). The license is beside the asset.
-  raven: "/assets/v2/agents/raven.svg",
+  raven: "/assets/v2/agents/raven.png",
 };
 
 /** Vendored icon for a client id, or null when there is none. */

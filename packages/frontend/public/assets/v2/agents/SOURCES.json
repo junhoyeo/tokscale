@@ -416,6 +416,15 @@
       "source": ".github/assets/client-capy.png",
       "readme_row": "Capy",
       "retrieved": "2026-11-14"
+    },
+    "raven.png": {
+      "clients": [
+        "raven"
+      ],
+      "source": "https://raw.githubusercontent.com/EverMind-AI/Raven/814e67f2f1146ca7608b4b290d35988eabe52577/ui-web/icon/raven.svg",
+      "readme_row": "Raven",
+      "retrieved": "2026-11-25",
+      "note": "Rasterized the released SVG to PNG. See raven-LICENSE.txt."
     }
   }
 }
