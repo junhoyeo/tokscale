@@ -8177,6 +8177,18 @@ fn test_codex_compressed_session_reports_usage() {
     }
 }
 
+fn pricing_cmd(tmp: &Path) -> Command {
+    let mut cmd = cmd_with_home(tmp);
+    // Redirect scanners that read the AppData environment variables. Windows
+    // known-folder lookups can still contribute rows from other clients.
+    #[cfg(windows)]
+    cmd.env("APPDATA", tmp.join("AppData/Roaming"))
+        .env("LOCALAPPDATA", tmp.join("AppData/Local"));
+    // The parallel Windows suite can delay child startup under load.
+    cmd.timeout(Duration::from_secs(30));
+    cmd
+}
+
 #[test]
 fn billing_custom_cli_is_offline_and_keeps_old_source_flag() {
     let tmp = TempDir::new().unwrap();
@@ -8184,8 +8196,7 @@ fn billing_custom_cli_is_offline_and_keeps_old_source_flag() {
     fs::create_dir_all(&config).unwrap();
     fs::write(config.join("custom-pricing.json"),r#"{"models":{"atlas":{"input_cost_per_million_tokens":9}},"provider_overrides":[{"provider_id":" Vertex ","model_id":"atlas","pricing":{"input_cost_per_million_tokens":2}}]}"#).unwrap();
     for source_flag in ["--source", "--provider"] {
-        let output = cmd_with_home(tmp.path())
-            .timeout(Duration::from_secs(10))
+        let output = pricing_cmd(tmp.path())
             .args([
                 "pricing",
                 "atlas",
@@ -8207,7 +8218,7 @@ fn billing_custom_cli_is_offline_and_keeps_old_source_flag() {
         assert_eq!(value["pricing"]["inputCostPerToken"], 0.000002);
         assert_eq!(value["missingRates"], serde_json::json!(["output"]));
     }
-    let output = cmd_with_home(tmp.path())
+    let output = pricing_cmd(tmp.path())
         .args([
             "pricing",
             "atlas",
@@ -8223,7 +8234,7 @@ fn billing_custom_cli_is_offline_and_keeps_old_source_flag() {
         .clone();
     let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["scope"], "global");
-    cmd_with_home(tmp.path())
+    pricing_cmd(tmp.path())
         .args([
             "pricing",
             "validate-overrides",
@@ -8233,7 +8244,7 @@ fn billing_custom_cli_is_offline_and_keeps_old_source_flag() {
         ])
         .assert()
         .success();
-    let output = cmd_with_home(tmp.path())
+    let output = pricing_cmd(tmp.path())
         .args(["pricing", "list-overrides", "--json", "--no-spinner"])
         .assert()
         .success()
@@ -8258,7 +8269,7 @@ fn billing_label_does_not_change_catalog_resolution() {
         Some("models.dev"),
     ] {
         let lookup = |billing: Option<&str>| {
-            let mut command = cmd_with_home(tmp.path());
+            let mut command = pricing_cmd(tmp.path());
             command.args(["pricing", model, "--json", "--no-spinner"]);
             if let Some(source) = source {
                 command.args(["--source", source]);
@@ -8266,13 +8277,7 @@ fn billing_label_does_not_change_catalog_resolution() {
             if let Some(billing) = billing {
                 command.args(["--billing-provider", billing]);
             }
-            let output = command
-                .timeout(Duration::from_secs(10))
-                .assert()
-                .success()
-                .get_output()
-                .stdout
-                .clone();
+            let output = command.assert().success().get_output().stdout.clone();
             serde_json::from_slice::<serde_json::Value>(&output).unwrap()
         };
         let baseline = lookup(None);
@@ -8396,9 +8401,22 @@ fn create_request_tier_pricing_explain_fixture() -> TempDir {
     tmp
 }
 
+fn pricing_explain_fixture_cmd(tmp: &Path) -> Command {
+    let mut cmd = pricing_cmd(tmp);
+    cmd.args(["pricing", "explain", "--no-spinner"]);
+    cmd
+}
+
 #[test]
 fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
     let tmp = TempDir::new().unwrap();
+    write_codex_token_session(
+        &tmp.path().join(".codex/sessions"),
+        "unrelated-session.jsonl",
+        "pricing-fixture-unrelated",
+        1,
+        1,
+    );
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -8428,35 +8446,40 @@ fn pricing_explain_names_submission_safety_gap_in_json_and_text() {
         .to_string(),
     )
     .unwrap();
-    let output = cmd_with_home(tmp.path())
-        .args(["pricing", "explain", "--json", "--no-spinner"])
+    let output = pricing_explain_fixture_cmd(tmp.path())
+        .arg("--json")
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    let mut rows: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    assert!(rows
+        .iter()
+        .any(|row| row["client"] == "codex" && row["rawModelId"] == "pricing-fixture-unrelated"));
+    rows.retain(|row| row["client"] == "opencode");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["coverage"], false);
     assert_eq!(
         rows[0]["submissionSafetyGap"],
         "unverified_provider_identity"
     );
-    cmd_with_home(tmp.path())
-        .args(["pricing", "explain", "--no-spinner"])
+    pricing_explain_fixture_cmd(tmp.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "submission_safety_gap=unverified_provider_identity",
-        ));
+        .stdout(
+            predicate::str::is_match(
+                r"(?m)^opencode / atlas-chat .*submission_safety_gap=unverified_provider_identity",
+            )
+            .unwrap(),
+        );
 }
 
 #[test]
 fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
     let tmp = create_request_tier_pricing_explain_fixture();
-    let output = cmd_with_home(tmp.path())
-        .timeout(Duration::from_secs(10))
-        .args(["pricing", "explain", "--json", "--no-spinner"])
+    let output = pricing_explain_fixture_cmd(tmp.path())
+        .arg("--json")
         .output()
         .unwrap();
     assert!(
@@ -8464,7 +8487,8 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let mut rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    rows.retain(|row| row["client"] == "claude");
     assert_eq!(rows.len(), 2);
 
     let long = rows
@@ -8489,25 +8513,28 @@ fn pricing_explain_names_request_tier_gaps_in_json_and_text() {
         serde_json::json!(["cache_write_1h_tier"])
     );
 
-    cmd_with_home(tmp.path())
-        .timeout(Duration::from_secs(10))
-        .args(["pricing", "explain", "--no-spinner"])
+    pricing_explain_fixture_cmd(tmp.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("claude-haiku-5-5 billing=unknown"))
-        .stdout(predicate::str::contains(
-            "uncovered=input_long_context_tier,output_long_context_tier",
-        ))
-        .stdout(predicate::str::contains("claude-haiku-5.5 billing=unknown"))
-        .stdout(predicate::str::contains("uncovered=cache_write_1h_tier"));
+        .stdout(
+            predicate::str::is_match(
+                r"(?m)^claude / claude-haiku-5-5 billing=unknown .*uncovered=input_long_context_tier,output_long_context_tier",
+            )
+            .unwrap(),
+        )
+        .stdout(
+            predicate::str::is_match(
+                r"(?m)^claude / claude-haiku-5\.5 billing=unknown .*uncovered=cache_write_1h_tier",
+            )
+            .unwrap(),
+        );
 }
 
 #[test]
 fn billing_explain_rejects_unknown_and_blank_filters() {
     let tmp = create_billing_explain_fixture();
     for provider in ["unknown", " UnKnOwN ", "", " \t\n "] {
-        let output = cmd_with_home(tmp.path())
-            .timeout(Duration::from_secs(10))
+        let output = pricing_cmd(tmp.path())
             .args([
                 "pricing",
                 "explain",
@@ -8533,8 +8560,7 @@ fn billing_explain_rejects_unknown_and_blank_filters() {
 #[test]
 fn billing_explain_known_filter_is_exact_and_normalized() {
     let tmp = create_billing_explain_fixture();
-    let output = cmd_with_home(tmp.path())
-        .timeout(Duration::from_secs(10))
+    let output = pricing_cmd(tmp.path())
         .args(["pricing", "explain", "--json", "--no-spinner"])
         .assert()
         .success()
@@ -8554,8 +8580,7 @@ fn billing_explain_known_filter_is_exact_and_normalized() {
         ("google", None),
         ("no-such-channel", None),
     ] {
-        let output = cmd_with_home(tmp.path())
-            .timeout(Duration::from_secs(10))
+        let output = pricing_cmd(tmp.path())
             .args([
                 "pricing",
                 "explain",
