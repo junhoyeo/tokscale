@@ -12,11 +12,11 @@ use crossterm::event::KeyEvent;
 #[cfg(any(unix, test))]
 use crossterm::event::{KeyCode, KeyModifiers};
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 const PROBE_TIMEOUT: Duration = Duration::from_millis(225);
 const PROBE_PREFIX: &[u8] = b"\x1b[1;1H\x1b[2K";
 const PROBE_GLYPH: &[u8] = "·".as_bytes();
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 const DSR_QUERY: &[u8] = b"\x1b[6n";
 const PROBE_CLEANUP: &[u8] = b"\x1b[1;1H\x1b[2K\x1b[1;1H";
 

@@ -292,7 +292,7 @@ fn sanitize_codex_login_line(line: &str) -> String {
     sanitized
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn put_codex_login_child_for_test(
     child_slot: &CodexLoginChildSlot,
     child: std::process::Child,
@@ -300,7 +300,7 @@ pub(crate) fn put_codex_login_child_for_test(
     put_codex_login_child(child_slot, child)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn codex_login_slot_child_is_none_for_test(child_slot: &CodexLoginChildSlot) -> bool {
     child_slot
         .lock()

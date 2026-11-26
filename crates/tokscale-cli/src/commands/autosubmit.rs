@@ -1471,9 +1471,9 @@ fn next_managed_scheduler_executable_path() -> Result<PathBuf> {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let sequence = WINDOWS_MANAGED_EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        return Ok(versioned_windows_managed_executable_path(
+        Ok(versioned_windows_managed_executable_path(
             &dir, timestamp, sequence,
-        ));
+        ))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1575,7 +1575,7 @@ fn remove_managed_scheduler_executable() -> Result<()> {
                 Err(error) => return Err(error.into()),
             }
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
