@@ -319,6 +319,7 @@ tokscale models --json > report.json   # 파일로 저장
   - `q` 또는 `Ctrl+C`: 종료
 - **마우스 지원**: 탭, 버튼, 필터 클릭
 - **테마**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk, Terminal
+- **터미널 배경**: `terminal` 테마(`p`로 선택하거나 `--theme terminal`)는 패널, 다이얼로그, 빈 차트 셀, 선택 항목에 배경을 채우지 않아 터미널 배경과 투명도가 그대로 보입니다. 차트 색상은 유지됩니다. 선택 항목은 배경색 대신 굵은 글씨와 밑줄로 표시됩니다.
 - **설정 저장**: 설정이 `~/.config/tokscale/settings.json`에 저장됨 ([설정](#설정) 참조)
 
 ### 그룹 기준 전략

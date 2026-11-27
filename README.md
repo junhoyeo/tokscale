@@ -323,7 +323,7 @@ The interactive TUI mode provides:
   - `q` or `Ctrl+C`: Quit
 - **Mouse Support**: Click tabs, buttons, and filters
 - **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk, Terminal
-- **Terminal background**: The `terminal` theme (select with `p`, or launch with `tokscale --theme terminal`) draws no background fill, so your terminal's background and transparency show through. Selection uses bold and underline instead of a fill.
+- **Terminal background**: The `terminal` theme (select with `p`, or launch with `tokscale --theme terminal`) draws no background fill for panels, dialogs, empty chart cells, or selection, so your terminal's background and transparency show through. Chart colors are kept. Selection uses bold and underline instead of a fill.
 - **Settings Persistence**: Preferences saved to `~/.config/tokscale/settings.json` (see [Configuration](#configuration))
 
 ### Group-By Strategies

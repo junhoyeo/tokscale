@@ -323,6 +323,7 @@ tokscale models --json > report.json   # ファイルに保存
   - `q` または `Ctrl+C`: 終了
 - **マウスサポート**: タブ、ボタン、フィルターをクリック
 - **テーマ**: Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu、Graphite、Lagoon、Dusk、Terminal
+- **ターミナル背景**: `terminal` テーマ（`p` で選択、または `--theme terminal`）は、パネル、ダイアログ、空のチャートセル、選択行に背景を塗りません。そのため端末の背景と透過がそのまま見えます。チャートの色は維持されます。選択行は背景色ではなく太字と下線で示されます。
 - **設定の永続化**: 設定は`~/.config/tokscale/settings.json`に保存（[設定](#設定)を参照）
 
 ### グループ基準戦略

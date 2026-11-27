@@ -499,7 +499,6 @@ impl Theme {
         if theme.uses_terminal_background() {
             theme.background = Color::Reset;
             theme.foreground = Color::Reset;
-            theme.colors[0] = Color::Reset;
         }
 
         theme
@@ -645,10 +644,21 @@ impl Theme {
         Style::default().fg(self.count_color())
     }
 
+    /// Background fill for a contribution cell. The terminal theme leaves the
+    /// empty grade unfilled so the terminal background shows through; its glyph
+    /// keeps the palette color.
+    pub(crate) fn graph_cell_background(&self, color: Color) -> Color {
+        if self.uses_terminal_background() && color == self.colors[0] {
+            Color::Reset
+        } else {
+            color
+        }
+    }
+
     pub(crate) fn graph_cell_selected_style(&self, bg: Color) -> Style {
-        // An empty cell on the terminal background has no fill to highlight,
-        // so reverse the terminal's own colors to keep the cursor visible.
-        if bg == Color::Reset {
+        // With no fill to highlight, reverse the terminal's own colors so the
+        // cursor stays visible.
+        if self.graph_cell_background(bg) == Color::Reset {
             return Style::default().add_modifier(Modifier::REVERSED);
         }
         let fg = match bg {
@@ -1074,8 +1084,23 @@ mod tests {
     fn terminal_theme_keeps_an_empty_selected_graph_cell_visible() {
         let theme =
             Theme::from_name_with_color_mode(ThemeName::Terminal, TerminalColorMode::FullColor);
-        let style = theme.graph_cell_selected_style(Color::Reset);
+        let style = theme.graph_cell_selected_style(Color::Rgb(22, 27, 34));
         assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn terminal_theme_leaves_empty_graph_cells_unfilled_but_keeps_their_glyph_color() {
+        let theme =
+            Theme::from_name_with_color_mode(ThemeName::Terminal, TerminalColorMode::FullColor);
+        assert_eq!(theme.colors[0], Color::Rgb(22, 27, 34));
+        assert_eq!(
+            theme.graph_cell_background(Color::Rgb(22, 27, 34)),
+            Color::Reset
+        );
+        assert_eq!(
+            theme.graph_cell_background(Color::Rgb(121, 184, 255)),
+            Color::Rgb(121, 184, 255)
+        );
     }
 
     #[test]

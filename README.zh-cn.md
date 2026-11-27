@@ -320,6 +320,7 @@ tokscale models --json > report.json   # 保存到文件
   - `q` 或 `Ctrl+C`：退出
 - **鼠标支持**：点击标签、按钮和筛选器
 - **主题**：Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu、Graphite、Lagoon、Dusk、Terminal
+- **终端背景**：`terminal` 主题（用 `p` 选择，或使用 `--theme terminal`）不会为面板、对话框、空的图表单元格或选中项绘制背景填充，因此终端背景和透明效果会直接显示。图表颜色保持不变。选中行改用粗体和下划线，而不是背景色。
 - **设置持久化**：偏好设置保存到 `~/.config/tokscale/settings.json`（参见[配置](#配置)）
 
 ### 分组策略
