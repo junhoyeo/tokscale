@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import styled from "styled-components";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import {
@@ -15,13 +16,42 @@ import {
   NumericValue,
 } from "./listStyles";
 import { getModelColor } from "./modelColors";
+import {
+  DEFAULT_MODEL_RANK_BY,
+  rankModelUsage,
+  type ModelRankBy,
+} from "./modelRanking";
+import { ModelRankToggle } from "./ModelRankToggle";
 import type { ModelUsage } from "./types";
 
 export interface ProfileModelsProps {
   models: string[];
   modelUsage?: ModelUsage[];
+  rankBy?: ModelRankBy;
+  onRankByChange?: (next: ModelRankBy) => void;
   className?: string;
 }
+
+const ModelsSection = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+`;
+
+const ModelsToolbar = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+`;
+
+const ModelsSummary = styled.p`
+  margin: 0;
+  color: var(--service-text-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+`;
 
 const ModelIdentity = styled.span`
   display: flex;
@@ -79,64 +109,126 @@ const ModelTag = styled.li`
 export function ProfileModels({
   models,
   modelUsage,
+  rankBy,
+  onRankByChange,
   className,
 }: ProfileModelsProps) {
-  const filteredUsage = (modelUsage ?? [])
-    .filter((usage) => usage.model !== "<synthetic>")
-    .sort((a, b) => b.cost - a.cost);
+  const [uncontrolledRankBy, setUncontrolledRankBy] = useState<ModelRankBy>(
+    DEFAULT_MODEL_RANK_BY,
+  );
+  const effectiveRankBy = rankBy ?? uncontrolledRankBy;
+  const handleRankByChange = (next: ModelRankBy) => {
+    if (onRankByChange) {
+      onRankByChange(next);
+    } else {
+      setUncontrolledRankBy(next);
+    }
+  };
+
+  const rankedUsage = useMemo(
+    () => rankModelUsage(modelUsage, effectiveRankBy),
+    [modelUsage, effectiveRankBy],
+  );
   const filteredModels = Array.from(
     new Set(models.filter((model) => model !== "<synthetic>")),
   );
 
-  if (filteredUsage.length > 0) {
+  if (rankedUsage.length > 0) {
+    const shareTitle =
+      effectiveRankBy === "tokens" ? "Share of total tokens" : "Share of total cost";
+
     return (
-      <ListCard className={className}>
-        <ListTable>
-          <ListCaption>Model usage</ListCaption>
-          <ListHead>
-            <tr>
-              <ListHeaderCell $width="52%">Model</ListHeaderCell>
-              <ListHeaderCell $width="18%" $align="right">
-                Tokens
-              </ListHeaderCell>
-              <ListHeaderCell $width="17%" $align="right">
-                Cost
-              </ListHeaderCell>
-              <ListHeaderCell $width="13%" $align="right">
-                Share
-              </ListHeaderCell>
-            </tr>
-          </ListHead>
-          <ListBody>
-            {filteredUsage.map((usage) => (
-              <ListRow key={usage.model}>
-                <ListPrimaryCell scope="row">
-                  <ModelIdentity>
-                    <ModelMarker
-                      aria-hidden="true"
-                      style={{ backgroundColor: getModelColor(usage.model) }}
-                    />
-                    <ModelName>{usage.model}</ModelName>
-                  </ModelIdentity>
-                </ListPrimaryCell>
-                <ListCell data-label="Tokens" $align="right">
-                  <NumericValue title={usage.tokens.toLocaleString("en-US")}>
-                    {formatNumber(usage.tokens)}
-                  </NumericValue>
-                </ListCell>
-                <ListCell data-label="Cost" $align="right">
-                  <NumericValue $accent>
-                    {formatCurrency(usage.cost)}
-                  </NumericValue>
-                </ListCell>
-                <ListCell data-label="Share" $align="right">
-                  <NumericValue>{usage.percentage.toFixed(1)}%</NumericValue>
-                </ListCell>
-              </ListRow>
-            ))}
-          </ListBody>
-        </ListTable>
-      </ListCard>
+      <ModelsSection className={className}>
+        <ModelsToolbar>
+          <ModelsSummary>
+            {rankedUsage.length.toLocaleString("en-US")}{" "}
+            {rankedUsage.length === 1 ? "model" : "models"} · ranked by{" "}
+            {effectiveRankBy === "tokens" ? "tokens" : "cost"}
+          </ModelsSummary>
+          <ModelRankToggle
+            label="Rank by"
+            ariaLabel="Rank models by"
+            value={effectiveRankBy}
+            onChange={handleRankByChange}
+          />
+        </ModelsToolbar>
+
+        <ListCard>
+          <ListTable>
+            <ListCaption>
+              Model usage ranked by{" "}
+              {effectiveRankBy === "tokens" ? "tokens" : "cost"}
+            </ListCaption>
+            <ListHead>
+              <tr>
+                <ListHeaderCell $width="52%">Model</ListHeaderCell>
+                <ListHeaderCell
+                  $width="18%"
+                  $align="right"
+                  aria-sort={
+                    effectiveRankBy === "tokens" ? "descending" : "none"
+                  }
+                >
+                  Tokens
+                </ListHeaderCell>
+                <ListHeaderCell
+                  $width="17%"
+                  $align="right"
+                  aria-sort={effectiveRankBy === "cost" ? "descending" : "none"}
+                >
+                  Cost
+                </ListHeaderCell>
+                <ListHeaderCell $width="13%" $align="right" title={shareTitle}>
+                  Share
+                </ListHeaderCell>
+              </tr>
+            </ListHead>
+            <ListBody>
+              {rankedUsage.map((usage) => {
+                const formattedShare =
+                  usage.share != null ? `${usage.share.toFixed(1)}%` : "0.0%";
+                return (
+                  <ListRow key={usage.model}>
+                    <ListPrimaryCell scope="row">
+                      <ModelIdentity>
+                        <ModelMarker
+                          aria-hidden="true"
+                          style={{ backgroundColor: getModelColor(usage.model) }}
+                        />
+                        <ModelName>{usage.model}</ModelName>
+                      </ModelIdentity>
+                    </ListPrimaryCell>
+                    <ListCell data-label="Tokens" $align="right">
+                      <NumericValue
+                        $accent={effectiveRankBy === "tokens"}
+                        title={usage.tokens.toLocaleString("en-US")}
+                      >
+                        {formatNumber(usage.tokens)}
+                      </NumericValue>
+                    </ListCell>
+                    <ListCell data-label="Cost" $align="right">
+                      <NumericValue
+                        $accent={effectiveRankBy === "cost"}
+                        title={usage.cost.toLocaleString("en-US", {
+                          style: "currency",
+                          currency: "USD",
+                        })}
+                      >
+                        {formatCurrency(usage.cost)}
+                      </NumericValue>
+                    </ListCell>
+                    <ListCell data-label="Share" $align="right">
+                      <NumericValue title={shareTitle}>
+                        {formattedShare}
+                      </NumericValue>
+                    </ListCell>
+                  </ListRow>
+                );
+              })}
+            </ListBody>
+          </ListTable>
+        </ListCard>
+      </ModelsSection>
     );
   }
 

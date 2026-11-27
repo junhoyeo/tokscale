@@ -6,9 +6,14 @@ import styled from "styled-components";
 import { Navigation } from "@/components/layout/Navigation";
 import { PublicFooter } from "@/components/layout/PublicFooter";
 import {
+  DEFAULT_MODEL_RANK_BY,
+  MODEL_RANK_BY_STORAGE_KEY,
+  ModelRankToggle,
   createContributionRangeOptions,
   getContributionDayForDate,
   getDefaultContributionDate,
+  getFavoriteModel,
+  isModelRankBy,
   ProfileContributionBreakdown,
   ProfileContributionGraph,
   ProfileDevices,
@@ -20,16 +25,20 @@ import {
   resolveContributionRange,
   resolveContributionSelectedDate,
   TokenBreakdown,
+  type ModelRankBy,
   type ModelUsage,
   type ProfileDevice,
   type ProfileStatsData,
   type ProfileTab,
   type ProfileContributionView,
   type ProfileUser,
+  type RankedModelUsage,
 } from "@/components/profile";
+import { getModelColor } from "@/components/profile/modelColors";
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
 import { resolveEffectiveTimeZone } from "@/lib/timezone";
+import { formatCurrency, formatNumber } from "@/lib/utils";
 import type { ModerationNotice } from "@/lib/moderation/notice";
 
 import { PROFILE_PERIODS, PROFILE_PERIOD_LABELS, type ProfilePeriod } from "@/lib/reportingPeriods";
@@ -260,16 +269,33 @@ export default function ProfilePageClient({
     [data.stats],
   );
 
-  const favoriteModel = useMemo(() => {
-    const usage =
-      data.modelUsage?.filter((item) => item.model !== "<synthetic>") ?? [];
-    return (
-      usage.reduce<ModelUsage | null>(
-        (best, current) => (!best || current.cost > best.cost ? current : best),
-        null,
-      )?.model ?? null
-    );
-  }, [data.modelUsage]);
+  // Resolved after mount so SSR and first client paint match (no hydration
+  // mismatch), while persisting the user's choice across period switches.
+  const [storedModelRankBy, setStoredModelRankBy] =
+    useState<ModelRankBy | null>(() => {
+      if (typeof window === "undefined") return null;
+      try {
+        const stored = window.localStorage.getItem(MODEL_RANK_BY_STORAGE_KEY);
+        return isModelRankBy(stored) ? stored : null;
+      } catch {
+        return null;
+      }
+    });
+  const modelRankBy: ModelRankBy =
+    mounted && storedModelRankBy ? storedModelRankBy : DEFAULT_MODEL_RANK_BY;
+  const commitModelRankBy = (next: ModelRankBy) => {
+    setStoredModelRankBy(next);
+    try {
+      window.localStorage.setItem(MODEL_RANK_BY_STORAGE_KEY, next);
+    } catch {
+      // Ignore persistence failures; the in-memory choice still applies.
+    }
+  };
+
+  const favoriteModel = useMemo(
+    () => getFavoriteModel(data.modelUsage, modelRankBy),
+    [data.modelUsage, modelRankBy],
+  );
 
   const showResubmitBanner =
     EARLY_ADOPTERS.includes(data.user.username) &&
@@ -398,6 +424,8 @@ export default function ProfilePageClient({
                       <ProfileInsights
                         stats={stats}
                         favoriteModel={favoriteModel}
+                        modelRankBy={modelRankBy}
+                        onModelRankByChange={commitModelRankBy}
                         clients={data.clients}
                         models={data.models}
                         mcpServers={data.mcpServers ?? []}
@@ -430,6 +458,8 @@ export default function ProfilePageClient({
               <ProfileModels
                 models={data.models}
                 modelUsage={data.modelUsage}
+                rankBy={modelRankBy}
+                onRankByChange={commitModelRankBy}
               />
             </TabPanel>
           )}
@@ -443,16 +473,47 @@ export default function ProfilePageClient({
   );
 }
 
+function formatFavoriteModelMeta(
+  favoriteModel: RankedModelUsage,
+  rankBy: ModelRankBy,
+): { text: string; title: string } {
+  const shareText =
+    favoriteModel.share != null ? `${favoriteModel.share.toFixed(1)}%` : null;
+
+  if (rankBy === "tokens") {
+    const compact = `${formatNumber(favoriteModel.tokens)} tokens`;
+    const exact = `${favoriteModel.tokens.toLocaleString("en-US")} tokens`;
+    return {
+      text: shareText ? `${compact} · ${shareText}` : compact,
+      title: shareText ? `${exact} (${shareText} of tokens)` : exact,
+    };
+  }
+
+  const compact = formatCurrency(favoriteModel.cost);
+  const exact = favoriteModel.cost.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+  });
+  return {
+    text: shareText ? `${compact} · ${shareText}` : compact,
+    title: shareText ? `${exact} (${shareText} of cost)` : exact,
+  };
+}
+
 function ProfileInsights({
   stats,
   favoriteModel,
+  modelRankBy,
+  onModelRankByChange,
   clients,
   models,
   mcpServers,
   period,
 }: {
   stats: ProfileStatsData;
-  favoriteModel: string | null;
+  favoriteModel: RankedModelUsage | null;
+  modelRankBy: ModelRankBy;
+  onModelRankByChange: (next: ModelRankBy) => void;
   clients: string[];
   models: string[];
   mcpServers: string[];
@@ -460,11 +521,10 @@ function ProfileInsights({
 }) {
   const rangeLabel =
     period === "all" ? "1y" : PROFILE_PERIOD_LABELS[period];
-  const insights = [
-    {
-      label: `Favorite model (${rangeLabel})`,
-      value: favoriteModel ?? "Not available",
-    },
+  const favoriteMeta = favoriteModel
+    ? formatFavoriteModelMeta(favoriteModel, modelRankBy)
+    : null;
+  const secondaryInsights = [
     period === "all"
       ? {
           label: "Sessions (all-time)",
@@ -474,7 +534,12 @@ function ProfileInsights({
         }
       : {
           label: "Selected range",
-          value: period === "month" ? "Last 30 days" : period === "week" ? "Last 7 days" : `${rangeLabel} (UTC)`,
+          value:
+            period === "month"
+              ? "Last 30 days"
+              : period === "week"
+                ? "Last 7 days"
+                : `${rangeLabel} (UTC)`,
         },
     {
       label: period === "all" ? "Models (latest)" : `Models (${rangeLabel})`,
@@ -487,12 +552,47 @@ function ProfileInsights({
   return (
     <InsightsPanel aria-labelledby="profile-insights-title">
       <InsightsHeader>
-        <InsightsTitle id="profile-insights-title">Usage details</InsightsTitle>
-        <InsightsDescription>Scope is shown for each fact.</InsightsDescription>
+        <InsightsHeadingGroup>
+          <InsightsTitle id="profile-insights-title">Usage details</InsightsTitle>
+          <InsightsDescription>Scope is shown for each fact.</InsightsDescription>
+        </InsightsHeadingGroup>
+        {favoriteModel && (
+          <ModelRankToggle
+            label="Rank by"
+            ariaLabel="Rank favorite model by"
+            value={modelRankBy}
+            onChange={onModelRankByChange}
+          />
+        )}
       </InsightsHeader>
 
       <InsightsGrid>
-        {insights.map((item) => (
+        <InsightItem>
+          <InsightLabel>{`Favorite model (${rangeLabel})`}</InsightLabel>
+          {favoriteModel ? (
+            <>
+              <InsightValue title={favoriteModel.model}>
+                <FavoriteModelValue>
+                  <FavoriteModelMarker
+                    aria-hidden="true"
+                    style={{
+                      backgroundColor: getModelColor(favoriteModel.model),
+                    }}
+                  />
+                  <FavoriteModelName>{favoriteModel.model}</FavoriteModelName>
+                </FavoriteModelValue>
+              </InsightValue>
+              {favoriteMeta && (
+                <InsightMeta title={favoriteMeta.title}>
+                  {favoriteMeta.text}
+                </InsightMeta>
+              )}
+            </>
+          ) : (
+            <InsightValue title="Not available">Not available</InsightValue>
+          )}
+        </InsightItem>
+        {secondaryInsights.map((item) => (
           <InsightItem key={item.label}>
             <InsightLabel>{item.label}</InsightLabel>
             <InsightValue title={item.value}>{item.value}</InsightValue>
@@ -788,30 +888,36 @@ const InsightsPanel = styled.section`
 
 const InsightsHeader = styled.div`
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
+  gap: 12px 16px;
+  padding: 0.875rem 1rem;
   border-bottom: 1px solid var(--service-border);
 
   @container (max-width: 28rem) {
     align-items: flex-start;
     flex-direction: column;
-    gap: 4px;
+    gap: 10px;
   }
+`;
+
+const InsightsHeadingGroup = styled.div`
+  min-width: 0;
 `;
 
 const InsightsTitle = styled.h2`
   margin: 0;
   color: var(--service-text);
-  font-size: 16px;
-  font-weight: 500;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 `;
 
 const InsightsDescription = styled.p`
-  margin: 0;
+  margin: 0.25rem 0 0;
   color: var(--service-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
 `;
 
 const InsightsGrid = styled.dl`
@@ -821,7 +927,7 @@ const InsightsGrid = styled.dl`
   padding: 0 16px;
 
   @container (min-width: 42rem) {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 `;
 
@@ -830,15 +936,16 @@ const InsightItem = styled.div`
   padding: 14px 0;
   border-top: 1px solid var(--service-border);
 
-  &:nth-child(-n + 2) {
+  &:first-child {
+    grid-column: 1 / -1;
     border-top: 0;
   }
 
-  &:nth-child(odd) {
+  &:nth-child(2) {
     padding-right: 14px;
   }
 
-  &:nth-child(even) {
+  &:nth-child(3) {
     padding-left: 14px;
     border-left: 1px solid var(--service-border);
   }
@@ -849,11 +956,17 @@ const InsightItem = styled.div`
     border-left: 1px solid var(--service-border);
 
     &:first-child {
+      grid-column: auto;
       padding-left: 0;
       border-left: 0;
     }
 
-    &:last-child {
+    &:nth-child(2) {
+      padding-right: 14px;
+    }
+
+    &:nth-child(3) {
+      padding-left: 14px;
       padding-right: 0;
     }
   }
@@ -880,6 +993,38 @@ const InsightValue = styled.dd`
   @media (min-width: 640px) {
     font-size: 14px;
   }
+`;
+
+const FavoriteModelValue = styled.span`
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.4375rem;
+`;
+
+const FavoriteModelMarker = styled.span`
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+`;
+
+const FavoriteModelName = styled.span`
+  overflow: hidden;
+  color: var(--service-text);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const InsightMeta = styled.dd`
+  overflow: hidden;
+  margin: 2px 0 0;
+  color: var(--service-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 `;
 
 const MetadataRow = styled.div`
