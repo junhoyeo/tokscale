@@ -19,48 +19,72 @@ function finiteNonnegative(value: number): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
+function compareCodePoint(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function computeOverflowSafeShares(values: readonly number[]): Array<number | null> {
+  let maxValue = 0;
+  for (const value of values) {
+    if (Number.isFinite(value) && value > maxValue) {
+      maxValue = value;
+    }
+  }
+
+  if (!(maxValue > 0) || !Number.isFinite(maxValue)) {
+    return values.map(() => null);
+  }
+
+  const normalized = values.map((value) =>
+    Number.isFinite(value) && value > 0 ? value / maxValue : 0,
+  );
+  const normalizedTotal = normalized.reduce((sum, value) => sum + value, 0);
+
+  if (!Number.isFinite(normalizedTotal) || !(normalizedTotal > 0)) {
+    return values.map(() => null);
+  }
+
+  return normalized.map((scaled) => {
+    const share = (scaled / normalizedTotal) * 100;
+    return Number.isFinite(share) ? share : null;
+  });
+}
+
 export function rankModelUsage(
   modelUsage: readonly ModelUsage[] | undefined,
   rankBy: ModelRankBy,
 ): RankedModelUsage[] {
-  const filtered = (modelUsage ?? [])
+  const sorted = (modelUsage ?? [])
     .filter((item) => item.model !== "<synthetic>")
     .map((item) => ({
       ...item,
       tokens: finiteNonnegative(item.tokens),
       cost: finiteNonnegative(item.cost),
       percentage: finiteNonnegative(item.percentage),
-    }));
-
-  const totalCost = filtered.reduce((sum, item) => sum + item.cost, 0);
-  const totalTokens = filtered.reduce((sum, item) => sum + item.tokens, 0);
-
-  return filtered
+    }))
     .sort((left, right) => {
       if (rankBy === "tokens") {
         return (
           right.tokens - left.tokens ||
           right.cost - left.cost ||
-          left.model.localeCompare(right.model)
+          compareCodePoint(left.model, right.model)
         );
       }
       return (
         right.cost - left.cost ||
         right.tokens - left.tokens ||
-        left.model.localeCompare(right.model)
+        compareCodePoint(left.model, right.model)
       );
-    })
-    .map((item) => ({
-      ...item,
-      share:
-        rankBy === "tokens"
-          ? totalTokens > 0
-            ? (item.tokens / totalTokens) * 100
-            : null
-          : totalCost > 0
-            ? (item.cost / totalCost) * 100
-            : null,
-    }));
+    });
+
+  const shares = computeOverflowSafeShares(
+    sorted.map((item) => (rankBy === "tokens" ? item.tokens : item.cost)),
+  );
+
+  return sorted.map((item, index) => ({
+    ...item,
+    share: shares[index] ?? null,
+  }));
 }
 
 export function getFavoriteModel(

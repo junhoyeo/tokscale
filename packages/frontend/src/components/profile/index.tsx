@@ -38,6 +38,9 @@ export type { TokenBreakdownProps } from "./TokenBreakdown";
 export { ProfileModels } from "./ProfileModels";
 export type { ProfileModelsProps } from "./ProfileModels";
 
+export { ModelIdentity } from "./ModelIdentity";
+export type { ModelIdentityProps } from "./ModelIdentity";
+
 export { ModelRankToggle } from "./ModelRankToggle";
 export type { ModelRankToggleProps } from "./ModelRankToggle";
 

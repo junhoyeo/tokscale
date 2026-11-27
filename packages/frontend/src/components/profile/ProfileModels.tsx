@@ -15,7 +15,7 @@ import {
   ListTable,
   NumericValue,
 } from "./listStyles";
-import { getModelColor } from "./modelColors";
+import { ModelIdentity } from "./ModelIdentity";
 import {
   DEFAULT_MODEL_RANK_BY,
   rankModelUsage,
@@ -53,32 +53,6 @@ const ModelsSummary = styled.p`
   font-variant-numeric: tabular-nums;
 `;
 
-const ModelIdentity = styled.span`
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 0.5rem;
-`;
-
-const ModelMarker = styled.span`
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-`;
-
-const ModelName = styled.span`
-  overflow: hidden;
-  color: var(--service-text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-
-  @media (max-width: 639px) {
-    overflow-wrap: anywhere;
-    white-space: normal;
-  }
-`;
-
 const ModelsFallback = styled(ListCard)`
   padding: 0.75rem;
 `;
@@ -96,7 +70,6 @@ const ModelTag = styled.li`
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 0.375rem;
   border: 1px solid var(--service-border);
   border-radius: 8px;
   padding: 0.35rem 0.5rem;
@@ -104,6 +77,10 @@ const ModelTag = styled.li`
   color: var(--service-text);
   font-size: 0.75rem;
   line-height: 1.2;
+`;
+
+const FallbackModelIdentity = styled(ModelIdentity)`
+  gap: 0.375rem;
 `;
 
 export function ProfileModels({
@@ -118,11 +95,10 @@ export function ProfileModels({
   );
   const effectiveRankBy = rankBy ?? uncontrolledRankBy;
   const handleRankByChange = (next: ModelRankBy) => {
-    if (onRankByChange) {
-      onRankByChange(next);
-    } else {
+    if (rankBy === undefined) {
       setUncontrolledRankBy(next);
     }
+    onRankByChange?.(next);
   };
 
   const rankedUsage = useMemo(
@@ -190,13 +166,7 @@ export function ProfileModels({
                 return (
                   <ListRow key={usage.model}>
                     <ListPrimaryCell scope="row">
-                      <ModelIdentity>
-                        <ModelMarker
-                          aria-hidden="true"
-                          style={{ backgroundColor: getModelColor(usage.model) }}
-                        />
-                        <ModelName>{usage.model}</ModelName>
-                      </ModelIdentity>
+                      <ModelIdentity model={usage.model} wrapOnMobile />
                     </ListPrimaryCell>
                     <ListCell data-label="Tokens" $align="right">
                       <NumericValue
@@ -239,11 +209,7 @@ export function ProfileModels({
       <ModelsFallbackList aria-label="Models used">
         {filteredModels.map((model) => (
           <ModelTag key={model}>
-            <ModelMarker
-              aria-hidden="true"
-              style={{ backgroundColor: getModelColor(model) }}
-            />
-            <ModelName>{model}</ModelName>
+            <FallbackModelIdentity model={model} wrapOnMobile />
           </ModelTag>
         ))}
       </ModelsFallbackList>

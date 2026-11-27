@@ -1,6 +1,10 @@
 "use client";
 
 import styled, { css } from "styled-components";
+import {
+  SegmentButton,
+  SegmentedGroup,
+} from "@/components/leaderboard/RankingUI";
 import type { ModelRankBy } from "./modelRanking";
 
 export interface ModelRankToggleProps {
@@ -30,29 +34,21 @@ const Label = styled.span`
   white-space: nowrap;
 `;
 
-const SegmentedGroup = styled.div`
-  display: inline-flex;
-  align-items: center;
+const CompactSegmentedGroup = styled(SegmentedGroup)`
+  gap: 0;
   padding: 0.125rem;
-  background: var(--service-surface-muted);
-  border: 1px solid var(--service-border);
-  border-radius: 0.5rem;
 `;
 
-const SegmentedButton = styled.button<{ $active: boolean }>`
-  position: relative;
+const CompactSegmentButton = styled(SegmentButton)`
   min-height: 1.75rem;
   padding: 0.25rem 0.625rem;
-  color: var(--service-text-muted);
-  background: transparent;
-  border: 0;
   border-radius: 0.375rem;
+  background: transparent;
+  color: var(--service-text-muted);
   font: inherit;
   font-size: 0.75rem;
   font-weight: 500;
   line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
   transition:
     color 140ms ease,
     background-color 140ms ease;
@@ -72,8 +68,13 @@ const SegmentedButton = styled.button<{ $active: boolean }>`
   }
 
   &:focus-visible {
-    outline: 2px solid var(--service-focus);
     outline-offset: 1px;
+  }
+
+  @media (max-width: 640px) {
+    min-height: 1.75rem;
+    padding: 0.25rem 0.625rem;
+    font-size: 0.75rem;
   }
 
   @media (pointer: coarse) {
@@ -95,11 +96,11 @@ export function ModelRankToggle({
   return (
     <Wrapper className={className}>
       {label && <Label aria-hidden="true">{label}</Label>}
-      <SegmentedGroup role="group" aria-label={ariaLabel}>
+      <CompactSegmentedGroup role="group" aria-label={ariaLabel}>
         {RANK_OPTIONS.map((option) => {
           const isActive = value === option.value;
           return (
-            <SegmentedButton
+            <CompactSegmentButton
               key={option.value}
               type="button"
               $active={isActive}
@@ -107,10 +108,10 @@ export function ModelRankToggle({
               onClick={() => onChange(option.value)}
             >
               {option.label}
-            </SegmentedButton>
+            </CompactSegmentButton>
           );
         })}
-      </SegmentedGroup>
+      </CompactSegmentedGroup>
     </Wrapper>
   );
 }

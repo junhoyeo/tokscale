@@ -8,6 +8,7 @@ import { PublicFooter } from "@/components/layout/PublicFooter";
 import {
   DEFAULT_MODEL_RANK_BY,
   MODEL_RANK_BY_STORAGE_KEY,
+  ModelIdentity,
   ModelRankToggle,
   createContributionRangeOptions,
   getContributionDayForDate,
@@ -34,7 +35,6 @@ import {
   type ProfileUser,
   type RankedModelUsage,
 } from "@/components/profile";
-import { getModelColor } from "@/components/profile/modelColors";
 import type { DailyContribution } from "@/lib/types";
 import { useSettings } from "@/lib/useSettings";
 import { resolveEffectiveTimeZone } from "@/lib/timezone";
@@ -572,15 +572,7 @@ function ProfileInsights({
           {favoriteModel ? (
             <>
               <InsightValue title={favoriteModel.model}>
-                <FavoriteModelValue>
-                  <FavoriteModelMarker
-                    aria-hidden="true"
-                    style={{
-                      backgroundColor: getModelColor(favoriteModel.model),
-                    }}
-                  />
-                  <FavoriteModelName>{favoriteModel.model}</FavoriteModelName>
-                </FavoriteModelValue>
+                <FavoriteModelIdentity model={favoriteModel.model} emphasize />
               </InsightValue>
               {favoriteMeta && (
                 <InsightMeta title={favoriteMeta.title}>
@@ -995,26 +987,8 @@ const InsightValue = styled.dd`
   }
 `;
 
-const FavoriteModelValue = styled.span`
-  display: flex;
-  min-width: 0;
-  align-items: center;
+const FavoriteModelIdentity = styled(ModelIdentity)`
   gap: 0.4375rem;
-`;
-
-const FavoriteModelMarker = styled.span`
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-`;
-
-const FavoriteModelName = styled.span`
-  overflow: hidden;
-  color: var(--service-text);
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 `;
 
 const InsightMeta = styled.dd`

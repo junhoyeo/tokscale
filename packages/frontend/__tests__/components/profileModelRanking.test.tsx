@@ -201,6 +201,48 @@ describe("modelRanking helpers", () => {
     expect(favoriteByTokens?.share).toBeCloseTo((5_000 / 5_500) * 100, 4);
   });
 
+  it("uses deterministic code-point ordering when metrics tie", () => {
+    const tiedUsage: ModelUsage[] = [
+      { model: "a-model", tokens: 1_000, cost: 10, percentage: 33.3 },
+      { model: "B-model", tokens: 1_000, cost: 10, percentage: 33.3 },
+      { model: "A-model", tokens: 1_000, cost: 10, percentage: 33.3 },
+    ];
+
+    expect(rankModelUsage(tiedUsage, "cost").map((item) => item.model)).toEqual([
+      "A-model",
+      "B-model",
+      "a-model",
+    ]);
+    expect(
+      rankModelUsage(tiedUsage, "tokens").map((item) => item.model),
+    ).toEqual(["A-model", "B-model", "a-model"]);
+  });
+
+  it("computes overflow-safe shares for extreme finite values without collapsing to 0%", () => {
+    const extremeUsage: ModelUsage[] = [
+      {
+        model: "huge-a",
+        tokens: Number.MAX_VALUE,
+        cost: Number.MAX_VALUE,
+        percentage: 0,
+      },
+      {
+        model: "huge-b",
+        tokens: Number.MAX_VALUE,
+        cost: Number.MAX_VALUE,
+        percentage: 0,
+      },
+    ];
+
+    const byTokens = rankModelUsage(extremeUsage, "tokens");
+    expect(byTokens[0].share).toBeCloseTo(50, 4);
+    expect(byTokens[1].share).toBeCloseTo(50, 4);
+
+    const byCost = rankModelUsage(extremeUsage, "cost");
+    expect(byCost[0].share).toBeCloseTo(50, 4);
+    expect(byCost[1].share).toBeCloseTo(50, 4);
+  });
+
   it("returns null favorite when no non-synthetic usage exists", () => {
     expect(
       getFavoriteModel(
@@ -256,6 +298,27 @@ describe("ProfileModels ranking toggle", () => {
     ).toBe("none");
     expect(within(table).getByText("48.4%")).toBeTruthy();
     expect(within(table).getByText("38.7%")).toBeTruthy();
+  });
+
+  it("updates uncontrolled state and notifies onRankByChange when rankBy prop is omitted", () => {
+    const onRankByChange = vi.fn();
+    render(
+      <ProfileModels
+        models={["claude-opus-5-5", "glm-5-3", "swe-2-high"]}
+        modelUsage={SAMPLE_USAGE}
+        onRankByChange={onRankByChange}
+      />,
+    );
+
+    const table = screen.getByRole("table");
+    const toggleGroup = screen.getByRole("group", { name: "Rank models by" });
+    fireEvent.click(within(toggleGroup).getByRole("button", { name: "Tokens" }));
+
+    expect(onRankByChange).toHaveBeenCalledWith("tokens");
+    const firstRowModel = within(
+      within(table).getAllByRole("row")[1],
+    ).getByRole("rowheader").textContent;
+    expect(firstRowModel).toBe("glm-5-3");
   });
 });
 
