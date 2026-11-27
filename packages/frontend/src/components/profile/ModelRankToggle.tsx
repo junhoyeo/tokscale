@@ -60,6 +60,11 @@ const CompactSegmentButton = styled(SegmentButton)`
       background: var(--service-accent-soft);
     `}
 
+  &:hover {
+    color: ${(props) =>
+      props.$active ? "var(--service-accent)" : "var(--service-text-muted)"};
+  }
+
   @media (hover: hover) {
     &:hover {
       color: ${(props) =>
