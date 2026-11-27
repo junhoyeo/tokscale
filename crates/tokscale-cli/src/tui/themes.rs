@@ -116,6 +116,7 @@ pub enum ThemeName {
     Gruvbox,
     GruvboxMaterial,
     OneDark,
+    Terminal,
 }
 
 impl ThemeName {
@@ -139,6 +140,7 @@ impl ThemeName {
             ThemeName::Gruvbox,
             ThemeName::GruvboxMaterial,
             ThemeName::OneDark,
+            ThemeName::Terminal,
         ]
     }
 
@@ -168,6 +170,7 @@ impl ThemeName {
             ThemeName::Gruvbox => "gruvbox",
             ThemeName::GruvboxMaterial => "gruvbox-material",
             ThemeName::OneDark => "one-dark",
+            ThemeName::Terminal => "terminal",
         }
     }
 }
@@ -195,6 +198,7 @@ impl std::str::FromStr for ThemeName {
             "gruvbox" => Ok(ThemeName::Gruvbox),
             "gruvbox-material" => Ok(ThemeName::GruvboxMaterial),
             "one-dark" => Ok(ThemeName::OneDark),
+            "terminal" => Ok(ThemeName::Terminal),
             _ => Err(()),
         }
     }
@@ -210,7 +214,7 @@ pub struct Theme {
     pub highlight: Color,
     pub muted: Color,
     pub accent: Color,
-    pub selection: Color,
+    selection: Color,
     striped_row: Color,
     current_row: Color,
     light: bool,
@@ -226,6 +230,10 @@ impl Theme {
         name: ThemeName,
         color_mode: TerminalColorMode,
     ) -> Self {
+        Self::from_palette(name, color_mode, false)
+    }
+
+    fn from_palette(name: ThemeName, color_mode: TerminalColorMode, light: bool) -> Self {
         let colors = match name {
             // Colors match frontend contribution graph palettes (higher grade = darker = more activity)
             ThemeName::Green => [
@@ -249,7 +257,7 @@ impl Theme {
                 Color::Rgb(13, 158, 158),  // grade3: #0d9e9e
                 Color::Rgb(14, 109, 109),  // grade4: #0e6d6d
             ],
-            ThemeName::Blue => [
+            ThemeName::Blue | ThemeName::Terminal => [
                 Color::Rgb(22, 27, 34),    // grade0: empty
                 Color::Rgb(121, 184, 255), // grade1: #79b8ff
                 Color::Rgb(56, 139, 253),  // grade2: #388bfd
@@ -485,7 +493,19 @@ impl Theme {
             theme.current_row = Color::DarkGray;
         }
 
+        if light {
+            theme.apply_light();
+        }
+        if theme.uses_terminal_background() {
+            theme.background = Color::Reset;
+            theme.foreground = Color::Reset;
+        }
+
         theme
+    }
+
+    pub(crate) fn uses_terminal_background(&self) -> bool {
+        self.name == ThemeName::Terminal
     }
 
     pub(crate) fn is_light(&self) -> bool {
@@ -560,7 +580,7 @@ impl Theme {
     }
 
     pub(crate) fn striped_row_style(&self) -> Style {
-        if self.color_mode == TerminalColorMode::Compatible {
+        if self.uses_terminal_background() || self.color_mode == TerminalColorMode::Compatible {
             Style::default()
         } else {
             Style::default().bg(self.striped_row)
@@ -568,10 +588,29 @@ impl Theme {
     }
 
     pub(crate) fn current_row_style(&self) -> Style {
+        if self.uses_terminal_background() {
+            return Style::default();
+        }
         if self.color_mode == TerminalColorMode::Compatible {
             Style::default().bg(self.selection)
         } else {
             Style::default().bg(self.current_row)
+        }
+    }
+
+    pub(crate) fn selection_style(&self) -> Style {
+        if self.uses_terminal_background() {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().bg(self.selection)
+        }
+    }
+
+    pub(crate) fn accent_control_style(&self) -> Style {
+        if self.uses_terminal_background() {
+            Style::default().fg(self.accent)
+        } else {
+            Style::default().fg(self.background).bg(self.accent)
         }
     }
 
@@ -605,7 +644,23 @@ impl Theme {
         Style::default().fg(self.count_color())
     }
 
+    /// Background fill for a contribution cell. The terminal theme leaves the
+    /// empty grade unfilled so the terminal background shows through; its glyph
+    /// keeps the palette color.
+    pub(crate) fn graph_cell_background(&self, color: Color) -> Color {
+        if self.uses_terminal_background() && color == self.colors[0] {
+            Color::Reset
+        } else {
+            color
+        }
+    }
+
     pub(crate) fn graph_cell_selected_style(&self, bg: Color) -> Style {
+        // With no fill to highlight, reverse the terminal's own colors so the
+        // cursor stays visible.
+        if self.graph_cell_background(bg) == Color::Reset {
+            return Style::default().add_modifier(Modifier::REVERSED);
+        }
         let fg = match bg {
             Color::Black | Color::DarkGray | Color::Blue => Color::White,
             Color::White | Color::Gray | Color::Cyan => {
@@ -633,19 +688,17 @@ impl Theme {
         Style::default().fg(fg).bg(bg)
     }
 
-    /// Build a light-background variant of `name` for the current terminal.
+    /// Build a variant of `name` for a light terminal.
     pub(crate) fn from_name_for_current_terminal_light(name: ThemeName) -> Self {
         Self::from_name_with_color_mode_light(name, TerminalColorMode::from_env(std::env::vars()))
     }
 
-    /// Build a light-background variant of `name` for an explicit color mode.
+    /// Build a variant of `name` for a light terminal with an explicit color mode.
     pub(crate) fn from_name_with_color_mode_light(
         name: ThemeName,
         color_mode: TerminalColorMode,
     ) -> Self {
-        let mut theme = Self::from_name_with_color_mode(name, color_mode);
-        theme.apply_light();
-        theme
+        Self::from_palette(name, color_mode, true)
     }
 
     /// Invert the dark surface to a light one (white background, dark text)
@@ -1004,6 +1057,49 @@ mod tests {
         assert_eq!(
             light.metric_cache_read_style().fg,
             Some(Color::Rgb(9, 105, 218))
+        );
+    }
+
+    #[test]
+    fn terminal_theme_leaves_the_dark_background_to_the_terminal() {
+        let theme =
+            Theme::from_name_with_color_mode(ThemeName::Terminal, TerminalColorMode::FullColor);
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.foreground, Color::Reset);
+        assert_eq!(theme.striped_row_style(), Style::default());
+    }
+
+    #[test]
+    fn terminal_theme_light_mode_keeps_the_terminal_background() {
+        let theme = Theme::from_name_with_color_mode_light(
+            ThemeName::Terminal,
+            TerminalColorMode::FullColor,
+        );
+        assert!(theme.is_light());
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.foreground, Color::Reset);
+    }
+
+    #[test]
+    fn terminal_theme_keeps_an_empty_selected_graph_cell_visible() {
+        let theme =
+            Theme::from_name_with_color_mode(ThemeName::Terminal, TerminalColorMode::FullColor);
+        let style = theme.graph_cell_selected_style(Color::Rgb(22, 27, 34));
+        assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn terminal_theme_leaves_empty_graph_cells_unfilled_but_keeps_their_glyph_color() {
+        let theme =
+            Theme::from_name_with_color_mode(ThemeName::Terminal, TerminalColorMode::FullColor);
+        assert_eq!(theme.colors[0], Color::Rgb(22, 27, 34));
+        assert_eq!(
+            theme.graph_cell_background(Color::Rgb(22, 27, 34)),
+            Color::Reset
+        );
+        assert_eq!(
+            theme.graph_cell_background(Color::Rgb(121, 184, 255)),
+            Color::Rgb(121, 184, 255)
         );
     }
 

@@ -132,8 +132,13 @@ impl ConfirmDialog {
     }
 
     fn confirm_button_style(&self, theme: &Theme) -> Style {
+        if theme.uses_terminal_background() {
+            return Style::default()
+                .fg(self.tone_color(theme))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        }
         match self.tone {
-            ConfirmTone::Accent => Style::default().fg(theme.background).bg(theme.accent),
+            ConfirmTone::Accent => theme.accent_control_style(),
             ConfirmTone::Warning => Style::default().fg(Color::Black).bg(Color::Yellow),
             ConfirmTone::Danger => Style::default().fg(Color::Black).bg(Color::Red),
         }

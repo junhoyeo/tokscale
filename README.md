@@ -317,12 +317,13 @@ The interactive TUI mode provides:
   - `b`: Toggle subagent session roll-up into parent sessions (Sessions tab)
   - `y`: Copy selected row to clipboard
   - `p`: Cycle through color themes
-  - `L`: Toggle light mode (white background). Until toggled, the TUI follows the terminal background reported by `COLORFGBG`
+  - `L`: Toggle light mode (white background; the `terminal` theme keeps your terminal background). Until toggled, the TUI follows the terminal background reported by `COLORFGBG`
   - `r`: Refresh data; `Shift+R` toggles auto-refresh; `+`/`-` adjusts interval
   - `e`: Export to JSON
   - `q` or `Ctrl+C`: Quit
 - **Mouse Support**: Click tabs, buttons, and filters
-- **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk
+- **Themes**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk, Terminal
+- **Terminal background**: The `terminal` theme (select with `p`, or launch with `tokscale --theme terminal`) draws no background fill for panels, dialogs, empty chart cells, or selection, so your terminal's background and transparency show through. Chart colors are kept. Selection uses bold and underline instead of a fill.
 - **Settings Persistence**: Preferences saved to `~/.config/tokscale/settings.json` (see [Configuration](#configuration))
 
 ### Group-By Strategies
@@ -1016,7 +1017,7 @@ Tokscale stores settings in `settings.json` in its config directory. By default 
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUI color theme (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark) |
+| `colorPalette` | string | `"blue"` | TUI color theme (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark, terminal) |
 | `glyphs` | `"auto"` \| `"unicode"` \| `"ascii"` | `"auto"` | TUI glyph policy. `auto` probes the terminal's ambiguous-character width at startup; use `unicode` or `ascii` to override detection for terminals that do not answer the probe correctly. Invalid values safely fall back to `auto`. |
 | `includeUnusedModels` | boolean | `false` | Show models with zero tokens in reports |
 | `autoRefreshEnabled` | boolean | `false` | Enable auto-refresh in TUI |

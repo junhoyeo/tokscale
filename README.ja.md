@@ -317,12 +317,13 @@ tokscale models --json > report.json   # ファイルに保存
   - `b`: サブエージェントセッションの親セッションへのロールアップ表示を切り替え（Sessions タブ）
   - `y`: 選択行をクリップボードにコピー
   - `p`: カラーテーマを循環
-  - `L`: ライトモード（白背景）を切り替え
+  - `L`: ライトモード（白背景）を切り替え（`terminal` テーマは端末の背景を維持）
   - `r`: データを更新; `Shift+R` で自動更新の切り替え; `+`/`-` で間隔調整
   - `e`: JSONにエクスポート
   - `q` または `Ctrl+C`: 終了
 - **マウスサポート**: タブ、ボタン、フィルターをクリック
-- **テーマ**: Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu、Graphite、Lagoon、Dusk
+- **テーマ**: Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu、Graphite、Lagoon、Dusk、Terminal
+- **ターミナル背景**: `terminal` テーマ（`p` で選択、または `--theme terminal`）は、パネル、ダイアログ、空のチャートセル、選択行に背景を塗りません。そのため端末の背景と透過がそのまま見えます。チャートの色は維持されます。選択行は背景色ではなく太字と下線で示されます。
 - **設定の永続化**: 設定は`~/.config/tokscale/settings.json`に保存（[設定](#設定)を参照）
 
 ### グループ基準戦略
@@ -997,7 +998,7 @@ Tokscaleは設定ディレクトリの`settings.json`に設定を保存します
 
 | 設定 | タイプ | デフォルト | 説明 |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUIカラーテーマ（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk、tokyo-night、catppuccin、solarized、gruvbox、gruvbox-material、one-dark） |
+| `colorPalette` | string | `"blue"` | TUIカラーテーマ（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk、tokyo-night、catppuccin、solarized、gruvbox、gruvbox-material、one-dark、terminal） |
 | `includeUnusedModels` | boolean | `false` | レポートでゼロトークンのモデルを表示 |
 | `autoRefreshEnabled` | boolean | `false` | TUIの自動更新を有効化 |
 | `autoRefreshMs` | number | `60000` | 自動更新間隔（30000-3600000ms） |

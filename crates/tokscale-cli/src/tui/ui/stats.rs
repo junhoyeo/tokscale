@@ -70,7 +70,10 @@ fn contribution_cell(app: &App, color: Color, selected: bool, empty: bool) -> (S
                     app.theme.subtle_text_style(),
                 )
             } else {
-                (app.glyphs.heat_cell.to_string(), Style::default().bg(color))
+                (
+                    app.glyphs.heat_cell.to_string(),
+                    Style::default().bg(app.theme.graph_cell_background(color)),
+                )
             }
         }
     }

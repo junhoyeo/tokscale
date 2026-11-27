@@ -656,6 +656,17 @@ fn button_label(label: &str) -> String {
 }
 
 fn button_style(app: &App, kind: ButtonKind, selected: bool) -> Style {
+    if app.theme.uses_terminal_background() {
+        let color = match kind {
+            ButtonKind::Primary | ButtonKind::Secondary => app.theme.accent,
+            ButtonKind::Warning => Color::Yellow,
+            ButtonKind::Danger => Color::Red,
+            ButtonKind::Disabled => return Style::default().fg(app.theme.muted),
+        };
+        return Style::default()
+            .fg(color)
+            .add_modifier(Modifier::UNDERLINED);
+    }
     if selected {
         return Style::default()
             .fg(Color::White)
@@ -664,9 +675,9 @@ fn button_style(app: &App, kind: ButtonKind, selected: bool) -> Style {
     }
 
     match kind {
-        ButtonKind::Primary => Style::default()
-            .fg(app.theme.background)
-            .bg(app.theme.accent)
+        ButtonKind::Primary => app
+            .theme
+            .accent_control_style()
             .add_modifier(Modifier::BOLD),
         ButtonKind::Secondary => Style::default().fg(app.theme.accent).bg(app.theme.border),
         ButtonKind::Warning => Style::default().fg(Color::Black).bg(Color::Yellow),
@@ -2363,7 +2374,7 @@ fn render_accounts_table(frame: &mut Frame, app: &mut App, area: Rect, outputs: 
         .header(account_table_header(app))
         .column_spacing(1)
         .highlight_spacing(HighlightSpacing::Never)
-        .row_highlight_style(Style::default().bg(app.theme.selection))
+        .row_highlight_style(app.theme.selection_style())
         .flex(Flex::Start);
     frame.render_stateful_widget(table, inner, &mut table_state);
 
@@ -2407,7 +2418,7 @@ fn render_narrow_accounts_table(
     let table = Table::new(rows, [Constraint::Percentage(100)])
         .header(Row::new([Cell::from(narrow_table_header(app, area.width))]))
         .highlight_spacing(HighlightSpacing::Never)
-        .row_highlight_style(Style::default().bg(app.theme.selection))
+        .row_highlight_style(app.theme.selection_style())
         .flex(Flex::Start);
     frame.render_stateful_widget(table, area, &mut table_state);
 
@@ -2480,7 +2491,7 @@ fn account_table_widths(width: u16) -> [Constraint; 8] {
 
 fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rect) -> Row<'static> {
     let separator = app.glyphs.compact_separator;
-    let selected = app.selected_index == index;
+    let selected = app.selected_index == index && !app.theme.uses_terminal_background();
     let width = area.width as usize;
     let row = usage_row_view(app, output);
     let lang = app.settings.tui_language;

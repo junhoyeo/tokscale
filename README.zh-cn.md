@@ -314,12 +314,13 @@ tokscale models --json > report.json   # 保存到文件
   - `b`：切换将子代理会话汇总到父会话显示（Sessions 标签）
   - `y`：复制选中行到剪贴板
   - `p`：循环颜色主题
-  - `L`：切换浅色模式（白色背景）
+  - `L`：切换浅色模式（白色背景；`terminal` 主题保留终端背景）
   - `r`：刷新数据；`Shift+R` 切换自动刷新；`+`/`-` 调整间隔
   - `e`：导出为 JSON
   - `q` 或 `Ctrl+C`：退出
 - **鼠标支持**：点击标签、按钮和筛选器
-- **主题**：Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu、Graphite、Lagoon、Dusk
+- **主题**：Green、Halloween、Teal、Blue、Pink、Purple、Orange、Monochrome、YlGnBu、Graphite、Lagoon、Dusk、Terminal
+- **终端背景**：`terminal` 主题（用 `p` 选择，或使用 `--theme terminal`）不会为面板、对话框、空的图表单元格或选中项绘制背景填充，因此终端背景和透明效果会直接显示。图表颜色保持不变。选中行改用粗体和下划线，而不是背景色。
 - **设置持久化**：偏好设置保存到 `~/.config/tokscale/settings.json`（参见[配置](#配置)）
 
 ### 分组策略
@@ -996,7 +997,7 @@ Tokscale 将设置存储在配置目录下的 `settings.json` 中。默认位置
 
 | 设置 | 类型 | 默认值 | 描述 |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUI 颜色主题（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk、tokyo-night、catppuccin、solarized、gruvbox、gruvbox-material、one-dark） |
+| `colorPalette` | string | `"blue"` | TUI 颜色主题（green、halloween、teal、blue、pink、purple、orange、monochrome、ylgnbu、graphite、lagoon、dusk、tokyo-night、catppuccin、solarized、gruvbox、gruvbox-material、one-dark、terminal） |
 | `includeUnusedModels` | boolean | `false` | 在报告中显示零 Token 的模型 |
 | `autoRefreshEnabled` | boolean | `false` | 在 TUI 中启用自动刷新 |
 | `autoRefreshMs` | number | `60000` | 自动刷新间隔（30000-3600000ms） |

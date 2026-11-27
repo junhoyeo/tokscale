@@ -313,12 +313,13 @@ tokscale models --json > report.json   # 파일로 저장
   - `b`: 서브에이전트 세션을 부모 세션에 롤업 표시 전환 (Sessions 탭)
   - `y`: 선택된 행을 클립보드에 복사
   - `p`: 색상 테마 순환
-  - `L`: 라이트 모드 (흰색 배경) 토글
+  - `L`: 라이트 모드 (흰색 배경) 토글 (`terminal` 테마는 터미널 배경 유지)
   - `r`: 데이터 새로고침; `Shift+R`로 자동 새로고침 토글; `+`/`-`로 간격 조정
   - `e`: JSON으로 내보내기
   - `q` 또는 `Ctrl+C`: 종료
 - **마우스 지원**: 탭, 버튼, 필터 클릭
-- **테마**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk
+- **테마**: Green, Halloween, Teal, Blue, Pink, Purple, Orange, Monochrome, YlGnBu, Graphite, Lagoon, Dusk, Terminal
+- **터미널 배경**: `terminal` 테마(`p`로 선택하거나 `--theme terminal`)는 패널, 다이얼로그, 빈 차트 셀, 선택 항목에 배경을 채우지 않아 터미널 배경과 투명도가 그대로 보입니다. 차트 색상은 유지됩니다. 선택 항목은 배경색 대신 굵은 글씨와 밑줄로 표시됩니다.
 - **설정 저장**: 설정이 `~/.config/tokscale/settings.json`에 저장됨 ([설정](#설정) 참조)
 
 ### 그룹 기준 전략
@@ -994,7 +995,7 @@ Tokscale은 설정 디렉터리의 `settings.json`에 설정을 저장합니다.
 
 | 설정 | 타입 | 기본값 | 설명 |
 |---------|------|---------|-------------|
-| `colorPalette` | string | `"blue"` | TUI 색상 테마 (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark) |
+| `colorPalette` | string | `"blue"` | TUI 색상 테마 (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark, terminal) |
 | `includeUnusedModels` | boolean | `false` | 리포트에서 제로 토큰 모델 표시 |
 | `autoRefreshEnabled` | boolean | `false` | TUI 자동 새로고침 활성화 |
 | `autoRefreshMs` | number | `60000` | 자동 새로고침 간격 (30000-3600000ms) |

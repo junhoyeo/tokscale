@@ -280,7 +280,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let group_by = app.group_by.borrow().clone();
     let theme_accent = app.theme.accent;
     let theme_muted = app.theme.muted;
-    let theme_selection = app.theme.selection;
+    let selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
@@ -475,7 +475,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let row_style = if is_selected {
-                Style::default().bg(theme_selection)
+                selection_style
             } else if is_striped {
                 striped_row_style
             } else {
@@ -490,7 +490,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(selection_style);
 
     frame.render_widget(table, inner);
 
