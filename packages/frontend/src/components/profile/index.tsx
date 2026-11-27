@@ -5,6 +5,7 @@ export {
   formatJoined,
   formatLastUpdated,
   getProfileRankLabel,
+  getProfileSubmissionMetric,
 } from "./ProfileOverview";
 export type { ProfileOverviewProps } from "./ProfileOverview";
 

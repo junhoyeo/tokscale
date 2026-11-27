@@ -262,7 +262,47 @@ export const submissionsRelations = relations(submissions, ({ one, many }) => ({
     references: [users.id],
   }),
   dailyBreakdown: many(dailyBreakdown),
+  dailyCounts: many(submissionDailyCounts),
 }));
+
+// ============================================================================
+// SUBMISSION DAILY COUNTS
+// ============================================================================
+/**
+ * Per-UTC-day count of accepted `POST /api/submit` calls for a user's
+ * submission row. `submissions.submit_count` only tracks the lifetime total,
+ * so this table enables period-scoped submission counts (e.g. `this-month`,
+ * `last-month`, `30d`, `7d`) going forward.
+ *
+ * Rows cascade-delete when the parent `submissions` row is deleted (account
+ * deletion or "delete submitted data").
+ */
+export const submissionDailyCounts = pgTable(
+  "submission_daily_counts",
+  {
+    submissionId: uuid("submission_id")
+      .notNull()
+      .references(() => submissions.id, { onDelete: "cascade" }),
+    /** UTC calendar day (`YYYY-MM-DD`) the submit request was accepted on. */
+    date: date("date").notNull(),
+    /** Number of accepted submissions recorded on this UTC day. */
+    submitCount: integer("submit_count").notNull().default(1),
+  },
+  (table) => [
+    primaryKey({ columns: [table.submissionId, table.date] }),
+    check("submission_daily_counts_positive", sql`${table.submitCount} > 0`),
+  ]
+);
+
+export const submissionDailyCountsRelations = relations(
+  submissionDailyCounts,
+  ({ one }) => ({
+    submission: one(submissions, {
+      fields: [submissionDailyCounts.submissionId],
+      references: [submissions.id],
+    }),
+  })
+);
 
 // ============================================================================
 // SUBMITTED DEVICES
@@ -882,6 +922,8 @@ export type DeviceCode = typeof deviceCodes.$inferSelect;
 export type NewDeviceCode = typeof deviceCodes.$inferInsert;
 export type Submission = typeof submissions.$inferSelect;
 export type NewSubmission = typeof submissions.$inferInsert;
+export type SubmissionDailyCount = typeof submissionDailyCounts.$inferSelect;
+export type NewSubmissionDailyCount = typeof submissionDailyCounts.$inferInsert;
 export type SubmittedDevice = typeof submittedDevices.$inferSelect;
 export type NewSubmittedDevice = typeof submittedDevices.$inferInsert;
 export type DailyBreakdown = typeof dailyBreakdown.$inferSelect;

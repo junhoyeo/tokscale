@@ -200,12 +200,22 @@ function isDailyBreakdownReportedSql(node: unknown): boolean {
   );
 }
 
+function isSubmissionDailyCountsSql(node: unknown): boolean {
+  return flattenSqlChunks(node).some(
+    (chunk) =>
+      typeof chunk === "string" && chunk.includes("submission_daily_counts")
+  );
+}
+
 function dailyBreakdownExecuteArgs(tx: {
   execute: { mock: { calls: unknown[][] } };
 }): unknown[] {
   return tx.execute.mock.calls
     .map((call) => call[0])
-    .filter((arg) => !isDailyBreakdownReportedSql(arg));
+    .filter(
+      (arg) =>
+        !isDailyBreakdownReportedSql(arg) && !isSubmissionDailyCountsSql(arg)
+    );
 }
 
 function dailyBreakdownReportedExecuteArgs(tx: {

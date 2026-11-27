@@ -36,6 +36,49 @@ export function getProfileRankLabel(
   return "All-time rank";
 }
 
+export function getProfileSubmissionMetric(
+  period: NonNullable<ProfileOverviewProps["period"]>,
+  stats: Pick<
+    ProfileStatsData,
+    "submissionCount" | "periodSubmissionCount" | "submissionTrackingStartDate"
+  >,
+): { label: string; value: string; title: string } {
+  const allTimeCount = stats.submissionCount ?? 0;
+  const allTimeFormatted = allTimeCount.toLocaleString("en-US");
+
+  if (period === "all") {
+    return {
+      label: "All submissions",
+      value: allTimeFormatted,
+      title: allTimeFormatted,
+    };
+  }
+
+  if (typeof stats.periodSubmissionCount === "number") {
+    const periodLabel =
+      period === "month"
+        ? "30d"
+        : period === "week"
+          ? "7d"
+          : PROFILE_PERIOD_LABELS[period];
+    const value = stats.periodSubmissionCount.toLocaleString("en-US");
+    const trackingSuffix = stats.submissionTrackingStartDate
+      ? ` (daily tracking since ${stats.submissionTrackingStartDate})`
+      : "";
+    return {
+      label: `${periodLabel} submissions`,
+      value,
+      title: `${value} (${periodLabel} UTC) · All-time: ${allTimeFormatted}${trackingSuffix}`,
+    };
+  }
+
+  return {
+    label: "All submissions",
+    value: allTimeFormatted,
+    title: `${allTimeFormatted} all-time submissions (per-period counts are tracked for new submissions going forward)`,
+  };
+}
+
 const OverviewPanel = styled.section`
   overflow: hidden;
   border: 1px solid var(--service-border);
@@ -257,7 +300,7 @@ const Metrics = styled.dl`
   text-align: left;
 
   @container (min-width: 40rem) {
-    grid-template-columns: repeat(4, 9.25rem);
+    grid-template-columns: repeat(4, minmax(9.25rem, max-content));
     justify-content: start;
   }
 `;
@@ -423,11 +466,7 @@ export function ProfileOverview({
       value: stats.activeDays.toLocaleString("en-US"),
       title: stats.activeDays.toLocaleString("en-US"),
     },
-    {
-      label: "All submissions",
-      value: (stats.submissionCount ?? 0).toLocaleString("en-US"),
-      title: (stats.submissionCount ?? 0).toLocaleString("en-US"),
-    },
+    getProfileSubmissionMetric(period, stats),
   ];
 
   return (

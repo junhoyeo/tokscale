@@ -10,6 +10,7 @@ import {
   usernameEqualsIgnoreCase,
 } from "@/lib/db/usernameLookup";
 import { buildSubmissionFreshness } from "@/lib/submissionFreshness";
+import { getPeriodSubmissionStats } from "@/lib/db/submissionDailyCounts";
 import { calculateIntensity } from "@/lib/utils";
 import { PROFILE_PERIODS, getProfileDateRange, type ProfilePeriod } from "@/lib/reportingPeriods";
 
@@ -191,6 +192,7 @@ export async function getPublicProfileResponse(
 
         db
           .select({
+            id: submissions.id,
             sourcesUsed: submissions.sourcesUsed,
             modelsUsed: submissions.modelsUsed,
             updatedAt: submissions.updatedAt,
@@ -271,49 +273,58 @@ export async function getPublicProfileResponse(
       dailyData.some(
         (day) => day.date >= rankingRange.start && day.date <= rankingRange.end,
       );
-    const scopedRankResult = rankingRange
-      ? hasPeriodRows
-        ? await unstable_cache(
-            () =>
-              db.execute<{ rank: number }>(sql`
-                WITH user_totals AS (
-                  SELECT
-                    s.user_id,
-                    u.username,
-                    SUM(d.tokens) as total_tokens,
-                    SUM(CAST(d.cost AS DECIMAL(18,4))) as total_cost
-                  FROM daily_breakdown d
-                  INNER JOIN submissions s ON d.submission_id = s.id
-                  INNER JOIN users u ON u.id = s.user_id
-                  WHERE u.leaderboard_hidden = false
-                    AND d.date >= ${rankingRange.start}
-                    AND d.date <= ${rankingRange.end}
-                  GROUP BY s.user_id, u.username
-                ),
-                ranked AS (
-                  SELECT
-                    user_id,
-                    ROW_NUMBER() OVER (ORDER BY total_tokens DESC, total_cost DESC, LOWER(username) ASC, user_id ASC) as rank
-                  FROM user_totals
-                )
-                SELECT rank FROM ranked WHERE user_id = ${user.id}
-              `),
-            [
-              "profile-period-rank",
-              user.id,
-              rankingRange.start,
-              rankingRange.end,
-            ],
-            {
-              revalidate: 60,
-              tags: [
-                "leaderboard",
-                `user:${normalizeUsernameCacheKey(user.username)}`,
+    const [scopedRankResult, periodSubmissionStats] = await Promise.all([
+      rankingRange
+        ? hasPeriodRows
+          ? unstable_cache(
+              () =>
+                db.execute<{ rank: number }>(sql`
+                  WITH user_totals AS (
+                    SELECT
+                      s.user_id,
+                      u.username,
+                      SUM(d.tokens) as total_tokens,
+                      SUM(CAST(d.cost AS DECIMAL(18,4))) as total_cost
+                    FROM daily_breakdown d
+                    INNER JOIN submissions s ON d.submission_id = s.id
+                    INNER JOIN users u ON u.id = s.user_id
+                    WHERE u.leaderboard_hidden = false
+                      AND d.date >= ${rankingRange.start}
+                      AND d.date <= ${rankingRange.end}
+                    GROUP BY s.user_id, u.username
+                  ),
+                  ranked AS (
+                    SELECT
+                      user_id,
+                      ROW_NUMBER() OVER (ORDER BY total_tokens DESC, total_cost DESC, LOWER(username) ASC, user_id ASC) as rank
+                    FROM user_totals
+                  )
+                  SELECT rank FROM ranked WHERE user_id = ${user.id}
+                `),
+              [
+                "profile-period-rank",
+                user.id,
+                rankingRange.start,
+                rankingRange.end,
               ],
-            },
-          )()
-        : []
-      : rankResult;
+              {
+                revalidate: 60,
+                tags: [
+                  "leaderboard",
+                  `user:${normalizeUsernameCacheKey(user.username)}`,
+                ],
+              },
+            )()
+          : Promise.resolve([])
+        : Promise.resolve(rankResult),
+      rankingRange && latestSubmission?.id
+        ? getPeriodSubmissionStats(
+            latestSubmission.id,
+            rankingRange.start,
+            rankingRange.end,
+          )
+        : Promise.resolve(null),
+    ]);
     const rank =
       Number(
         (scopedRankResult as unknown as { rank: number }[])[0]?.rank,
@@ -737,6 +748,13 @@ export async function getPublicProfileResponse(
           ? periodTotals.reasoningTokens
           : Number(stats?.reasoningTokens) || 0,
         submissionCount: Number(stats?.submissionCount) || 0,
+        ...(isPeriodFiltered && periodSubmissionStats !== null
+          ? {
+              periodSubmissionCount: periodSubmissionStats.count,
+              submissionTrackingStartDate:
+                periodSubmissionStats.trackingStartDate,
+            }
+          : {}),
         activeDays,
         // Session count is only stored at submission level, so hide it for rolling ranges.
         sessionCount: isPeriodFiltered ? 0 : Number(stats?.sessionCount) || 0,

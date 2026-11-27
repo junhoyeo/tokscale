@@ -8,6 +8,7 @@ import {
   formatJoined,
   formatLastUpdated,
   getProfileRankLabel,
+  getProfileSubmissionMetric,
 } from "../../src/components/profile";
 
 // A fixed instant, 2026-07-10 15:30:00 UTC.
@@ -110,5 +111,74 @@ describe("getProfileRankLabel", () => {
     expect(getProfileRankLabel("all")).toBe("All-time rank");
     expect(getProfileRankLabel("month")).toBe("30d rank (UTC)");
     expect(getProfileRankLabel("week")).toBe("7d rank (UTC)");
+  });
+});
+
+describe("getProfileSubmissionMetric", () => {
+  it("shows all-time submissions for the lifetime period", () => {
+    expect(
+      getProfileSubmissionMetric("all", {
+        submissionCount: 918,
+        periodSubmissionCount: 42,
+      }),
+    ).toEqual({
+      label: "All submissions",
+      value: "918",
+      title: "918",
+    });
+  });
+
+  it("shows period-scoped submissions when tracked counts are available", () => {
+    expect(
+      getProfileSubmissionMetric("last-month", {
+        submissionCount: 918,
+        periodSubmissionCount: 42,
+        submissionTrackingStartDate: "2026-10-01",
+      }),
+    ).toEqual({
+      label: "Last month submissions",
+      value: "42",
+      title: "42 (Last month UTC) · All-time: 918 (daily tracking since 2026-10-01)",
+    });
+
+    expect(
+      getProfileSubmissionMetric("this-month", {
+        submissionCount: 918,
+        periodSubmissionCount: 0,
+        submissionTrackingStartDate: "2026-10-01",
+      }),
+    ).toEqual({
+      label: "This month submissions",
+      value: "0",
+      title: "0 (This month UTC) · All-time: 918 (daily tracking since 2026-10-01)",
+    });
+
+    expect(
+      getProfileSubmissionMetric("month", {
+        submissionCount: 100,
+        periodSubmissionCount: 12,
+      }).label,
+    ).toBe("30d submissions");
+
+    expect(
+      getProfileSubmissionMetric("week", {
+        submissionCount: 100,
+        periodSubmissionCount: 3,
+      }).label,
+    ).toBe("7d submissions");
+  });
+
+  it("falls back to All submissions when a historical period predates daily tracking", () => {
+    expect(
+      getProfileSubmissionMetric("last-month", {
+        submissionCount: 918,
+        periodSubmissionCount: null,
+        submissionTrackingStartDate: "2026-11-27",
+      }),
+    ).toEqual({
+      label: "All submissions",
+      value: "918",
+      title: "918 all-time submissions (per-period counts are tracked for new submissions going forward)",
+    });
   });
 });

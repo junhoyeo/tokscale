@@ -26,6 +26,7 @@ const mockState = vi.hoisted(() => {
       createdAt: "users.createdAt",
     },
     submissions: {
+      id: "submissions.id",
       userId: "submissions.userId",
       totalTokens: "submissions.totalTokens",
       totalCost: "submissions.totalCost",
@@ -1593,5 +1594,71 @@ describe("GET /api/users/[username]", () => {
     expect(body.updatedAt).toBeNull();
     expect(body.clients).toEqual([]);
     expect(body.models).toEqual([]);
+  });
+
+  it("includes tracked periodSubmissionCount for finite periods when submission id is present", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-28T12:00:00.000Z"));
+
+    mockState.pushSelectResult([
+      {
+        id: "user-1",
+        username: "alice",
+        displayName: "Alice",
+        avatarUrl: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        totalTokens: 1000,
+        totalCost: 10,
+        inputTokens: 600,
+        outputTokens: 400,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        submissionCount: 918,
+        earliestDate: "2026-01-01",
+        latestDate: "2026-06-28",
+        sessionCount: 8,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        id: "sub-1",
+        sourcesUsed: ["codex"],
+        modelsUsed: ["gpt-5.5"],
+        updatedAt: new Date("2026-06-28T10:00:00.000Z"),
+        cliVersion: "4.23.1",
+        schemaVersion: 2,
+      },
+    ]);
+    mockState.pushSelectResult([
+      {
+        date: "2026-05-15",
+        timestampMs: 100,
+        tokens: 200,
+        cost: "2.0000",
+        inputTokens: 120,
+        outputTokens: 80,
+        sourceBreakdown: {},
+      },
+    ]);
+    mockState.pushExecuteResult([{ rank: 7 }]);
+    mockState.pushExecuteResult([
+      { period_count: 19, earliest_tracked_date: "2026-05-01" },
+    ]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/users/alice?period=last-month"),
+      { params: Promise.resolve({ username: "alice" }) },
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.stats.submissionCount).toBe(918);
+    expect(body.stats.periodSubmissionCount).toBe(19);
+    expect(body.stats.submissionTrackingStartDate).toBe("2026-05-01");
   });
 });
