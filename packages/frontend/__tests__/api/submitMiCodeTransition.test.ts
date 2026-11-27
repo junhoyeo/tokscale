@@ -45,6 +45,7 @@ type Reported = { deviceId: string; date: string; client: string; tokens: number
 type CensusWork = { id: string; submissionId: string; submittedDeviceId: string; buckets: DeviceClientBucketTotal[] };
 type CensusTotal = { deviceId: string; client: string; origin: string; width: string; key: string; tokens: number; cost: number; updatedAt: string };
 let reported: Map<string, Reported>;
+let dailyCounts: Map<string, number>;
 let work: Map<string, CensusWork>;
 let highwater: Map<string, CensusTotal>;
 let sqlFailures: string[];
@@ -164,6 +165,14 @@ async function executeSql(fragment: SQL): Promise<unknown[]> {
         knownDevice(deviceId);
         reported.set(JSON.stringify([deviceId, date, client]), { deviceId, date: date as string, client: client as string, tokens: tokens as number, cost: Number(cost), input: input as number, output: output as number, activeTimeMs: activeTimeMs as number | null, origin: origin as string, reportedAt: reportedAt as string });
       }
+    } else if (statement === "INSERT INTO submission_daily_counts (submission_id, date, submit_count) VALUES (?, ?, 1) ON CONFLICT (submission_id, date) DO UPDATE SET submit_count = submission_daily_counts.submit_count + 1") {
+      expect(params).toHaveLength(2); expect(transactionDepth).toBe(1);
+      const [submissionId, date] = params;
+      expect(submissionId).toBe("submission-one");
+      expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      const key = `${submissionId}:${date}`;
+      dailyCounts.set(key, (dailyCounts.get(key) ?? 0) + 1);
+      statementKinds.push("daily-count-upsert");
     } else if (statement === "INSERT INTO ratchet_census_work (submission_id, submitted_device_id, buckets) VALUES ( ?::uuid, ?::uuid, ?::jsonb )") {
       expect(params).toHaveLength(3); expect(transactionDepth).toBe(1);
       const [submissionId, submittedDeviceId, raw] = params;
@@ -221,13 +230,13 @@ async function executeSql(fragment: SQL): Promise<unknown[]> {
 }
 async function inTransaction<T>(callback: () => Promise<T>): Promise<T> {
   const previous = {
-    ...structuredClone({ days, devices, sequence, hasSubmission, reported, work, highwater, tokenLastUsedAt }),
+    ...structuredClone({ days, devices, sequence, hasSubmission, reported, dailyCounts, work, highwater, tokenLastUsedAt }),
     // Drizzle expressions are immutable SQL objects, not structured-cloneable.
     savedSubmission: { ...savedSubmission },
   };
   transactionDepth++;
   try { return await callback(); } catch (error) {
-    ({ days, devices, sequence, hasSubmission, reported, work, highwater, savedSubmission, tokenLastUsedAt } = previous);
+    ({ days, devices, sequence, hasSubmission, reported, dailyCounts, work, highwater, savedSubmission, tokenLastUsedAt } = previous);
     throw error;
   } finally { transactionDepth--; }
 }
@@ -326,7 +335,7 @@ function installStore() {
 }
 beforeEach(() => {
   days = []; devices = new Map(); sequence = 0; hasSubmission = true;
-  reported = new Map(); work = new Map(); highwater = new Map();
+  reported = new Map(); dailyCounts = new Map(); work = new Map(); highwater = new Map();
   sqlFailures = []; statementKinds = []; transactionDepth = 0;
   savedSubmission = {}; tokenLastUsedAt = undefined;
   vi.stubEnv(DEVICE_CLIENT_TOTALS_WRITE_FLAG, "false");

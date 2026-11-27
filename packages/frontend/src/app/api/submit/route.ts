@@ -65,6 +65,7 @@ import { getLeaderboardData } from "@/lib/leaderboard/getLeaderboard";
 import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 import { expireExploreCache } from "@/lib/explore/cache";
 import { advanceExploreCacheRevision } from "@/lib/explore/revision";
+import { recordDailySubmissionCount } from "@/lib/db/submissionDailyCounts";
 import { LEGACY_DEVICE_KEY } from "@/lib/devices/shared";
 import { createSafeRecord, ownValue } from "@/lib/safeRecord";
 
@@ -1803,6 +1804,8 @@ export async function POST(request: Request) {
           updatedAt: new Date(),
         })
         .where(eq(submissions.id, submissionId));
+
+      await recordDailySubmissionCount(tx, submissionId, submittedAt);
 
       // Only final ledger volume can change account state.
       const withholdingUsage = getWithholdingUsageTotals(allDays);

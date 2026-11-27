@@ -53,6 +53,8 @@ export interface ProfileData {
     cacheWriteTokens: number;
     reasoningTokens?: number;
     submissionCount: number;
+    periodSubmissionCount?: number | null;
+    submissionTrackingStartDate?: string | null;
     activeDays: number;
     sessionCount: number;
   };
@@ -255,6 +257,8 @@ export default function ProfilePageClient({
       reasoningTokens: data.stats.reasoningTokens ?? 0,
       activeDays: data.stats.activeDays,
       submissionCount: data.stats.submissionCount,
+      periodSubmissionCount: data.stats.periodSubmissionCount,
+      submissionTrackingStartDate: data.stats.submissionTrackingStartDate,
       sessionCount: data.stats.sessionCount,
     }),
     [data.stats],

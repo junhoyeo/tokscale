@@ -196,6 +196,7 @@ try {
         'group_members',
         'groups',
         'sessions',
+        'submission_daily_counts',
         'submissions',
         'submitted_devices',
         'users'
@@ -210,6 +211,7 @@ try {
     "group_members",
     "groups",
     "sessions",
+    "submission_daily_counts",
     "submissions",
     "submitted_devices",
     "users",
@@ -368,6 +370,31 @@ try {
       )
       VALUES (${submission.id}, ${device.id}, '2026-05-25', 42, 0.4200, 20, 22)
     `;
+    await sql`
+      INSERT INTO "submission_daily_counts" ("submission_id", "date", "submit_count")
+      VALUES (${submission.id}, '2026-05-25', 1)
+      ON CONFLICT ("submission_id", "date")
+      DO UPDATE SET "submit_count" = "submission_daily_counts"."submit_count" + 1
+    `;
+    await sql`SAVEPOINT invalid_submission_daily_count`;
+    let rejectedNonPositiveCount = false;
+    try {
+      await sql`
+        INSERT INTO "submission_daily_counts" ("submission_id", "date", "submit_count")
+        VALUES (${submission.id}, '2026-05-26', 0)
+      `;
+    } catch (err) {
+      const failure = err as { code?: string; constraint_name?: string };
+      rejectedNonPositiveCount =
+        failure.code === "23514" &&
+        failure.constraint_name === "submission_daily_counts_positive";
+    } finally {
+      await sql`ROLLBACK TO SAVEPOINT invalid_submission_daily_count`;
+    }
+    expect(
+      "database rejects non-positive daily submission count",
+      rejectedNonPositiveCount
+    );
     const [group] = await sql<{ id: string }[]>`
       INSERT INTO "groups" ("name", "slug", "created_by")
       VALUES ('CI Group', 'ci-group', ${user.id})

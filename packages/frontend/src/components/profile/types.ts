@@ -19,6 +19,8 @@ export interface ProfileStatsData {
   reasoningTokens?: number;
   activeDays: number;
   submissionCount?: number;
+  periodSubmissionCount?: number | null;
+  submissionTrackingStartDate?: string | null;
   sessionCount?: number;
 }
 
