@@ -339,7 +339,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
     let theme_accent = app.theme.accent;
-    let theme_selection = app.theme.selection;
+    let selection_style = app.theme.selection_style();
     let striped_row_style = app.theme.striped_row_style();
 
     let sort_indicator = |field: SortField| -> &'static str {
@@ -431,7 +431,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let row_style = if is_selected {
-                Style::default().bg(theme_selection)
+                selection_style
             } else if is_striped {
                 striped_row_style
             } else {
@@ -451,7 +451,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(rows, widths)
         .column_spacing(COLUMN_SPACING)
         .header(header)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(selection_style);
 
     frame.render_widget(table, inner);
 

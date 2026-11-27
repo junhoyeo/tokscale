@@ -133,7 +133,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_direction = app.sort_direction;
     let scroll_offset = app.scroll_offset;
     let selected_index = app.selected_index;
-    let theme_selection = app.theme.selection;
+    let selection_style = app.theme.selection_style();
     let metric_input_style = app.theme.metric_input_style();
     let metric_output_style = app.theme.metric_output_style();
     let metric_cache_read_style = app.theme.metric_cache_read_style();
@@ -220,7 +220,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let row_style = if idx == selected_index {
-                Style::default().bg(theme_selection)
+                selection_style
             } else if is_today {
                 current_row_style
             } else if idx % 2 == 1 {
@@ -235,7 +235,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, header_widths(is_narrow, is_very_narrow))
         .header(header)
-        .row_highlight_style(Style::default().bg(theme_selection));
+        .row_highlight_style(selection_style);
     frame.render_widget(table, inner);
 
     if days_len > visible_height {

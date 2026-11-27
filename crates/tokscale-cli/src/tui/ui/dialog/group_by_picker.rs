@@ -167,10 +167,7 @@ impl DialogContent for GroupByPickerDialog {
             let desc = format!("    {}", opt.description);
 
             let base_style = if is_cursor {
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.background)
-                    .add_modifier(Modifier::BOLD)
+                theme.accent_control_style().add_modifier(Modifier::BOLD)
             } else if is_active {
                 Style::default().fg(theme.foreground)
             } else {
@@ -178,7 +175,7 @@ impl DialogContent for GroupByPickerDialog {
             };
 
             let desc_style = if is_cursor {
-                Style::default().bg(theme.accent).fg(theme.background)
+                theme.accent_control_style()
             } else {
                 Style::default().fg(theme.muted)
             };

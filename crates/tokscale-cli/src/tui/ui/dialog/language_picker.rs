@@ -105,10 +105,7 @@ impl DialogContent for LanguagePickerDialog {
             let usable = list_area.width.saturating_sub(4) as usize;
 
             let base_style = if is_cursor {
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.background)
-                    .add_modifier(Modifier::BOLD)
+                theme.accent_control_style().add_modifier(Modifier::BOLD)
             } else if is_active {
                 Style::default().fg(theme.foreground)
             } else {

@@ -241,7 +241,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
     let theme_background = app.theme.background;
     let theme_muted = app.theme.muted;
     let theme_foreground = app.theme.foreground;
-    let theme_selection = app.theme.selection;
+    let selection_style = app.theme.selection_style();
     let secondary_text_style = app.theme.secondary_text_style();
     let subtle_text_style = app.theme.subtle_text_style();
     let scroll_offset = app.scroll_offset;
@@ -353,7 +353,7 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
         let idx = i + start;
         let is_selected = idx == selected_index;
         let row_style = if is_selected {
-            Style::default().bg(theme_selection).fg(theme_foreground)
+            selection_style.fg(theme_foreground)
         } else {
             Style::default()
         };
@@ -544,6 +544,35 @@ mod tests {
             .chunks(width as usize)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect()
+    }
+
+    #[test]
+    fn terminal_theme_inherits_the_background_even_on_the_selected_model() {
+        let config = TuiConfig {
+            theme: "terminal".to_string(),
+            initial_tab: Some(Tab::Overview),
+            ..Default::default()
+        };
+        let mut app = App::new_with_cached_data(config, None).unwrap();
+        *app.group_by.borrow_mut() = GroupBy::Model;
+        app.data.models = vec![machine_row("local")];
+        app.selected_index = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+
+        let cells = terminal.backend().buffer().content();
+        assert!(cells.iter().all(|cell| cell.bg == Color::Reset));
+        let model_row = cells
+            .chunks(120)
+            .find(|row| {
+                let text = row.iter().map(|cell| cell.symbol()).collect::<String>();
+                text.contains(MODEL) && text.contains("(100.0%)")
+            })
+            .expect("the selected model should be visible");
+        assert!(model_row[3].modifier.contains(Modifier::UNDERLINED));
     }
 
     /// A long machine label must not push the model id off the row. Head

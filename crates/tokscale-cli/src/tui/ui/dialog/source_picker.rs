@@ -208,10 +208,7 @@ impl DialogContent for ClientPickerDialog {
             let padding = usable.saturating_sub(left.chars().count());
 
             let base_style = if is_selected {
-                Style::default()
-                    .bg(theme.accent)
-                    .fg(theme.background)
-                    .add_modifier(Modifier::BOLD)
+                theme.accent_control_style().add_modifier(Modifier::BOLD)
             } else if is_enabled {
                 Style::default().fg(theme.foreground)
             } else {
