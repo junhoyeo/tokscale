@@ -38,6 +38,21 @@ export type { TokenBreakdownProps } from "./TokenBreakdown";
 export { ProfileModels } from "./ProfileModels";
 export type { ProfileModelsProps } from "./ProfileModels";
 
+export { ModelIdentity } from "./ModelIdentity";
+export type { ModelIdentityProps } from "./ModelIdentity";
+
+export { ModelRankToggle } from "./ModelRankToggle";
+export type { ModelRankToggleProps } from "./ModelRankToggle";
+
+export {
+  DEFAULT_MODEL_RANK_BY,
+  MODEL_RANK_BY_STORAGE_KEY,
+  getFavoriteModel,
+  isModelRankBy,
+  rankModelUsage,
+} from "./modelRanking";
+export type { ModelRankBy, RankedModelUsage } from "./modelRanking";
+
 export { ProfileDevices } from "./ProfileDevices";
 export type { ProfileDevice, ProfileDevicesProps } from "./ProfileDevices";
 
