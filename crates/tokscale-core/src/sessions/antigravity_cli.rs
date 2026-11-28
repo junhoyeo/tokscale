@@ -68,7 +68,12 @@ use std::path::Path;
 
 /// Bump when parsing behavior for Antigravity generation databases changes.
 /// The CLI and IDE extension clients share this parser and cache generation.
-pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 2;
+///
+/// v2->v3: resolve Antigravity Gemini 4 orchestrator, worker, and placeholder
+/// aliases at parse time (including `SessionModels` shared-label recovery),
+/// so unchanged databases carrying raw internal IDs must invalidate cached v2
+/// rows and warm derived totals.
+pub const ANTIGRAVITY_DB_PARSER_BASE_VERSION: u32 = 3;
 
 /// Parse an Antigravity CLI conversation database.
 pub fn parse_antigravity_cli_file(path: &Path) -> Vec<UnifiedMessage> {
@@ -1101,6 +1106,18 @@ fn non_empty_string_field(buf: &[u8], field: u64) -> Option<&str> {
 }
 
 #[cfg(test)]
+pub(crate) fn write_test_conversation_for_cache(
+    path: &Path,
+    rows: &[(Option<&str>, Option<&str>, &str)],
+) {
+    let blobs: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|(model, display, response_id)| tests::build_row(*model, *display, response_id))
+        .collect();
+    tests::write_conversation(path, &blobs);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::{params, Connection};
@@ -1237,7 +1254,11 @@ mod tests {
 
     /// One `gen_metadata` blob with either model field independently present or
     /// absent, mirroring the real rows where `#19` is missing but `#21` is not.
-    fn build_row(model: Option<&str>, display: Option<&str>, response_id: &str) -> Vec<u8> {
+    pub(super) fn build_row(
+        model: Option<&str>,
+        display: Option<&str>,
+        response_id: &str,
+    ) -> Vec<u8> {
         // usage message (#4 of chatModel)
         let mut usage = Vec::new();
         usage.extend(enc_varint(1, 1132)); // model enum (MODEL_PLACEHOLDER_M132)
@@ -1261,7 +1282,7 @@ mod tests {
     }
 
     /// Build a conversation database from `gen_metadata` blobs in row order.
-    fn write_conversation(path: &Path, blobs: &[Vec<u8>]) {
+    pub(super) fn write_conversation(path: &Path, blobs: &[Vec<u8>]) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
             .unwrap();
@@ -3137,5 +3158,46 @@ mod tests {
         assert_eq!(messages[0].timestamp, turn1_seconds * 1_000);
         assert_eq!(messages[1].timestamp, turn2_seconds * 1_000);
         assert!(messages.iter().all(|m| m.timestamp != session_created_ms));
+    }
+
+    #[test]
+    fn resolves_orchestrator_and_worker_response_models_and_shared_argon_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchestrator.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-flash-worker-agy"),
+                    Some("Gemini 4 Hydrogen (Orchestrator)"),
+                    "resp-0",
+                ),
+                build_row(
+                    Some("gemini-pro-orchestrator-neon"),
+                    Some("Orchestrator (Neon)"),
+                    "resp-1",
+                ),
+                build_row(
+                    Some("gemini-pro-orchestrator-g1-pro"),
+                    Some("Orchestrator (Argon)"),
+                    "resp-2",
+                ),
+                build_row(
+                    Some("gemini-pro-orchestrator-argon"),
+                    Some("Orchestrator (Argon)"),
+                    "resp-3",
+                ),
+                build_row(None, Some("Orchestrator (Argon)"), "resp-4"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].model_id, "gemini-4-hydrogen");
+        assert_eq!(messages[1].model_id, "gemini-4-neon");
+        assert_eq!(messages[2].model_id, "gemini-4-argon");
+        assert_eq!(messages[3].model_id, "gemini-4-argon");
+        assert_eq!(messages[4].model_id, "gemini-4-argon");
+        assert!(messages.iter().all(|m| m.provider_id == "google"));
     }
 }

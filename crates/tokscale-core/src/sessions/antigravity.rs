@@ -469,4 +469,31 @@ mod tests {
         assert_ne!(s2.timestamp, 1_711_200_000_000);
         assert!(s2.timestamp > 0); // fell back to file mtime
     }
+
+    #[test]
+    fn parse_usage_row_resolves_orchestrator_and_worker_models() {
+        let input = r#"{"type":"usage","sessionId":"abc","modelId":"gemini-flash-worker-agy","timestamp":1711200000000,"input":12,"output":4,"cacheRead":2,"cacheWrite":0,"reasoning":1}
+{"type":"usage","sessionId":"abc","modelId":"gemini-pro-orchestrator-neon","timestamp":1711200000001,"input":8,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0}
+{"type":"usage","sessionId":"abc","modelId":"gemini-pro-orchestrator-g1-pro","timestamp":1711200000002,"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0}
+{"type":"usage","sessionId":"abc","modelId":"MODEL_PLACEHOLDER_M669","timestamp":1711200000003,"input":6,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":0}
+"#;
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(path.path(), input).unwrap();
+
+        let messages = parse_antigravity_file(path.path());
+        assert_eq!(messages.len(), 4);
+
+        let expected = [
+            ("gemini-4-hydrogen", "gemini-flash-worker-agy"),
+            ("gemini-4-neon", "gemini-pro-orchestrator-neon"),
+            ("gemini-4-argon", "gemini-pro-orchestrator-g1-pro"),
+            ("gemini-4-hydrogen", "MODEL_PLACEHOLDER_M669"),
+        ];
+        for (msg, (canonical, raw)) in messages.iter().zip(expected) {
+            assert_eq!(msg.model_id, canonical);
+            assert_eq!(msg.provider_id, "google");
+            assert_eq!(msg.pricing_model_id.as_deref(), Some(raw));
+        }
+    }
 }

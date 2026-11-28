@@ -2272,7 +2272,9 @@ fn parser_version(client: ClientId) -> u32 {
         ClientId::Crush => 1,
         ClientId::Goose => 1,
         // v1->v2: fall back to session_meta / file mtime when usage timestamp is null.
-        ClientId::Antigravity => 2,
+        // v2->v3: resolve Antigravity Gemini 4 orchestrator, worker, and placeholder
+        // aliases at parse time so v2 cached rows and derived totals invalidate.
+        ClientId::Antigravity => 3,
         // v1->v2: include native ChatGPT subscription threads and use their cumulative totals.
         ClientId::Zed => 2,
         ClientId::Trae => 1,
@@ -10869,29 +10871,213 @@ mod tests {
 
     #[test]
     fn test_antigravity_family_bump_moves_the_parser_generation() {
-        assert_eq!(parser_version(ClientId::Antigravity), 2);
-        assert_eq!(parser_version(ClientId::AntigravityCli), 2);
-        assert_eq!(parser_version(ClientId::AntigravityExtension), 2);
+        assert_eq!(parser_version(ClientId::Antigravity), 3);
+        assert_eq!(parser_version(ClientId::AntigravityCli), 3);
+        assert_eq!(parser_version(ClientId::AntigravityExtension), 3);
 
-        let pre_bump_generation = parser_generation_for_versions(
-            ClientId::ALL.iter().copied().map(|c| {
-                if c == ClientId::Antigravity
-                    || c == ClientId::AntigravityCli
-                    || c == ClientId::AntigravityExtension
-                {
-                    1
-                } else {
-                    parser_version(c)
-                }
-            }),
-            CLAUDE_RETAINED_PARSE_GENERATION,
+        for stale_version in [1, 2] {
+            let stale_generation = parser_generation_for_versions(
+                ClientId::ALL.iter().copied().map(|c| {
+                    if c == ClientId::Antigravity
+                        || c == ClientId::AntigravityCli
+                        || c == ClientId::AntigravityExtension
+                    {
+                        stale_version
+                    } else {
+                        parser_version(c)
+                    }
+                }),
+                CLAUDE_RETAINED_PARSE_GENERATION,
+            );
+            assert_ne!(
+                parser_generation(),
+                stale_generation,
+                "bumping Antigravity family to v3 must invalidate v{stale_version} parser_generation(), \
+                 preventing stale warm caches from reusing pre-v3 totals"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_antigravity_v2_cache_entries_invalidate_and_reparse_orchestrator_aliases() {
+        let cache_home = TempDir::new().unwrap();
+        let source_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(cache_home.path());
+        let source_home_str = source_home.path().to_str().unwrap();
+
+        let cli_dir = std::path::PathBuf::from(
+            ClientId::AntigravityCli
+                .data()
+                .resolve_path_with_env_strategy(source_home_str, false),
         );
-        assert_ne!(
-            parser_generation(),
-            pre_bump_generation,
-            "bumping Antigravity family to v2 must invalidate parser_generation(), \
-             preventing stale warm caches from reusing pre-v2 totals"
+        let ext_dir = std::path::PathBuf::from(
+            ClientId::AntigravityExtension
+                .data()
+                .resolve_path_with_env_strategy(source_home_str, false),
         );
+        let jsonl_dir = std::path::PathBuf::from(
+            ClientId::Antigravity
+                .data()
+                .resolve_path_with_env_strategy(source_home_str, false),
+        );
+        std::fs::create_dir_all(&cli_dir).unwrap();
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        std::fs::create_dir_all(&jsonl_dir).unwrap();
+
+        let cli_db = cli_dir.join("orchestrator-cli.db");
+        crate::sessions::antigravity_cli::write_test_conversation_for_cache(
+            &cli_db,
+            &[
+                (
+                    Some("gemini-flash-worker-agy"),
+                    Some("Gemini 4 Hydrogen (Orchestrator)"),
+                    "cli-resp-0",
+                ),
+                (
+                    Some("gemini-pro-orchestrator-neon"),
+                    Some("Orchestrator (Neon)"),
+                    "cli-resp-1",
+                ),
+                (
+                    Some("gemini-pro-orchestrator-g1-pro"),
+                    Some("Orchestrator (Argon)"),
+                    "cli-resp-2",
+                ),
+                (None, Some("Orchestrator (Argon)"), "cli-resp-3"),
+            ],
+        );
+
+        let ext_db = ext_dir.join("orchestrator-ext.db");
+        crate::sessions::antigravity_cli::write_test_conversation_for_cache(
+            &ext_db,
+            &[(
+                Some("gemini-pro-orchestrator-g1-pro"),
+                Some("Orchestrator (Argon)"),
+                "ext-resp-0",
+            )],
+        );
+
+        let jsonl_path = jsonl_dir.join("sess-orchestrator.jsonl");
+        std::fs::write(
+            &jsonl_path,
+            concat!(
+                r#"{"type":"usage","formatVersion":2,"sessionId":"sess-orch","modelId":"gemini-pro-orchestrator-neon","responseId":"jsonl-resp-0","timestamp":1776000000000,"input":500,"responseOutputTokens":300,"cacheRead":1000,"reasoning":40}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        for (client, path, stale_model) in [
+            (ClientId::AntigravityCli, &cli_db, "gemini-flash-worker-agy"),
+            (
+                ClientId::AntigravityExtension,
+                &ext_db,
+                "gemini-pro-orchestrator-g1-pro",
+            ),
+            (
+                ClientId::Antigravity,
+                &jsonl_path,
+                "gemini-pro-orchestrator-neon",
+            ),
+        ] {
+            let current_identity = CacheIdentity::for_client(client);
+            assert_eq!(current_identity.parser_version, 3);
+            let stale_identity = CacheIdentity {
+                namespace: current_identity.namespace,
+                parser_version: 2,
+            };
+            let fingerprint = SourceFingerprint::from_path(path).unwrap();
+            let stale_message = UnifiedMessage::new(
+                client.as_str(),
+                stale_model,
+                "antigravity",
+                "sess-orch",
+                1_776_000_000_000,
+                crate::TokenBreakdown {
+                    input: 500,
+                    output: 300,
+                    cache_read: 1000,
+                    reasoning: 40,
+                    ..Default::default()
+                },
+                0.0,
+            );
+            let stale_entry = CachedSourceEntry::new(
+                stale_identity,
+                path,
+                fingerprint,
+                vec![stale_message],
+                Vec::new(),
+                None,
+            );
+            let stale_path = cache_shard_path(current_identity, path);
+            ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+            write_shard_with_limit(
+                &stale_path,
+                stale_identity,
+                &[stale_entry],
+                MAX_CACHE_SHARD_BYTES,
+            )
+            .unwrap();
+            assert!(
+                SourceMessageCache::load()
+                    .get(current_identity, path)
+                    .is_none(),
+                "stale v2 entry for {client:?} must not match v3 lookup identity"
+            );
+        }
+
+        let messages = crate::parse_all_messages_with_pricing_with_env_strategy(
+            source_home_str,
+            &[
+                "antigravity".to_string(),
+                "antigravity-cli".to_string(),
+                "antigravity-extension".to_string(),
+            ],
+            None,
+            false,
+            &crate::scanner::ScannerSettings::default(),
+        );
+        assert_eq!(messages.len(), 6);
+
+        let by_dedup_key: std::collections::HashMap<&str, &UnifiedMessage> = messages
+            .iter()
+            .filter_map(|msg| msg.dedup_key.as_deref().map(|key| (key, msg)))
+            .collect();
+        assert_eq!(by_dedup_key.len(), 6);
+        assert_eq!(
+            by_dedup_key["cli-resp-0"].model_id.as_str(),
+            "gemini-4-hydrogen"
+        );
+        assert_eq!(
+            by_dedup_key["cli-resp-1"].model_id.as_str(),
+            "gemini-4-neon"
+        );
+        assert_eq!(
+            by_dedup_key["cli-resp-2"].model_id.as_str(),
+            "gemini-4-argon"
+        );
+        assert_eq!(
+            by_dedup_key["cli-resp-3"].model_id.as_str(),
+            "gemini-4-argon"
+        );
+        assert_eq!(
+            by_dedup_key["ext-resp-0"].model_id.as_str(),
+            "gemini-4-argon"
+        );
+        assert_eq!(
+            by_dedup_key["jsonl-resp-0"].model_id.as_str(),
+            "gemini-4-neon"
+        );
+
+        for msg in &messages {
+            assert_eq!(msg.provider_id.as_str(), "google");
+            assert_ne!(msg.model_id.as_str(), "gemini-flash-worker-agy");
+            assert_ne!(msg.model_id.as_str(), "gemini-pro-orchestrator-neon");
+            assert_ne!(msg.model_id.as_str(), "gemini-pro-orchestrator-g1-pro");
+            assert_ne!(msg.model_id.as_str(), "unknown");
+        }
     }
 
     #[test]
