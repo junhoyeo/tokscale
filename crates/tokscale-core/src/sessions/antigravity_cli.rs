@@ -3138,4 +3138,45 @@ mod tests {
         assert_eq!(messages[1].timestamp, turn2_seconds * 1_000);
         assert!(messages.iter().all(|m| m.timestamp != session_created_ms));
     }
+
+    #[test]
+    fn resolves_orchestrator_and_worker_response_models_and_shared_argon_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchestrator.db");
+        write_conversation(
+            &path,
+            &[
+                build_row(
+                    Some("gemini-flash-worker-agy"),
+                    Some("Gemini 4 Hydrogen (Orchestrator)"),
+                    "resp-0",
+                ),
+                build_row(
+                    Some("gemini-pro-orchestrator-neon"),
+                    Some("Orchestrator (Neon)"),
+                    "resp-1",
+                ),
+                build_row(
+                    Some("gemini-pro-orchestrator-g1-pro"),
+                    Some("Orchestrator (Argon)"),
+                    "resp-2",
+                ),
+                build_row(
+                    Some("gemini-pro-orchestrator-argon"),
+                    Some("Orchestrator (Argon)"),
+                    "resp-3",
+                ),
+                build_row(None, Some("Orchestrator (Argon)"), "resp-4"),
+            ],
+        );
+
+        let messages = parse_antigravity_cli_file(&path);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].model_id, "gemini-4-hydrogen");
+        assert_eq!(messages[1].model_id, "gemini-4-neon");
+        assert_eq!(messages[2].model_id, "gemini-4-argon");
+        assert_eq!(messages[3].model_id, "gemini-4-argon");
+        assert_eq!(messages[4].model_id, "gemini-4-argon");
+        assert!(messages.iter().all(|m| m.provider_id == "google"));
+    }
 }

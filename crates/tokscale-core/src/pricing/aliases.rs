@@ -131,6 +131,57 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-3-flash-b", "gemini-3.5-flash-high");
     m.insert("gemini-3.5-flash-low", "gemini-3.5-flash-medium");
     m.insert("model_placeholder_m47", "gemini-3-flash-preview");
+
+    // Antigravity Gemini 4 Orchestrator, delegated Worker, and standard-tier
+    // placeholder IDs. Verified across three independent sources:
+    //
+    // - Antigravity Context Window Monitor (`src/models.ts` and
+    //   `ORCHESTRATOR_BASE_PRICE_MAP` in `src/pricing-store.ts` at commit
+    //   6ed9bfcf1053935a6d583f2fddf9786d7ef01838):
+    //   https://github.com/AGI-is-going-to-arrive/Antigravity-Context-Window-Monitor/blob/6ed9bfcf1053935a6d583f2fddf9786d7ef01838/src/pricing-store.ts
+    //   maps M537 (`gemini-pro-orchestrator-neon`) -> `gemini-4-neon`,
+    //   M667 (`gemini-pro-orchestrator`) -> `gemini-4-carbon`,
+    //   M681 (`gemini-pro-orchestrator-argon`) -> `gemini-4-argon`, and
+    //   M669 (`gemini-flash-worker-agy`) -> `gemini-4-hydrogen` (live LS 2.34.0
+    //   confirms M669 shares base M432 with Gemini 4 Hydrogen).
+    // - Live `agy 1.5.19` (`agy models`) lists `gemini-pro-orchestrator-neon`
+    //   ("Orchestrator (Neon)"), `gemini-pro-orchestrator` ("Orchestrator
+    //   (Carbon)"), and `gemini-pro-orchestrator-argon` ("Orchestrator
+    //   (Argon)").
+    // - Real Antigravity CLI `gen_metadata` protobuf records confirm enum 1668
+    //   (`MODEL_PLACEHOLDER_M668` / `gemini-pro-orchestrator-g1-pro`) with
+    //   display label "Orchestrator (Argon)" and enum 1669
+    //   (`MODEL_PLACEHOLDER_M669` / `gemini-flash-worker-agy`) with display
+    //   label "Gemini 4 Hydrogen (Orchestrator)".
+    //
+    // Unlike `gemini-default`, these are fixed-route 1:1 identities rather than
+    // dynamic routers, so each maps directly to its canonical `gemini-4-*`
+    // base model in a single hop.
+    m.insert("gemini-flash-worker-agy", "gemini-4-hydrogen");
+    m.insert("gemini-pro-orchestrator-neon", "gemini-4-neon");
+    m.insert("gemini-pro-orchestrator-g1-pro", "gemini-4-argon");
+    m.insert("gemini-pro-orchestrator-argon", "gemini-4-argon");
+    m.insert("gemini-pro-orchestrator", "gemini-4-carbon");
+    m.insert("model_placeholder_m669", "gemini-4-hydrogen");
+    m.insert("model_placeholder_m537", "gemini-4-neon");
+    m.insert("model_placeholder_m668", "gemini-4-argon");
+    m.insert("model_placeholder_m681", "gemini-4-argon");
+    m.insert("model_placeholder_m667", "gemini-4-carbon");
+    m.insert("model_placeholder_m532", "gemini-4-neon");
+    m.insert("model_placeholder_m533", "gemini-4-neon");
+    m.insert("model_placeholder_m534", "gemini-4-neon");
+    m.insert("model_placeholder_m535", "gemini-4-neon");
+    m.insert("model_placeholder_m525", "gemini-4-hydrogen");
+    m.insert("model_placeholder_m526", "gemini-4-hydrogen");
+    m.insert("model_placeholder_m527", "gemini-4-hydrogen");
+    m.insert("model_placeholder_m528", "gemini-4-hydrogen");
+    m.insert("model_placeholder_m427", "gemini-4-carbon");
+    m.insert("model_placeholder_m437", "gemini-4-carbon");
+    m.insert("model_placeholder_m438", "gemini-4-carbon");
+    m.insert("model_placeholder_m417", "gemini-4-argon");
+    m.insert("model_placeholder_m418", "gemini-4-argon");
+    m.insert("model_placeholder_m419", "gemini-4-argon");
+
     m.insert("model_openai_gpt_oss_120b_medium", "gpt-oss-120b-medium");
     m.insert("claude-opus-4-6-thinking", "claude-opus-4-6");
     m.insert("claude-sonnet-4-6-thinking", "claude-sonnet-4-6");
@@ -825,6 +876,178 @@ mod tests {
                 super::resolve_alias(raw),
                 None,
                 "qoder dynamic slot identifier {raw} should not be statically aliased"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_antigravity_orchestrator_and_gemini_4_aliases() {
+        let cases = [
+            ("gemini-flash-worker-agy", "gemini-4-hydrogen"),
+            ("GEMINI-FLASH-WORKER-AGY", "gemini-4-hydrogen"),
+            ("gemini-pro-orchestrator-neon", "gemini-4-neon"),
+            ("Gemini-Pro-Orchestrator-Neon", "gemini-4-neon"),
+            ("gemini-pro-orchestrator-g1-pro", "gemini-4-argon"),
+            ("gemini-pro-orchestrator-argon", "gemini-4-argon"),
+            ("gemini-pro-orchestrator", "gemini-4-carbon"),
+            ("MODEL_PLACEHOLDER_M669", "gemini-4-hydrogen"),
+            ("MODEL_PLACEHOLDER_M537", "gemini-4-neon"),
+            ("MODEL_PLACEHOLDER_M668", "gemini-4-argon"),
+            ("MODEL_PLACEHOLDER_M681", "gemini-4-argon"),
+            ("MODEL_PLACEHOLDER_M667", "gemini-4-carbon"),
+            ("MODEL_PLACEHOLDER_M532", "gemini-4-neon"),
+            ("model_placeholder_m533", "gemini-4-neon"),
+            ("model_placeholder_m534", "gemini-4-neon"),
+            ("model_placeholder_m535", "gemini-4-neon"),
+            ("MODEL_PLACEHOLDER_M525", "gemini-4-hydrogen"),
+            ("model_placeholder_m526", "gemini-4-hydrogen"),
+            ("model_placeholder_m527", "gemini-4-hydrogen"),
+            ("model_placeholder_m528", "gemini-4-hydrogen"),
+            ("MODEL_PLACEHOLDER_M427", "gemini-4-carbon"),
+            ("model_placeholder_m437", "gemini-4-carbon"),
+            ("model_placeholder_m438", "gemini-4-carbon"),
+            ("MODEL_PLACEHOLDER_M417", "gemini-4-argon"),
+            ("model_placeholder_m418", "gemini-4-argon"),
+            ("model_placeholder_m419", "gemini-4-argon"),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(resolve_alias(raw), Some(expected), "raw model: {raw}");
+        }
+
+        // Keep alias resolution strictly single-hop.
+        for canonical in [
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
+            "gemini-4-argon",
+            "gemini-4-carbon",
+        ] {
+            assert_eq!(
+                resolve_alias(canonical),
+                None,
+                "canonical target {canonical} must not re-enter resolve_alias"
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_orchestrator_aliases_resolve_submission_safe() {
+        let row = |input: f64, output: f64, cache_read: f64| super::super::litellm::ModelPricing {
+            input_cost_per_token: Some(input),
+            output_cost_per_token: Some(output),
+            cache_read_input_token_cost: Some(cache_read),
+            ..Default::default()
+        };
+        let litellm = HashMap::from([
+            (
+                "gemini/gemini-4-hydrogen".to_string(),
+                row(1.5e-6, 7.5e-6, 7.5e-8),
+            ),
+            (
+                "gemini/gemini-4-neon".to_string(),
+                row(3.0e-6, 15.0e-6, 1.5e-7),
+            ),
+            (
+                "gemini/gemini-4-argon".to_string(),
+                row(2.0e-6, 10.0e-6, 1.0e-7),
+            ),
+            (
+                "gemini/gemini-4-carbon".to_string(),
+                row(2.0e-6, 10.0e-6, 1.0e-7),
+            ),
+            // Distractors that fuzzy matching picked before these aliases existed.
+            (
+                "gemini/gemini-flash-lite-latest".to_string(),
+                row(0.3e-6, 2.5e-6, 0.3e-7),
+            ),
+            (
+                "gemini/gemini-pro-latest".to_string(),
+                row(2.0e-6, 12.0e-6, 2.0e-7),
+            ),
+        ]);
+        let service = super::super::PricingService::new(litellm, HashMap::new());
+        let usage = crate::TokenBreakdown {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 500_000,
+            cache_write: 0,
+            cache_write_1h: 0,
+            reasoning: 0,
+        };
+
+        let cases = [
+            (
+                "gemini-flash-worker-agy",
+                "gemini/gemini-4-hydrogen",
+                1.5 + 0.75 + 0.0375,
+            ),
+            (
+                "MODEL_PLACEHOLDER_M669",
+                "gemini/gemini-4-hydrogen",
+                1.5 + 0.75 + 0.0375,
+            ),
+            (
+                "gemini-pro-orchestrator-neon",
+                "gemini/gemini-4-neon",
+                3.0 + 1.5 + 0.075,
+            ),
+            (
+                "MODEL_PLACEHOLDER_M537",
+                "gemini/gemini-4-neon",
+                3.0 + 1.5 + 0.075,
+            ),
+            (
+                "gemini-pro-orchestrator-g1-pro",
+                "gemini/gemini-4-argon",
+                2.0 + 1.0 + 0.05,
+            ),
+            (
+                "MODEL_PLACEHOLDER_M668",
+                "gemini/gemini-4-argon",
+                2.0 + 1.0 + 0.05,
+            ),
+            (
+                "gemini-pro-orchestrator-argon",
+                "gemini/gemini-4-argon",
+                2.0 + 1.0 + 0.05,
+            ),
+            (
+                "MODEL_PLACEHOLDER_M681",
+                "gemini/gemini-4-argon",
+                2.0 + 1.0 + 0.05,
+            ),
+            (
+                "gemini-pro-orchestrator",
+                "gemini/gemini-4-carbon",
+                2.0 + 1.0 + 0.05,
+            ),
+            (
+                "MODEL_PLACEHOLDER_M667",
+                "gemini/gemini-4-carbon",
+                2.0 + 1.0 + 0.05,
+            ),
+        ];
+
+        for (model_id, expected_key, expected_cost) in cases {
+            let result = service
+                .lookup_with_source_and_provider(model_id, None, Some("google"))
+                .unwrap_or_else(|| panic!("failed to resolve {model_id}"));
+            assert_eq!(result.matched_key, expected_key, "model: {model_id}");
+            assert!(result.evidence.alias_applied, "model: {model_id}");
+            assert_eq!(
+                result.evidence.submission_safety_gap(),
+                None,
+                "model: {model_id}"
+            );
+            assert!(result.evidence.is_submission_safe(), "model: {model_id}");
+            assert!(
+                service.covers_usage_with_provider(model_id, Some("google"), &usage),
+                "model: {model_id}"
+            );
+            let cost = service.calculate_cost_with_provider(model_id, Some("google"), &usage);
+            assert!(
+                (cost - expected_cost).abs() < 1e-12,
+                "model {model_id}: got {cost}, expected {expected_cost}"
             );
         }
     }
