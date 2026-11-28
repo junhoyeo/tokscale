@@ -14,12 +14,18 @@
 //!
 //! Antigravity language server v1.5.3+ enforces CSRF token validation across
 //! Connect-RPC endpoints, including `RetrieveUserQuotaSummary`, via the
-//! `X-Codeium-Csrf-Token` header. Tokscale supplies this token from the
-//! candidate connection metadata (for IDE processes), the active
-//! `ANTIGRAVITY_CSRF_TOKEN` environment variable, or a recorded session
-//! environment file (`active_session.env`) populated by session lifecycle hooks.
-//! Older language server versions that do not require a CSRF token continue
-//! to be supported when no token is present.
+//! `X-Codeium-Csrf-Token` header. `agy` injects `ANTIGRAVITY_CSRF_TOKEN` and
+//! `ANTIGRAVITY_LS_ADDRESS` into agent shell commands (not into `hooks.json`
+//! lifecycle hooks), so Tokscale resolves the token from IDE process metadata,
+//! `ANTIGRAVITY_CSRF_TOKEN` / `ANTIGRAVITY_LS_ADDRESS` / `ANTIGRAVITY_LS_PORT`
+//! environment variables, or a recorded session file (`active_session.env` /
+//! `ANTIGRAVITY_SESSION_FILE`, synced automatically after a verified environment
+//! fetch). When a loopback language server rejects requests with HTTP 401
+//! Connect-RPC CSRF authentication and no other source succeeds,
+//! [`has_credentials`] admits the provider so [`fetch_all`] surfaces an
+//! actionable diagnostic instead of hiding Antigravity. Older language server
+//! versions that do not require a CSRF token continue to be supported when no
+//! token is present.
 //!
 //! Calling Google's `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
 //! directly was tried first and rejected: authentication succeeds, but a
@@ -39,7 +45,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 use super::{UsageAccount, UsageMetric, UsageOutput};
@@ -63,7 +69,7 @@ const RPC_PATH: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUs
 /// without Antigravity never approaches this, and a port that accepts and then
 /// goes quiet is waited on once for the round rather than once per candidate.
 ///
-/// A *round*, not the whole of discovery. [`discover_quota`] has two candidate
+/// A *round*, not the whole of discovery. [`discover_quota_outcome`] has two candidate
 /// sources and each gets its own round, computed when that round starts, so
 /// the requests can cost twice this in total. One instant shared across both
 /// was worse than that arithmetic: a first source that spent it handed the
@@ -134,7 +140,8 @@ struct QuotaBucket {
 
 // ── Provider interface ──
 
-/// Whether a reachable language server is serving quota right now.
+/// Whether a reachable language server is serving quota (or rejecting it for
+/// missing CSRF auth) right now.
 ///
 /// This probes rather than checking for a credential file, because Antigravity
 /// keeps its token inside the running process: "is it installed" and "can we
@@ -145,9 +152,14 @@ struct QuotaBucket {
 /// request at all and builds no HTTP client: what it pays is the log read and
 /// the process scan.
 ///
-/// This runs the same [`discover_quota`] the fetch runs, so the two cannot
-/// disagree about whether a server is answering: a summary that clears this
-/// gate is a summary the fetch can also obtain.
+/// When a running loopback server answers HTTP 401 Connect-RPC CSRF rejection
+/// and no fallback source succeeds, this returns `true` so [`fetch_all`] can
+/// surface a diagnostic telling the user to set `ANTIGRAVITY_CSRF_TOKEN` or
+/// run via an `agy` agent shell.
+///
+/// This runs the same [`discover_quota_outcome`] the fetch runs, so the two
+/// cannot disagree about whether a server is answering: a summary that clears
+/// this gate is a summary the fetch can also obtain.
 pub fn has_credentials() -> bool {
     off_caller_runtime(|| {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -156,7 +168,12 @@ pub fn has_credentials() -> bool {
         else {
             return false;
         };
-        rt.block_on(async { discover_quota().await.is_some() })
+        rt.block_on(async {
+            matches!(
+                discover_quota_outcome().await,
+                DiscoveryOutcome::Found(_) | DiscoveryOutcome::CsrfAuthRequired { .. }
+            )
+        })
     })
     .unwrap_or(false)
 }
@@ -168,9 +185,15 @@ pub fn fetch_all() -> Result<Vec<UsageOutput>> {
             .build()?;
 
         rt.block_on(async {
-            let summary = discover_quota()
-                .await
-                .context("Antigravity language server is not running")?;
+            let summary = match discover_quota_outcome().await {
+                DiscoveryOutcome::Found(summary) => summary,
+                DiscoveryOutcome::CsrfAuthRequired { port } => {
+                    anyhow::bail!("{}", csrf_auth_required_message(port));
+                }
+                DiscoveryOutcome::NotFound => {
+                    anyhow::bail!("Antigravity language server is not running");
+                }
+            };
 
             if summary.groups.is_empty() {
                 anyhow::bail!("Antigravity is running but not signed in");
@@ -292,7 +315,7 @@ const MAX_QUOTA_BODY_BYTES: usize = 1024 * 1024;
 /// clone to each request is free.
 ///
 /// Built only once a round has a candidate to send to -- see
-/// [`race_for_quota`], which returns before reaching here on an empty list.
+/// [`race_for_quota_outcome`], which returns before reaching here on an empty list.
 ///
 /// `round` is the budget of the round this client serves,
 /// [`DISCOVERY_ROUND_TIMEOUT`] in production. It is handed in rather than read
@@ -417,11 +440,52 @@ impl From<(u16, TargetCsrfToken)> for CandidateTarget {
     }
 }
 
-async fn call_rpc(
-    client: reqwest::Client,
-    port: u16,
-    csrf_token: TargetCsrfToken,
-) -> Result<QuotaSummary> {
+const MAX_ERROR_BODY_BYTES: usize = 4096;
+
+#[derive(Debug, Deserialize)]
+struct ConnectErrorEnvelope {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+enum RpcOutcome {
+    Summary(QuotaSummary),
+    CsrfAuthRequired,
+    Unavailable,
+}
+
+enum RoundOutcome {
+    Found(CandidateTarget, QuotaSummary),
+    CsrfAuthRequired { port: u16 },
+    None,
+}
+
+#[derive(Debug)]
+enum DiscoveryOutcome {
+    Found(QuotaSummary),
+    CsrfAuthRequired { port: u16 },
+    NotFound,
+}
+
+fn is_csrf_auth_error(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::UNAUTHORIZED {
+        return false;
+    }
+    serde_json::from_str::<ConnectErrorEnvelope>(body)
+        .ok()
+        .is_some_and(|err| {
+            err.code.eq_ignore_ascii_case("unauthenticated")
+                && err.message.to_ascii_lowercase().contains("csrf token")
+        })
+}
+
+fn csrf_auth_required_message(port: u16) -> String {
+    format!("Set ANTIGRAVITY_CSRF_TOKEN or run via agy agent (CSRF 401 on port {port})")
+}
+
+async fn probe_rpc(client: reqwest::Client, port: u16, csrf_token: TargetCsrfToken) -> RpcOutcome {
     let mut request = client
         .post(format!("http://127.0.0.1:{port}{RPC_PATH}"))
         // Connect-RPC rejects the request without this header.
@@ -437,15 +501,48 @@ async fn call_rpc(
         request = request.header("X-Codeium-Csrf-Token", token);
     }
 
-    let response = request
-        .json(&serde_json::json!({}))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body =
-        crate::antigravity::read_reqwest_response_with_cap(response, MAX_QUOTA_BODY_BYTES).await?;
-    let envelope: QuotaSummaryEnvelope = serde_json::from_str(&body)?;
-    Ok(envelope.response)
+    let Ok(response) = request.json(&serde_json::json!({})).send().await else {
+        return RpcOutcome::Unavailable;
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        let Ok(body) =
+            crate::antigravity::read_reqwest_response_with_cap(response, MAX_ERROR_BODY_BYTES)
+                .await
+        else {
+            return RpcOutcome::Unavailable;
+        };
+        return if is_csrf_auth_error(status, &body) {
+            RpcOutcome::CsrfAuthRequired
+        } else {
+            RpcOutcome::Unavailable
+        };
+    }
+    if !status.is_success() {
+        return RpcOutcome::Unavailable;
+    }
+    let Ok(body) =
+        crate::antigravity::read_reqwest_response_with_cap(response, MAX_QUOTA_BODY_BYTES).await
+    else {
+        return RpcOutcome::Unavailable;
+    };
+    match serde_json::from_str::<QuotaSummaryEnvelope>(&body) {
+        Ok(envelope) => RpcOutcome::Summary(envelope.response),
+        Err(_) => RpcOutcome::Unavailable,
+    }
+}
+
+#[cfg(test)]
+async fn call_rpc(
+    client: reqwest::Client,
+    port: u16,
+    csrf_token: TargetCsrfToken,
+) -> Result<QuotaSummary> {
+    match probe_rpc(client, port, csrf_token).await {
+        RpcOutcome::Summary(summary) => Ok(summary),
+        RpcOutcome::CsrfAuthRequired => anyhow::bail!("unauthenticated: CSRF token required"),
+        RpcOutcome::Unavailable => anyhow::bail!("quota RPC unavailable"),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -653,143 +750,6 @@ fn resolve_csrf_token(explicit: Option<&str>) -> Option<String> {
     active_session().and_then(|s| s.csrf_token)
 }
 
-pub const HOOK_SPEC_KEY: &str = "tokscale-session-sync";
-const HOOK_COMMAND: &str = r#"set -eu; token=${ANTIGRAVITY_CSRF_TOKEN-}; address=${ANTIGRAVITY_LS_ADDRESS-}; if [ -z "$token" ] || [ -z "$address" ]; then echo "{}"; exit 0; fi; dir="$HOME/.gemini/antigravity-cli"; mkdir -p "$dir"; umask 077; tmp=$(mktemp "$dir/active_session.env.XXXXXX"); printf "ANTIGRAVITY_CSRF_TOKEN=%s\nANTIGRAVITY_LS_ADDRESS=%s\n" "$token" "$address" > "$tmp"; mv -f "$tmp" "$dir/active_session.env"; echo "{}""#;
-
-fn hook_spec() -> serde_json::Value {
-    let handler = serde_json::json!([
-        {
-            "type": "command",
-            "command": HOOK_COMMAND
-        }
-    ]);
-    serde_json::json!({
-        "SessionStart": handler,
-        "PreInvocation": handler,
-        "PostInvocation": handler
-    })
-}
-
-/// Location of the global Antigravity customization `hooks.json` file.
-pub fn global_hooks_path() -> Option<PathBuf> {
-    if let Ok(override_path) = std::env::var("ANTIGRAVITY_HOOKS_FILE") {
-        let trimmed = override_path.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    tokscale_core::paths::home_dir().map(|h| h.join(".gemini").join("config").join("hooks.json"))
-}
-
-/// Checks whether the Tokscale session sync hook is registered in `hooks.json`.
-pub fn is_antigravity_hook_registered() -> bool {
-    if !cfg!(unix) {
-        return false;
-    }
-    let Some(path) = global_hooks_path() else {
-        return false;
-    };
-    if !path.is_file() {
-        return false;
-    }
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return false;
-    };
-    json.as_object()
-        .and_then(|obj| obj.get(HOOK_SPEC_KEY))
-        .is_some_and(|value| value == &hook_spec())
-}
-
-/// Registers the Tokscale session sync hook in `~/.gemini/config/hooks.json`.
-pub fn register_antigravity_hook() -> Result<PathBuf> {
-    register_antigravity_hook_with(|| {})
-}
-
-fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathBuf> {
-    if !cfg!(unix) {
-        anyhow::bail!("Antigravity hook registration is only supported on Unix");
-    }
-    let Some(path) = global_hooks_path() else {
-        anyhow::bail!("unable to determine home directory");
-    };
-
-    let parent = path
-        .parent()
-        .context("hooks.json must have a parent directory")?;
-    std::fs::create_dir_all(parent)?;
-
-    let initial_content = if path.is_file() {
-        Some(std::fs::read(&path)?)
-    } else {
-        None
-    };
-    let mut root = if let Some(content) = initial_content.as_deref() {
-        serde_json::from_slice::<serde_json::Value>(content)
-            .context("hooks.json contains invalid JSON")?
-    } else {
-        serde_json::json!({})
-    };
-
-    if !root.is_object() {
-        anyhow::bail!("hooks.json root must be a JSON object");
-    }
-
-    root.as_object_mut()
-        .context("hooks.json root must be a JSON object")?
-        .insert(HOOK_SPEC_KEY.to_string(), hook_spec());
-
-    let formatted = serde_json::to_string_pretty(&root)?;
-    let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    let write_res = (|| -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            use std::os::unix::fs::PermissionsExt;
-
-            let mode = std::fs::metadata(&path)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0o600);
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(mode)
-                .open(&tmp_path)?;
-            file.write_all(formatted.as_bytes())?;
-            file.flush()?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&tmp_path, formatted)
-        }
-    })();
-
-    if let Err(e) = write_res {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
-    before_replace();
-    let current_content = if path.is_file() {
-        Some(std::fs::read(&path)?)
-    } else {
-        None
-    };
-    if current_content != initial_content {
-        let _ = std::fs::remove_file(&tmp_path);
-        anyhow::bail!("hooks.json changed during registration; no changes were written");
-    }
-    if let Err(e) = tokscale_core::fs_atomic::replace_file(&tmp_path, &path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
-    Ok(path)
-}
-
 // ── Port discovery ──
 
 /// Find a language server that answers `RetrieveUserQuotaSummary`, and keep
@@ -800,9 +760,9 @@ fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathB
 /// 1. Environment variables (`ANTIGRAVITY_LS_ADDRESS` or `ANTIGRAVITY_LS_PORT`),
 ///    which immediately supply the server port and CSRF token when tokscale is
 ///    invoked from an active `agy` session or configured runner.
-/// 2. Recorded active session environment file (`active_session.env`), which
-///    shares the token and listening address across separate terminal sessions
-///    when populated by an Antigravity `SessionStart` lifecycle hook.
+/// 2. Recorded active session environment file (`active_session.env` or
+///    `ANTIGRAVITY_SESSION_FILE`), synced automatically when tokscale fetches
+///    with verified environment credentials.
 /// 3. The CLI log, which records `listening on random port at NNNN for HTTP`
 ///    on every start. Reading one file beats enumerating processes.
 /// 4. [`crate::antigravity::detect_antigravity_connections`], which finds the
@@ -815,8 +775,12 @@ fn register_antigravity_hook_with(before_replace: impl FnOnce()) -> Result<PathB
 /// is the summary returned. `fetch_all` used to throw it away and ask the same
 /// port the same question again, which is a second round trip for an answer
 /// already in hand.
-async fn discover_quota() -> Option<QuotaSummary> {
-    discover_quota_with_fallback_sources(&[
+///
+/// When a source reports HTTP 401 Connect-RPC CSRF rejection without a working
+/// answer, discovery keeps scanning fallback sources (such as IDE process
+/// discovery) and only surfaces `CsrfAuthRequired` if no source succeeds.
+async fn discover_quota_outcome() -> DiscoveryOutcome {
+    discover_quota_outcome_with_fallback_sources(&[
         &targets_from_session,
         &targets_from_cli_log,
         &detected_targets,
@@ -824,31 +788,75 @@ async fn discover_quota() -> Option<QuotaSummary> {
     .await
 }
 
-async fn discover_quota_with_fallback_sources(
+async fn discover_quota_outcome_with_fallback_sources(
     fallback_sources: &[&dyn Fn() -> Vec<CandidateTarget>],
-) -> Option<QuotaSummary> {
-    if let Some((target, summary)) = race_for_quota_target(targets_from_env()).await {
-        sync_successful_env_target(&target);
-        return Some(summary);
+) -> DiscoveryOutcome {
+    let mut auth_required_port = None;
+    match race_for_quota_outcome(targets_from_env()).await {
+        RoundOutcome::Found(target, summary) => {
+            sync_successful_env_target(&target);
+            return DiscoveryOutcome::Found(summary);
+        }
+        RoundOutcome::CsrfAuthRequired { port } => {
+            auth_required_port = Some(port);
+        }
+        RoundOutcome::None => {}
     }
-    discover_quota_from(fallback_sources).await
+
+    match discover_quota_outcome_from(fallback_sources).await {
+        DiscoveryOutcome::Found(summary) => DiscoveryOutcome::Found(summary),
+        DiscoveryOutcome::CsrfAuthRequired { port } => DiscoveryOutcome::CsrfAuthRequired {
+            port: auth_required_port.unwrap_or(port),
+        },
+        DiscoveryOutcome::NotFound => auth_required_port
+            .map_or(DiscoveryOutcome::NotFound, |port| {
+                DiscoveryOutcome::CsrfAuthRequired { port }
+            }),
+    }
 }
 
 /// Ask each source in turn and stop at the first that answers.
 ///
-/// Separate from [`discover_quota`] so the sequencing can be tested: source 4
-/// runs `ps` and has no fixture, so the only way to observe that a first
-/// source which spent its whole round still leaves the next one asked is to
-/// hand discovery sources the test controls.
+/// Separate from [`discover_quota_outcome`] so the sequencing can be tested:
+/// source 4 runs `ps` and has no fixture, so the only way to observe that a
+/// first source which spent its whole round still leaves the next one asked is
+/// to hand discovery sources the test controls.
+async fn discover_quota_outcome_from(
+    sources: &[&dyn Fn() -> Vec<CandidateTarget>],
+) -> DiscoveryOutcome {
+    let mut auth_required_port = None;
+    for source in sources {
+        match race_for_quota_outcome(source()).await {
+            RoundOutcome::Found(_, summary) => return DiscoveryOutcome::Found(summary),
+            RoundOutcome::CsrfAuthRequired { port } => {
+                auth_required_port.get_or_insert(port);
+            }
+            RoundOutcome::None => {}
+        }
+    }
+    auth_required_port.map_or(DiscoveryOutcome::NotFound, |port| {
+        DiscoveryOutcome::CsrfAuthRequired { port }
+    })
+}
+
+#[cfg(test)]
+async fn discover_quota_with_fallback_sources(
+    fallback_sources: &[&dyn Fn() -> Vec<CandidateTarget>],
+) -> Option<QuotaSummary> {
+    match discover_quota_outcome_with_fallback_sources(fallback_sources).await {
+        DiscoveryOutcome::Found(summary) => Some(summary),
+        DiscoveryOutcome::CsrfAuthRequired { .. } | DiscoveryOutcome::NotFound => None,
+    }
+}
+
+#[cfg(test)]
 async fn discover_quota_from(
     sources: &[&dyn Fn() -> Vec<CandidateTarget>],
 ) -> Option<QuotaSummary> {
-    for source in sources {
-        if let Some(summary) = race_for_quota(source()).await {
-            return Some(summary);
-        }
+    match discover_quota_outcome_from(sources).await {
+        DiscoveryOutcome::Found(summary) => Some(summary),
+        DiscoveryOutcome::CsrfAuthRequired { .. } | DiscoveryOutcome::NotFound => None,
     }
-    None
 }
 
 /// Candidate targets from the environment (`ANTIGRAVITY_LS_ADDRESS` or `ANTIGRAVITY_LS_PORT`).
@@ -987,19 +995,11 @@ fn detected_ports() -> Vec<u16> {
 /// An empty `targets` returns before building anything, which is what keeps a
 /// machine with no Antigravity from paying for a client it has nothing to
 /// send to.
-async fn race_for_quota(targets: Vec<CandidateTarget>) -> Option<QuotaSummary> {
-    race_for_quota_target(targets)
-        .await
-        .map(|(_, summary)| summary)
+async fn race_for_quota_outcome(targets: Vec<CandidateTarget>) -> RoundOutcome {
+    race_for_quota_outcome_with(targets, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
 }
 
-async fn race_for_quota_target(
-    targets: Vec<CandidateTarget>,
-) -> Option<(CandidateTarget, QuotaSummary)> {
-    race_for_quota_target_with(targets, DISCOVERY_ROUND_TIMEOUT, &quota_client).await
-}
-
-/// [`race_for_quota`] with the round budget and the client build handed in.
+/// [`race_for_quota_outcome`] with the round budget and the client build handed in.
 ///
 /// Separate so a test can observe two things from its own call.
 ///
@@ -1018,42 +1018,44 @@ async fn race_for_quota_target(
 /// of seconds makes the deadline a stall guard again.
 ///
 /// `build_client` is given `round` so the client's per-request timeout -- the
-/// backstop for a `call_rpc` awaited outside a round -- cannot undercut it.
+/// backstop for a `probe_rpc` awaited outside a round -- cannot undercut it.
 #[cfg(test)]
 async fn race_for_quota_with(
     targets: Vec<CandidateTarget>,
     round: Duration,
     build_client: &dyn Fn(Duration) -> Result<reqwest::Client>,
 ) -> Option<QuotaSummary> {
-    race_for_quota_target_with(targets, round, build_client)
-        .await
-        .map(|(_, summary)| summary)
+    match race_for_quota_outcome_with(targets, round, build_client).await {
+        RoundOutcome::Found(_, summary) => Some(summary),
+        RoundOutcome::CsrfAuthRequired { .. } | RoundOutcome::None => None,
+    }
 }
 
-async fn race_for_quota_target_with(
+async fn race_for_quota_outcome_with(
     targets: Vec<CandidateTarget>,
     round: Duration,
     build_client: &dyn Fn(Duration) -> Result<reqwest::Client>,
-) -> Option<(CandidateTarget, QuotaSummary)> {
+) -> RoundOutcome {
     if targets.is_empty() {
-        return None;
+        return RoundOutcome::None;
     }
 
-    let client = build_client(round).ok()?;
+    let Ok(client) = build_client(round) else {
+        return RoundOutcome::None;
+    };
     let deadline = tokio::time::Instant::now() + round;
     let mut settled = vec![false; targets.len()];
     let mut requests = tokio::task::JoinSet::new();
     for (rank, target) in targets.into_iter().enumerate() {
         let client = client.clone();
         requests.spawn(async move {
-            let answer = call_rpc(client, target.port, target.csrf_token.clone())
-                .await
-                .ok();
-            (rank, target, answer)
+            let outcome = probe_rpc(client, target.port, target.csrf_token.clone()).await;
+            (rank, target, outcome)
         });
     }
 
     let mut best: Option<(usize, CandidateTarget, QuotaSummary)> = None;
+    let mut best_auth_required: Option<(usize, u16)> = None;
 
     while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, requests.join_next()).await {
         // A `JoinError` carries no rank, so a panicked request is never
@@ -1062,17 +1064,28 @@ async fn race_for_quota_target_with(
         // points: `join_next` draining the set and yielding `None` once every
         // surviving request has finished, or `timeout_at` returning `Err` at
         // the deadline -- which is what happens when a lower-ranked survivor
-        // has accepted the connection and gone quiet. `call_rpc` reports
-        // every failure it has as `Err`, so this is the unreachable arm
-        // rather than the failure path.
-        let Ok((rank, target, answer)) = joined else {
+        // has accepted the connection and gone quiet. `probe_rpc` handles
+        // every failure internally, so this is the unreachable arm rather than
+        // the failure path.
+        let Ok((rank, target, outcome)) = joined else {
             continue;
         };
         settled[rank] = true;
-        if let Some(summary) = answer {
-            if best.as_ref().is_none_or(|(kept, _, _)| rank < *kept) {
-                best = Some((rank, target, summary));
+        match outcome {
+            RpcOutcome::Summary(summary) => {
+                if best.as_ref().is_none_or(|(kept, _, _)| rank < *kept) {
+                    best = Some((rank, target, summary));
+                }
             }
+            RpcOutcome::CsrfAuthRequired => {
+                if best_auth_required
+                    .as_ref()
+                    .is_none_or(|(kept, _)| rank < *kept)
+                {
+                    best_auth_required = Some((rank, target.port));
+                }
+            }
+            RpcOutcome::Unavailable => {}
         }
         let Some((kept, _, _)) = best.as_ref() else {
             continue;
@@ -1082,7 +1095,13 @@ async fn race_for_quota_target_with(
         }
     }
 
-    best.map(|(_, target, summary)| (target, summary))
+    if let Some((_, target, summary)) = best {
+        RoundOutcome::Found(target, summary)
+    } else if let Some((_, port)) = best_auth_required {
+        RoundOutcome::CsrfAuthRequired { port }
+    } else {
+        RoundOutcome::None
+    }
 }
 
 fn cli_log_path() -> Option<PathBuf> {
@@ -2573,186 +2592,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(session_file).unwrap(), original);
     }
 
-    #[cfg(not(unix))]
-    #[test]
-    #[serial]
-    fn hook_registration_is_rejected_without_writing_on_non_unix() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        let err = register_antigravity_hook().unwrap_err();
-        assert!(err.to_string().contains("only supported on Unix"));
-        assert!(!hooks_file.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn hook_registration_creates_and_detects_hook_spec() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        assert!(!is_antigravity_hook_registered());
-
-        let path = register_antigravity_hook().expect("registration succeeds");
-        assert_eq!(path, hooks_file);
-        assert!(is_antigravity_hook_registered());
-
-        // Verify JSON contents
-        let content = std::fs::read_to_string(&hooks_file).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(json.as_object().unwrap().contains_key(HOOK_SPEC_KEY));
-        for event in ["SessionStart", "PreInvocation", "PostInvocation"] {
-            let event_hook = &json[HOOK_SPEC_KEY][event];
-            assert!(event_hook.is_array());
-            assert_eq!(event_hook[0]["type"], "command");
-            let cmd = event_hook[0]["command"].as_str().unwrap();
-            assert!(cmd.contains("umask 077"));
-            assert!(cmd.contains("mktemp"));
-            assert!(cmd.contains("token=${ANTIGRAVITY_CSRF_TOKEN-}"));
-            assert!(cmd.contains("address=${ANTIGRAVITY_LS_ADDRESS-}"));
-            assert!(cmd.contains(r#"[ -z "$token" ] || [ -z "$address" ]"#));
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn incomplete_session_does_not_replace_complete_hook_record() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        register_antigravity_hook().unwrap();
-        let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&hooks_file).unwrap()).unwrap();
-        let command = json[HOOK_SPEC_KEY]["SessionStart"][0]["command"]
-            .as_str()
-            .unwrap();
-        let session_file = tmp
-            .path()
-            .join(".gemini")
-            .join("antigravity-cli")
-            .join("active_session.env");
-
-        let complete = std::process::Command::new("sh")
-            .args(["-c", command])
-            .env("HOME", tmp.path())
-            .env("ANTIGRAVITY_CSRF_TOKEN", "complete-token")
-            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:45019")
-            .status()
-            .unwrap();
-        assert!(complete.success());
-        let expected = std::fs::read_to_string(&session_file).unwrap();
-
-        let incomplete = std::process::Command::new("sh")
-            .args(["-c", command])
-            .env("HOME", tmp.path())
-            .env_remove("ANTIGRAVITY_CSRF_TOKEN")
-            .env_remove("ANTIGRAVITY_LS_ADDRESS")
-            .status()
-            .unwrap();
-        assert!(incomplete.success());
-        assert_eq!(std::fs::read_to_string(session_file).unwrap(), expected);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn outdated_hook_command_is_not_reported_as_registered() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-        std::fs::write(
-            &hooks_file,
-            serde_json::to_vec(&serde_json::json!({
-                HOOK_SPEC_KEY: {
-                    "SessionStart": [{ "type": "command", "command": "old command" }]
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        assert!(!is_antigravity_hook_registered());
-        register_antigravity_hook().unwrap();
-        assert!(is_antigravity_hook_registered());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn hook_registration_rejects_a_concurrent_hooks_file_change() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-        let initial = serde_json::json!({"existing": {"event": []}});
-        std::fs::write(&hooks_file, serde_json::to_vec(&initial).unwrap()).unwrap();
-
-        let concurrent = serde_json::json!({
-            "existing": {"event": []},
-            "other-hook": {"SessionStart": []}
-        });
-        let concurrent_bytes = serde_json::to_vec(&concurrent).unwrap();
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        let err = register_antigravity_hook_with(|| {
-            std::fs::write(&hooks_file, &concurrent_bytes).unwrap();
-        })
-        .unwrap_err();
-
-        assert!(err.to_string().contains("changed during registration"));
-        assert_eq!(std::fs::read(&hooks_file).unwrap(), concurrent_bytes);
-    }
-
-    #[test]
-    #[serial]
-    #[cfg(unix)]
-    fn hook_registration_preserves_private_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-        std::fs::write(&hooks_file, "{}").unwrap();
-        std::fs::set_permissions(&hooks_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        register_antigravity_hook().unwrap();
-
-        let metadata = std::fs::metadata(&hooks_file).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn hook_registration_fails_on_malformed_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hooks_file = tmp.path().join("hooks.json");
-        std::fs::write(&hooks_file, "{ invalid json").unwrap();
-
-        let mut env = EnvGuard::capture(&["ANTIGRAVITY_HOOKS_FILE"]);
-        env.set("ANTIGRAVITY_HOOKS_FILE", hooks_file.to_str().unwrap());
-
-        let err = register_antigravity_hook().unwrap_err();
-        assert!(err.to_string().contains("invalid JSON"));
-        // Confirm content was not wiped
-        assert_eq!(
-            std::fs::read_to_string(&hooks_file).unwrap(),
-            "{ invalid json"
-        );
-    }
-
     #[test]
     #[serial]
     fn cli_log_path_prioritizes_app_data_dir() {
@@ -2766,5 +2605,147 @@ mod tests {
         env.set("ANTIGRAVITY_APP_DATA_DIR", custom_dir.to_str().unwrap());
 
         assert_eq!(cli_log_path(), Some(custom_log));
+    }
+
+    #[test]
+    fn csrf_auth_error_classifier_matches_connect_rpc_csrf_401_only() {
+        let missing =
+            r#"{"code":"unauthenticated","message":"unauthenticated: missing CSRF token"}"#;
+        let invalid =
+            r#"{"code":"unauthenticated","message":"unauthenticated: invalid CSRF token"}"#;
+
+        assert!(is_csrf_auth_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            missing
+        ));
+        assert!(is_csrf_auth_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            invalid
+        ));
+        assert!(!is_csrf_auth_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "unauthorized"
+        ));
+        assert!(!is_csrf_auth_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{not json"
+        ));
+        assert!(!is_csrf_auth_error(reqwest::StatusCode::FORBIDDEN, missing));
+        assert!(!is_csrf_auth_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            missing
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn cli_log_csrf_401_is_admitted_and_surfaces_diagnostic() {
+        let (base, seen) = spawn_server(|_path, _calls| {
+            (
+                401,
+                r#"{"code":"unauthenticated","message":"unauthenticated: missing CSRF token"}"#
+                    .to_string(),
+            )
+        });
+        let port = port_of(&base);
+
+        let home = TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        redirect_home_to_logged_ports(&mut env, &home, &[port]);
+
+        let (has_credentials, fetch) = registered_antigravity_provider();
+        assert!(
+            has_credentials(),
+            "a loopback server returning Connect-RPC 401 CSRF rejection must be admitted so fetch can surface diagnostics"
+        );
+
+        let err = fetch.call().unwrap_err().to_string();
+        assert!(
+            err.contains("Set ANTIGRAVITY_CSRF_TOKEN or run via agy agent"),
+            "{err}"
+        );
+        assert!(err.contains(&port.to_string()), "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn cli_log_generic_401_stays_hidden() {
+        let (base, seen) = spawn_server(|_path, _calls| (401, "unauthorized".to_string()));
+        let port = port_of(&base);
+
+        let home = TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        redirect_home_to_logged_ports(&mut env, &home, &[port]);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(discover_quota_outcome_with_fallback_sources(&[
+            &targets_from_session,
+            &targets_from_cli_log,
+        ]));
+
+        assert!(
+            matches!(outcome, DiscoveryOutcome::NotFound),
+            "generic non-CSRF 401 must remain NotFound, got {outcome:?}"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn csrf_401_in_earlier_source_still_yields_to_working_fallback() {
+        let (csrf_base, _csrf_seen) = spawn_server(|_path, _calls| {
+            (
+                401,
+                r#"{"code":"unauthenticated","message":"unauthenticated: invalid CSRF token"}"#
+                    .to_string(),
+            )
+        });
+        let (live_base, live_seen) = spawn_server(|_path, _calls| (200, FIXTURE_QUOTA.to_string()));
+        let tmp = TempDir::new().unwrap();
+        let session_file = tmp.path().join("active_session.env");
+        let original = format!(
+            "ANTIGRAVITY_CSRF_TOKEN=live-token\nANTIGRAVITY_LS_ADDRESS=127.0.0.1:{}\n",
+            port_of(&live_base)
+        );
+        std::fs::write(&session_file, &original).unwrap();
+
+        let mut env = EnvGuard::capture(&HOME_ENV_KEYS);
+        env.set("HOME", tmp.path());
+        env.set("USERPROFILE", tmp.path());
+        env.set("ANTIGRAVITY_SESSION_FILE", &session_file);
+        env.set("ANTIGRAVITY_CSRF_TOKEN", "stale-token");
+        env.set("ANTIGRAVITY_LS_ADDRESS", &csrf_base);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(discover_quota_outcome_with_fallback_sources(&[
+            &targets_from_session,
+        ]));
+
+        match outcome {
+            DiscoveryOutcome::Found(summary) => {
+                assert_eq!(summary.groups[0].display_name, "Fixture Models");
+            }
+            other => panic!("expected working fallback to win, got {other:?}"),
+        }
+        assert_eq!(live_seen.lock().unwrap().len(), 1);
+        assert_eq!(std::fs::read_to_string(&session_file).unwrap(), original);
+    }
+
+    #[test]
+    fn csrf_auth_required_message_fits_remedy_in_narrow_usage_summary() {
+        let message = csrf_auth_required_message(32859);
+        let remedy = message.split(" (").next().unwrap();
+        assert!(
+            remedy.chars().count() <= 49,
+            "remedy exceeds narrow two-column summary width: {remedy:?}"
+        );
+        assert!(remedy.contains("ANTIGRAVITY_CSRF_TOKEN"), "{remedy:?}");
     }
 }
