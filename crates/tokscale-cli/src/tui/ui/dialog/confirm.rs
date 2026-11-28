@@ -99,26 +99,6 @@ impl ConfirmDialog {
         }
     }
 
-    pub fn antigravity_hook(
-        target_path: String,
-        confirmed_value: Rc<RefCell<Option<String>>>,
-        language: TuiLanguage,
-    ) -> Self {
-        Self {
-            value: target_path.clone(),
-            title: tr(language, MessageKey::AntigravityHookDialogTitle),
-            message: tr(language, MessageKey::AntigravityHookDialogMessage),
-            target_label: target_path,
-            effect: tr(language, MessageKey::AntigravityHookDialogEffect),
-            confirm_label: tr(language, MessageKey::AntigravityHookDialogConfirm),
-            // The key hint line is English in every confirm dialog.
-            confirm_verb: "register",
-            language,
-            tone: ConfirmTone::Accent,
-            confirmed_value,
-        }
-    }
-
     fn confirm(&self) {
         *self.confirmed_value.borrow_mut() = Some(self.value.clone());
     }
@@ -404,21 +384,60 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_dialog_fits_its_default_size_in_every_language() {
+    fn localized_confirm_dialog_fits_its_default_size_in_every_language() {
         use crate::tui::ui::header_budget::strip_wide_continuation_cells;
 
-        for language in [
-            TuiLanguage::En,
-            TuiLanguage::Ko,
-            TuiLanguage::Ja,
-            TuiLanguage::ZhCn,
-            TuiLanguage::Fr,
-        ] {
-            let dialog = ConfirmDialog::antigravity_hook(
-                "~/.gemini/config/hooks.json".to_string(),
-                Rc::new(RefCell::new(None)),
+        let cases = [
+            (
+                TuiLanguage::En,
+                "Confirm Action",
+                "Apply this change to the selected configuration file.",
+                "Updates configuration; reloads active settings",
+                "Register",
+            ),
+            (
+                TuiLanguage::Ko,
+                "작업 확인",
+                "선택한 설정 파일에 변경 사항을 적용합니다.",
+                "설정을 갱신하고 현재 상태를 다시 불러옵니다",
+                "등록",
+            ),
+            (
+                TuiLanguage::Ja,
+                "操作の確認",
+                "選択した設定ファイルに変更を適用します。",
+                "設定を更新して現在の状態を再読み込みします",
+                "登録",
+            ),
+            (
+                TuiLanguage::ZhCn,
+                "确认操作",
+                "将此更改应用到所选配置文件。",
+                "更新配置并重新加载当前状态",
+                "注册",
+            ),
+            (
+                TuiLanguage::Fr,
+                "Confirmer l'action",
+                "Appliquer cette modification au fichier choisi.",
+                "Met à jour la config et recharge l'état",
+                "Ajouter",
+            ),
+        ];
+
+        for (language, title, message, effect, confirm_label) in cases {
+            let dialog = ConfirmDialog {
+                value: "~/.config/tokscale/settings.json".to_string(),
+                title,
+                message,
+                target_label: "~/.config/tokscale/settings.json".to_string(),
+                effect,
+                confirm_label,
+                confirm_verb: "register",
                 language,
-            );
+                tone: ConfirmTone::Accent,
+                confirmed_value: Rc::new(RefCell::new(None)),
+            };
             let (width, height) = dialog.desired_size(Rect::new(0, 0, 120, 40));
             let area = Rect::new(0, 0, width, height);
             let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
@@ -439,14 +458,13 @@ mod tests {
                 .join("\n");
 
             // Nothing is clipped at the size the dialog asks for.
-            for key in [
-                MessageKey::AntigravityHookDialogTitle,
-                MessageKey::AntigravityHookDialogMessage,
-                MessageKey::AntigravityHookDialogEffect,
-                MessageKey::DialogTargetLabel,
-                MessageKey::DialogEffectLabel,
+            for text in [
+                title,
+                message,
+                effect,
+                tr(language, MessageKey::DialogTargetLabel),
+                tr(language, MessageKey::DialogEffectLabel),
             ] {
-                let text = tr(language, key);
                 assert!(body.contains(text), "{language:?}: {text}\n{body}");
             }
             assert!(body.contains("Enter/y register"), "{language:?}\n{body}");
@@ -468,14 +486,21 @@ mod tests {
     }
 
     #[test]
-    fn narrow_antigravity_dialog_marks_a_cut_double_width_effect_line() {
+    fn narrow_confirm_dialog_marks_a_cut_double_width_effect_line() {
         use crate::tui::ui::header_budget::strip_wide_continuation_cells;
 
-        let dialog = ConfirmDialog::antigravity_hook(
-            "~/.gemini/config/hooks.json".to_string(),
-            Rc::new(RefCell::new(None)),
-            TuiLanguage::Ko,
-        );
+        let dialog = ConfirmDialog {
+            value: "~/.config/tokscale/settings.json".to_string(),
+            title: "작업 확인",
+            message: "선택한 설정 파일에 변경 사항을 적용합니다.",
+            target_label: "~/.config/tokscale/settings.json".to_string(),
+            effect: "이 설명은 좁은 대화상자에서 잘리도록 충분히 길게 작성한 한국어 문장입니다",
+            confirm_label: "등록",
+            confirm_verb: "register",
+            language: TuiLanguage::Ko,
+            tone: ConfirmTone::Accent,
+            confirmed_value: Rc::new(RefCell::new(None)),
+        };
         let (width, height) = (40, 10);
         let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
