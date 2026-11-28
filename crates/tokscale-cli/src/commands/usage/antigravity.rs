@@ -69,7 +69,7 @@ const RPC_PATH: &str = "/exa.language_server_pb.LanguageServerService/RetrieveUs
 /// without Antigravity never approaches this, and a port that accepts and then
 /// goes quiet is waited on once for the round rather than once per candidate.
 ///
-/// A *round*, not the whole of discovery. [`discover_quota`] has two candidate
+/// A *round*, not the whole of discovery. [`discover_quota_outcome`] has two candidate
 /// sources and each gets its own round, computed when that round starts, so
 /// the requests can cost twice this in total. One instant shared across both
 /// was worse than that arithmetic: a first source that spent it handed the
@@ -315,7 +315,7 @@ const MAX_QUOTA_BODY_BYTES: usize = 1024 * 1024;
 /// clone to each request is free.
 ///
 /// Built only once a round has a candidate to send to -- see
-/// [`race_for_quota`], which returns before reaching here on an empty list.
+/// [`race_for_quota_outcome`], which returns before reaching here on an empty list.
 ///
 /// `round` is the budget of the round this client serves,
 /// [`DISCOVERY_ROUND_TIMEOUT`] in production. It is handed in rather than read
